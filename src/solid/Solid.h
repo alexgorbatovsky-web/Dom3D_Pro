@@ -1,0 +1,173 @@
+#pragma once
+#include "../CAlfaObject.h"
+
+#include <TopoDS_Shape.hxx>
+#include <AIS_Shape.hxx>
+
+#include "SurfaceFace.h"
+
+#include <functional>
+#include <iosfwd>
+#include <string>
+#include <utility>
+#include <vector>
+
+class CPolyline;
+class CSurface;
+class CSplineCurve;
+class TopoDS_Face;
+class Poly_Triangulation;
+class CMesh3D_XL;
+
+enum TypeParamsFunction {
+	FUNCT_SOLID_BOX,
+	FUNCT_SOLID_CYLINDER,
+	FUNCT_SOLID_BOOLEAN,
+	FUNC_SOLID_FILLET,
+	FUNC_SOLID_CHAMFER,
+	FUNC_SOLID_SPHERE,
+	FUNC_SOLID_TORUS,
+	FUNC_SOLID_SEWING_FACE,
+	FUNC_SOLID_THICK,
+	FUNC_SOLID_PRISM,
+	FUNC_SOLID_EXTRUDE,
+	FUNC_SOLID_SWEPT,
+	FUNC_SOLID_TRANSFORM,
+	FUNC_SOLID_DRAFT,
+
+};
+
+class SolidTool;
+
+class ParametricFunction 
+{
+public:
+	SolidTool* m_Tool;//Operation
+	int m_ID;
+	std::string Name;
+	ParametricFunction();
+	ParametricFunction(int ID, std::string name);
+	ParametricFunction(const char* text, std::function<void()> onClick = nullptr);
+
+//	SERIALIZE_LATER();
+};
+
+class CDimens;
+class CSolid :public CAlfaObject {
+
+//	cList<CPolyline*> m_Edges;
+	Poly_Triangulation* m_Mesh;
+	std::vector<CSurfaceFace*> m_Surfaces;
+ //	ClassArray<ParametricFunction> m_OperatonTree;
+//	cList<SolidTool*> m_Operaton;
+
+
+public:
+	virtual const char* GetID() { return "CSolid"; }
+	virtual const char* GetHint() { return "CSolid_HINT"; }
+	virtual bool			PresentInRetopoTools() { return true; }
+	virtual const char* GetPrevTool() { return "SpineTool"; }//applies only for uv/retopo rooms
+	virtual bool			NeedBrushMipmaps() { return false; }
+	virtual bool			PickAveragePos() { return false; }
+	virtual bool			PickCurrentPos() { return false; }
+	virtual bool			PickEmptySpace() { return true; }
+	virtual bool AllowRadisRMBControl() { return false; }
+
+	void Render3d(bool selected) const override;
+	void Render2d(float center_x, float center_y, float scale) const override;
+	bool HitTest(CurvePoint point, float tolerance) const override;
+	bool Save(std::ostream& stream) const override;
+	void Translate(Vec3 delta) override;
+	void Rotate(Vec3 center, Vec3 axis, float angle) override;
+	void Scale(Vec3 center, Vec3 axis, float factor) override;
+	bool GetBounds(Vec3& min_point, Vec3& max_point) const override;
+
+	CSolid();
+	CSolid(TopoDS_Shape& shape);
+	void Alloc();
+	virtual ~CSolid();
+	void Clear();
+
+	int GetNumSurfaces() {return m_Surfaces.size();}
+	CSurfaceFace* GetSurfaceFace(int indx);
+	const CSurfaceFace* GetSurfaceFace(int indx) const;
+	bool HitTestEdgeScreen(DomPoint point,
+	                       const std::function<bool(Vec3, DomPoint&)>& world_to_screen,
+	                       float tolerance,
+	                       int& surface_index,
+	                       int& edge_index) const;
+	void SetSelectedEdge(int surface_index, int edge_index);
+	void AddSelectedEdge(int surface_index, int edge_index);
+	void RemoveSelectedEdge(int surface_index, int edge_index);
+	void ClearSelectedEdge();
+	bool HasSelectedEdge() const;
+	int GetSelectedSurfaceIndex() const { return m_SelectedEdges.empty() ? -1 : m_SelectedEdges.front().first; }
+	int GetSelectedEdgeIndex() const { return m_SelectedEdges.empty() ? -1 : m_SelectedEdges.front().second; }
+	const TopoDS_Edge* GetSelectedTopoEdge() const;
+	std::vector<TopoDS_Edge> GetSelectedTopoEdges() const;
+	std::vector<TopoDS_Edge> GetAllTopoEdges() const;
+
+	static CSolid* pCSolidTool;
+	CSolid* instance() { return pCSolidTool; }
+	bool InitEdges();
+	bool InitSurfaces();
+	bool BuldMesh(float Deflection);
+
+
+
+	bool IsInitEdges;
+	TopoDS_Shape m_Shape;
+	int Surface_ID;
+
+	bool IsSurfaceInit;
+	float lenEdgeMax;
+	bool DrawNet;
+	bool MeshQuadro;
+	bool MeshQuadroOld;
+	int m_TypeGeom;
+
+	bool FastMesh;
+	bool FillMesh;
+	bool FastMeshQuadro;
+//	HashSummator OldHash;
+	char* BinData;
+	int LenData;
+	bool IsEmpty;
+	bool NeedUpdateSculpt;
+static	int NumReadFile;
+	bool MeshQuadroX;
+	float AngDeflection;
+	bool m_IsParametric;
+	float ptchDensityOld;
+	CSolid* EditingSolid;
+	CSolid* m_pSolid;
+	static int prevTime;
+//	Matrix4D MatrixSumm;
+	bool DoWeld;
+	static bool DoSmooth;
+	int NumSurfPrint;
+	int QtySurf;
+	bool DimensVisible;
+	static int m_DimensId;
+//	cList <CDimens*> m_Dimens;
+
+	std::vector<std::pair<int, int>> m_SelectedEdges;
+
+//	SERIALIZE_LATER();
+
+private:
+/*
+	bool SaveTopoDS_ShapeToStepFile();
+	bool LoadTopoDS_ShapeFromStepFile();
+	virtual void LoadData(int ChunkIdx, BinStream& BS);
+	virtual void SaveData(int ChunkIdx, BinStream& BS);
+	virtual int GetNumSaveChunks() { return 1; }
+	virtual DWORD GetSaveMagic(int ChunkIdx) { return MakeMagic("SLD0"); }
+	void PrepareClastersSurfs();
+	void PrintInfoSurf();
+	void FindRingPatches();
+	void AnalizRingPatch(cList<RingPatch>& rp);
+	void AnalizRingPatches();*/
+};
+
+

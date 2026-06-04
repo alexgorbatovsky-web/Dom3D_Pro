@@ -1,0 +1,18 @@
+<RCC>
+    <qresource prefix="/icons">
+        <file alias="orbit.png">icons/orbit.png</file>
+        <file alias="select.png">icons/select.png</file>
+        <file alias="curve.png">icons/curve.png</file>
+        <file alias="transform.png">icons/transform.png</file>
+        <file alias="move.png">icons/move.png</file>
+        <file alias="rotate.png">icons/rotate.png</file>
+        <file alias="scale.png">icons/scale.png</file>
+        <file alias="stair.png">icons/stair.png</file>
+        <file alias="window.png">icons/window.png</file>
+        <file alias="door.png">icons/door.png</file>
+        <file alias="cabinet.png">icons/cabinet.png</file>
+        <file alias="open.png">icons/open.png</file>
+        <file alias="save.png">icons/save.png</file>
+        <file alias="app_icon.ico">app_icon.ico</file>
+    </qresource>
+</RCC>
