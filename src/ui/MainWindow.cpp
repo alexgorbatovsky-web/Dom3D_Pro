@@ -8,8 +8,10 @@
 #include <QCursor>
 #include <QDockWidget>
 #include <QFileDialog>
+#include <QGridLayout>
 #include <QIcon>
 #include <QKeySequence>
+#include <QLayoutItem>
 #include <QMessageBox>
 #include <QMenuBar>
 #include <QPushButton>
@@ -18,7 +20,6 @@
 #include <QTabBar>
 #include <QToolBar>
 #include <QTreeWidget>
-#include <QVBoxLayout>
 #include <QVariant>
 
 #include <memory>
@@ -91,7 +92,7 @@ void MainWindow::CreateActions() {
     tool_tabs_->addTab("Architecture");
     tool_tabs_->addTab("Furniture");
     tool_tabs_->addTab("Surfaces");
-    tool_tabs_->addTab("Body");
+    tool_tabs_->addTab("Solid");
     tool_tabs_->addTab("Lines");
     tool_tabs_->addTab("Sketch");
     tool_tabs_->addTab("Assemblies");
@@ -101,6 +102,7 @@ void MainWindow::CreateActions() {
         if (!tool_tabs_ || index < 0) {
             return;
         }
+        PopulateToolsPanelForTab(index);
         statusBar()->showMessage(QString("%1 tab").arg(tool_tabs_->tabText(index)), 1200);
     });
 
@@ -207,23 +209,14 @@ void MainWindow::CreateActions() {
     main_toolbar_->addAction(move_action);
     main_toolbar_->addAction(rotate_action);
     main_toolbar_->addAction(scale_action);
-    main_toolbar_->addSeparator();
-    for (const ToolDefinition& tool : tool_registry_.Tools()) {
-        auto* action = main_toolbar_->addAction(QString::fromStdString(tool.label), this, [this, id = tool.id]() {
-            ActivateParametricTool(id);
-        });
-        RegisterToolAction(action, tool.id);
-    }
-    main_toolbar_->addSeparator();
-    main_toolbar_->addAction(ToolIcon("save"), "Save", this, [this]() { SaveProject(); });
-    main_toolbar_->addAction(ToolIcon("open"), "Open", this, [this]() { OpenProject(); });
     UpdateActiveToolUi(active_tool_key_);
 }
 
 void MainWindow::CreateDocks() {
-    auto* tools_dock = new QDockWidget("Tools", this);
-    CreateToolsPanel(tools_dock);
-    addDockWidget(Qt::LeftDockWidgetArea, tools_dock);
+    tools_dock_ = new QDockWidget("Architecture", this);
+    tools_dock_->setMinimumWidth(104);
+    CreateToolsPanel(tools_dock_);
+    addDockWidget(Qt::LeftDockWidgetArea, tools_dock_);
 
     auto* tree_dock = new QDockWidget("Scene Tree", this);
     scene_tree_ = new QTreeWidget(tree_dock);
@@ -239,59 +232,26 @@ void MainWindow::CreateDocks() {
 }
 
 void MainWindow::CreateToolsPanel(QDockWidget* dock) {
-    auto* panel = new QWidget(dock);
-    auto* layout = new QVBoxLayout(panel);
-    layout->setContentsMargins(8, 8, 8, 8);
-    layout->setSpacing(6);
+    tools_panel_ = new QWidget(dock);
+    tools_layout_ = new QGridLayout(tools_panel_);
+    tools_layout_->setContentsMargins(8, 8, 8, 8);
+    tools_layout_->setHorizontalSpacing(4);
+    tools_layout_->setVerticalSpacing(4);
 
-    auto* orbit = new QPushButton("Orbit", panel);
-    RegisterToolButton(orbit, "orbit");
-    connect(orbit, &QPushButton::clicked, this, [this]() { SetTool(ToolMode::Orbit, "Orbit camera"); });
-    layout->addWidget(orbit);
-
-    auto* select = new QPushButton("Select", panel);
-    RegisterToolButton(select, "select");
-    connect(select, &QPushButton::clicked, this, [this]() { SetTool(ToolMode::Select, "Select objects"); });
-    layout->addWidget(select);
-
-    auto* curve = new QPushButton("Curve", panel);
-    RegisterToolButton(curve, "curve");
-    connect(curve, &QPushButton::clicked, this, [this]() {
-        document_.CreatePolyline();
-        SetTool(ToolMode::DrawCurve, "Curve tool active: click in viewport");
-        RefreshSceneTree();
-    });
-    layout->addWidget(curve);
-
-    auto* transform = new QPushButton("Transform", panel);
-    RegisterToolButton(transform, "transform");
-    connect(transform, &QPushButton::clicked, this, [this]() { BeginTransformTool(TransformOperation::Move); });
-    layout->addWidget(transform);
-
-    auto* move = new QPushButton("Move", panel);
-    RegisterToolButton(move, "move");
-    connect(move, &QPushButton::clicked, this, [this]() { BeginTransformTool(TransformOperation::Move); });
-    layout->addWidget(move);
-
-    auto* rotate = new QPushButton("Rotate", panel);
-    RegisterToolButton(rotate, "rotate");
-    connect(rotate, &QPushButton::clicked, this, [this]() { BeginTransformTool(TransformOperation::Rotate); });
-    layout->addWidget(rotate);
-
-    auto* scale = new QPushButton("Scale", panel);
-    RegisterToolButton(scale, "scale");
-    connect(scale, &QPushButton::clicked, this, [this]() { BeginTransformTool(TransformOperation::Scale); });
-    layout->addWidget(scale);
-
-    for (const ToolDefinition& tool : tool_registry_.Tools()) {
-        auto* button = new QPushButton(QString::fromStdString(tool.label), panel);
-        RegisterToolButton(button, tool.id);
-        connect(button, &QPushButton::clicked, this, [this, id = tool.id]() { ActivateParametricTool(id); });
-        layout->addWidget(button);
-    }
-
-    layout->addStretch();
-    panel->setStyleSheet(
+    tools_panel_->setStyleSheet(
+        "QPushButton {"
+        "  background-color: #f6f6f6;"
+        "  border: 1px solid #b9b9b9;"
+        "  border-radius: 2px;"
+        "}"
+        "QPushButton:hover:!disabled {"
+        "  background-color: #eaf2ff;"
+        "  border-color: #6ea0e8;"
+        "}"
+        "QPushButton[placeholder=\"true\"] {"
+        "  background-color: #eeeeee;"
+        "  border-color: #b9b9b9;"
+        "}"
         "QPushButton:checked {"
         "  background-color: #2f80ed;"
         "  color: white;"
@@ -299,8 +259,98 @@ void MainWindow::CreateToolsPanel(QDockWidget* dock) {
         "  font-weight: 600;"
         "}"
     );
-    dock->setWidget(panel);
+    dock->setWidget(tools_panel_);
+    PopulateToolsPanelForTab(tool_tabs_ ? tool_tabs_->currentIndex() : 0);
+}
+
+void MainWindow::PopulateToolsPanelForTab(int tab_index) {
+    if (!tools_dock_ || !tools_layout_ || !tool_tabs_) {
+        return;
+    }
+
+    ClearActiveProperties();
+    tool_buttons_.clear();
+    while (QLayoutItem* item = tools_layout_->takeAt(0)) {
+        if (QWidget* widget = item->widget()) {
+            widget->deleteLater();
+        }
+        delete item;
+    }
+
+    const QString tab = tool_tabs_->tabText(tab_index);
+    tools_dock_->setWindowTitle(tab);
+    tools_dock_->setVisible(tab == "Architecture" || tab == "Furniture" || tab == "Solid");
+
+    std::vector<std::string> tool_ids;
+    if (tab == "Architecture") {
+        tool_ids = {"stair", "window", "door"};
+    } else if (tab == "Furniture") {
+        tool_ids = {"cabinet"};
+    } else if (tab == "Solid") {
+        tool_ids = {"SolidBox", "boolean_union", "boolean_cut", "boolean_common", "fillet_edge", "fillet_all_edges"};
+    }
+
+    int index = 0;
+    for (const std::string& tool_id : tool_ids) {
+        AddToolButton(tools_layout_, tools_panel_, tool_id, index / 2, index % 2);
+        ++index;
+    }
+
+    if (tab == "Solid") {
+        const std::vector<std::pair<QString, QString>> placeholders = {
+            {"SolidCylinder", "Cylinder"},
+            {"SolidSphereTool", "Sphere"},
+            {"SolidPrismTool", "Prism"},
+            {"SolidExtrudeTool", "Extrude"},
+            {"SolidExtrudeFace", "Extrude Face"},
+            {"SolidTorusTool", "Torus"},
+            {"SolidSweptTool", "Swept Solid"},
+            {"SurfaceOfRevolution", "Revolution"},
+            {"SolidDraft", "Draft"},
+            {"ChamferSolid", "Chamfer"},
+            {"DeleteFaceOrEdge", "Delete Face or Edge"},
+            {"ExtractFaceTool", "Extract Face"},
+            {"ThickSolidTool", "Thicken"},
+            {"SewingFaceTool", "Sew Faces"},
+            {"SplitRings", "Split Rings"},
+            {"SolidInSet", "Inset"},
+            {"SolidTransform", "Solid Transform"}
+        };
+        for (const auto& placeholder : placeholders) {
+            AddPlaceholderButton(tools_layout_, tools_panel_, placeholder.first, placeholder.second, index / 2, index % 2);
+            ++index;
+        }
+    }
+
+    tools_layout_->setRowStretch((index + 1) / 2, 1);
     UpdateActiveToolUi(active_tool_key_);
+}
+
+void MainWindow::AddToolButton(QGridLayout* layout, QWidget* parent, const std::string& key, int row, int column) {
+    const ToolDefinition* tool = tool_registry_.Find(key);
+    if (!tool) {
+        return;
+    }
+
+    auto* button = new QPushButton(parent);
+    button->setToolTip(QString::fromStdString(tool->label));
+    button->setFixedSize(42, 36);
+    RegisterToolButton(button, key);
+    connect(button, &QPushButton::clicked, this, [this, key]() { ActivateParametricTool(key); });
+    layout->addWidget(button, row, column);
+}
+
+void MainWindow::AddPlaceholderButton(QGridLayout* layout, QWidget* parent, const QString& icon_key, const QString& title, int row, int column) {
+    auto* button = new QPushButton(parent);
+    button->setToolTip(title);
+    button->setIcon(ToolIcon(icon_key.toStdString()));
+    button->setIconSize(QSize(28, 28));
+    button->setFixedSize(42, 36);
+    button->setProperty("placeholder", true);
+    connect(button, &QPushButton::clicked, this, [this, title]() {
+        statusBar()->showMessage(QString("%1: tool is not connected yet").arg(title), 1200);
+    });
+    layout->addWidget(button, row, column);
 }
 
 void MainWindow::RefreshSceneTree() {
@@ -551,7 +601,13 @@ void MainWindow::UpdateToolAvailability() {
 }
 
 QIcon MainWindow::ToolIcon(const std::string& key) const {
-    return QIcon(QString(":/icons/%1.png").arg(QString::fromStdString(key)));
+    QString icon_key = QString::fromStdString(key);
+    if (icon_key == "boolean_union" || icon_key == "boolean_cut" || icon_key == "boolean_common") {
+        icon_key = "BooleanSolid";
+    } else if (icon_key == "fillet_edge" || icon_key == "fillet_all_edges") {
+        icon_key = "FilletSolid";
+    }
+    return QIcon(QString(":/icons/%1.png").arg(icon_key));
 }
 
 void MainWindow::NewProject() {

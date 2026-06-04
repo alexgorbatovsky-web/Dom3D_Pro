@@ -15,6 +15,7 @@
 
 class QAction;
 class QDockWidget;
+class QGridLayout;
 class QPushButton;
 class QTabBar;
 class QTreeWidget;
@@ -30,6 +31,9 @@ private:
     void CreateActions();
     void CreateDocks();
     void CreateToolsPanel(QDockWidget* dock);
+    void PopulateToolsPanelForTab(int tab_index);
+    void AddToolButton(QGridLayout* layout, QWidget* parent, const std::string& key, int row, int column);
+    void AddPlaceholderButton(QGridLayout* layout, QWidget* parent, const QString& icon_key, const QString& title, int row, int column);
     void RefreshSceneTree();
     void SetTool(ToolMode tool, const QString& status_text);
     void BeginTransformTool(TransformOperation operation);
@@ -54,6 +58,9 @@ private:
     OpenGLViewport* viewport_ = nullptr;
     QTreeWidget* scene_tree_ = nullptr;
     PropertyPanel* property_panel_ = nullptr;
+    QDockWidget* tools_dock_ = nullptr;
+    QWidget* tools_panel_ = nullptr;
+    QGridLayout* tools_layout_ = nullptr;
     QDockWidget* properties_dock_ = nullptr;
     QTabBar* tool_tabs_ = nullptr;
     QToolBar* tab_toolbar_ = nullptr;
