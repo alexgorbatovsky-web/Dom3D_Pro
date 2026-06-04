@@ -169,6 +169,18 @@ if(WIN32)
     )
 endif()
 
+set(DOM3D_WINDEPLOYQT "${DOM3D_QT_MSVC2022_PATH}/bin/windeployqt.exe")
+if(WIN32 AND EXISTS "${DOM3D_WINDEPLOYQT}")
+    add_custom_command(TARGET Dom3D_Pro POST_BUILD
+        COMMAND "${DOM3D_WINDEPLOYQT}"
+            --no-translations
+            --no-compiler-runtime
+            --dir "$<TARGET_FILE_DIR:Dom3D_Pro>"
+            "$<TARGET_FILE:Dom3D_Pro>"
+        COMMENT "Deploying Qt runtime DLLs"
+    )
+endif()
+
 if(WIN32)
     target_link_libraries(Dom3D_Pro PRIVATE comdlg32)
 endif()
