@@ -23,6 +23,7 @@ public:
     virtual std::vector<ToolParameter> GetDefaultParameters() const = 0;
     virtual Color GetColor() const;
     virtual std::string GetObjectName() const;
+    std::vector<int> IndexCreatedSurfaces;
 
     ToolDefinition CreateToolDefinition() const;
     void CreateSolid(CAlfaDoc& document, const std::vector<ToolParameter>& parameters) const;

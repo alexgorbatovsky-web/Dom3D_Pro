@@ -16,7 +16,14 @@ public:
     void SetTool(ToolMode tool);
     void SetTransformOperation(TransformOperation operation);
     void BeginBooleanTool(BooleanOperation operation);
+    void FitToDocument();
     ToolMode CurrentTool() const;
+    bool IsOrthographicProjection() const;
+    void SetOrthographicProjection(bool enabled);
+    OrbitMode GetOrbitMode() const;
+    void SetOrbitMode(OrbitMode mode);
+    bool IsCoordinateAxesVisible() const;
+    void SetCoordinateAxesVisible(bool visible);
 
 signals:
     void DocumentChanged();
@@ -42,6 +49,7 @@ private:
     TransformAxis HitTestTransformGizmo(const QPoint& point) const;
     Vec3 AxisVector(TransformAxis axis) const;
     float DistanceToScreenSegment(DomPoint point, DomPoint start, DomPoint end) const;
+    void DrawCoordinateAxisLabels();
 
     CAlfaDoc* document_ = nullptr;
     QtSceneRenderer renderer_;
@@ -57,5 +65,8 @@ private:
     bool panning_ = false;
     bool dragging_transform_ = false;
     bool has_boolean_body_ = false;
+    bool orthographic_projection_ = false;
+    bool show_coordinate_axes_ = true;
+    OrbitMode orbit_mode_ = OrbitMode::CAD;
     size_t boolean_body_index_ = 0;
 };

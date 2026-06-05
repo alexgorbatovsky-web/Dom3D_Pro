@@ -99,6 +99,8 @@ int CSolid::m_DimensId = 0;
 CSolid* CSolid::pCSolidTool=NULL;
 int CSolid::NumReadFile =0;
 bool CSolid::DoSmooth = false;
+SolidDisplayMode CSolid::s_DisplayMode = SolidDisplayMode::SurfacesAndEdges;
+bool CSolid::s_SurfaceTransparencyEnabled = false;
 
 
 CSolid::CSolid()
@@ -115,6 +117,26 @@ CSolid::CSolid(TopoDS_Shape& shape)
 CSolid::~CSolid()
 {
 	Clear();
+}
+
+SolidDisplayMode CSolid::GetDisplayMode()
+{
+	return s_DisplayMode;
+}
+
+void CSolid::SetDisplayMode(SolidDisplayMode mode)
+{
+	s_DisplayMode = mode;
+}
+
+bool CSolid::IsSurfaceTransparencyEnabled()
+{
+	return s_SurfaceTransparencyEnabled;
+}
+
+void CSolid::SetSurfaceTransparencyEnabled(bool enabled)
+{
+	s_SurfaceTransparencyEnabled = enabled;
 }
 
 void CSolid::Alloc()
@@ -337,11 +359,51 @@ void CSolid::Clear()
 
 void CSolid::Render3d(bool selected) const
 {
-	for (CSurfaceFace* surface : m_Surfaces) {
-		if (surface && surface->pMesh3D) {
-			surface->pMesh3D->Render3d(selected);
+	const SolidDisplayMode mode = GetDisplayMode();
+	const MeshDisplayMode mesh_mode = CMesh3D::GetDisplayMode();
+	const bool draw_faces = mode == SolidDisplayMode::SurfacesAndEdges || mode == SolidDisplayMode::SurfacesAndRaisedMesh;
+	const bool draw_mesh = mode == SolidDisplayMode::MeshOnly || mode == SolidDisplayMode::SurfacesAndRaisedMesh;
+	const bool draw_edges = mode != SolidDisplayMode::MeshOnly;
+	Material surface_material = GetMaterial();
+	if (mesh_mode == MeshDisplayMode::SurfaceGray) {
+		surface_material.diffuse = {0.62f, 0.69f, 0.75f};
+		surface_material.alpha = 1.0f;
+		surface_material.specular = 0.24f;
+		surface_material.shininess = 42.0f;
+	}
+	if (IsSurfaceTransparencyEnabled()) {
+		surface_material.alpha = std::min(surface_material.alpha, 0.62f);
+	}
+	const Color solid_color = surface_material.diffuse;
+
+	if (mesh_mode == MeshDisplayMode::Wire) {
+		for (CSurfaceFace* surface : m_Surfaces) {
+			if (surface && surface->pMesh3D) {
+				surface->pMesh3D->RenderWire(selected, true, &solid_color);
+			}
+		}
+		return;
+	}
+
+	if (draw_faces) {
+		for (CSurfaceFace* surface : m_Surfaces) {
+			if (surface && surface->pMesh3D) {
+				surface->pMesh3D->RenderFaces(selected, draw_edges || mode == SolidDisplayMode::SurfacesAndRaisedMesh, &surface_material);
+			}
 		}
 	}
+
+	if (draw_mesh) {
+		for (CSurfaceFace* surface : m_Surfaces) {
+			if (surface && surface->pMesh3D) {
+				surface->pMesh3D->RenderWire(selected, mode == SolidDisplayMode::SurfacesAndRaisedMesh, &solid_color);
+			}
+		}
+	}
+
+	if (!draw_edges)
+		return;
+
 	for (int i = 0; i < static_cast<int>(m_Surfaces.size()); ++i) {
 		CSurfaceFace* surface = m_Surfaces[static_cast<size_t>(i)];
 		if (surface) {

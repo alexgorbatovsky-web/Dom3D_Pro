@@ -20,7 +20,14 @@ public:
 
     void Render();
     void Render3d(bool selected) const override;
+    void RenderFaces(bool selected, bool offset_fill = false, const Material* material_override = nullptr) const;
+    void RenderWire(bool selected, bool draw_on_top = false, const Color* color_override = nullptr) const;
     void Render2d(float center_x, float center_y, float scale) const override;
+    static Material material_Defailt;
+    static float GetWireOpacity();
+    static void SetWireOpacity(float opacity);
+    static MeshDisplayMode GetDisplayMode();
+    static void SetDisplayMode(MeshDisplayMode mode);
     bool HitTest(CurvePoint point, float tolerance) const override;
     void Translate(Vec3 delta) override;
     void Rotate(Vec3 center, Vec3 axis, float angle) override;
@@ -39,4 +46,6 @@ private:
 
     std::vector<Vec3> vertices_;
     std::vector<Face> faces_;
+    static float s_WireOpacity;
+    static MeshDisplayMode s_DisplayMode;
 };

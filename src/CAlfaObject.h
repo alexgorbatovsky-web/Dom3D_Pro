@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Common.h"
+#include "Material.h"
 
 #include <iosfwd>
 #include <cstddef>
@@ -15,6 +16,9 @@ class CAlfaObject {
 public:
     virtual ~CAlfaObject() = default;
 
+    unsigned long m_col = 0;
+    bool m_selected = false;
+
     virtual void Render3d(bool selected) const = 0;
     virtual void Render3d(bool selected, bool has_selected_point, size_t selected_point_index) const;
     virtual void Render2d(float center_x, float center_y, float scale) const = 0;
@@ -28,6 +32,10 @@ public:
 
     const std::string& GetName() const;
     void SetName(std::string name);
+    const std::string& GetGroupName() const;
+    void SetGroupName(std::string group_name);
+    bool IsVisible() const;
+    void SetVisible(bool visible);
 
     Color GetColor() const;
     void SetColor(Color color);
@@ -40,5 +48,7 @@ protected:
 
 private:
     std::string name_;
+    std::string group_name_;
     Material material_;
+    bool visible_ = true;
 };

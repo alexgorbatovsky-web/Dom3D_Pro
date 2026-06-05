@@ -45,6 +45,9 @@ void CView2d::DrawPreview(const CAlfaDoc& document, float x, float y, float widt
     glEnd();
 
     for (const auto& object : document.GetObjects()) {
+        if (!object || !object->IsVisible()) {
+            continue;
+        }
         object->Render2d(center_x, center_y, scale);
     }
 }

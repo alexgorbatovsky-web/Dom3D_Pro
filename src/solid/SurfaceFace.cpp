@@ -299,19 +299,28 @@ bool CSurfaceFace::InitEdges()
 
 void CSurfaceFace::RenderEdges(bool selected, const std::vector<int>& selected_edge_indices) const
 {
-	const float width = selected ? 4.5f : 3.0f;
-	const float r = selected ? 0.20f : 0.95f;
-	const float g = selected ? 0.88f : 0.72f;
-	const float b = selected ? 1.00f : 0.18f;
+	const float width = selected ? 1.15f : 0.9f;
+	const float r = 0.035f;
+	const float g = 0.038f;
+	const float b = 0.040f;
 
 	for (int i = 0; i < static_cast<int>(m_Edges.size()); ++i) {
 		CSplineCurve* edge = m_Edges[static_cast<size_t>(i)];
 		if (!edge)
 			continue;
 		if (std::find(selected_edge_indices.begin(), selected_edge_indices.end(), i) != selected_edge_indices.end())
-			edge->Draw(1.0f, 0.24f, 0.12f, 7.0f, 24, true, true);
+			continue;
 		else
-			edge->Draw(r, g, b, width, 16, false, true);
+			edge->Draw(r, g, b, width, 16, false, false);
+	}
+
+	for (int edge_index : selected_edge_indices) {
+		if (edge_index < 0 || edge_index >= static_cast<int>(m_Edges.size()))
+			continue;
+		CSplineCurve* edge = m_Edges[static_cast<size_t>(edge_index)];
+		if (!edge)
+			continue;
+		edge->Draw(1.0f, 0.22f, 0.12f, 5.5f, 24, false, true);
 	}
 }
 

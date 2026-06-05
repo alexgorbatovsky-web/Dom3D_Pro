@@ -10,7 +10,7 @@ if(EXISTS "${DOM3D_QT_MSVC2022_PATH}/lib/cmake/Qt6/Qt6Config.cmake")
     list(PREPEND CMAKE_PREFIX_PATH "${DOM3D_QT_MSVC2022_PATH}")
 endif()
 
-find_package(Qt6 COMPONENTS Widgets OpenGLWidgets QUIET)
+find_package(Qt6 COMPONENTS Widgets OpenGLWidgets Xml QUIET)
 if(NOT Qt6_FOUND)
     message(FATAL_ERROR
         "Qt 6 was not found. Expected Qt MSVC 2022 x64 at:\n"
@@ -64,14 +64,17 @@ set(DOM3D_OPENCASCADE_LIBS
 
 set(DOM3D_SOURCES
     src/main.cpp
+    src/Material.cpp
     src/CAlfaObject.cpp
     src/CAlfaDoc.cpp
     src/CMesh3D.cpp
     src/CPolyline.cpp
     src/CView2d.cpp
     src/CView3d.cpp
+    src/Dom3DProjectSerializer.cpp
     src/ObjIO.cpp
     src/ProjectIO.cpp
+    src/StepIO.cpp
     src/solid/SolidBoxTool.cpp
     src/solid/SolidTool.cpp
     src/ui/MainWindow.cpp
@@ -103,15 +106,18 @@ set(DOM3D_SOURCES
 
 set(DOM3D_HEADERS
     src/CAlfaObject.h
+    src/Material.h
     src/CAlfaDoc.h
     src/Common.h
     src/CMesh3D.h
     src/CPolyline.h
     src/CView2d.h
     src/CView3d.h
+    src/Dom3DProjectSerializer.h
     src/ObjIO.h
     src/OpenGLCompat.h
     src/ProjectIO.h
+    src/StepIO.h
     src/solid/SolidBoxTool.h
     src/solid/SolidTool.h
     src/ui/MainWindow.h
@@ -158,7 +164,7 @@ source_group("Header Files" FILES ${DOM3D_HEADERS})
 target_compile_features(Dom3D_Pro PRIVATE cxx_std_17)
 target_include_directories(Dom3D_Pro PRIVATE "${DOM3D_OPENCASCADE_INCLUDE_DIR}")
 target_link_directories(Dom3D_Pro PRIVATE "${DOM3D_OPENCASCADE_LIBRARY_DIR}")
-target_link_libraries(Dom3D_Pro PRIVATE Qt6::Widgets Qt6::OpenGLWidgets OpenGL::GL ${DOM3D_OPENCASCADE_LIBS})
+target_link_libraries(Dom3D_Pro PRIVATE Qt6::Widgets Qt6::OpenGLWidgets Qt6::Xml OpenGL::GL ${DOM3D_OPENCASCADE_LIBS})
 
 if(WIN32)
     add_custom_command(TARGET Dom3D_Pro POST_BUILD

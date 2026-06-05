@@ -58,8 +58,8 @@ class CSolid :public CAlfaObject {
 //	cList<CPolyline*> m_Edges;
 	Poly_Triangulation* m_Mesh;
 	std::vector<CSurfaceFace*> m_Surfaces;
- //	ClassArray<ParametricFunction> m_OperatonTree;
-//	cList<SolidTool*> m_Operaton;
+	std::vector<ParametricFunction> m_OperatonTree;
+
 
 
 public:
@@ -72,6 +72,11 @@ public:
 	virtual bool			PickCurrentPos() { return false; }
 	virtual bool			PickEmptySpace() { return true; }
 	virtual bool AllowRadisRMBControl() { return false; }
+
+	static SolidDisplayMode GetDisplayMode();
+	static void SetDisplayMode(SolidDisplayMode mode);
+	static bool IsSurfaceTransparencyEnabled();
+	static void SetSurfaceTransparencyEnabled(bool enabled);
 
 	void Render3d(bool selected) const override;
 	void Render2d(float center_x, float center_y, float scale) const override;
@@ -135,6 +140,8 @@ public:
 	bool IsEmpty;
 	bool NeedUpdateSculpt;
 static	int NumReadFile;
+	static SolidDisplayMode s_DisplayMode;
+	static bool s_SurfaceTransparencyEnabled;
 	bool MeshQuadroX;
 	float AngDeflection;
 	bool m_IsParametric;

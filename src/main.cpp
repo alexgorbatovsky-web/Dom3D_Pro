@@ -10,13 +10,16 @@ int main(int argc, char* argv[]) {
     format.setVersion(2, 1);
     format.setProfile(QSurfaceFormat::CompatibilityProfile);
     format.setDepthBufferSize(24);
+    format.setSamples(4);
     format.setSwapBehavior(QSurfaceFormat::DoubleBuffer);
     QSurfaceFormat::setDefaultFormat(format);
 
     QApplication app(argc, argv);
+    QApplication::setOrganizationName("Dom3D");
+    QApplication::setApplicationName("Dom3D Pro");
     app.setWindowIcon(QIcon(":/icons/app_icon.ico"));
     MainWindow window;
     window.setWindowIcon(QIcon(":/icons/app_icon.ico"));
-    window.show();
+    window.showMaximized();
     return app.exec();
 }

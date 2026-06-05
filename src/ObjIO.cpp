@@ -47,7 +47,7 @@ bool ObjIO::Import(const std::string& path, std::unique_ptr<CMesh3D>& mesh, std:
     }
 
     auto loaded = std::make_unique<CMesh3D>("Imported OBJ");
-    loaded->SetColor({0.46f, 0.72f, 0.94f});
+    loaded->SetColor({0.42f, 0.57f, 0.36f});
     if (!loaded->SetGeometry(std::move(vertices), std::move(faces))) {
         error = "OBJ file has no valid mesh geometry.";
         return false;

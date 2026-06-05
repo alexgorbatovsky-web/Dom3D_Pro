@@ -6,19 +6,27 @@
 
 #include "../ObjIO.h"
 #include "../ProjectIO.h"
+#include "../Dom3DProjectSerializer.h"
+#include "../StepIO.h"
 
 #include <QIcon>
 #include <QMainWindow>
+#include <QStringList>
 
 #include <string>
 #include <vector>
 
 class QAction;
+class QCheckBox;
 class QDockWidget;
 class QGridLayout;
+class QLabel;
+class QMenu;
 class QPushButton;
+class QSlider;
 class QTabBar;
 class QTreeWidget;
+class QTreeWidgetItem;
 class QToolBar;
 
 class MainWindow : public QMainWindow {
@@ -35,7 +43,15 @@ private:
     void AddToolButton(QGridLayout* layout, QWidget* parent, const std::string& key, int row, int column);
     void AddPlaceholderButton(QGridLayout* layout, QWidget* parent, const QString& icon_key, const QString& title, int row, int column);
     void RefreshSceneTree();
+    void OnSceneTreeItemClicked(QTreeWidgetItem* item, int column);
     void SetTool(ToolMode tool, const QString& status_text);
+    void SetSolidDisplayMode(SolidDisplayMode mode);
+    void SetMeshDisplayMode(MeshDisplayMode mode);
+    void SetMeshWireOpacity(float opacity);
+    void SetOrthographicProjection(bool enabled);
+    void SetOrbitMode(OrbitMode mode);
+    void SetCoordinateAxesVisible(bool visible);
+    void UpdateProjectionStatus();
     void BeginTransformTool(TransformOperation operation);
     void ActivateParametricTool(const std::string& tool_id);
     void ClearActiveProperties();
@@ -49,11 +65,19 @@ private:
     QIcon ToolIcon(const std::string& key) const;
     void NewProject();
     void OpenProject();
+    void OpenProjectFromPath(const QString& path);
     void SaveProject();
     void ShowPreferences();
-    void ImportObj();
-    void ExportObj();
+    void ImportFile();
+    void ExportFile();
     void DeleteSelected();
+    void LoadUserSettings();
+    void RememberLastDialogDir(const QString& path);
+    QString LastDialogDir() const;
+    void AddRecentProjectFile(const QString& path);
+    void UpdateRecentFilesMenu();
+    void ClearRecentProjectFiles();
+    void ShowGreetingDialog(bool force = false);
 
     OpenGLViewport* viewport_ = nullptr;
     QTreeWidget* scene_tree_ = nullptr;
@@ -65,13 +89,30 @@ private:
     QTabBar* tool_tabs_ = nullptr;
     QToolBar* tab_toolbar_ = nullptr;
     QToolBar* main_toolbar_ = nullptr;
+    QMenu* recent_files_menu_ = nullptr;
+    QAction* orthographic_projection_action_ = nullptr;
+    QAction* cad_orbit_action_ = nullptr;
+    QAction* architectural_orbit_action_ = nullptr;
+    QAction* surfaces_edges_action_ = nullptr;
+    QAction* mesh_only_action_ = nullptr;
+    QAction* surfaces_wire_action_ = nullptr;
+    QCheckBox* coordinate_axes_check_box_ = nullptr;
+    QPushButton* mesh_display_button_ = nullptr;
+    QMenu* mesh_display_menu_ = nullptr;
+    QSlider* mesh_opacity_slider_ = nullptr;
+    QLabel* mesh_opacity_value_label_ = nullptr;
+    QLabel* projection_status_label_ = nullptr;
     std::vector<QAction*> tool_actions_;
     std::vector<QPushButton*> tool_buttons_;
+    QStringList recent_project_files_;
+    QString last_file_dialog_dir_;
     std::string active_tool_key_ = "orbit";
 
     CAlfaDoc document_;
+    Dom3DProjectSerializer dom3d_serializer_;
     ProjectIO project_io_;
     ObjIO obj_io_;
+    StepIO step_io_;
     ToolRegistry tool_registry_;
     ActiveParametricObject active_parametric_object_;
     std::string project_path_;

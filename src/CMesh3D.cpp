@@ -7,16 +7,93 @@
 #include <istream>
 #include <ostream>
 #include <sstream>
+#include <unordered_set>
 #include <utility>
+
+namespace {
+float clamp01(float value) {
+    return std::clamp(value, 0.0f, 1.0f);
+}
+
+Color shaded_color(Color base, Vec3 normal, float specular_strength, float shininess, bool selected) {
+    const Vec3 n = normalize(normal);
+    const Vec3 key_light = normalize({-0.45f, 0.82f, 0.36f});
+    const Vec3 fill_light = normalize({0.72f, 0.42f, -0.58f});
+    const Vec3 camera_fill_light = normalize({0.28f, 0.28f, 0.92f});
+    const Vec3 view_dir = normalize({0.30f, 0.45f, 0.84f});
+    const Vec3 half_vector = normalize(key_light + view_dir);
+    const float key = std::max(0.0f, dot(n, key_light));
+    const float fill = std::max(0.0f, dot(n, fill_light));
+    const float camera_fill = std::max(0.0f, dot(n, camera_fill_light));
+    const float sky = std::max(0.0f, n.y);
+    const float side = 1.0f - std::fabs(n.y);
+    const float shade = std::min(1.38f, 0.40f + key * 0.56f + fill * 0.18f + camera_fill * 0.14f + sky * 0.13f + side * 0.07f);
+    const float gloss = std::pow(std::max(0.0f, dot(n, half_vector)), std::max(4.0f, shininess));
+    const float rim = std::pow(std::max(0.0f, 1.0f - std::fabs(dot(n, view_dir))), 3.0f) * std::max(key, camera_fill * 0.45f);
+    const float highlight = std::min(0.32f, specular_strength * (gloss * 0.68f + rim * 0.12f));
+    const float selected_boost = selected ? 1.08f : 1.0f;
+
+    return {
+        clamp01(base.r * shade * selected_boost + key * 0.06f + highlight),
+        clamp01(base.g * shade * selected_boost + key * 0.06f + highlight),
+        clamp01(base.b * shade * selected_boost + key * 0.08f + highlight)
+    };
+}
+
+Color normal_rgb_color(Vec3 normal) {
+    const Vec3 n = normalize(normal);
+    const float x = std::fabs(n.x);
+    const float y = std::fabs(n.y);
+    const float z = std::fabs(n.z);
+    const float sum = std::max(0.0001f, x + y + z);
+    const Color x_color{1.00f, 0.42f, 0.38f};
+    const Color y_color{0.42f, 1.00f, 0.30f};
+    const Color z_color{0.42f, 0.68f, 1.00f};
+    const float ambient = 0.16f;
+
+    return {
+        clamp01(ambient + (x_color.r * x + y_color.r * y + z_color.r * z) / sum * 0.84f),
+        clamp01(ambient + (x_color.g * x + y_color.g * y + z_color.g * z) / sum * 0.84f),
+        clamp01(ambient + (x_color.b * x + y_color.b * y + z_color.b * z) / sum * 0.84f)
+    };
+}
+
+Color wire_color(Color base, MeshDisplayMode mode, bool selected) {
+    if (mode == MeshDisplayMode::SurfaceGray) {
+        return selected ? Color{0.045f, 0.050f, 0.052f} : Color{0.075f, 0.083f, 0.087f};
+    }
+    if (mode == MeshDisplayMode::Wire) {
+        return selected ? Color{0.080f, 0.130f, 0.105f} : Color{0.120f, 0.175f, 0.140f};
+    }
+
+    const float luminance = base.r * 0.30f + base.g * 0.59f + base.b * 0.11f;
+    const float shade = selected ? 0.20f : (luminance > 0.58f ? 0.27f : 0.34f);
+    const float neutral = selected ? 0.022f : (luminance > 0.58f ? 0.035f : 0.050f);
+    return {
+        clamp01(base.r * shade + neutral),
+        clamp01(base.g * shade + neutral),
+        clamp01(base.b * shade + neutral)
+    };
+}
+
+Material colored_mesh_material() {
+    return Material::ImportedMesh();
+}
+
+}
 
 CMesh3D::CMesh3D()
     : CAlfaObject("Mesh3D") {
-    SetColor({0.38f, 0.68f, 0.88f});
+    SetMaterial(colored_mesh_material());
 }
+
+Material CMesh3D::material_Defailt = Material::DefaultMesh();
+float CMesh3D::s_WireOpacity = 0.76f;
+MeshDisplayMode CMesh3D::s_DisplayMode = MeshDisplayMode::SurfaceGray;
 
 CMesh3D::CMesh3D(std::string name)
     : CAlfaObject(std::move(name)) {
-    SetColor({0.38f, 0.68f, 0.88f});
+    SetMaterial(colored_mesh_material());
 }
 
 const std::vector<Vec3>& CMesh3D::GetVertices() const {
@@ -48,24 +125,57 @@ void CMesh3D::Render() {
 }
 
 void CMesh3D::Render3d(bool selected) const {
+    const MeshDisplayMode mode = GetDisplayMode();
+    if (mode == MeshDisplayMode::Wire) {
+        const Material material = mode == MeshDisplayMode::SurfaceGray ? material_Defailt : GetMaterial();
+        RenderWire(selected, true, &material.diffuse);
+        return;
+    }
+
+    const Material material = mode == MeshDisplayMode::SurfaceGray ? material_Defailt : GetMaterial();
+
+    RenderFaces(selected, true, &material);
+    RenderWire(selected, true, &material.diffuse);
+}
+
+void CMesh3D::RenderFaces(bool selected, bool offset_fill, const Material* material_override) const {
     if (vertices_.empty() || faces_.empty()) {
         return;
     }
 
-    const Color color = GetColor();
-    const Material material = GetMaterial();
-    const float r = selected ? 0.35f : color.r;
-    const float g = selected ? 0.86f : color.g;
-    const float b = selected ? 1.0f : color.b;
-    const float alpha = selected ? std::min(material.alpha + 0.12f, 1.0f) : material.alpha;
+    const Material material = material_override ? *material_override : GetMaterial();
+    const Color color = material.diffuse;
+    const float specular_strength = std::clamp(material.specular <= 0.0f ? 0.18f : material.specular, 0.0f, 1.0f);
+    const float shininess = std::clamp(material.shininess <= 0.0f ? 36.0f : material.shininess, 4.0f, 96.0f);
+    const float alpha = selected ? std::min(material.alpha + 0.04f, 1.0f) : material.alpha;
 
-    const Vec3 light_dir = normalize({-0.35f, 0.85f, 0.38f});
+    std::vector<Vec3> vertex_normals(vertices_.size(), {0.0f, 0.0f, 0.0f});
+    for (const Face& face : faces_) {
+        if (!IsValidFace(face, vertices_.size())) {
+            continue;
+        }
+        const Vec3 normal = FaceNormal(face);
+        for (size_t index : face) {
+            vertex_normals[index] = vertex_normals[index] + normal;
+        }
+    }
+    for (Vec3& normal : vertex_normals) {
+        normal = normalize(normal);
+        if (std::fabs(normal.x) <= 0.00001f && std::fabs(normal.y) <= 0.00001f && std::fabs(normal.z) <= 0.00001f) {
+            normal = {0.0f, 1.0f, 0.0f};
+        }
+    }
 
     if (alpha < 0.999f) {
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glDepthMask(GL_FALSE);
     }
     glDisable(GL_LIGHTING);
+    if (offset_fill) {
+        glEnable(GL_POLYGON_OFFSET_FILL);
+        glPolygonOffset(0.55f, 0.55f);
+    }
 
     glBegin(GL_TRIANGLES);
     for (const Face& face : faces_) {
@@ -73,28 +183,52 @@ void CMesh3D::Render3d(bool selected) const {
             continue;
         }
 
-        const Vec3 normal = FaceNormal(face);
-        const float lambert = std::fabs(dot(normal, light_dir));
-        const float shade = selected ? 1.0f : (0.34f + lambert * 0.78f);
-        glNormal3f(normal.x, normal.y, normal.z);
-        glColor4f(std::min(r * shade, 1.0f), std::min(g * shade, 1.0f), std::min(b * shade, 1.0f), alpha);
         for (size_t i = 1; i + 1 < face.size(); ++i) {
-            const Vec3& a = vertices_[face[0]];
-            const Vec3& b_vertex = vertices_[face[i]];
-            const Vec3& c = vertices_[face[i + 1]];
-            glVertex3f(a.x, a.y, a.z);
-            glVertex3f(b_vertex.x, b_vertex.y, b_vertex.z);
-            glVertex3f(c.x, c.y, c.z);
+            const size_t indices[] = {face[0], face[i], face[i + 1]};
+            for (size_t vertex_index : indices) {
+                const Vec3& normal = vertex_normals[vertex_index];
+                const Color shade = selected ? normal_rgb_color(normal) : shaded_color(color, normal, specular_strength, shininess, selected);
+                const Vec3& vertex = vertices_[vertex_index];
+                glNormal3f(normal.x, normal.y, normal.z);
+                glColor4f(shade.r, shade.g, shade.b, alpha);
+                glVertex3f(vertex.x, vertex.y, vertex.z);
+            }
         }
     }
     glEnd();
 
+    if (offset_fill) {
+        glDisable(GL_POLYGON_OFFSET_FILL);
+    }
     if (alpha < 0.999f) {
+        glDepthMask(GL_TRUE);
         glDisable(GL_BLEND);
     }
+}
 
-    glLineWidth(selected ? 3.0f : 1.5f);
-    glColor3f(r * 0.72f, g * 0.72f, b * 0.72f);
+void CMesh3D::RenderWire(bool selected, bool draw_on_top, const Color* color_override) const {
+    if (vertices_.empty() || faces_.empty()) {
+        return;
+    }
+
+    const Color base_color = color_override ? *color_override : GetColor();
+    const MeshDisplayMode mode = GetDisplayMode();
+
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_LINE_SMOOTH);
+    glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
+    glLineWidth(draw_on_top ? (selected ? 1.16f : 1.02f) : (selected ? 1.02f : 0.92f));
+    const float opacity = std::clamp(s_WireOpacity, 0.05f, 1.0f);
+    const Color wire = wire_color(base_color, mode, selected);
+    const float alpha = opacity * (draw_on_top ? (selected ? 0.98f : 0.92f) : (selected ? 0.88f : 0.82f));
+    glColor4f(wire.r, wire.g, wire.b, alpha);
+
+    std::unordered_set<unsigned long long> drawn_edges;
+    drawn_edges.reserve(faces_.size() * 3);
+
     glBegin(GL_LINES);
     for (const Face& face : faces_) {
         if (!IsValidFace(face, vertices_.size())) {
@@ -102,13 +236,43 @@ void CMesh3D::Render3d(bool selected) const {
         }
 
         for (size_t i = 0; i < face.size(); ++i) {
-            const Vec3& a = vertices_[face[i]];
-            const Vec3& b_vertex = vertices_[face[(i + 1) % face.size()]];
+            const size_t a_index = face[i];
+            const size_t b_index = face[(i + 1) % face.size()];
+            const size_t edge_min = std::min(a_index, b_index);
+            const size_t edge_max = std::max(a_index, b_index);
+            const unsigned long long key = (static_cast<unsigned long long>(edge_min) << 32)
+                | static_cast<unsigned long long>(edge_max);
+            if (!drawn_edges.insert(key).second) {
+                continue;
+            }
+
+            const Vec3& a = vertices_[a_index];
+            const Vec3& b_vertex = vertices_[b_index];
             glVertex3f(a.x, a.y, a.z);
             glVertex3f(b_vertex.x, b_vertex.y, b_vertex.z);
         }
     }
     glEnd();
+
+    glDisable(GL_LINE_SMOOTH);
+    glDisable(GL_BLEND);
+    glDepthFunc(GL_LESS);
+}
+
+float CMesh3D::GetWireOpacity() {
+    return s_WireOpacity;
+}
+
+void CMesh3D::SetWireOpacity(float opacity) {
+    s_WireOpacity = std::clamp(opacity, 0.05f, 1.0f);
+}
+
+MeshDisplayMode CMesh3D::GetDisplayMode() {
+    return s_DisplayMode;
+}
+
+void CMesh3D::SetDisplayMode(MeshDisplayMode mode) {
+    s_DisplayMode = mode;
 }
 
 void CMesh3D::Render2d(float center_x, float center_y, float scale) const {
@@ -361,7 +525,7 @@ bool CMesh3D::Create(CPolyline* pline, CVector3d dir, float dist) {
     }
 
     SetName(pline->GetName() + " Mesh");
-    SetColor(pline->GetColor());
+    SetMaterial(colored_mesh_material());
     vertices_ = std::move(created_vertices);
     faces_ = std::move(created_faces);
     return true;

@@ -3,10 +3,15 @@
 #include "../solid/Solid.h"
 
 #include <QMouseEvent>
+#include <QPainter>
 #include <QWheelEvent>
 
 #include <algorithm>
 #include <cmath>
+
+namespace {
+constexpr float kGridHalfSize = 12.0f;
+}
 
 OpenGLViewport::OpenGLViewport(QWidget* parent)
     : QOpenGLWidget(parent) {
@@ -48,8 +53,89 @@ void OpenGLViewport::BeginBooleanTool(BooleanOperation operation) {
     emit StatusTextChanged("Boolean: выбери body");
 }
 
+void OpenGLViewport::FitToDocument() {
+    if (!document_) {
+        return;
+    }
+
+    Vec3 min_point{};
+    Vec3 max_point{};
+    bool has_bounds = false;
+    for (const auto& object : document_->GetObjects()) {
+        if (!object || !object->IsVisible()) {
+            continue;
+        }
+
+        Vec3 object_min{};
+        Vec3 object_max{};
+        if (!object->GetBounds(object_min, object_max)) {
+            continue;
+        }
+
+        if (!has_bounds) {
+            min_point = object_min;
+            max_point = object_max;
+            has_bounds = true;
+        } else {
+            min_point.x = std::min(min_point.x, object_min.x);
+            min_point.y = std::min(min_point.y, object_min.y);
+            min_point.z = std::min(min_point.z, object_min.z);
+            max_point.x = std::max(max_point.x, object_max.x);
+            max_point.y = std::max(max_point.y, object_max.y);
+            max_point.z = std::max(max_point.z, object_max.z);
+        }
+    }
+
+    if (!has_bounds) {
+        return;
+    }
+
+    const Vec3 center = (min_point + max_point) * 0.5f;
+    const Vec3 size = max_point - min_point;
+    const float radius = std::max(1.0f, std::sqrt(dot(size, size)) * 0.5f);
+    camera_.target = center;
+    camera_.distance = std::clamp(radius * 3.0f, 2.0f, 100000.0f);
+    update();
+}
+
 ToolMode OpenGLViewport::CurrentTool() const {
     return tool_;
+}
+
+bool OpenGLViewport::IsOrthographicProjection() const {
+    return orthographic_projection_;
+}
+
+void OpenGLViewport::SetOrthographicProjection(bool enabled) {
+    if (orthographic_projection_ == enabled) {
+        return;
+    }
+    orthographic_projection_ = enabled;
+    update();
+}
+
+OrbitMode OpenGLViewport::GetOrbitMode() const {
+    return orbit_mode_;
+}
+
+void OpenGLViewport::SetOrbitMode(OrbitMode mode) {
+    orbit_mode_ = mode;
+    if (orbit_mode_ == OrbitMode::Architectural) {
+        camera_.pitch = std::clamp(camera_.pitch, -10.0f, 75.0f);
+    }
+    update();
+}
+
+bool OpenGLViewport::IsCoordinateAxesVisible() const {
+    return show_coordinate_axes_;
+}
+
+void OpenGLViewport::SetCoordinateAxesVisible(bool visible) {
+    if (show_coordinate_axes_ == visible) {
+        return;
+    }
+    show_coordinate_axes_ = visible;
+    update();
 }
 
 void OpenGLViewport::initializeGL() {
@@ -63,7 +149,10 @@ void OpenGLViewport::paintGL() {
     if (!document_) {
         return;
     }
-    renderer_.Render(*document_, camera_, tool_, highlighted_transform_axis_, width(), height());
+    renderer_.Render(*document_, camera_, orthographic_projection_, show_coordinate_axes_, tool_, highlighted_transform_axis_, width(), height());
+    if (show_coordinate_axes_) {
+        DrawCoordinateAxisLabels();
+    }
 }
 
 void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
@@ -136,7 +225,11 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
     if (orbiting_ || alt_orbiting_) {
         camera_.yaw -= static_cast<float>(delta.x()) * 0.35f;
         camera_.pitch += static_cast<float>(delta.y()) * 0.25f;
-        camera_.pitch = std::clamp(camera_.pitch, -10.0f, 75.0f);
+        if (orbit_mode_ == OrbitMode::Architectural) {
+            camera_.pitch = std::clamp(camera_.pitch, -10.0f, 75.0f);
+        } else if (std::fabs(camera_.pitch) > 360.0f) {
+            camera_.pitch = std::fmod(camera_.pitch, 360.0f);
+        }
         last_mouse_ = event->pos();
         update();
         return;
@@ -164,15 +257,17 @@ void OpenGLViewport::mouseReleaseEvent(QMouseEvent*) {
 }
 
 void OpenGLViewport::wheelEvent(QWheelEvent* event) {
-    camera_.distance -= static_cast<float>(event->angleDelta().y()) / 120.0f;
-    camera_.distance = std::clamp(camera_.distance, 6.0f, 32.0f);
+    const float wheel_steps = static_cast<float>(event->angleDelta().y()) / 120.0f;
+    const float zoom_factor = std::pow(1.12f, -wheel_steps);
+    camera_.distance *= zoom_factor;
+    camera_.distance = std::clamp(camera_.distance, 0.25f, 100000.0f);
     update();
 }
 
 void OpenGLViewport::SelectAt(const QPoint& point, SelectionAction action) {
     const DomPoint screen_point{point.x(), point.y()};
     auto world_to_screen = [this](Vec3 world, DomPoint& screen) {
-        return renderer_.WorldToScreen(world, camera_, width(), height(), screen);
+        return renderer_.WorldToScreen(world, camera_, orthographic_projection_, width(), height(), screen);
     };
     if (document_->SelectSolidEdgeAtScreen(screen_point, world_to_screen, 10.0f, action)) {
         emit SelectionChanged();
@@ -182,7 +277,7 @@ void OpenGLViewport::SelectAt(const QPoint& point, SelectionAction action) {
     }
 
     CurvePoint scene_point{};
-    if (!renderer_.ScreenToFloor(point.x(), point.y(), width(), height(), camera_, scene_point)) {
+    if (!renderer_.ScreenToFloor(point.x(), point.y(), width(), height(), camera_, orthographic_projection_, scene_point)) {
         return;
     }
 
@@ -202,7 +297,7 @@ void OpenGLViewport::SelectAt(const QPoint& point, SelectionAction action) {
 
 void OpenGLViewport::DrawCurveAt(const QPoint& point) {
     CurvePoint scene_point{};
-    if (!renderer_.ScreenToFloor(point.x(), point.y(), width(), height(), camera_, scene_point)) {
+    if (!renderer_.ScreenToFloor(point.x(), point.y(), width(), height(), camera_, orthographic_projection_, scene_point)) {
         return;
     }
 
@@ -217,7 +312,7 @@ void OpenGLViewport::HandleBooleanClick(const QPoint& point) {
     }
 
     CurvePoint scene_point{};
-    if (!renderer_.ScreenToFloor(point.x(), point.y(), width(), height(), camera_, scene_point)) {
+    if (!renderer_.ScreenToFloor(point.x(), point.y(), width(), height(), camera_, orthographic_projection_, scene_point)) {
         emit StatusTextChanged(has_boolean_body_ ? "Boolean: выбери tool body" : "Boolean: выбери body");
         return;
     }
@@ -279,7 +374,7 @@ void OpenGLViewport::HandleTransformClick(const QPoint& point, bool add_to_selec
     }
 
     CurvePoint scene_point{};
-    if (!renderer_.ScreenToFloor(point.x(), point.y(), width(), height(), camera_, scene_point)) {
+    if (!renderer_.ScreenToFloor(point.x(), point.y(), width(), height(), camera_, orthographic_projection_, scene_point)) {
         return;
     }
 
@@ -310,8 +405,8 @@ void OpenGLViewport::HandleTransformDrag(const QPoint& point) {
     const float gizmo_size = std::max(0.8f, camera_.distance * 0.10f);
     DomPoint center_screen{};
     DomPoint axis_screen{};
-    if (!renderer_.WorldToScreen(center, camera_, width(), height(), center_screen)
-        || !renderer_.WorldToScreen(center + axis * gizmo_size, camera_, width(), height(), axis_screen)) {
+    if (!renderer_.WorldToScreen(center, camera_, orthographic_projection_, width(), height(), center_screen)
+        || !renderer_.WorldToScreen(center + axis * gizmo_size, camera_, orthographic_projection_, width(), height(), axis_screen)) {
         return;
     }
 
@@ -357,7 +452,7 @@ TransformAxis OpenGLViewport::HitTestTransformGizmo(const QPoint& point) const {
 
     const float gizmo_size = std::max(0.8f, camera_.distance * 0.10f);
     DomPoint center_screen{};
-    if (!renderer_.WorldToScreen(center, camera_, width(), height(), center_screen)) {
+    if (!renderer_.WorldToScreen(center, camera_, orthographic_projection_, width(), height(), center_screen)) {
         return TransformAxis::None;
     }
 
@@ -366,7 +461,7 @@ TransformAxis OpenGLViewport::HitTestTransformGizmo(const QPoint& point) const {
     const TransformAxis axes[] = {TransformAxis::X, TransformAxis::Y, TransformAxis::Z};
     for (TransformAxis axis : axes) {
         DomPoint axis_end{};
-        if (!renderer_.WorldToScreen(center + AxisVector(axis) * gizmo_size, camera_, width(), height(), axis_end)) {
+        if (!renderer_.WorldToScreen(center + AxisVector(axis) * gizmo_size, camera_, orthographic_projection_, width(), height(), axis_end)) {
             continue;
         }
 
@@ -410,4 +505,35 @@ float OpenGLViewport::DistanceToScreenSegment(DomPoint point, DomPoint start, Do
     const float px = static_cast<float>(point.x) - closest_x;
     const float py = static_cast<float>(point.y) - closest_y;
     return std::sqrt(px * px + py * py);
+}
+
+void OpenGLViewport::DrawCoordinateAxisLabels() {
+    DomPoint x_screen{};
+    DomPoint y_screen{};
+    DomPoint z_screen{};
+    const bool has_x = renderer_.WorldToScreen({kGridHalfSize, 0.02f, 0.0f}, camera_, orthographic_projection_, width(), height(), x_screen);
+    const bool has_y = renderer_.WorldToScreen({0.0f, 0.02f, kGridHalfSize}, camera_, orthographic_projection_, width(), height(), y_screen);
+    const bool has_z = renderer_.WorldToScreen({0.0f, kGridHalfSize, 0.0f}, camera_, orthographic_projection_, width(), height(), z_screen);
+
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::TextAntialiasing, true);
+    QFont label_font = painter.font();
+    label_font.setBold(true);
+    label_font.setPointSize(9);
+    painter.setFont(label_font);
+
+    const auto draw_label = [&painter](const DomPoint& point, const QColor& color, const QString& text) {
+        painter.setPen(color);
+        painter.drawText(QPoint(point.x + 5, point.y - 5), text);
+    };
+
+    if (has_x) {
+        draw_label(x_screen, QColor(255, 20, 18), "X");
+    }
+    if (has_y) {
+        draw_label(y_screen, QColor(40, 255, 45), "Y");
+    }
+    if (has_z) {
+        draw_label(z_screen, QColor(55, 85, 255), "Z");
+    }
 }

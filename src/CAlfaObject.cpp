@@ -200,6 +200,22 @@ void CAlfaObject::SetName(std::string name) {
     name_ = std::move(name);
 }
 
+const std::string& CAlfaObject::GetGroupName() const {
+    return group_name_;
+}
+
+void CAlfaObject::SetGroupName(std::string group_name) {
+    group_name_ = std::move(group_name);
+}
+
+bool CAlfaObject::IsVisible() const {
+    return visible_;
+}
+
+void CAlfaObject::SetVisible(bool visible) {
+    visible_ = visible;
+}
+
 Color CAlfaObject::GetColor() const {
     return material_.diffuse;
 }

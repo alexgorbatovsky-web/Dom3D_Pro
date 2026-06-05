@@ -13,21 +13,31 @@ void set_color(float r, float g, float b, float a = 1.0f) {
 
 void CView3d::Draw(const CAlfaDoc& document) const {
     DrawGrid();
-    DrawRoom();
     DrawObjects(document);
 }
 
 void CView3d::DrawGrid() const {
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_LINE_SMOOTH);
+    glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
     glLineWidth(1.0f);
     glBegin(GL_LINES);
     for (int i = -12; i <= 12; ++i) {
-        set_color(i == 0 ? 0.38f : 0.20f, i == 0 ? 0.47f : 0.24f, i == 0 ? 0.58f : 0.30f);
+        const bool major = i % 4 == 0;
+        const float r = major ? 0.34f : 0.22f;
+        const float g = major ? 0.40f : 0.27f;
+        const float b = major ? 0.48f : 0.34f;
+        const float a = major ? 0.58f : 0.34f;
+        set_color(r, g, b, a);
         glVertex3f(static_cast<float>(i), 0.0f, -12.0f);
         glVertex3f(static_cast<float>(i), 0.0f, 12.0f);
         glVertex3f(-12.0f, 0.0f, static_cast<float>(i));
         glVertex3f(12.0f, 0.0f, static_cast<float>(i));
     }
     glEnd();
+    glDisable(GL_LINE_SMOOTH);
+    glDisable(GL_BLEND);
 }
 
 void CView3d::DrawRoom() const {
@@ -71,6 +81,9 @@ void CView3d::DrawRoom() const {
 void CView3d::DrawObjects(const CAlfaDoc& document) const {
     const auto& objects = document.GetObjects();
     for (size_t index = 0; index < objects.size(); ++index) {
+        if (!objects[index] || !objects[index]->IsVisible()) {
+            continue;
+        }
         const bool selected = document.IsObjectSelected(index);
         const bool has_selected_point = document.HasSelection() && document.GetSelectedObjectIndex() == index && document.HasSelectedPoint();
         objects[index]->Render3d(selected, has_selected_point, document.GetSelectedPointIndex());

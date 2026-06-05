@@ -42,13 +42,6 @@ struct Color {
     float b = 0.30f;
 };
 
-struct Material {
-    Color diffuse{};
-    float alpha = 1.0f;
-    float specular = 0.2f;
-    float shininess = 24.0f;
-};
-
 struct Camera {
     Vec3 target{0.0f, 1.2f, 0.0f};
     float yaw = -35.0f;
@@ -108,6 +101,23 @@ enum class TransformOperation {
     Move,
     Rotate,
     Scale
+};
+
+enum class SolidDisplayMode {
+    SurfacesAndEdges,
+    MeshOnly,
+    SurfacesAndRaisedMesh
+};
+
+enum class MeshDisplayMode {
+    SurfaceGray,
+    SurfaceColored,
+    Wire
+};
+
+enum class OrbitMode {
+    CAD,
+    Architectural
 };
 
 inline float deg_to_rad(float value) {

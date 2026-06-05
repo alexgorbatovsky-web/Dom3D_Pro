@@ -97,7 +97,7 @@ bool CAlfaDoc::CreateMeshFromSelectedPolyline(CVector3d dir, float dist) {
 bool CAlfaDoc::SelectObjectAt(CurvePoint point, float tolerance) {
     for (size_t i = objects_.size(); i > 0; --i) {
         const size_t index = i - 1;
-        if (objects_[index]->HitTest(point, tolerance)) {
+        if (objects_[index]->IsVisible() && objects_[index]->HitTest(point, tolerance)) {
             for (ObjectPtr& object : objects_) {
                 if (auto* solid = dynamic_cast<CSolid*>(object.get())) {
                     solid->ClearSelectedEdge();
@@ -119,7 +119,7 @@ bool CAlfaDoc::SelectObjectAt(CurvePoint point, float tolerance) {
 bool CAlfaDoc::AddObjectToSelectionAt(CurvePoint point, float tolerance) {
     for (size_t i = objects_.size(); i > 0; --i) {
         const size_t index = i - 1;
-        if (objects_[index]->HitTest(point, tolerance)) {
+        if (objects_[index]->IsVisible() && objects_[index]->HitTest(point, tolerance)) {
             selected_object_index_ = index;
             active_object_index_ = index;
             has_selected_object_ = true;
@@ -137,7 +137,7 @@ bool CAlfaDoc::AddObjectToSelectionAt(CurvePoint point, float tolerance) {
 bool CAlfaDoc::RemoveObjectFromSelectionAt(CurvePoint point, float tolerance) {
     for (size_t i = objects_.size(); i > 0; --i) {
         const size_t index = i - 1;
-        if (!objects_[index]->HitTest(point, tolerance)) {
+        if (!objects_[index]->IsVisible() || !objects_[index]->HitTest(point, tolerance)) {
             continue;
         }
 
@@ -164,7 +164,7 @@ bool CAlfaDoc::RemoveObjectFromSelectionAt(CurvePoint point, float tolerance) {
 bool CAlfaDoc::ToggleObjectSelectionAt(CurvePoint point, float tolerance) {
     for (size_t i = objects_.size(); i > 0; --i) {
         const size_t index = i - 1;
-        if (!objects_[index]->HitTest(point, tolerance)) {
+        if (!objects_[index]->IsVisible() || !objects_[index]->HitTest(point, tolerance)) {
             continue;
         }
 
@@ -200,7 +200,7 @@ bool CAlfaDoc::SelectSolidEdgeAtScreen(DomPoint point,
     for (size_t i = objects_.size(); i > 0; --i) {
         const size_t index = i - 1;
         CSolid* solid = dynamic_cast<CSolid*>(objects_[index].get());
-        if (!solid) {
+        if (!solid || !solid->IsVisible()) {
             continue;
         }
 
@@ -239,7 +239,7 @@ bool CAlfaDoc::SelectPolylineAt(CurvePoint point, float tolerance) {
     for (size_t i = objects_.size(); i > 0; --i) {
         const size_t index = i - 1;
         CPolyline* polyline = dynamic_cast<CPolyline*>(objects_[index].get());
-        if (polyline && polyline->HitTest(point, tolerance)) {
+        if (polyline && polyline->IsVisible() && polyline->HitTest(point, tolerance)) {
             selected_object_index_ = index;
             active_object_index_ = index;
             selected_object_indices_ = {index};
@@ -639,7 +639,7 @@ bool CAlfaDoc::GetSelectionBounds(Vec3& min_point, Vec3& max_point) const {
 
     bool has_bounds = false;
     for (size_t index : selected_object_indices_) {
-        if (index >= objects_.size()) {
+        if (index >= objects_.size() || !objects_[index]->IsVisible()) {
             continue;
         }
 
