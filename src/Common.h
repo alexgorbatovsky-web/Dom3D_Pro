@@ -36,6 +36,11 @@ struct CurvePoint {
     float z = 0.0f;
 };
 
+struct UV {
+    float u = 0.0f;
+    float v = 0.0f;
+};
+
 struct Color {
     float r = 0.98f;
     float g = 0.77f;
@@ -75,7 +80,14 @@ enum class ToolMode {
     Select,
     Mesh,
     Transform,
-    Boolean
+    Boolean,
+    FaceExtrude,
+    DraftFace,
+    ThickSolid,
+    DrawBSpline,
+    EditPoint,
+    SketchRectangle,
+    SketchFillet
 };
 
 enum class BooleanOperation {
@@ -90,11 +102,20 @@ enum class SelectionAction {
     Remove
 };
 
+enum class SelectionMode {
+    Object,
+    Face,
+    Edge,
+    Point
+};
+
 enum class TransformAxis {
     None,
     X,
     Y,
-    Z
+    Z,
+    ScreenPlane,
+    UniformScale
 };
 
 enum class TransformOperation {
@@ -171,6 +192,10 @@ inline Vec3 scale_along_axis(Vec3 value, Vec3 axis, float factor) {
     const Vec3 unit_axis = normalize(axis);
     const float component = dot(value, unit_axis);
     return value + unit_axis * (component * (factor - 1.0f));
+}
+
+inline Vec3 scale_uniform(Vec3 value, float factor) {
+    return value * factor;
 }
 
 inline Vec3 camera_position(const Camera& camera) {

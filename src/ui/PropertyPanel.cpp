@@ -1,10 +1,14 @@
 #include "PropertyPanel.h"
 
+#include <QCheckBox>
+#include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
+
+#include <algorithm>
 
 PropertyPanel::PropertyPanel(QWidget* parent)
     : QWidget(parent),
@@ -26,6 +30,32 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
 
     for (int i = 0; i < static_cast<int>(active_object_.parameters.size()); ++i) {
         ToolParameter& parameter = active_object_.parameters[static_cast<size_t>(i)];
+        if (parameter.type == ToolParameterType::Checkbox) {
+            auto* editor = new QCheckBox(this);
+            editor->setChecked(parameter.value >= 0.5);
+            connect(editor, &QCheckBox::toggled, this, [this, i](bool checked) {
+                active_object_.parameters[static_cast<size_t>(i)].value = checked ? 1.0 : 0.0;
+                emit ParametersChanged();
+            });
+            form_->addRow(QString::fromStdString(parameter.label), editor);
+            continue;
+        }
+
+        if (parameter.type == ToolParameterType::Combo) {
+            auto* editor = new QComboBox(this);
+            for (const std::string& option : parameter.options) {
+                editor->addItem(QString::fromStdString(option));
+            }
+            const int index = std::clamp(static_cast<int>(parameter.value), 0, std::max(0, editor->count() - 1));
+            editor->setCurrentIndex(index);
+            connect(editor, &QComboBox::currentIndexChanged, this, [this, i](int index) {
+                active_object_.parameters[static_cast<size_t>(i)].value = static_cast<double>(index);
+                emit ParametersChanged();
+            });
+            form_->addRow(QString::fromStdString(parameter.label), editor);
+            continue;
+        }
+
         auto* editor = new QDoubleSpinBox(this);
         editor->setRange(parameter.minimum, parameter.maximum);
         editor->setSingleStep(parameter.step);

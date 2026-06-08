@@ -2,15 +2,109 @@
 
 #include "OpenGLCompat.h"
 
+#include <QCoreApplication>
+#include <QDir>
+#include <QFileInfo>
+#include <QImage>
+
 #include <algorithm>
 #include <cmath>
 #include <istream>
+#include <limits>
+#include <memory>
 #include <ostream>
 #include <sstream>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
 namespace {
+QString resolve_texture_path(const std::string& texture_path) {
+    const QString path = QString::fromStdString(texture_path).trimmed();
+    if (path.isEmpty()) {
+        return {};
+    }
+
+    const QFileInfo info(path);
+    if (info.isAbsolute() && info.exists()) {
+        return info.absoluteFilePath();
+    }
+
+    const QDir app_dir(QCoreApplication::applicationDirPath());
+    const QString material_path = app_dir.filePath("materials/" + path);
+    if (QFileInfo::exists(material_path)) {
+        return QFileInfo(material_path).absoluteFilePath();
+    }
+
+    const QString app_relative_path = app_dir.filePath(path);
+    if (QFileInfo::exists(app_relative_path)) {
+        return QFileInfo(app_relative_path).absoluteFilePath();
+    }
+
+    if (info.exists()) {
+        return info.absoluteFilePath();
+    }
+
+    return {};
+}
+
+GLuint texture_id_for_path(const std::string& texture_path) {
+    const QString resolved = resolve_texture_path(texture_path);
+    if (resolved.isEmpty()) {
+        return 0;
+    }
+
+    static std::unordered_map<std::string, GLuint> texture_cache;
+    const std::string key = QDir::toNativeSeparators(resolved).toStdString();
+    const auto found = texture_cache.find(key);
+    if (found != texture_cache.end()) {
+        return found->second;
+    }
+
+    QImage image(resolved);
+    if (image.isNull()) {
+        texture_cache[key] = 0;
+        return 0;
+    }
+
+    image = image.convertToFormat(QImage::Format_RGBA8888).mirrored(false, true);
+    GLuint texture_id = 0;
+    glGenTextures(1, &texture_id);
+    glBindTexture(GL_TEXTURE_2D, texture_id);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexImage2D(GL_TEXTURE_2D,
+                 0,
+                 GL_RGBA,
+                 image.width(),
+                 image.height(),
+                 0,
+                 GL_RGBA,
+                 GL_UNSIGNED_BYTE,
+                 image.constBits());
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    texture_cache[key] = texture_id;
+    return texture_id;
+}
+
+UV projected_uv_for_face(Vec3 vertex, Vec3 face_normal) {
+    const Vec3 n = normalize(face_normal);
+    const float ax = std::fabs(n.x);
+    const float ay = std::fabs(n.y);
+    const float az = std::fabs(n.z);
+
+    if (ay >= ax && ay >= az) {
+        return {vertex.x, vertex.z};
+    }
+    if (az >= ax) {
+        return {vertex.x, vertex.y};
+    }
+    return {vertex.z, vertex.y};
+}
+
 float clamp01(float value) {
     return std::clamp(value, 0.0f, 1.0f);
 }
@@ -104,7 +198,15 @@ const std::vector<CMesh3D::Face>& CMesh3D::GetFaces() const {
     return faces_;
 }
 
+const std::vector<UV>& CMesh3D::GetUVs() const {
+    return uvs_;
+}
+
 bool CMesh3D::SetGeometry(std::vector<Vec3> vertices, std::vector<Face> faces) {
+    return SetGeometry(std::move(vertices), std::move(faces), {});
+}
+
+bool CMesh3D::SetGeometry(std::vector<Vec3> vertices, std::vector<Face> faces, std::vector<UV> uvs) {
     if (vertices.empty() || faces.empty()) {
         return false;
     }
@@ -117,7 +219,37 @@ bool CMesh3D::SetGeometry(std::vector<Vec3> vertices, std::vector<Face> faces) {
 
     vertices_ = std::move(vertices);
     faces_ = std::move(faces);
+    uvs_ = std::move(uvs);
+    if (uvs_.size() != vertices_.size()) {
+        GeneratePlanarUVs();
+    }
     return true;
+}
+
+void CMesh3D::GeneratePlanarUVs() {
+    uvs_.clear();
+    uvs_.resize(vertices_.size());
+    if (vertices_.empty()) {
+        return;
+    }
+
+    float min_x = vertices_.front().x;
+    float max_x = vertices_.front().x;
+    float min_z = vertices_.front().z;
+    float max_z = vertices_.front().z;
+    for (const Vec3& vertex : vertices_) {
+        min_x = std::min(min_x, vertex.x);
+        max_x = std::max(max_x, vertex.x);
+        min_z = std::min(min_z, vertex.z);
+        max_z = std::max(max_z, vertex.z);
+    }
+
+    const float width = std::max(max_x - min_x, 0.0001f);
+    const float depth = std::max(max_z - min_z, 0.0001f);
+    for (size_t i = 0; i < vertices_.size(); ++i) {
+        uvs_[i].u = (vertices_[i].x - min_x) / width;
+        uvs_[i].v = (vertices_[i].z - min_z) / depth;
+    }
 }
 
 void CMesh3D::Render() {
@@ -148,6 +280,8 @@ void CMesh3D::RenderFaces(bool selected, bool offset_fill, const Material* mater
     const float specular_strength = std::clamp(material.specular <= 0.0f ? 0.18f : material.specular, 0.0f, 1.0f);
     const float shininess = std::clamp(material.shininess <= 0.0f ? 36.0f : material.shininess, 4.0f, 96.0f);
     const float alpha = selected ? std::min(material.alpha + 0.04f, 1.0f) : material.alpha;
+    const GLuint color_texture = texture_id_for_path(material.color_texture_path);
+    const bool has_texture = color_texture != 0;
 
     std::vector<Vec3> vertex_normals(vertices_.size(), {0.0f, 0.0f, 0.0f});
     for (const Face& face : faces_) {
@@ -172,6 +306,11 @@ void CMesh3D::RenderFaces(bool selected, bool offset_fill, const Material* mater
         glDepthMask(GL_FALSE);
     }
     glDisable(GL_LIGHTING);
+    if (has_texture) {
+        glEnable(GL_TEXTURE_2D);
+        glBindTexture(GL_TEXTURE_2D, color_texture);
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+    }
     if (offset_fill) {
         glEnable(GL_POLYGON_OFFSET_FILL);
         glPolygonOffset(0.55f, 0.55f);
@@ -182,21 +321,30 @@ void CMesh3D::RenderFaces(bool selected, bool offset_fill, const Material* mater
         if (!IsValidFace(face, vertices_.size())) {
             continue;
         }
+        const Vec3 face_normal = FaceNormal(face);
 
         for (size_t i = 1; i + 1 < face.size(); ++i) {
             const size_t indices[] = {face[0], face[i], face[i + 1]};
             for (size_t vertex_index : indices) {
                 const Vec3& normal = vertex_normals[vertex_index];
-                const Color shade = selected ? normal_rgb_color(normal) : shaded_color(color, normal, specular_strength, shininess, selected);
+                const Color shade = (selected && !has_texture) ? normal_rgb_color(normal) : shaded_color(color, normal, specular_strength, shininess, selected);
                 const Vec3& vertex = vertices_[vertex_index];
                 glNormal3f(normal.x, normal.y, normal.z);
                 glColor4f(shade.r, shade.g, shade.b, alpha);
+                if (has_texture) {
+                    const UV uv = projected_uv_for_face(vertex, face_normal);
+                    glTexCoord2f(uv.u, uv.v);
+                }
                 glVertex3f(vertex.x, vertex.y, vertex.z);
             }
         }
     }
     glEnd();
 
+    if (has_texture) {
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glDisable(GL_TEXTURE_2D);
+    }
     if (offset_fill) {
         glDisable(GL_POLYGON_OFFSET_FILL);
     }
@@ -335,6 +483,94 @@ bool CMesh3D::HitTest(CurvePoint point, float tolerance) const {
         && point.z <= max_point.z + tolerance;
 }
 
+namespace {
+float edge_function(DomPoint a, DomPoint b, DomPoint c)
+{
+    return static_cast<float>((c.x - a.x) * (b.y - a.y) - (c.y - a.y) * (b.x - a.x));
+}
+
+bool point_in_screen_triangle(DomPoint point, DomPoint a, DomPoint b, DomPoint c)
+{
+    const float area = edge_function(a, b, c);
+    if (std::abs(area) <= 0.0001f) {
+        return false;
+    }
+
+    const float w0 = edge_function(b, c, point);
+    const float w1 = edge_function(c, a, point);
+    const float w2 = edge_function(a, b, point);
+    if (area < 0.0f) {
+        return w0 <= 0.0f && w1 <= 0.0f && w2 <= 0.0f;
+    }
+    return w0 >= 0.0f && w1 >= 0.0f && w2 >= 0.0f;
+}
+}
+
+bool CMesh3D::HitTestMeshScreen(DomPoint point,
+                                const std::function<bool(Vec3, DomPoint&, float&)>& project_world,
+                                float& depth) const
+{
+    bool hit = false;
+    float best_depth = std::numeric_limits<float>::max();
+
+    for (const Face& face : faces_) {
+        if (!IsValidFace(face, vertices_.size()) || face.size() < 3) {
+            continue;
+        }
+
+        std::vector<DomPoint> projected;
+        std::vector<float> depths;
+        projected.reserve(face.size());
+        depths.reserve(face.size());
+        bool face_visible = true;
+        for (size_t index : face) {
+            DomPoint screen{};
+            float vertex_depth = 0.0f;
+            if (!project_world(vertices_[index], screen, vertex_depth)) {
+                face_visible = false;
+                break;
+            }
+            projected.push_back(screen);
+            depths.push_back(vertex_depth);
+        }
+
+        if (!face_visible) {
+            continue;
+        }
+
+        for (size_t i = 1; i + 1 < projected.size(); ++i) {
+            if (!point_in_screen_triangle(point, projected[0], projected[i], projected[i + 1])) {
+                continue;
+            }
+
+            const float triangle_depth = (depths[0] + depths[i] + depths[i + 1]) / 3.0f;
+            if (triangle_depth < best_depth) {
+                best_depth = triangle_depth;
+                hit = true;
+            }
+        }
+    }
+
+    if (!hit) {
+        return false;
+    }
+
+    depth = best_depth;
+    return true;
+}
+
+std::unique_ptr<CAlfaObject> CMesh3D::Clone() const {
+    auto copy = std::make_unique<CMesh3D>(GetName() + " Copy");
+    copy->vertices_ = vertices_;
+    copy->uvs_ = uvs_;
+    copy->faces_ = faces_;
+    copy->SetGroupName(GetGroupName());
+    copy->SetVisible(IsVisible());
+    copy->SetMaterial(GetMaterial());
+    copy->SetMaterialId(GetMaterialId());
+    return copy;
+}
+
 void CMesh3D::Translate(Vec3 delta) {
     for (Vec3& vertex : vertices_) {
         vertex = vertex + delta;
@@ -349,7 +585,12 @@ void CMesh3D::Rotate(Vec3 center, Vec3 axis, float angle) {
 
 void CMesh3D::Scale(Vec3 center, Vec3 axis, float factor) {
     for (Vec3& vertex : vertices_) {
-        vertex = scale_along_axis(vertex - center, axis, factor) + center;
+        const Vec3 local = vertex - center;
+        if (dot(axis, axis) <= 0.000001f) {
+            vertex = scale_uniform(local, factor) + center;
+        } else {
+            vertex = scale_along_axis(local, axis, factor) + center;
+        }
     }
 }
 
@@ -486,9 +727,7 @@ bool CMesh3D::Load(std::istream& stream) {
         loaded_faces.push_back(std::move(face));
     }
 
-    vertices_ = std::move(loaded_vertices);
-    faces_ = std::move(loaded_faces);
-    return true;
+    return SetGeometry(std::move(loaded_vertices), std::move(loaded_faces));
 }
 
 bool CMesh3D::Create(CPolyline* pline, CVector3d dir, float dist) {
@@ -506,15 +745,19 @@ bool CMesh3D::Create(CPolyline* pline, CVector3d dir, float dist) {
     const auto& points = pline->GetPoints();
     std::vector<Vec3> created_vertices;
     created_vertices.reserve(points.size() * 2);
-    for (const CurvePoint& point : points) {
-        created_vertices.push_back({point.x, 0.0f, point.z});
+    for (const CPoint3d& point : points) {
+        created_vertices.push_back({static_cast<float>(point.x), static_cast<float>(point.y), static_cast<float>(point.z)});
     }
-    for (const CurvePoint& point : points) {
-        created_vertices.push_back({point.x + offset.x, offset.y, point.z + offset.z});
+    for (const CPoint3d& point : points) {
+        created_vertices.push_back({
+            static_cast<float>(point.x) + offset.x,
+            static_cast<float>(point.y) + offset.y,
+            static_cast<float>(point.z) + offset.z
+        });
     }
 
     std::vector<Face> created_faces;
-    created_faces.reserve(points.size() - 1);
+    created_faces.reserve(points.size() - 1 + (pline->IsClosed() ? 1 : 0));
     const size_t upper_offset = points.size();
     for (size_t i = 1; i < points.size(); ++i) {
         const size_t a = i - 1;
@@ -523,16 +766,21 @@ bool CMesh3D::Create(CPolyline* pline, CVector3d dir, float dist) {
         const size_t d = upper_offset + i - 1;
         created_faces.push_back({a, b, c, d});
     }
+    if (pline->IsClosed()) {
+        created_faces.push_back({points.size() - 1, 0, upper_offset, upper_offset + points.size() - 1});
+    }
 
     SetName(pline->GetName() + " Mesh");
     SetMaterial(colored_mesh_material());
     vertices_ = std::move(created_vertices);
     faces_ = std::move(created_faces);
+    GeneratePlanarUVs();
     return true;
 }
 
 void CMesh3D::Clear() {
     vertices_.clear();
+    uvs_.clear();
     faces_.clear();
 }
 

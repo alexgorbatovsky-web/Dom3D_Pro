@@ -4,6 +4,7 @@
 #include "CPolyline.h"
 
 #include <iosfwd>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -16,7 +17,10 @@ public:
 
     const std::vector<Vec3>& GetVertices() const;
     const std::vector<Face>& GetFaces() const;
+    const std::vector<UV>& GetUVs() const;
     bool SetGeometry(std::vector<Vec3> vertices, std::vector<Face> faces);
+    bool SetGeometry(std::vector<Vec3> vertices, std::vector<Face> faces, std::vector<UV> uvs);
+    void GeneratePlanarUVs();
 
     void Render();
     void Render3d(bool selected) const override;
@@ -29,6 +33,10 @@ public:
     static MeshDisplayMode GetDisplayMode();
     static void SetDisplayMode(MeshDisplayMode mode);
     bool HitTest(CurvePoint point, float tolerance) const override;
+    bool HitTestMeshScreen(DomPoint point,
+                           const std::function<bool(Vec3, DomPoint&, float&)>& project_world,
+                           float& depth) const;
+    std::unique_ptr<CAlfaObject> Clone() const override;
     void Translate(Vec3 delta) override;
     void Rotate(Vec3 center, Vec3 axis, float angle) override;
     void Scale(Vec3 center, Vec3 axis, float factor) override;
@@ -45,6 +53,7 @@ private:
     float DistanceToSegment2d(CurvePoint point, Vec3 start, Vec3 end) const;
 
     std::vector<Vec3> vertices_;
+    std::vector<UV> uvs_;
     std::vector<Face> faces_;
     static float s_WireOpacity;
     static MeshDisplayMode s_DisplayMode;

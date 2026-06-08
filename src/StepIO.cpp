@@ -1,5 +1,6 @@
 #include "StepIO.h"
 
+#include "solid/SurfaceSet.h"
 #include "solid/Solid.h"
 
 #include <BRep_Builder.hxx>
@@ -11,18 +12,54 @@
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS_Compound.hxx>
+#include <TopoDS_Iterator.hxx>
 #include <TopoDS_Shape.hxx>
 
 #include <memory>
 #include <vector>
 
 namespace {
+bool shape_has_type(const TopoDS_Shape& shape, TopAbs_ShapeEnum type)
+{
+    TopExp_Explorer explorer(shape, type);
+    return explorer.More();
+}
+
+void collect_top_level_shapes(const TopoDS_Shape& shape, std::vector<TopoDS_Shape>& shapes)
+{
+    if (shape.IsNull()) {
+        return;
+    }
+
+    const TopAbs_ShapeEnum shape_type = shape.ShapeType();
+    if (shape_type != TopAbs_COMPOUND && shape_type != TopAbs_COMPSOLID) {
+        shapes.push_back(shape);
+        return;
+    }
+
+    const size_t before = shapes.size();
+    for (TopoDS_Iterator iterator(shape); iterator.More(); iterator.Next()) {
+        collect_top_level_shapes(iterator.Value(), shapes);
+    }
+    if (shapes.size() == before) {
+        shapes.push_back(shape);
+    }
+}
+
 std::unique_ptr<CSolid> make_imported_solid(const TopoDS_Shape& source_shape, int index, int count)
 {
     TopoDS_Shape shape = source_shape;
-    auto loaded = std::make_unique<CSolid>(shape);
-    loaded->SetName(count > 1 ? "Imported STEP " + std::to_string(index) : "Imported STEP");
-    loaded->SetGroupName(count > 1 ? "Solids from STEP" : "");
+    std::unique_ptr<CSolid> loaded;
+    const bool has_solid = shape_has_type(shape, TopAbs_SOLID);
+    if (has_solid) {
+        loaded = std::make_unique<CSolid>(shape);
+        loaded->SetName(count > 1 ? "Imported STEP " + std::to_string(index) : "Imported STEP");
+        loaded->SetGroupName(count > 1 ? "Solids from STEP" : "");
+    } else {
+        loaded = std::make_unique<CSurfaceSet>(shape);
+        loaded->SetName(count > 1 ? "Imported STEP Surface Set " + std::to_string(index) : "Imported STEP Surface Set");
+        loaded->SetGroupName(count > 1 ? "Surfaces from STEP" : "");
+    }
     loaded->SetColor({0.58f, 0.68f, 0.76f});
     loaded->InitSurfaces();
     loaded->InitEdges();
@@ -54,11 +91,11 @@ bool StepIO::Import(const std::string& path, std::vector<std::unique_ptr<CSolid>
         }
 
         std::vector<TopoDS_Shape> imported_shapes;
-        for (TopExp_Explorer explorer(shape, TopAbs_SOLID); explorer.More(); explorer.Next()) {
-            imported_shapes.push_back(explorer.Current());
+        for (Standard_Integer i = 1; i <= reader.NbShapes(); ++i) {
+            collect_top_level_shapes(reader.Shape(i), imported_shapes);
         }
         if (imported_shapes.empty()) {
-            imported_shapes.push_back(shape);
+            collect_top_level_shapes(shape, imported_shapes);
         }
 
         const int imported_count = static_cast<int>(imported_shapes.size());
@@ -78,31 +115,27 @@ bool StepIO::Import(const std::string& path, std::vector<std::unique_ptr<CSolid>
 bool StepIO::Export(const std::string& path, const CAlfaDoc& document, std::string& error) const {
     TopoDS_Shape export_shape;
 
-    if (const CSolid* selected_solid = document.GetSelectedSolid()) {
-        export_shape = selected_solid->m_Shape;
-    } else {
-        BRep_Builder builder;
-        TopoDS_Compound compound;
-        builder.MakeCompound(compound);
+    BRep_Builder builder;
+    TopoDS_Compound compound;
+    builder.MakeCompound(compound);
 
-        int solid_count = 0;
-        for (const auto& object : document.GetObjects()) {
-            const auto* solid = dynamic_cast<const CSolid*>(object.get());
-            if (solid && !solid->m_Shape.IsNull()) {
-                builder.Add(compound, solid->m_Shape);
-                ++solid_count;
-            }
+    int solid_count = 0;
+    for (const auto& object : document.GetObjects()) {
+        const auto* solid = dynamic_cast<const CSolid*>(object.get());
+        if (solid && solid->IsVisible() && !solid->m_Shape.IsNull()) {
+            builder.Add(compound, solid->m_Shape);
+            ++solid_count;
         }
-
-        if (solid_count == 0) {
-            error = "There are no solid objects to export.";
-            return false;
-        }
-        export_shape = compound;
     }
 
+    if (solid_count == 0) {
+        error = "There are no visible solid objects to export.";
+        return false;
+    }
+    export_shape = compound;
+
     if (export_shape.IsNull()) {
-        error = "Selected solid has no STEP shape.";
+        error = "Visible solids have no STEP shape.";
         return false;
     }
 

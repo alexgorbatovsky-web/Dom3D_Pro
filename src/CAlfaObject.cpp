@@ -192,6 +192,10 @@ void CAlfaObject::Render3d(bool selected, bool, size_t) const {
     Render3d(selected);
 }
 
+std::unique_ptr<CAlfaObject> CAlfaObject::Clone() const {
+    return nullptr;
+}
+
 const std::string& CAlfaObject::GetName() const {
     return name_;
 }
@@ -230,4 +234,13 @@ Material CAlfaObject::GetMaterial() const {
 
 void CAlfaObject::SetMaterial(Material material) {
     material_ = material;
+    material_id_ = material.id;
+}
+
+unsigned long CAlfaObject::GetMaterialId() const {
+    return material_id_;
+}
+
+void CAlfaObject::SetMaterialId(unsigned long id) {
+    material_id_ = id;
 }

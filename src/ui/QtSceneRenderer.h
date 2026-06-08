@@ -12,7 +12,9 @@ public:
                 bool orthographic,
                 bool show_coordinate_axes,
                 ToolMode tool,
+                TransformOperation transform_operation,
                 TransformAxis highlighted_transform_axis,
+                bool highlighted_draft_face_gizmo,
                 int width,
                 int height) const;
 
@@ -22,7 +24,7 @@ public:
 private:
     void CalculateClipPlanes(const CAlfaDoc& document, const Camera& camera, float& z_near, float& z_far) const;
     void DrawCoordinateAxes() const;
-    void DrawTransformGizmo(const CAlfaDoc& document, const Camera& camera, TransformAxis highlighted_axis) const;
+    void DrawTransformGizmo(const CAlfaDoc& document, const Camera& camera, TransformOperation operation, TransformAxis highlighted_axis) const;
     void Perspective(float fov_y, float aspect, float z_near, float z_far) const;
     void Orthographic(const Camera& camera, float aspect, float z_near, float z_far) const;
     void LookAt(Vec3 eye, Vec3 center, Vec3 up) const;

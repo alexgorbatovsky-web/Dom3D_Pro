@@ -7,10 +7,21 @@
 #include "Point3d.h"
 #include "SystemCoord.h"
 
-
-
-//#include "Line_2P.h"
-#include "CAlfaDoc.h"
+#ifndef String
+#define String char*
+#endif
+#ifndef XtPointer
+#define XtPointer void*
+#endif
+#ifndef Coord
+#define Coord double
+#endif
+#ifndef Pixel
+#define Pixel unsigned long
+#endif
+#ifndef LPCTSTR
+#define LPCTSTR const char*
+#endif
 
 #ifdef _DEBUG
 #define new DEBUG_NEW

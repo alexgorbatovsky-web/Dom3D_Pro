@@ -564,7 +564,7 @@ void CSplineCurve::Move(CPoint3d* p1, CPoint3d* p2)
     if (!p1 || !p2)
         return;
     CVector v(p1, p2);
-    Move(&v, 1.0);
+    Move(&v, p1->DistTo(p2));
 }
 
 void CSplineCurve::Move(CVector* vect, double dist)

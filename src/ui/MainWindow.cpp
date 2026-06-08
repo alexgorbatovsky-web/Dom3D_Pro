@@ -1,19 +1,31 @@
 #include "MainWindow.h"
 
+#include "../CadCurve3D.h"
+#include "../CBSpline.h"
 #include "../CMesh3D.h"
 #include "../CPolyline.h"
+#include "../MaterialLibrary.h"
 #include "../solid/Solid.h"
+#include "../solid/SurfaceSet.h"
+#include "MaterialEditorDialog.h"
+#include "MaterialDrag.h"
 #include "PreferencesDialog.h"
+#include "BooleanDialog.h"
+#include "ExtrudeFaceDialog.h"
 
 #include <QAction>
 #include <QActionGroup>
+#include <QApplication>
 #include <QButtonGroup>
 #include <QCheckBox>
+#include <QColor>
+#include <QComboBox>
 #include <QCursor>
 #include <QDesktopServices>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDockWidget>
+#include <QDrag>
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -23,13 +35,20 @@
 #include <QKeySequence>
 #include <QLabel>
 #include <QLayoutItem>
+#include <QLineEdit>
+#include <QLinearGradient>
+#include <QListWidget>
+#include <QListWidgetItem>
 #include <QMenu>
 #include <QMessageBox>
+#include <QMimeData>
 #include <QMenuBar>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPixmap>
 #include <QPushButton>
+#include <QRadialGradient>
 #include <QSettings>
 #include <QSize>
 #include <QSignalBlocker>
@@ -48,12 +67,227 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
+#include <functional>
 #include <vector>
 
 namespace {
 constexpr int kMaxRecentProjectFiles = 18;
 constexpr int kSceneTreeObjectIndexRole = Qt::UserRole + 1;
 constexpr int kSceneTreeGroupRole = Qt::UserRole + 2;
+constexpr int kMaterialLibraryEntryRole = Qt::UserRole + 20;
+constexpr int kMaterialDocumentIndexRole = Qt::UserRole + 21;
+constexpr int kMaterialSourceRole = Qt::UserRole + 22;
+
+enum class MaterialListSource {
+    Library,
+    Document
+};
+
+class MaterialListWidget : public QListWidget {
+public:
+    using MaterialResolver = std::function<bool(QListWidgetItem*, Material*)>;
+
+    explicit MaterialListWidget(QWidget* parent = nullptr)
+        : QListWidget(parent) {
+        setDragEnabled(true);
+        setDragDropMode(QAbstractItemView::DragOnly);
+    }
+
+    void SetMaterialResolver(MaterialResolver resolver) {
+        material_resolver_ = std::move(resolver);
+    }
+
+protected:
+    void mousePressEvent(QMouseEvent* event) override {
+        if (event->button() == Qt::LeftButton) {
+            drag_start_pos_ = event->pos();
+            drag_start_item_ = itemAt(event->pos());
+        }
+        QListWidget::mousePressEvent(event);
+    }
+
+    void mouseMoveEvent(QMouseEvent* event) override {
+        if (!(event->buttons() & Qt::LeftButton) || !drag_start_item_) {
+            QListWidget::mouseMoveEvent(event);
+            return;
+        }
+        if ((event->pos() - drag_start_pos_).manhattanLength() < QApplication::startDragDistance()) {
+            QListWidget::mouseMoveEvent(event);
+            return;
+        }
+
+        StartMaterialDrag(drag_start_item_);
+        drag_start_item_ = nullptr;
+    }
+
+    void startDrag(Qt::DropActions supported_actions) override {
+        (void)supported_actions;
+        StartMaterialDrag(currentItem());
+    }
+
+private:
+    void StartMaterialDrag(QListWidgetItem* item) {
+        Material material;
+        if (!material_resolver_ || !material_resolver_(item, &material)) {
+            return;
+        }
+
+        auto* mime_data = new QMimeData;
+        mime_data->setData(MaterialDrag::MimeType(), MaterialDrag::Encode(material));
+
+        auto* drag = new QDrag(this);
+        drag->setMimeData(mime_data);
+        const QPixmap sphere = MaterialDrag::SpherePixmap(material, 58, true);
+        drag->setPixmap(sphere);
+        drag->setHotSpot(QPoint(sphere.width() / 2, sphere.height() / 2));
+        drag->exec(Qt::CopyAction);
+    }
+
+    MaterialResolver material_resolver_;
+    QPoint drag_start_pos_;
+    QListWidgetItem* drag_start_item_ = nullptr;
+};
+
+QColor ToQColor(Color color) {
+    return QColor::fromRgbF(std::clamp(color.r, 0.0f, 1.0f),
+                            std::clamp(color.g, 0.0f, 1.0f),
+                            std::clamp(color.b, 0.0f, 1.0f));
+}
+
+QIcon SearchIcon() {
+    QPixmap pixmap(22, 22);
+    pixmap.fill(Qt::transparent);
+
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(QPen(QColor(232, 232, 232), 2));
+    painter.drawEllipse(QRectF(4.5, 4.5, 9.5, 9.5));
+    painter.drawLine(QPointF(12.5, 12.5), QPointF(18.0, 18.0));
+    painter.setPen(QPen(QColor(120, 120, 120, 120), 1));
+    painter.drawEllipse(QRectF(6.5, 6.5, 4.0, 4.0));
+    painter.end();
+    return QIcon(pixmap);
+}
+
+QIcon DuplicateObjectIcon() {
+    QPixmap pixmap(22, 22);
+    pixmap.fill(Qt::transparent);
+
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(QPen(QColor(42, 46, 54), 1));
+    painter.setBrush(QColor(122, 132, 146));
+    painter.drawRect(QRectF(5.0, 4.0, 10.0, 10.0));
+    painter.setBrush(QColor(220, 224, 230));
+    painter.drawRect(QRectF(9.0, 8.0, 10.0, 10.0));
+    painter.setPen(QPen(QColor(42, 46, 54), 1.4));
+    painter.drawLine(QPointF(12.0, 13.0), QPointF(16.0, 13.0));
+    painter.drawLine(QPointF(14.0, 11.0), QPointF(14.0, 15.0));
+    painter.end();
+    return QIcon(pixmap);
+}
+
+QIcon NewSketchIcon() {
+    QPixmap pixmap(22, 22);
+    pixmap.fill(Qt::transparent);
+
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(QPen(QColor(40, 46, 54), 1));
+    painter.setBrush(QColor(230, 235, 240));
+    painter.drawRect(QRectF(4.0, 5.0, 14.0, 13.0));
+    painter.setPen(QPen(QColor(235, 20, 22), 1.6));
+    painter.drawLine(QPointF(7.0, 8.0), QPointF(15.5, 8.0));
+    painter.drawLine(QPointF(7.0, 8.0), QPointF(7.0, 15.0));
+    painter.setPen(QPen(QColor(15, 120, 210), 1.5));
+    painter.drawLine(QPointF(14.0, 13.0), QPointF(19.0, 13.0));
+    painter.drawLine(QPointF(16.5, 10.5), QPointF(16.5, 15.5));
+    painter.end();
+    return QIcon(pixmap);
+}
+
+QIcon SketchRectangleIcon() {
+    QPixmap pixmap(44, 44);
+    pixmap.fill(Qt::transparent);
+
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(QPen(QColor(20, 20, 20), 3.0));
+    painter.drawRect(QRectF(10.0, 10.0, 24.0, 22.0));
+    painter.setBrush(QColor(255, 62, 78));
+    painter.setPen(QPen(QColor(155, 0, 16), 1.0));
+    painter.drawEllipse(QPointF(10.0, 32.0), 4.0, 4.0);
+    painter.drawEllipse(QPointF(34.0, 10.0), 4.0, 4.0);
+    painter.end();
+    return QIcon(pixmap);
+}
+
+QIcon LoftSurfaceIcon() {
+    QPixmap pixmap(28, 28);
+    pixmap.fill(Qt::transparent);
+
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(Qt::NoPen);
+    QLinearGradient gradient(6.0, 8.0, 22.0, 22.0);
+    gradient.setColorAt(0.0, QColor(210, 212, 208));
+    gradient.setColorAt(1.0, QColor(116, 120, 116));
+    QPainterPath surface;
+    surface.moveTo(4.0, 19.0);
+    surface.cubicTo(8.0, 10.0, 15.0, 9.0, 24.0, 6.0);
+    surface.lineTo(24.0, 16.5);
+    surface.cubicTo(16.0, 19.0, 10.0, 22.5, 4.0, 23.0);
+    surface.closeSubpath();
+    painter.setBrush(gradient);
+    painter.drawPath(surface);
+
+    painter.setBrush(Qt::NoBrush);
+    painter.setPen(QPen(QColor(235, 20, 22), 1.4));
+    const QPointF rows[][4] = {
+        {QPointF(4, 19), QPointF(8, 10), QPointF(15, 9), QPointF(24, 6)},
+        {QPointF(4, 23), QPointF(10, 22.5), QPointF(16, 19), QPointF(24, 16.5)}
+    };
+    for (const auto& row : rows) {
+        QPainterPath path;
+        path.moveTo(row[0]);
+        path.cubicTo(row[1], row[2], row[3]);
+        painter.drawPath(path);
+    }
+    painter.setPen(QPen(QColor(235, 20, 22), 1.0));
+    for (int i = 0; i < 3; ++i) {
+        const qreal x = 8.0 + i * 5.5;
+        painter.drawLine(QPointF(x, 15.0 - i * 2.0), QPointF(x + 1.2, 21.5 - i * 1.7));
+    }
+    painter.end();
+    return QIcon(pixmap);
+}
+
+QIcon ReverseNormalsIcon() {
+    QPixmap pixmap(28, 28);
+    pixmap.fill(Qt::transparent);
+
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setBrush(QColor(155, 160, 158));
+    painter.setPen(QPen(QColor(44, 48, 54), 1));
+    QPainterPath surface;
+    surface.moveTo(5.0, 20.0);
+    surface.cubicTo(10.0, 12.0, 18.0, 12.0, 24.0, 8.0);
+    surface.lineTo(24.0, 15.0);
+    surface.cubicTo(17.0, 19.0, 10.0, 19.0, 5.0, 24.0);
+    surface.closeSubpath();
+    painter.drawPath(surface);
+
+    painter.setPen(QPen(QColor(0, 220, 60), 2.0));
+    painter.drawLine(QPointF(14.0, 18.0), QPointF(14.0, 6.0));
+    painter.drawLine(QPointF(14.0, 6.0), QPointF(10.5, 10.0));
+    painter.drawLine(QPointF(14.0, 6.0), QPointF(17.5, 10.0));
+    painter.setPen(QPen(QColor(235, 20, 22), 1.2));
+    painter.drawArc(QRectF(7.0, 8.0, 14.0, 14.0), 35 * 16, 235 * 16);
+    painter.end();
+    return QIcon(pixmap);
+}
 
 QPixmap GreetingIcon(const QString& key) {
     QPixmap pixmap(132, 100);
@@ -132,11 +366,36 @@ MainWindow::MainWindow(QWidget* parent)
         RefreshSceneTree();
     });
     connect(viewport_, &OpenGLViewport::SelectionChanged, this, [this]() {
-        ClearActiveProperties();
+        const bool active_edge_tool = active_parametric_object_.tool_id == "fillet_edge"
+            || active_parametric_object_.tool_id == "ChamferSolid";
+        if (active_edge_tool) {
+            TryStartLiveEdgeToolFromSelection();
+        } else if (active_parametric_object_.tool_id == "SolidExtrudeTool") {
+            TryStartLivePolylineExtrudeFromSelection();
+        } else if (active_parametric_object_.tool_id == "SurfaceOfRevolution") {
+            TryStartLivePolylineRevolveFromSelection();
+        } else if (active_parametric_object_.tool_id != "ThickSolidTool") {
+            ClearActiveProperties();
+        }
         UpdateToolAvailability();
     });
     connect(viewport_, &OpenGLViewport::StatusTextChanged, this, [this](const QString& text) {
         statusBar()->showMessage(text);
+    });
+    connect(viewport_, &OpenGLViewport::ToolModeChanged, this, [this](ToolMode tool) {
+        if (tool == ToolMode::Orbit) {
+            UpdateActiveToolUi("orbit");
+        } else if (tool == ToolMode::Select) {
+            UpdateActiveToolUi("select");
+        } else if (tool == ToolMode::DrawCurve) {
+            UpdateActiveToolUi("PolylineCurve");
+        } else if (tool == ToolMode::DrawBSpline) {
+            UpdateActiveToolUi("BSplineCurve");
+        } else if (tool == ToolMode::EditPoint) {
+            UpdateActiveToolUi("EditPoint");
+        } else if (tool == ToolMode::SketchRectangle) {
+            UpdateActiveToolUi("NewSketch");
+        }
     });
     connect(viewport_, &OpenGLViewport::BooleanFinished, this, [this]() {
         UpdateActiveToolUi("select");
@@ -144,7 +403,71 @@ MainWindow::MainWindow(QWidget* parent)
     connect(property_panel_, &PropertyPanel::ParametersChanged, this, [this]() {
         active_parametric_object_ = property_panel_->ActiveObject();
         if (active_parametric_object_.tool_id == "fillet_edge" || active_parametric_object_.tool_id == "fillet_all_edges") {
-            statusBar()->showMessage("Fillet: нажми OK чтобы применить Radius");
+            const double radius = active_parametric_object_.parameters.empty() ? 0.20 : active_parametric_object_.parameters[0].value;
+            if (!document_.HasLiveFillet()) {
+                statusBar()->showMessage("Fillet: выбери кромку тела");
+                return;
+            }
+            const bool rebuilt = document_.UpdateLiveFillet(radius);
+            RefreshSceneTree();
+            viewport_->update();
+            statusBar()->showMessage(rebuilt
+                ? QString("Fillet: radius %1").arg(radius, 0, 'f', 2)
+                : "Fillet: радиус не подходит");
+            return;
+        }
+        if (active_parametric_object_.tool_id == "ChamferSolid") {
+            const double distance = active_parametric_object_.parameters.empty() ? 0.20 : active_parametric_object_.parameters[0].value;
+            if (!document_.HasLiveChamfer()) {
+                statusBar()->showMessage("Chamfer: выбери кромку тела");
+                return;
+            }
+            const bool rebuilt = document_.UpdateLiveChamfer(distance);
+            RefreshSceneTree();
+            viewport_->update();
+            statusBar()->showMessage(rebuilt
+                ? QString("Chamfer: Distance %1").arg(distance, 0, 'f', 2)
+                : "Chamfer: размер не подходит");
+            return;
+        }
+        if (active_parametric_object_.tool_id == "ThickSolidTool") {
+            const double thickness = active_parametric_object_.parameters.empty() ? 0.0 : active_parametric_object_.parameters[0].value;
+            viewport_->SetThickSolidThickness(thickness);
+            viewport_->update();
+            statusBar()->showMessage(QString("ThickSolid: Thick %1, выбери Face и нажми OK").arg(thickness, 0, 'f', 2));
+            return;
+        }
+        if (active_parametric_object_.tool_id == "SolidExtrudeTool") {
+            const auto& parameters = active_parametric_object_.parameters;
+            const double distance = parameters.size() > 0 ? parameters[0].value : 1.0;
+            const bool reverse = parameters.size() > 1 && parameters[1].value >= 0.5;
+            const double taper_angle = parameters.size() > 2 ? parameters[2].value : 0.0;
+            if (!document_.HasLivePolylineExtrude()) {
+                statusBar()->showMessage("Extrude: выбери замкнутую плоскую Polyline");
+                return;
+            }
+            const bool rebuilt = document_.UpdateLiveExtrudeSelectedPolyline(distance, reverse, taper_angle);
+            RefreshSceneTree();
+            viewport_->update();
+            statusBar()->showMessage(rebuilt
+                ? QString("Extrude: Distance %1, Angle %2").arg(distance, 0, 'f', 2).arg(taper_angle, 0, 'f', 2)
+                : "Extrude: профиль или параметры не подходят");
+            return;
+        }
+        if (active_parametric_object_.tool_id == "SurfaceOfRevolution") {
+            const auto& parameters = active_parametric_object_.parameters;
+            const double angle = parameters.size() > 0 ? parameters[0].value : 360.0;
+            const int axis_index = parameters.size() > 1 ? static_cast<int>(parameters[1].value) : 2;
+            if (!document_.HasLivePolylineRevolve()) {
+                statusBar()->showMessage("Revolve: выбери плоскую Polyline");
+                return;
+            }
+            const bool rebuilt = document_.UpdateLiveRevolveSelectedPolyline(angle, axis_index);
+            RefreshSceneTree();
+            viewport_->update();
+            statusBar()->showMessage(rebuilt
+                ? QString("Revolve: Angle %1").arg(angle, 0, 'f', 1)
+                : "Revolve: профиль или параметры не подходят");
             return;
         }
         tool_registry_.Rebuild(active_parametric_object_, document_);
@@ -189,7 +512,7 @@ void MainWindow::CreateActions() {
     tool_tabs_->addTab("Furniture");
     tool_tabs_->addTab("Surfaces");
     tool_tabs_->addTab("Solid");
-    tool_tabs_->addTab("Lines");
+    tool_tabs_->addTab("Curves");
     tool_tabs_->addTab("Sketch");
     tool_tabs_->addTab("Assemblies");
     tool_tabs_->setCurrentIndex(0);
@@ -319,26 +642,34 @@ void MainWindow::CreateActions() {
     auto* orbit_action = add_action("Orbit", {}, [this]() { SetTool(ToolMode::Orbit, "Orbit camera"); });
     auto* select_action = add_action("Select", {}, [this]() { SetTool(ToolMode::Select, "Select objects"); });
     auto* curve_action = add_action("Curve", {}, [this]() {
-        document_.CreatePolyline();
-        SetTool(ToolMode::DrawCurve, "Curve tool active: click in viewport");
-        RefreshSceneTree();
+        ActivateParametricTool("PolylineCurve");
     });
     auto* transform_action = add_action("Transform", {}, [this]() { BeginTransformTool(TransformOperation::Move); });
     auto* move_action = add_action("Move", {}, [this]() { BeginTransformTool(TransformOperation::Move); });
     auto* rotate_action = add_action("Rotate", {}, [this]() { BeginTransformTool(TransformOperation::Rotate); });
     auto* scale_action = add_action("Scale", {}, [this]() { BeginTransformTool(TransformOperation::Scale); });
+    auto* new_sketch_action = add_action("New Sketch", {}, [this]() { BeginNewSketch(); });
+    auto* duplicate_action = add_action("Make Object Copy", {}, [this]() { DuplicateSelectedObject(); });
+    duplicate_action->setToolTip("Make a copy of selected object and move it");
+    duplicate_action->setIcon(DuplicateObjectIcon());
     auto* all_scene_action = add_action("All Scene", {}, [this]() {
         viewport_->FitToDocument();
         statusBar()->showMessage("All scene fitted", 1400);
     });
+    auto* material_editor_action = add_action("Material Editor...", {}, [this]() {
+        ShowMaterialEditor();
+    });
     RegisterToolAction(orbit_action, "orbit");
     RegisterToolAction(select_action, "select");
-    RegisterToolAction(curve_action, "curve");
+    RegisterToolAction(curve_action, "PolylineCurve");
     RegisterToolAction(transform_action, "transform");
     RegisterToolAction(move_action, "move");
     RegisterToolAction(rotate_action, "rotate");
     RegisterToolAction(scale_action, "scale");
+    RegisterToolAction(new_sketch_action, "NewSketch");
 
+    tools_menu->addAction(material_editor_action);
+    tools_menu->addSeparator();
     tools_menu->addAction(orbit_action);
     tools_menu->addAction(select_action);
     tools_menu->addAction(curve_action);
@@ -347,6 +678,7 @@ void MainWindow::CreateActions() {
     tools_menu->addAction(move_action);
     tools_menu->addAction(rotate_action);
     tools_menu->addAction(scale_action);
+    tools_menu->addAction(new_sketch_action);
     tools_menu->addSeparator();
     for (const ToolDefinition& tool : tool_registry_.Tools()) {
         auto* action = tools_menu->addAction(QString::fromStdString(tool.label), this, [this, id = tool.id]() {
@@ -355,6 +687,15 @@ void MainWindow::CreateActions() {
         RegisterToolAction(action, tool.id);
     }
 
+    edit_menu->addAction(add_action("Close Polyline", {}, [this]() {
+        if (document_.CloseSelectedOrActivePolyline()) {
+            RefreshSceneTree();
+            viewport_->update();
+            statusBar()->showMessage("Polyline closed", 1200);
+        } else {
+            statusBar()->showMessage("Polyline: need at least 3 points", 1600);
+        }
+    }));
     edit_menu->addAction(add_action("&Delete Selected", QKeySequence::Delete, [this]() { DeleteSelected(); }));
 
     help_menu->addAction(add_action("Help &Topics", QKeySequence::HelpContents, [this]() {
@@ -382,11 +723,35 @@ void MainWindow::CreateActions() {
     main_toolbar_->addAction(select_action);
     main_toolbar_->addAction(curve_action);
     main_toolbar_->addAction(transform_action);
+    main_toolbar_->addAction(duplicate_action);
     main_toolbar_->addSeparator();
     main_toolbar_->addAction(move_action);
     main_toolbar_->addAction(rotate_action);
     main_toolbar_->addAction(scale_action);
+    main_toolbar_->addAction(new_sketch_action);
     main_toolbar_->addSeparator();
+
+    auto* selection_mode_group = new QActionGroup(main_toolbar_);
+    selection_mode_group->setExclusive(true);
+    const auto add_selection_mode_action = [this, selection_mode_group](const QString& text, const QString& tooltip, SelectionMode mode) {
+        auto* action = new QAction(text, selection_mode_group);
+        action->setToolTip(tooltip);
+        action->setCheckable(true);
+        action->setData(static_cast<int>(mode));
+        action->setChecked(viewport_->GetSelectionMode() == mode);
+        connect(action, &QAction::triggered, this, [this, mode, tooltip]() {
+            viewport_->SetSelectionMode(mode);
+            statusBar()->showMessage(tooltip, 1200);
+        });
+        selection_mode_group->addAction(action);
+        main_toolbar_->addAction(action);
+        return action;
+    };
+    add_selection_mode_action("Obj", "Select objects", SelectionMode::Object);
+    add_selection_mode_action("Face", "Select planar faces", SelectionMode::Face);
+    add_selection_mode_action("Edge", "Select solid edges", SelectionMode::Edge);
+    add_selection_mode_action("Pt", "Select curve points", SelectionMode::Point);
+
     coordinate_axes_check_box_ = new QCheckBox("Axis", main_toolbar_);
     coordinate_axes_check_box_->setToolTip("Show coordinate axes");
     coordinate_axes_check_box_->setChecked(viewport_->IsCoordinateAxesVisible());
@@ -394,6 +759,15 @@ void MainWindow::CreateActions() {
         SetCoordinateAxesVisible(checked);
     });
     main_toolbar_->addWidget(coordinate_axes_check_box_);
+
+    xy_plane_view_check_box_ = new QCheckBox("Plane XY", main_toolbar_);
+    xy_plane_view_check_box_->setToolTip("Top view on XY plane, lock scene rotation");
+    xy_plane_view_check_box_->setChecked(viewport_->IsXYPlaneViewEnabled());
+    connect(xy_plane_view_check_box_, &QCheckBox::toggled, this, [this](bool checked) {
+        SetXYPlaneViewEnabled(checked);
+    });
+    main_toolbar_->addWidget(xy_plane_view_check_box_);
+
     mesh_display_button_ = new QPushButton(main_toolbar_);
     mesh_display_button_->setToolTip("Mesh display mode");
     mesh_display_button_->setMinimumWidth(136);
@@ -440,6 +814,13 @@ void MainWindow::CreateActions() {
     mesh_opacity_value_label_->setMinimumWidth(38);
     mesh_opacity_value_label_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     main_toolbar_->addWidget(mesh_opacity_value_label_);
+    auto* material_editor_button = new QPushButton("Material", main_toolbar_);
+    material_editor_button->setToolTip("Material Editor");
+    material_editor_button->setMinimumWidth(72);
+    connect(material_editor_button, &QPushButton::clicked, this, [this]() {
+        ShowMaterialEditor(has_selected_library_material_ ? &selected_library_material_ : nullptr);
+    });
+    main_toolbar_->addWidget(material_editor_button);
     main_toolbar_->addAction(all_scene_action);
     UpdateActiveToolUi(active_tool_key_);
     UpdateRecentFilesMenu();
@@ -451,12 +832,15 @@ void MainWindow::CreateDocks() {
     CreateToolsPanel(tools_dock_);
     addDockWidget(Qt::LeftDockWidgetArea, tools_dock_);
 
-    auto* tree_dock = new QDockWidget("Scene Tree", this);
-    scene_tree_ = new QTreeWidget(tree_dock);
+    scene_tree_dock_ = new QDockWidget("Scene Tree", this);
+    scene_tree_dock_->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
+    scene_tree_dock_->setFeatures(QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
+    scene_tree_dock_->setMinimumWidth(240);
+    scene_tree_ = new QTreeWidget(scene_tree_dock_);
     scene_tree_->setHeaderLabels({"Visible", "Object", "Type"});
     scene_tree_->setColumnWidth(0, 58);
-    tree_dock->setWidget(scene_tree_);
-    addDockWidget(Qt::RightDockWidgetArea, tree_dock);
+    scene_tree_dock_->setWidget(scene_tree_);
+    addDockWidget(Qt::RightDockWidgetArea, scene_tree_dock_);
     connect(scene_tree_, &QTreeWidget::itemClicked, this, [this](QTreeWidgetItem* item, int column) {
         OnSceneTreeItemClicked(item, column);
     });
@@ -466,6 +850,356 @@ void MainWindow::CreateDocks() {
     properties_dock_->setAllowedAreas(Qt::BottomDockWidgetArea | Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
     addDockWidget(Qt::BottomDockWidgetArea, properties_dock_);
     properties_dock_->hide();
+
+    CreateMaterialLibraryDock();
+}
+
+void MainWindow::CreateMaterialLibraryDock() {
+    material_library_dock_ = new QDockWidget("Materials Library", this);
+    material_library_dock_->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
+    material_library_dock_->setFeatures(QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
+    material_library_dock_->setMinimumWidth(280);
+    material_library_dock_->resize(330, 360);
+
+    auto* panel = new QWidget(material_library_dock_);
+    auto* root_layout = new QVBoxLayout(panel);
+    root_layout->setContentsMargins(0, 0, 0, 0);
+    root_layout->setSpacing(0);
+
+    auto* tabs = new QTabBar(panel);
+    tabs->addTab("Shaders");
+    tabs->addTab("Poly Models");
+    tabs->setCurrentIndex(0);
+    root_layout->addWidget(tabs);
+
+    auto* controls = new QWidget(panel);
+    auto* controls_layout = new QHBoxLayout(controls);
+    controls_layout->setContentsMargins(8, 8, 8, 6);
+    controls_layout->setSpacing(6);
+
+    auto* category_combo = new QComboBox(controls);
+    auto* add_button = new QPushButton("+", controls);
+    auto* search_button = new QPushButton(controls);
+    search_button->setIcon(SearchIcon());
+    search_button->setIconSize(QSize(18, 18));
+    search_button->setToolTip("Search materials");
+    search_button->setCheckable(true);
+    add_button->setToolTip("Add material to current library category");
+    add_button->setFixedSize(26, 24);
+    search_button->setFixedSize(26, 24);
+    controls_layout->addWidget(category_combo, 1);
+    controls_layout->addWidget(add_button);
+    controls_layout->addWidget(search_button);
+    root_layout->addWidget(controls);
+
+    auto* search_edit = new QLineEdit(panel);
+    search_edit->setPlaceholderText("Search materials");
+    search_edit->setClearButtonEnabled(true);
+    search_edit->hide();
+    root_layout->addWidget(search_edit);
+
+    auto* material_list = new MaterialListWidget(panel);
+    material_list->setViewMode(QListView::IconMode);
+    material_list->setMovement(QListView::Static);
+    material_list->setResizeMode(QListView::Adjust);
+    material_list->setWrapping(true);
+    material_list->setSpacing(8);
+    material_list->setIconSize(QSize(46, 46));
+    material_list->setGridSize(QSize(58, 58));
+    material_list->setUniformItemSizes(true);
+    material_list->setTextElideMode(Qt::ElideRight);
+    root_layout->addWidget(material_list, 1);
+
+    panel->setStyleSheet(
+        "QWidget { background: #1f1f1f; color: #e5e5e5; }"
+        "QTabBar::tab {"
+        "  background: #1f1f1f;"
+        "  color: #9b9b9b;"
+        "  min-width: 78px;"
+        "  height: 30px;"
+        "  padding: 0 8px;"
+        "  border-right: 1px solid #333333;"
+        "}"
+        "QTabBar::tab:selected { background: #2b2b2b; color: #ffffff; }"
+        "QComboBox, QLineEdit { background: #555555; color: #eeeeee; border: 1px solid #777777; padding: 2px 6px; }"
+        "QPushButton { background: #3f3f3f; color: #eeeeee; border: 1px solid #565656; }"
+        "QPushButton:hover { background: #505050; }"
+        "QListWidget { background: #1f1f1f; border: 0; outline: 0; }"
+        "QListWidget::item { color: transparent; }"
+        "QListWidget::item:selected { background: #3b5f8f; }"
+    );
+
+    auto library = std::make_shared<MaterialLibrary>();
+    library->Load(MaterialLibrary::DefaultLibraryPath());
+
+    std::set<QString> categories;
+    for (const auto& entry : library->Entries()) {
+        categories.insert(entry.category);
+    }
+    category_combo->addItem("Default");
+    category_combo->addItem("Document");
+    for (const QString& default_category : MaterialLibrary::DefaultCategories()) {
+        if (default_category != "Default" && categories.find(default_category) != categories.end()) {
+            category_combo->addItem(default_category);
+            categories.erase(default_category);
+        }
+    }
+    categories.erase("Default");
+    for (const QString& category : categories) {
+        category_combo->addItem(category);
+    }
+
+    const auto material_from_item = [this, library](QListWidgetItem* item, Material* material) {
+        if (!item || !material) {
+            return false;
+        }
+
+        const auto source = static_cast<MaterialListSource>(item->data(kMaterialSourceRole).toInt());
+        if (source == MaterialListSource::Document) {
+            const int index = item->data(kMaterialDocumentIndexRole).toInt();
+            const auto& materials = document_.GetMaterials();
+            if (index < 0 || index >= static_cast<int>(materials.size())) {
+                return false;
+            }
+            *material = materials[index];
+            return true;
+        }
+
+        const int index = item->data(kMaterialLibraryEntryRole).toInt();
+        const auto& entries = library->Entries();
+        if (index < 0 || index >= static_cast<int>(entries.size())) {
+            return false;
+        }
+        *material = entries[index].material;
+        material->source_file_path = entries[index].file_path.toStdString();
+        return true;
+    };
+    material_list->SetMaterialResolver(material_from_item);
+
+    const auto populate_materials = [this, library, material_list](const QString& category, const QString& query) {
+        material_list->clear();
+        const QString normalized_query = query.trimmed();
+        const auto matches_query = [&normalized_query](const QString& material_name, const QString& category_name) {
+            return normalized_query.isEmpty()
+                || material_name.contains(normalized_query, Qt::CaseInsensitive)
+                || category_name.contains(normalized_query, Qt::CaseInsensitive);
+        };
+
+        if (category == "Document") {
+            const auto& materials = document_.GetMaterials();
+            for (int i = 0; i < static_cast<int>(materials.size()); ++i) {
+                const Material& material = materials[i];
+                const QString material_name = QString::fromStdString(material.name);
+                if (!matches_query(material_name, "Document")) {
+                    continue;
+                }
+                auto* item = new QListWidgetItem(QIcon(MaterialDrag::SpherePixmap(material, 48, false)), material_name, material_list);
+                item->setData(kMaterialSourceRole, static_cast<int>(MaterialListSource::Document));
+                item->setData(kMaterialDocumentIndexRole, i);
+                item->setToolTip(QString("Document / %1").arg(material_name));
+            }
+            return;
+        }
+
+        const auto& entries = library->Entries();
+        for (int i = 0; i < static_cast<int>(entries.size()); ++i) {
+            const auto& entry = entries[i];
+            if (category != "Default" && entry.category != category) {
+                continue;
+            }
+            const QString material_name = QString::fromStdString(entry.material.name);
+            if (!matches_query(material_name, entry.category)) {
+                continue;
+            }
+            auto* item = new QListWidgetItem(QIcon(MaterialDrag::SpherePixmap(entry.material, 48, false, entry.file_path)), QString::fromStdString(entry.material.name), material_list);
+            item->setData(kMaterialSourceRole, static_cast<int>(MaterialListSource::Library));
+            item->setData(kMaterialLibraryEntryRole, i);
+            item->setToolTip(QString("%1 / %2").arg(entry.category, QString::fromStdString(entry.material.name)));
+        }
+    };
+    refresh_material_library_ = [library, populate_materials, category_combo, search_edit]() {
+        library->Load(MaterialLibrary::DefaultLibraryPath());
+        populate_materials(category_combo->currentText(), search_edit->text());
+    };
+
+    populate_materials(category_combo->currentText(), search_edit->text());
+    connect(category_combo, &QComboBox::currentTextChanged, this, [populate_materials, search_edit](const QString& category) {
+        populate_materials(category, search_edit->text());
+    });
+    connect(search_button, &QPushButton::toggled, this, [search_edit](bool checked) {
+        search_edit->setVisible(checked);
+        if (checked) {
+            search_edit->setFocus();
+        } else {
+            search_edit->clear();
+        }
+    });
+    connect(search_edit, &QLineEdit::textChanged, this, [populate_materials, category_combo](const QString& query) {
+        populate_materials(category_combo->currentText(), query);
+    });
+    connect(material_list, &QListWidget::itemClicked, this, [this, material_from_item](QListWidgetItem* item) {
+        Material material;
+        if (!material_from_item(item, &material)) {
+            has_selected_library_material_ = false;
+            return;
+        }
+        selected_library_material_ = material;
+        has_selected_library_material_ = true;
+        statusBar()->showMessage(QString("Material selected: %1").arg(QString::fromStdString(selected_library_material_.name)), 1400);
+    });
+    connect(material_list, &QListWidget::itemDoubleClicked, this, [this, material_from_item, populate_materials, category_combo, search_edit](QListWidgetItem* item) {
+        Material material;
+        if (!material_from_item(item, &material)) {
+            return;
+        }
+        const auto source = static_cast<MaterialListSource>(item->data(kMaterialSourceRole).toInt());
+        if (source == MaterialListSource::Library) {
+            ShowMaterialEditor(&material, QString::fromStdString(material.source_file_path));
+            return;
+        }
+        if (document_.HasSelection()) {
+            ApplyMaterialToSelection(material);
+        } else {
+            SaveMaterialToDocument(material);
+            populate_materials(category_combo->currentText(), search_edit->text());
+        }
+    });
+    material_list->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(material_list, &QListWidget::customContextMenuRequested, this, [this, material_list, material_from_item, populate_materials, category_combo, search_edit](const QPoint& position) {
+        QListWidgetItem* item = material_list->itemAt(position);
+        Material material;
+        if (!material_from_item(item, &material)) {
+            return;
+        }
+        const auto source = static_cast<MaterialListSource>(item->data(kMaterialSourceRole).toInt());
+        selected_library_material_ = material;
+        has_selected_library_material_ = true;
+
+        QMenu menu(material_list);
+        QAction* apply_action = menu.addAction("Apply to Selection");
+        apply_action->setEnabled(document_.HasSelection());
+        QAction* edit_action = menu.addAction("Edit...");
+        QAction* duplicate_action = menu.addAction("Duplicate to Document");
+        QAction* delete_action = menu.addAction("Delete from Document");
+        delete_action->setEnabled(document_.FindMaterial(material.id) != nullptr);
+
+        QAction* chosen = menu.exec(material_list->viewport()->mapToGlobal(position));
+        if (!chosen) {
+            return;
+        }
+        if (chosen == apply_action) {
+            ApplyMaterialToSelection(material);
+        } else if (chosen == edit_action) {
+            const QString source_path = source == MaterialListSource::Library ? QString::fromStdString(material.source_file_path) : QString();
+            ShowMaterialEditor(&material, source_path);
+        } else if (chosen == duplicate_action) {
+            Material duplicate = material;
+            duplicate.id = 0;
+            duplicate.name += " Copy";
+            SaveMaterialToDocument(duplicate);
+            category_combo->setCurrentText("Document");
+            populate_materials(category_combo->currentText(), search_edit->text());
+        } else if (chosen == delete_action) {
+            if (document_.DeleteMaterial(material.id)) {
+                RefreshSceneTree();
+                viewport_->update();
+                populate_materials(category_combo->currentText(), search_edit->text());
+                statusBar()->showMessage(QString("Material deleted from document: %1").arg(QString::fromStdString(material.name)), 1400);
+            }
+        }
+    });
+    connect(add_button, &QPushButton::clicked, this, [this, library, material_list, material_from_item, populate_materials, category_combo, search_edit]() {
+        QString category = category_combo->currentText();
+        if (category == "Document" || category.isEmpty()) {
+            QMessageBox::information(this,
+                                     "Add Material",
+                                     "Select a library category before adding a material.");
+            return;
+        }
+
+        Material selected_material;
+        const bool has_library_selection = material_list->currentItem()
+            && static_cast<MaterialListSource>(material_list->currentItem()->data(kMaterialSourceRole).toInt()) == MaterialListSource::Library
+            && material_from_item(material_list->currentItem(), &selected_material);
+
+        QMessageBox choice(this);
+        choice.setWindowTitle("Add Material");
+        choice.setText(QString("Add material to \"%1\".").arg(category));
+        choice.setInformativeText("Create a default material or copy the selected library material?");
+        QPushButton* default_button = choice.addButton("Default Material", QMessageBox::AcceptRole);
+        QPushButton* copy_button = choice.addButton("Copy Selected", QMessageBox::AcceptRole);
+        QPushButton* cancel_button = choice.addButton(QMessageBox::Cancel);
+        copy_button->setEnabled(has_library_selection);
+        if (!has_library_selection) {
+            copy_button->setToolTip("Select a material in the library first");
+        }
+        choice.exec();
+        if (choice.clickedButton() == cancel_button || !choice.clickedButton()) {
+            return;
+        }
+
+        Material material = Material::DefaultWhite();
+        if (choice.clickedButton() == copy_button) {
+            material = selected_material;
+            material.name += " Copy";
+        } else if (choice.clickedButton() == default_button) {
+            material.name = "New Material";
+        }
+
+        unsigned long next_id = 1;
+        for (const Material& existing : document_.GetMaterials()) {
+            next_id = std::max(next_id, existing.id + 1);
+        }
+        for (const auto& entry : library->Entries()) {
+            next_id = std::max(next_id, entry.material.id + 1);
+        }
+        material.id = next_id;
+
+        QDir category_dir(QDir(MaterialLibrary::DefaultLibraryPath()).filePath(category));
+        if (!category_dir.exists() && !QDir().mkpath(category_dir.absolutePath())) {
+            QMessageBox::critical(this, "Add Material", QString("Cannot create category folder:\n%1").arg(category_dir.absolutePath()));
+            return;
+        }
+
+        QString base_name = QString::fromStdString(material.name).trimmed();
+        if (base_name.isEmpty()) {
+            base_name = "Material";
+        }
+        for (QChar& ch : base_name) {
+            if (QString("\\/:*?\"<>|").contains(ch)) {
+                ch = '_';
+            }
+        }
+
+        QString file_path = category_dir.filePath(base_name + ".d3mat");
+        int suffix = 2;
+        while (QFileInfo::exists(file_path)) {
+            file_path = category_dir.filePath(QString("%1_%2.d3mat").arg(base_name).arg(suffix++));
+        }
+        material.source_file_path = file_path.toStdString();
+
+        QString error;
+        if (!library->SaveMaterial(file_path, material, &error)) {
+            QMessageBox::critical(this, "Add Material", error);
+            return;
+        }
+        library->Load(MaterialLibrary::DefaultLibraryPath());
+        if (category_combo->findText(category) < 0) {
+            category_combo->addItem(category);
+        }
+        category_combo->setCurrentText(category);
+        populate_materials(category_combo->currentText(), search_edit->text());
+        ShowMaterialEditor(&material, file_path);
+    });
+
+    material_library_dock_->setWidget(panel);
+    addDockWidget(Qt::RightDockWidgetArea, material_library_dock_);
+    if (scene_tree_dock_) {
+        tabifyDockWidget(scene_tree_dock_, material_library_dock_);
+    }
+    material_library_dock_->setFloating(false);
+    material_library_dock_->show();
+    material_library_dock_->raise();
 }
 
 void MainWindow::CreateToolsPanel(QDockWidget* dock) {
@@ -498,69 +1232,6 @@ void MainWindow::CreateToolsPanel(QDockWidget* dock) {
     );
     dock->setWidget(tools_panel_);
     PopulateToolsPanelForTab(tool_tabs_ ? tool_tabs_->currentIndex() : 0);
-}
-
-void MainWindow::PopulateToolsPanelForTab(int tab_index) {
-    if (!tools_dock_ || !tools_layout_ || !tool_tabs_) {
-        return;
-    }
-
-    ClearActiveProperties();
-    tool_buttons_.clear();
-    while (QLayoutItem* item = tools_layout_->takeAt(0)) {
-        if (QWidget* widget = item->widget()) {
-            widget->deleteLater();
-        }
-        delete item;
-    }
-
-    const QString tab = tool_tabs_->tabText(tab_index);
-    tools_dock_->setWindowTitle(tab);
-    tools_dock_->setVisible(tab == "Architecture" || tab == "Furniture" || tab == "Solid");
-
-    std::vector<std::string> tool_ids;
-    if (tab == "Architecture") {
-        tool_ids = {"stair", "window", "door"};
-    } else if (tab == "Furniture") {
-        tool_ids = {"cabinet"};
-    } else if (tab == "Solid") {
-        tool_ids = {"SolidBox", "boolean_union", "boolean_cut", "boolean_common", "fillet_edge", "fillet_all_edges"};
-    }
-
-    int index = 0;
-    for (const std::string& tool_id : tool_ids) {
-        AddToolButton(tools_layout_, tools_panel_, tool_id, index / 2, index % 2);
-        ++index;
-    }
-
-    if (tab == "Solid") {
-        const std::vector<std::pair<QString, QString>> placeholders = {
-            {"SolidCylinder", "Cylinder"},
-            {"SolidSphereTool", "Sphere"},
-            {"SolidPrismTool", "Prism"},
-            {"SolidExtrudeTool", "Extrude"},
-            {"SolidExtrudeFace", "Extrude Face"},
-            {"SolidTorusTool", "Torus"},
-            {"SolidSweptTool", "Swept Solid"},
-            {"SurfaceOfRevolution", "Revolution"},
-            {"SolidDraft", "Draft"},
-            {"ChamferSolid", "Chamfer"},
-            {"DeleteFaceOrEdge", "Delete Face or Edge"},
-            {"ExtractFaceTool", "Extract Face"},
-            {"ThickSolidTool", "Thicken"},
-            {"SewingFaceTool", "Sew Faces"},
-            {"SplitRings", "Split Rings"},
-            {"SolidInSet", "Inset"},
-            {"SolidTransform", "Solid Transform"}
-        };
-        for (const auto& placeholder : placeholders) {
-            AddPlaceholderButton(tools_layout_, tools_panel_, placeholder.first, placeholder.second, index / 2, index % 2);
-            ++index;
-        }
-    }
-
-    tools_layout_->setRowStretch((index + 1) / 2, 1);
-    UpdateActiveToolUi(active_tool_key_);
 }
 
 void MainWindow::AddToolButton(QGridLayout* layout, QWidget* parent, const std::string& key, int row, int column) {
@@ -603,10 +1274,22 @@ void MainWindow::RefreshSceneTree() {
         }
 
         QString type = "Object";
-        if (dynamic_cast<const CPolyline*>(object)) {
+        if (const auto* polyline = dynamic_cast<const CPolyline*>(object)) {
+            if (polyline->IsEmpty()) {
+                continue;
+            }
             type = "Curve";
+        } else if (const auto* spline = dynamic_cast<const CBSpline*>(object)) {
+            if (spline->IsEmpty()) {
+                continue;
+            }
+            type = "B-Spline";
+        } else if (dynamic_cast<const CCadCurve3D*>(object)) {
+            type = "CAD Curve";
         } else if (dynamic_cast<const CMesh3D*>(object)) {
             type = "Mesh";
+        } else if (dynamic_cast<const CSurfaceSet*>(object)) {
+            type = "Surface Set";
         } else if (dynamic_cast<const CSolid*>(object)) {
             type = "Solid";
         }
@@ -700,7 +1383,13 @@ void MainWindow::SetTool(ToolMode tool, const QString& status_text) {
     } else if (tool == ToolMode::Select) {
         UpdateActiveToolUi("select");
     } else if (tool == ToolMode::DrawCurve) {
-        UpdateActiveToolUi("curve");
+        UpdateActiveToolUi("PolylineCurve");
+    } else if (tool == ToolMode::DrawBSpline) {
+        UpdateActiveToolUi("BSplineCurve");
+    } else if (tool == ToolMode::EditPoint) {
+        UpdateActiveToolUi("EditPoint");
+    } else if (tool == ToolMode::SketchRectangle) {
+        UpdateActiveToolUi("NewSketch");
     }
     statusBar()->showMessage(status_text);
 }
@@ -778,14 +1467,15 @@ void MainWindow::SetMeshWireOpacity(float opacity) {
 
 void MainWindow::SetOrthographicProjection(bool enabled) {
     viewport_->SetOrthographicProjection(enabled);
-    if (orthographic_projection_action_ && orthographic_projection_action_->isChecked() != enabled) {
-        orthographic_projection_action_->setChecked(enabled);
+    const bool actual_enabled = viewport_->IsOrthographicProjection();
+    if (orthographic_projection_action_ && orthographic_projection_action_->isChecked() != actual_enabled) {
+        orthographic_projection_action_->setChecked(actual_enabled);
     }
 
     QSettings settings;
-    settings.setValue("view/orthographicProjection", enabled);
+    settings.setValue("view/orthographicProjection", actual_enabled);
     UpdateProjectionStatus();
-    statusBar()->showMessage(enabled ? "Orthographic projection" : "Perspective projection", 1400);
+    statusBar()->showMessage(actual_enabled ? "Orthographic projection" : "Perspective projection", 1400);
 }
 
 void MainWindow::SetOrbitMode(OrbitMode mode) {
@@ -800,6 +1490,21 @@ void MainWindow::SetOrbitMode(OrbitMode mode) {
     QSettings settings;
     settings.setValue("view/orbitMode", mode == OrbitMode::Architectural ? "architectural" : "cad");
     statusBar()->showMessage(mode == OrbitMode::Architectural ? "Orbit mode: Architectural" : "Orbit mode: CAD", 1400);
+}
+
+void MainWindow::SetXYPlaneViewEnabled(bool enabled) {
+    viewport_->SetXYPlaneViewEnabled(enabled);
+    if (xy_plane_view_check_box_ && xy_plane_view_check_box_->isChecked() != enabled) {
+        xy_plane_view_check_box_->setChecked(enabled);
+    }
+    if (orthographic_projection_action_ && orthographic_projection_action_->isChecked() != viewport_->IsOrthographicProjection()) {
+        orthographic_projection_action_->setChecked(viewport_->IsOrthographicProjection());
+    }
+
+    QSettings settings;
+    settings.setValue("view/xyPlaneView", enabled);
+    UpdateProjectionStatus();
+    statusBar()->showMessage(enabled ? "XY plane view: rotation locked" : "XY plane view disabled", 1400);
 }
 
 void MainWindow::SetCoordinateAxesVisible(bool visible) {
@@ -818,6 +1523,86 @@ void MainWindow::UpdateProjectionStatus() {
         return;
     }
     projection_status_label_->setText(viewport_->IsOrthographicProjection() ? "[ORTHO]" : "[PERSPECTIVE]");
+}
+
+void MainWindow::ShowMaterialEditor(const Material* initial_material, const QString& material_file_path) {
+    auto* dialog = new MaterialEditorDialog(MaterialLibrary::DefaultLibraryPath(), document_.GetMaterials(), document_.HasSelection(), initial_material, this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    connect(dialog, &MaterialEditorDialog::SaveMaterialToDocument, this, [this](const Material& material) {
+        SaveMaterialToDocument(material);
+    });
+    connect(dialog, &MaterialEditorDialog::ApplyMaterialToSelected, this, [this](const Material& material) {
+        ApplyMaterialToSelection(material);
+    });
+    connect(dialog, &MaterialEditorDialog::LibraryMaterialSaved, this, [this](const QString&) {
+        if (refresh_material_library_) {
+            refresh_material_library_();
+        }
+        if (material_library_dock_) {
+            statusBar()->showMessage("Library material saved", 1400);
+        }
+    });
+    connect(dialog, &MaterialEditorDialog::RequestSelectedObjectMaterial, this, [this, dialog]() {
+        const CAlfaObject* selected_object = document_.GetSelectedObject();
+        if (!selected_object) {
+            statusBar()->showMessage("Material: no selected object", 1400);
+            return;
+        }
+        dialog->SetCurrentMaterial(selected_object->GetMaterial());
+        statusBar()->showMessage(QString("Material copied from: %1").arg(QString::fromStdString(selected_object->GetName())), 1400);
+    });
+    connect(dialog, &MaterialEditorDialog::RequestPaintMaterial, this, [this](const Material& material) {
+        viewport_->BeginMaterialPaint(material);
+    });
+    connect(dialog, &MaterialEditorDialog::RequestPickObjectMaterial, this, [this]() {
+        viewport_->BeginMaterialPick();
+    });
+    connect(viewport_, &OpenGLViewport::MaterialPicked, dialog, [dialog](const Material& material) {
+        dialog->SetCurrentMaterial(material);
+    });
+    if (initial_material && !material_file_path.isEmpty()) {
+        dialog->SetCurrentMaterial(*initial_material, material_file_path);
+    }
+    connect(dialog, &QDialog::finished, this, [this]() {
+        viewport_->CancelMaterialInteraction();
+    });
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
+}
+
+void MainWindow::SaveMaterialToDocument(const Material& material) {
+    const Material& saved = document_.UpsertMaterial(material);
+    for (auto& object : document_.GetObjects()) {
+        if (object && object->GetMaterialId() == saved.id) {
+            object->SetMaterial(saved);
+        }
+    }
+    viewport_->update();
+    statusBar()->showMessage(QString("Material saved: %1").arg(QString::fromStdString(saved.name)), 1400);
+}
+
+void MainWindow::ApplyMaterialToSelection(const Material& material) {
+    const std::vector<size_t> selected_indices = document_.GetSelectedObjectIndices();
+    if (selected_indices.empty()) {
+        statusBar()->showMessage("Material: no selected object", 1400);
+        return;
+    }
+
+    const Material& document_material = document_.UpsertMaterial(material);
+    auto& objects = document_.GetObjects();
+    int applied = 0;
+    for (size_t index : selected_indices) {
+        if (index < objects.size() && objects[index]) {
+            objects[index]->SetMaterial(document_material);
+            objects[index]->SetMaterialId(document_material.id);
+            ++applied;
+        }
+    }
+
+    RefreshSceneTree();
+    viewport_->update();
+    statusBar()->showMessage(QString("Material applied to %1 object(s)").arg(applied), 1400);
 }
 
 void MainWindow::BeginTransformTool(TransformOperation operation) {
@@ -842,30 +1627,436 @@ void MainWindow::BeginTransformTool(TransformOperation operation) {
     }
 }
 
+void MainWindow::BeginNewSketch() {
+    ClearActiveProperties();
+
+    QDialog dlg(this);
+    dlg.setWindowTitle("New Sketch");
+    dlg.setModal(true);
+
+    auto* layout = new QGridLayout(&dlg);
+    layout->setContentsMargins(12, 10, 12, 12);
+    layout->setHorizontalSpacing(12);
+    layout->setVerticalSpacing(10);
+
+    auto* name_label = new QLabel("Name of", &dlg);
+    auto* name_edit = new QLineEdit(QString("Sketch-%1").arg(sketch_counter_), &dlg);
+    auto* coordinate_label = new QLabel("Coordinate system", &dlg);
+    auto* plane_combo = new QComboBox(&dlg);
+    plane_combo->addItem(QString::fromUtf8("Плоскость XY"), static_cast<int>(OpenGLViewport::SketchPlane::XY));
+    plane_combo->addItem(QString::fromUtf8("Плоскость XZ"), static_cast<int>(OpenGLViewport::SketchPlane::XZ));
+    plane_combo->addItem(QString::fromUtf8("Плоскость YZ"), static_cast<int>(OpenGLViewport::SketchPlane::YZ));
+    plane_combo->addItem(QString::fromUtf8("Грань тела"), static_cast<int>(OpenGLViewport::SketchPlane::XY));
+    plane_combo->addItem(QString::fromUtf8("Задать 3-мя точками"), static_cast<int>(OpenGLViewport::SketchPlane::XY));
+
+    layout->addWidget(name_label, 0, 0);
+    layout->addWidget(name_edit, 0, 1);
+    layout->addWidget(coordinate_label, 1, 0, 1, 2);
+    layout->addWidget(plane_combo, 2, 0, 1, 2);
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    layout->addWidget(buttons, 3, 0, 1, 2);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+    if (dlg.exec() != QDialog::Accepted) {
+        UpdateActiveToolUi("select");
+        statusBar()->showMessage("New Sketch canceled", 800);
+        return;
+    }
+
+    const QString sketch_name = name_edit->text().trimmed().isEmpty()
+        ? QString("Sketch-%1").arg(sketch_counter_)
+        : name_edit->text().trimmed();
+    const OpenGLViewport::SketchPlane plane = static_cast<OpenGLViewport::SketchPlane>(plane_combo->currentData().toInt());
+    ++sketch_counter_;
+
+    viewport_->BeginSketch(sketch_name, plane);
+    UpdateActiveToolUi("NewSketch");
+    ShowSketchPanel();
+    statusBar()->showMessage(QString("%1: Rectangle tool").arg(sketch_name));
+}
+
+void MainWindow::BeginSketchFillet() {
+    QDialog dlg(this);
+    dlg.setWindowTitle("Fillets Box");
+    dlg.setModal(true);
+
+    auto* layout = new QGridLayout(&dlg);
+    layout->setContentsMargins(12, 10, 12, 12);
+    layout->setHorizontalSpacing(12);
+    layout->setVerticalSpacing(10);
+
+    auto* radius_label = new QLabel("Fillet", &dlg);
+    auto* radius_edit = new QLineEdit("10", &dlg);
+    radius_edit->selectAll();
+    layout->addWidget(radius_label, 0, 0);
+    layout->addWidget(radius_edit, 0, 1);
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    layout->addWidget(buttons, 1, 0, 1, 2);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+    if (dlg.exec() != QDialog::Accepted) {
+        statusBar()->showMessage("Sketch Fillet canceled", 800);
+        return;
+    }
+
+    bool ok = false;
+    const double radius = radius_edit->text().toDouble(&ok);
+    if (!ok || radius <= 0.0) {
+        QMessageBox::warning(this, "Fillets Box", "Radius must be positive.");
+        statusBar()->showMessage("Sketch Fillet: bad radius", 1200);
+        return;
+    }
+
+    viewport_->BeginSketchFillet(radius);
+    viewport_->setFocus();
+    UpdateActiveToolUi("NewSketch");
+    statusBar()->showMessage(QString("Sketch Fillet R=%1: укажите вершину полилинии").arg(radius, 0, 'f', 2));
+}
+
+void MainWindow::ShowSketchPanel() {
+    if (!sketch_dock_) {
+        sketch_dock_ = new QDockWidget("Sketch", this);
+        sketch_dock_->setObjectName("SketchFloatingPanel");
+        sketch_dock_->setAllowedAreas(Qt::NoDockWidgetArea);
+        sketch_dock_->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable | QDockWidget::DockWidgetClosable);
+
+        auto* panel = new QWidget(sketch_dock_);
+        auto* root = new QVBoxLayout(panel);
+        root->setContentsMargins(8, 8, 8, 8);
+        root->setSpacing(8);
+
+        auto* grid = new QGridLayout();
+        grid->setSpacing(6);
+        root->addLayout(grid);
+
+        auto* rectangle_button = new QPushButton(panel);
+        rectangle_button->setCheckable(true);
+        rectangle_button->setChecked(true);
+        rectangle_button->setIcon(SketchRectangleIcon());
+        rectangle_button->setIconSize(QSize(44, 44));
+        rectangle_button->setToolTip("Rectangle");
+        rectangle_button->setFixedSize(58, 58);
+        connect(rectangle_button, &QPushButton::clicked, this, [this, rectangle_button]() {
+            rectangle_button->setChecked(true);
+            viewport_->SetSketchRectangleTool();
+        });
+        grid->addWidget(rectangle_button, 0, 0);
+
+        const struct {
+            const char* label;
+            const char* tooltip;
+            int row;
+            int column;
+        } sketch_placeholders[] = {
+            {"P", "Polyline", 0, 1},
+            {"A", "Arc", 1, 0},
+            {"F", "Fillet", 1, 1},
+            {"B", "Bezier", 2, 0}
+        };
+        for (const auto& placeholder : sketch_placeholders) {
+            auto* button = new QPushButton(panel);
+            button->setToolTip(placeholder.tooltip);
+            button->setFixedSize(58, 58);
+            button->setText(placeholder.label);
+            if (QString::fromLatin1(placeholder.tooltip) == "Fillet") {
+                connect(button, &QPushButton::clicked, this, [this]() {
+                    BeginSketchFillet();
+                });
+            } else {
+                button->setEnabled(false);
+            }
+            grid->addWidget(button, placeholder.row, placeholder.column);
+        }
+
+        root->addStretch(1);
+
+        auto* button_row = new QHBoxLayout();
+        auto* ok_button = new QPushButton("OK", panel);
+        auto* cancel_button = new QPushButton("Cancel", panel);
+        ok_button->setMinimumHeight(34);
+        cancel_button->setMinimumHeight(34);
+        button_row->addWidget(ok_button);
+        button_row->addWidget(cancel_button);
+        root->addLayout(button_row);
+
+        connect(ok_button, &QPushButton::clicked, this, [this]() {
+            viewport_->EndSketch();
+            if (sketch_dock_) {
+                sketch_dock_->hide();
+            }
+            UpdateActiveToolUi("select");
+            statusBar()->showMessage("Sketch accepted", 900);
+        });
+        connect(cancel_button, &QPushButton::clicked, this, [this]() {
+            viewport_->EndSketch();
+            if (sketch_dock_) {
+                sketch_dock_->hide();
+            }
+            UpdateActiveToolUi("select");
+            statusBar()->showMessage("Sketch closed", 900);
+        });
+
+        panel->setStyleSheet(
+            "QPushButton { background: #f5f5f5; border: 1px solid #9b9b9b; color: #111; }"
+            "QPushButton:checked { border: 2px solid #d71920; }"
+            "QPushButton:disabled { color: #777; background: #eeeeee; }"
+        );
+        sketch_dock_->setWidget(panel);
+        addDockWidget(Qt::RightDockWidgetArea, sketch_dock_);
+    }
+
+    sketch_dock_->setFloating(true);
+    sketch_dock_->resize(148, 330);
+    sketch_dock_->move(mapToGlobal(QPoint(18, 118)));
+    sketch_dock_->show();
+    sketch_dock_->raise();
+}
+
 void MainWindow::ActivateParametricTool(const std::string& tool_id) {
-    if (tool_id == "boolean_union" || tool_id == "boolean_cut" || tool_id == "boolean_common") {
+    if (tool_id == "PolylineCurve") {
+        ClearActiveProperties();
+        document_.CreatePolyline();
+        viewport_->SetTool(ToolMode::DrawCurve);
+        UpdateActiveToolUi(tool_id);
+        RefreshSceneTree();
+        viewport_->update();
+        statusBar()->showMessage("Polyline: click in viewport to add 3D points");
+        return;
+    }
+
+    if (tool_id == "BSplineCurve") {
+        ClearActiveProperties();
+        document_.CreateBSpline();
+        viewport_->SetTool(ToolMode::DrawBSpline);
+        UpdateActiveToolUi(tool_id);
+        RefreshSceneTree();
+        viewport_->update();
+        statusBar()->showMessage("B-Spline: click in viewport to add 3D control points");
+        return;
+    }
+
+    if (tool_id == "EditPoint") {
+        ClearActiveProperties();
+        viewport_->SetTool(ToolMode::EditPoint);
+        UpdateActiveToolUi(tool_id);
+        viewport_->update();
+        statusBar()->showMessage("Edit Point: click curve points, drag selected handles");
+        return;
+    }
+
+    if (tool_id == "boolean") {
         ClearActiveProperties();
 
+        BooleanDialog dlg(this);
+        if (dlg.exec() != QDialog::Accepted) {
+            // Отмена
+            UpdateActiveToolUi("select");
+            viewport_->SetTool(ToolMode::Select);
+            statusBar()->showMessage("Булева операция отменена", 800);
+            return;
+        }
+
         BooleanOperation operation = BooleanOperation::Union;
-        if (tool_id == "boolean_cut") {
+        const BooleanDialog::Operation selected = dlg.SelectedOperation();
+        if (selected == BooleanDialog::Operation::Union) {
+            operation = BooleanOperation::Union;
+        } else if (selected == BooleanDialog::Operation::Cut) {
             operation = BooleanOperation::Cut;
-        } else if (tool_id == "boolean_common") {
+        } else if (selected == BooleanDialog::Operation::Common) {
             operation = BooleanOperation::Common;
         }
 
         viewport_->BeginBooleanTool(operation);
+        UpdateActiveToolUi("boolean");
+        return;
+    }
+
+    if (tool_id == "SolidExtrudeFace") {
+        ClearActiveProperties();
+        ExtrudeFaceDialog dlg(this);
+        if (dlg.exec() != QDialog::Accepted) {
+            UpdateActiveToolUi("select");
+            viewport_->SetTool(ToolMode::Select);
+            statusBar()->showMessage("Extrude Face canceled", 800);
+            return;
+        }
+
+        const double taper_angle = dlg.TaperAngle();
+        viewport_->BeginFaceExtrudeTool(taper_angle);
         UpdateActiveToolUi(tool_id);
+        if (document_.HasSelectedSolidFace()) {
+            statusBar()->showMessage(QString("Extrude Face: тяни оранжевую ручку, Taper Angle %1").arg(taper_angle, 0, 'f', 2));
+        } else {
+            statusBar()->showMessage(QString("Extrude Face: выбери плоскую грань, Taper Angle %1").arg(taper_angle, 0, 'f', 2));
+        }
+        return;
+    }
+
+    if (tool_id == "SolidDraft") {
+        ClearActiveProperties();
+        viewport_->BeginDraftFaceTool();
+        UpdateActiveToolUi(tool_id);
+        if (document_.HasSelectedSolidFace()) {
+            statusBar()->showMessage("Draft Face: выбери прямую кромку-ось");
+        } else {
+            statusBar()->showMessage("Draft Face: выбери плоскую грань");
+        }
+        return;
+    }
+
+    if (tool_id == "ThickSolidTool") {
+        ClearActiveProperties();
+        active_parametric_object_ = {
+            tool_id,
+            document_.GetSelectedObjectIndex(),
+            {{"thick", "Thick", 1.0, -100.0, 100.0, 0.1}}
+        };
+        property_panel_->SetActiveObject(active_parametric_object_);
+        ShowPropertyPanelAtCursor("ThickSolid");
+        viewport_->BeginThickSolidTool(active_parametric_object_.parameters[0].value);
+        UpdateActiveToolUi(tool_id);
+        RefreshSceneTree();
+        viewport_->update();
+        if (document_.HasLiveThickSolid() && document_.GetLiveThickSolidFaceCount() > 0) {
+            statusBar()->showMessage("ThickSolid: меняй Thick, OK оставит результат");
+        } else {
+            statusBar()->showMessage(document_.GetSelectedSolid() ? "ThickSolid: выбери Face" : "ThickSolid: выбери CSolid");
+        }
+        return;
+    }
+
+    if (tool_id == "SolidExtrudeTool") {
+        ClearActiveProperties();
+        active_parametric_object_ = {
+            tool_id,
+            document_.GetSelectedObjectIndex(),
+            {
+                {"distance", "Distance", 1.0, 0.0, 1000.0, 0.1},
+                {"reverse", "Reverse", 0.0, 0.0, 1.0, 1.0, ToolParameterType::Checkbox},
+                {"taper", "Angle taper", 0.0, -89.0, 89.0, 1.0}
+            }
+        };
+        property_panel_->SetActiveObject(active_parametric_object_);
+        ShowPropertyPanelAtCursor("Extrude");
+        viewport_->SetTool(ToolMode::Select);
+        viewport_->SetSelectionMode(SelectionMode::Object);
+        UpdateActiveToolUi(tool_id);
+
+        if (document_.GetSelectedPolyline() && !TryStartLivePolylineExtrudeFromSelection()) {
+            document_.CancelLiveExtrudeSelectedPolyline();
+            active_parametric_object_ = {};
+            UpdateActiveToolUi("select");
+            viewport_->SetTool(ToolMode::Select);
+            statusBar()->showMessage("Extrude: операция не выполнена");
+            return;
+        }
+        RefreshSceneTree();
+        viewport_->update();
+        statusBar()->showMessage(document_.HasLivePolylineExtrude()
+            ? "Extrude: меняй параметры, OK оставит результат"
+            : "Extrude: выбери замкнутую плоскую Polyline");
+        return;
+    }
+
+    if (tool_id == "SurfaceOfRevolution") {
+        ClearActiveProperties();
+        active_parametric_object_ = {
+            tool_id,
+            document_.GetSelectedObjectIndex(),
+            {
+                {"angle", "Angle", 360.0, 0.0, 360.0, 1.0},
+                {"axis", "Axis", 2.0, 0.0, 2.0, 1.0, ToolParameterType::Combo, {"Axis X", "Axis Y", "Axis Z"}}
+            }
+        };
+        property_panel_->SetActiveObject(active_parametric_object_);
+        ShowPropertyPanelAtCursor("Revolve");
+        viewport_->SetTool(ToolMode::Select);
+        viewport_->SetSelectionMode(SelectionMode::Object);
+        UpdateActiveToolUi(tool_id);
+
+        if (document_.GetSelectedPolyline() && !TryStartLivePolylineRevolveFromSelection()) {
+            document_.CancelLiveRevolveSelectedPolyline();
+            active_parametric_object_ = {};
+            UpdateActiveToolUi("select");
+            viewport_->SetTool(ToolMode::Select);
+            statusBar()->showMessage("Revolve: операция не выполнена");
+            return;
+        }
+        RefreshSceneTree();
+        viewport_->update();
+        statusBar()->showMessage(document_.HasLivePolylineRevolve()
+            ? "Revolve: меняй параметры, OK оставит результат"
+            : "Revolve: выбери плоскую Polyline");
+        return;
+    }
+
+    if (tool_id == "SurfaceLoft") {
+        ClearActiveProperties();
+        viewport_->SetTool(ToolMode::Select);
+        viewport_->SetSelectionMode(SelectionMode::Object);
+        UpdateActiveToolUi(tool_id);
+        if (!document_.CreateLoftSurfaceFromSelectedBSplines()) {
+            UpdateActiveToolUi("select");
+            statusBar()->showMessage("Loft Surface: выбери минимум 2 B-Spline", 1800);
+            return;
+        }
+        RefreshSceneTree();
+        viewport_->update();
+        statusBar()->showMessage("Loft Surface created", 1600);
+        return;
+    }
+
+    if (tool_id == "SurfaceReverseNormals") {
+        ClearActiveProperties();
+        viewport_->SetTool(ToolMode::Select);
+        viewport_->SetSelectionMode(SelectionMode::Object);
+        UpdateActiveToolUi(tool_id);
+        if (!document_.ReverseSelectedSurfaceNormals()) {
+            UpdateActiveToolUi("select");
+            statusBar()->showMessage("Reverse Normals: выбери поверхность", 1800);
+            return;
+        }
+        RefreshSceneTree();
+        viewport_->update();
+        statusBar()->showMessage("Normals reversed", 1400);
+        return;
+    }
+
+    if (tool_id == "ChamferSolid") {
+        ClearActiveProperties();
+        active_parametric_object_ = {
+            tool_id,
+            document_.GetSelectedObjectIndex(),
+            {{"distance", "Distance", 0.20, 0.01, 10.0, 0.01}}
+        };
+        property_panel_->SetActiveObject(active_parametric_object_);
+        ShowPropertyPanelAtCursor("Chamfer");
+        viewport_->SetTool(ToolMode::Select);
+        viewport_->SetSelectionMode(SelectionMode::Edge);
+        UpdateActiveToolUi(tool_id);
+
+        if (document_.HasSelectedSolidEdge() && !TryStartLiveEdgeToolFromSelection()) {
+            document_.CancelLiveChamfer();
+            active_parametric_object_ = {};
+            UpdateActiveToolUi("select");
+            viewport_->SetTool(ToolMode::Select);
+            statusBar()->showMessage("Chamfer: операция не выполнена");
+            return;
+        }
+        RefreshSceneTree();
+        viewport_->update();
+        statusBar()->showMessage(document_.HasLiveChamfer()
+            ? "Chamfer: меняй Distance, OK оставит результат"
+            : "Chamfer: выбери кромку тела");
         return;
     }
 
     if (tool_id == "fillet_edge" || tool_id == "fillet_all_edges") {
         ClearActiveProperties();
-        if (tool_id == "fillet_edge" && !document_.HasSelectedSolidEdge()) {
-            UpdateActiveToolUi("select");
-            viewport_->SetTool(ToolMode::Select);
-            statusBar()->showMessage("Fillet: выбери кромку тела");
-            return;
-        }
         if (tool_id == "fillet_all_edges" && !document_.GetSelectedSolid()) {
             UpdateActiveToolUi("select");
             viewport_->SetTool(ToolMode::Select);
@@ -878,10 +2069,40 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
             document_.GetSelectedObjectIndex(),
             {{"radius", "Radius", 0.20, 0.01, 10.0, 0.01}}
         };
+        const bool all_edges = tool_id == "fillet_all_edges";
         property_panel_->SetActiveObject(active_parametric_object_);
         ShowPropertyPanelAtCursor(tool_id == "fillet_edge" ? "Fillet Edge" : "Fillet All Edges");
+        viewport_->SetTool(ToolMode::Select);
+        if (tool_id == "fillet_edge") {
+            viewport_->SetSelectionMode(SelectionMode::Edge);
+        }
         UpdateActiveToolUi(tool_id);
-        statusBar()->showMessage(tool_id == "fillet_edge" ? "Fillet: задай Radius и нажми OK" : "Fillet All: задай Radius и нажми OK");
+
+        const bool should_start_now = all_edges || document_.HasSelectedSolidEdge();
+        const bool started = all_edges
+            ? document_.BeginLiveFilletSelectedEdges(all_edges)
+            : TryStartLiveEdgeToolFromSelection();
+        if (should_start_now && (!started || !document_.HasLiveFillet())) {
+            document_.CancelLiveFillet();
+            active_parametric_object_ = {};
+            UpdateActiveToolUi("select");
+            viewport_->SetTool(ToolMode::Select);
+            statusBar()->showMessage("Fillet: операция не выполнена");
+            return;
+        }
+        if (all_edges && !document_.UpdateLiveFillet(active_parametric_object_.parameters[0].value)) {
+            document_.CancelLiveFillet();
+            active_parametric_object_ = {};
+            UpdateActiveToolUi("select");
+            viewport_->SetTool(ToolMode::Select);
+            statusBar()->showMessage("Fillet: операция не выполнена");
+            return;
+        }
+        RefreshSceneTree();
+        viewport_->update();
+        statusBar()->showMessage(document_.HasLiveFillet()
+            ? (tool_id == "fillet_edge" ? "Fillet: меняй Radius, OK оставит результат" : "Fillet All: меняй Radius, OK оставит результат")
+            : "Fillet: выбери кромку тела");
         return;
     }
 
@@ -889,6 +2110,9 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
     if (!active_parametric_object_.tool_id.empty()) {
         property_panel_->SetActiveObject(active_parametric_object_);
         ShowPropertyPanelAtCursor(QString::fromStdString(tool_id));
+        if (tool_id == "SolidBox" || tool_id == "SolidCylinder") {
+            document_.ClearSelection();
+        }
     } else {
         ClearActiveProperties();
     }
@@ -899,7 +2123,117 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
     statusBar()->showMessage(QString("%1 applied").arg(QString::fromStdString(tool_id)));
 }
 
+bool MainWindow::TryStartLiveEdgeToolFromSelection() {
+    if (active_parametric_object_.tool_id == "fillet_edge") {
+        if (document_.HasLiveFillet()) {
+            return true;
+        }
+        if (!document_.HasSelectedSolidEdge()) {
+            statusBar()->showMessage("Fillet: выбери кромку тела");
+            return false;
+        }
+        const double radius = active_parametric_object_.parameters.empty() ? 0.20 : active_parametric_object_.parameters[0].value;
+        if (!document_.BeginLiveFilletSelectedEdges(false) || !document_.UpdateLiveFillet(radius)) {
+            document_.CancelLiveFillet();
+            statusBar()->showMessage("Fillet: операция не выполнена");
+            return false;
+        }
+        RefreshSceneTree();
+        viewport_->update();
+        statusBar()->showMessage("Fillet: меняй Radius, OK оставит результат");
+        return true;
+    }
+
+    if (active_parametric_object_.tool_id == "ChamferSolid") {
+        if (document_.HasLiveChamfer()) {
+            return true;
+        }
+        if (!document_.HasSelectedSolidEdge()) {
+            statusBar()->showMessage("Chamfer: выбери кромку тела");
+            return false;
+        }
+        const double distance = active_parametric_object_.parameters.empty() ? 0.20 : active_parametric_object_.parameters[0].value;
+        if (!document_.BeginLiveChamferSelectedEdges() || !document_.UpdateLiveChamfer(distance)) {
+            document_.CancelLiveChamfer();
+            statusBar()->showMessage("Chamfer: операция не выполнена");
+            return false;
+        }
+        RefreshSceneTree();
+        viewport_->update();
+        statusBar()->showMessage("Chamfer: меняй Distance, OK оставит результат");
+        return true;
+    }
+
+    return false;
+}
+
+bool MainWindow::TryStartLivePolylineExtrudeFromSelection() {
+    if (active_parametric_object_.tool_id != "SolidExtrudeTool") {
+        return false;
+    }
+    if (document_.HasLivePolylineExtrude()) {
+        return true;
+    }
+    if (!document_.GetSelectedPolyline()) {
+        statusBar()->showMessage("Extrude: выбери замкнутую плоскую Polyline");
+        return false;
+    }
+
+    const auto& parameters = active_parametric_object_.parameters;
+    const double distance = parameters.size() > 0 ? parameters[0].value : 1.0;
+    const bool reverse = parameters.size() > 1 && parameters[1].value >= 0.5;
+    const double taper_angle = parameters.size() > 2 ? parameters[2].value : 0.0;
+    if (!document_.BeginLiveExtrudeSelectedPolyline(distance, reverse, taper_angle)) {
+        document_.CancelLiveExtrudeSelectedPolyline();
+        statusBar()->showMessage("Extrude: Polyline должна быть плоской и замкнутой");
+        return false;
+    }
+
+    RefreshSceneTree();
+    viewport_->update();
+    statusBar()->showMessage("Extrude: меняй параметры, OK оставит результат");
+    return true;
+}
+
+bool MainWindow::TryStartLivePolylineRevolveFromSelection() {
+    if (active_parametric_object_.tool_id != "SurfaceOfRevolution") {
+        return false;
+    }
+    if (document_.HasLivePolylineRevolve()) {
+        return true;
+    }
+    if (!document_.GetSelectedPolyline()) {
+        statusBar()->showMessage("Revolve: выбери плоскую Polyline");
+        return false;
+    }
+
+    const auto& parameters = active_parametric_object_.parameters;
+    const double angle = parameters.size() > 0 ? parameters[0].value : 360.0;
+    const int axis_index = parameters.size() > 1 ? static_cast<int>(parameters[1].value) : 2;
+    if (!document_.BeginLiveRevolveSelectedPolyline(angle, axis_index)) {
+        document_.CancelLiveRevolveSelectedPolyline();
+        statusBar()->showMessage("Revolve: Polyline должна лежать в Plane XY");
+        return false;
+    }
+
+    RefreshSceneTree();
+    viewport_->update();
+    statusBar()->showMessage("Revolve: меняй параметры, OK оставит результат");
+    return true;
+}
+
 void MainWindow::ClearActiveProperties() {
+    if (active_parametric_object_.tool_id == "fillet_edge" || active_parametric_object_.tool_id == "fillet_all_edges") {
+        document_.CancelLiveFillet();
+    } else if (active_parametric_object_.tool_id == "ChamferSolid") {
+        document_.CancelLiveChamfer();
+    } else if (active_parametric_object_.tool_id == "ThickSolidTool") {
+        document_.CancelLiveThickSolid();
+    } else if (active_parametric_object_.tool_id == "SolidExtrudeTool") {
+        document_.CancelLiveExtrudeSelectedPolyline();
+    } else if (active_parametric_object_.tool_id == "SurfaceOfRevolution") {
+        document_.CancelLiveRevolveSelectedPolyline();
+    }
     active_parametric_object_ = {};
     property_panel_->Clear();
     if (properties_dock_) {
@@ -911,13 +2245,83 @@ void MainWindow::AcceptActiveProperties() {
     if (active_parametric_object_.tool_id == "fillet_edge" || active_parametric_object_.tool_id == "fillet_all_edges") {
         const double radius = active_parametric_object_.parameters.empty() ? 0.20 : active_parametric_object_.parameters[0].value;
         const bool all_edges = active_parametric_object_.tool_id == "fillet_all_edges";
-        const bool applied = all_edges ? document_.ApplyFilletToAllSelectedSolidEdges(radius) : document_.ApplyFilletToSelectedEdge(radius);
+        if (!document_.HasLiveFillet()) {
+            statusBar()->showMessage(all_edges ? "Fillet All: выбери тело" : "Fillet: выбери кромку тела", 1600);
+            return;
+        }
+        document_.FinishLiveFillet();
         ClearActiveProperties();
         RefreshSceneTree();
         viewport_->SetTool(ToolMode::Select);
         UpdateActiveToolUi("select");
         viewport_->update();
-        statusBar()->showMessage(applied ? QString("%1: radius %2").arg(all_edges ? "Fillet All" : "Fillet").arg(radius, 0, 'f', 2) : "Fillet: операция не выполнена");
+        statusBar()->showMessage(QString("%1: radius %2").arg(all_edges ? "Fillet All" : "Fillet").arg(radius, 0, 'f', 2));
+        return;
+    }
+
+    if (active_parametric_object_.tool_id == "ChamferSolid") {
+        const double distance = active_parametric_object_.parameters.empty() ? 0.20 : active_parametric_object_.parameters[0].value;
+        if (!document_.HasLiveChamfer()) {
+            statusBar()->showMessage("Chamfer: выбери кромку тела", 1600);
+            return;
+        }
+        document_.FinishLiveChamfer();
+        ClearActiveProperties();
+        RefreshSceneTree();
+        viewport_->SetTool(ToolMode::Select);
+        UpdateActiveToolUi("select");
+        viewport_->update();
+        statusBar()->showMessage(QString("Chamfer: Distance %1").arg(distance, 0, 'f', 2));
+        return;
+    }
+
+    if (active_parametric_object_.tool_id == "ThickSolidTool") {
+        const double thickness = active_parametric_object_.parameters.empty() ? 0.0 : active_parametric_object_.parameters[0].value;
+        viewport_->SetThickSolidThickness(thickness);
+        if (!document_.FinishLiveThickSolid()) {
+            statusBar()->showMessage("ThickSolid: выбери Face и задай Thick != 0", 1600);
+            viewport_->update();
+            return;
+        }
+        ClearActiveProperties();
+        document_.ClearSelection();
+        RefreshSceneTree();
+        viewport_->SetTool(ToolMode::Select);
+        UpdateActiveToolUi("select");
+        viewport_->update();
+        statusBar()->showMessage("ThickSolid: done", 1200);
+        return;
+    }
+
+    if (active_parametric_object_.tool_id == "SolidExtrudeTool") {
+        const double distance = active_parametric_object_.parameters.empty() ? 0.0 : active_parametric_object_.parameters[0].value;
+        if (!document_.FinishLiveExtrudeSelectedPolyline()) {
+            statusBar()->showMessage("Extrude: выбери Polyline и задай Distance != 0", 1600);
+            viewport_->update();
+            return;
+        }
+        ClearActiveProperties();
+        RefreshSceneTree();
+        viewport_->SetTool(ToolMode::Select);
+        UpdateActiveToolUi("select");
+        viewport_->update();
+        statusBar()->showMessage(QString("Extrude: Distance %1").arg(distance, 0, 'f', 2), 1200);
+        return;
+    }
+
+    if (active_parametric_object_.tool_id == "SurfaceOfRevolution") {
+        const double angle = active_parametric_object_.parameters.empty() ? 0.0 : active_parametric_object_.parameters[0].value;
+        if (!document_.FinishLiveRevolveSelectedPolyline()) {
+            statusBar()->showMessage("Revolve: выбери Polyline и задай Angle > 0", 1600);
+            viewport_->update();
+            return;
+        }
+        ClearActiveProperties();
+        RefreshSceneTree();
+        viewport_->SetTool(ToolMode::Select);
+        UpdateActiveToolUi("select");
+        viewport_->update();
+        statusBar()->showMessage(QString("Revolve: Angle %1").arg(angle, 0, 'f', 1), 1200);
         return;
     }
 
@@ -932,10 +2336,57 @@ void MainWindow::AcceptActiveProperties() {
 
 void MainWindow::CancelActiveProperties() {
     if (active_parametric_object_.tool_id == "fillet_edge" || active_parametric_object_.tool_id == "fillet_all_edges") {
+        document_.CancelLiveFillet();
         ClearActiveProperties();
         viewport_->SetTool(ToolMode::Select);
         UpdateActiveToolUi("select");
+        RefreshSceneTree();
+        viewport_->update();
         statusBar()->showMessage("Fillet canceled", 1200);
+        return;
+    }
+
+    if (active_parametric_object_.tool_id == "ChamferSolid") {
+        document_.CancelLiveChamfer();
+        ClearActiveProperties();
+        viewport_->SetTool(ToolMode::Select);
+        UpdateActiveToolUi("select");
+        RefreshSceneTree();
+        viewport_->update();
+        statusBar()->showMessage("Chamfer canceled", 1200);
+        return;
+    }
+
+    if (active_parametric_object_.tool_id == "ThickSolidTool") {
+        document_.CancelLiveThickSolid();
+        ClearActiveProperties();
+        viewport_->SetTool(ToolMode::Select);
+        UpdateActiveToolUi("select");
+        RefreshSceneTree();
+        viewport_->update();
+        statusBar()->showMessage("ThickSolid canceled", 1200);
+        return;
+    }
+
+    if (active_parametric_object_.tool_id == "SolidExtrudeTool") {
+        document_.CancelLiveExtrudeSelectedPolyline();
+        ClearActiveProperties();
+        viewport_->SetTool(ToolMode::Select);
+        UpdateActiveToolUi("select");
+        RefreshSceneTree();
+        viewport_->update();
+        statusBar()->showMessage("Extrude canceled", 1200);
+        return;
+    }
+
+    if (active_parametric_object_.tool_id == "SurfaceOfRevolution") {
+        document_.CancelLiveRevolveSelectedPolyline();
+        ClearActiveProperties();
+        viewport_->SetTool(ToolMode::Select);
+        UpdateActiveToolUi("select");
+        RefreshSceneTree();
+        viewport_->update();
+        statusBar()->showMessage("Revolve canceled", 1200);
         return;
     }
 
@@ -1006,12 +2457,8 @@ void MainWindow::UpdateActiveToolUi(const std::string& key) {
 
 void MainWindow::UpdateToolAvailability() {
     const bool has_selected_solid = document_.GetSelectedSolid() != nullptr;
-    const bool has_selected_edge = document_.HasSelectedSolidEdge();
 
-    const auto is_enabled = [has_selected_solid, has_selected_edge](const QString& key) {
-        if (key == "fillet_edge") {
-            return has_selected_edge;
-        }
+    const auto is_enabled = [has_selected_solid](const QString& key) {
         if (key == "fillet_all_edges") {
             return has_selected_solid;
         }
@@ -1033,10 +2480,20 @@ void MainWindow::UpdateToolAvailability() {
 
 QIcon MainWindow::ToolIcon(const std::string& key) const {
     QString icon_key = QString::fromStdString(key);
-    if (icon_key == "boolean_union" || icon_key == "boolean_cut" || icon_key == "boolean_common") {
+    if (icon_key == "boolean" || icon_key == "boolean_union" || icon_key == "boolean_cut" || icon_key == "boolean_common") {
         icon_key = "BooleanSolid";
     } else if (icon_key == "fillet_edge" || icon_key == "fillet_all_edges") {
         icon_key = "FilletSolid";
+    } else if (icon_key == "PolylineCurve" || icon_key == "BSplineCurve") {
+        icon_key = "curve";
+    } else if (icon_key == "EditPoint") {
+        icon_key = "select";
+    } else if (icon_key == "NewSketch") {
+        return NewSketchIcon();
+    } else if (icon_key == "SurfaceLoft") {
+        return LoftSurfaceIcon();
+    } else if (icon_key == "SurfaceReverseNormals") {
+        return ReverseNormalsIcon();
     }
     return QIcon(QString(":/icons/%1.png").arg(icon_key));
 }
@@ -1142,7 +2599,7 @@ void MainWindow::ShowPreferences() {
 }
 
 void MainWindow::ImportFile() {
-    const QString filter = "Wavefront OBJ (*.obj);;STEP (*.step *.stp);;All files (*.*)";
+    const QString filter = "Wavefront OBJ (*.obj);;STEP (*.step *.stp);;IGES (*.iges *.igs);;All files (*.*)";
     QString selected_filter;
     const QString path = QFileDialog::getOpenFileName(this, "Import", LastDialogDir(), filter, &selected_filter);
     if (path.isEmpty()) {
@@ -1160,13 +2617,24 @@ void MainWindow::ImportFile() {
         for (auto& solid : solids) {
             document_.AddObject(std::move(solid));
         }
+    } else if (selected_filter.startsWith("IGES") || lower_path.endsWith(".iges") || lower_path.endsWith(".igs")) {
+        std::vector<std::unique_ptr<CAlfaObject>> objects;
+        if (!iges_io_.Import(path.toStdString(), objects, error)) {
+            QMessageBox::critical(this, "IGES Import", QString::fromStdString(error));
+            return;
+        }
+        for (auto& object : objects) {
+            document_.AddObject(std::move(object));
+        }
     } else {
-        std::unique_ptr<CMesh3D> mesh;
-        if (!obj_io_.Import(path.toStdString(), mesh, error)) {
+        std::vector<std::unique_ptr<CMesh3D>> meshes;
+        if (!obj_io_.Import(path.toStdString(), meshes, error)) {
             QMessageBox::critical(this, "OBJ Import", QString::fromStdString(error));
             return;
         }
-        document_.AddMesh(std::move(mesh));
+        for (auto& mesh : meshes) {
+            document_.AddMesh(std::move(mesh));
+        }
     }
 
     RememberLastDialogDir(path);
@@ -1178,7 +2646,7 @@ void MainWindow::ImportFile() {
 }
 
 void MainWindow::ExportFile() {
-    const QString filter = "Wavefront OBJ (*.obj);;STEP (*.step *.stp);;All files (*.*)";
+    const QString filter = "Wavefront OBJ (*.obj);;STEP (*.step *.stp);;IGES (*.iges *.igs);;All files (*.*)";
     QString selected_filter;
     QString path = QFileDialog::getSaveFileName(this, "Export", LastDialogDir(), filter, &selected_filter);
     if (path.isEmpty()) {
@@ -1188,21 +2656,40 @@ void MainWindow::ExportFile() {
     std::string error;
     const QString lower_path = path.toLower();
     const bool export_step = selected_filter.startsWith("STEP") || lower_path.endsWith(".step") || lower_path.endsWith(".stp");
+    const bool export_iges = selected_filter.startsWith("IGES") || lower_path.endsWith(".iges") || lower_path.endsWith(".igs");
     if (QFileInfo(path).suffix().isEmpty()) {
-        path += export_step ? ".step" : ".obj";
+        path += export_step ? ".step" : export_iges ? ".iges" : ".obj";
     }
 
-    const bool exported = export_step
-        ? step_io_.Export(path.toStdString(), document_, error)
-        : obj_io_.Export(path.toStdString(), document_, error);
+    bool exported = false;
+    if (export_step) {
+        exported = step_io_.Export(path.toStdString(), document_, error);
+    } else if (export_iges) {
+        exported = iges_io_.Export(path.toStdString(), document_, error);
+    } else {
+        exported = obj_io_.Export(path.toStdString(), document_, error);
+    }
 
     if (!exported) {
-        QMessageBox::critical(this, export_step ? "STEP Export" : "OBJ Export", QString::fromStdString(error));
+        QMessageBox::critical(this, export_step ? "STEP Export" : export_iges ? "IGES Export" : "OBJ Export", QString::fromStdString(error));
         return;
     }
 
     RememberLastDialogDir(path);
     statusBar()->showMessage("File exported", 1400);
+}
+
+void MainWindow::DuplicateSelectedObject() {
+    ClearActiveProperties();
+    if (!document_.DuplicateSelectedObject()) {
+        statusBar()->showMessage("Copy: select an object first", 1600);
+        return;
+    }
+
+    RefreshSceneTree();
+    viewport_->update();
+    BeginTransformTool(TransformOperation::Move);
+    statusBar()->showMessage("Copy created. Move tool is active", 1600);
 }
 
 void MainWindow::LoadUserSettings() {
@@ -1225,6 +2712,7 @@ void MainWindow::LoadUserSettings() {
     const QString orbit_mode = settings.value("view/orbitMode", "cad").toString();
     viewport_->SetOrbitMode(orbit_mode == "architectural" ? OrbitMode::Architectural : OrbitMode::CAD);
     viewport_->SetCoordinateAxesVisible(settings.value("view/showCoordinateAxes", true).toBool());
+    viewport_->SetXYPlaneViewEnabled(settings.value("view/xyPlaneView", false).toBool());
     recent_project_files_.removeAll(QString());
     recent_project_files_.removeDuplicates();
     while (recent_project_files_.size() > kMaxRecentProjectFiles) {
@@ -1447,4 +2935,75 @@ void MainWindow::DeleteSelected() {
         RefreshSceneTree();
         viewport_->update();
     }
+}
+
+void MainWindow::PopulateToolsPanelForTab(int tab_index) {
+    if (!tools_dock_ || !tools_layout_ || !tool_tabs_) {
+        return;
+    }
+
+    ClearActiveProperties();
+    tool_buttons_.clear();
+    while (QLayoutItem* item = tools_layout_->takeAt(0)) {
+        if (QWidget* widget = item->widget()) {
+            widget->deleteLater();
+        }
+        delete item;
+    }
+
+    const QString tab = tool_tabs_->tabText(tab_index);
+    tools_dock_->setWindowTitle(tab);
+    tools_dock_->setVisible(tab == "Architecture" || tab == "Furniture" || tab == "Surfaces" || tab == "Solid" || tab == "Curves");
+
+    std::vector<std::string> tool_ids;
+    if (tab == "Architecture") {
+        tool_ids = {"stair", "window", "door"};
+    } else if (tab == "Furniture") {
+        tool_ids = {"cabinet"};
+    } else if (tab == "Curves") {
+        tool_ids = {"PolylineCurve", "BSplineCurve", "EditPoint"};
+    } else if (tab == "Surfaces") {
+        tool_ids = {"SurfaceLoft", "SurfaceReverseNormals", "SurfaceOfRevolution"};
+    } else if (tab == "Solid") {
+        // единый boolean-инструмент вместо трёх отдельных
+        tool_ids = {"SolidBox", "SolidCylinder", "SolidExtrudeTool", "SurfaceOfRevolution", "boolean", "fillet_edge", "fillet_all_edges", "ChamferSolid", "SolidExtrudeFace", "SolidDraft", "ThickSolidTool"};
+    }
+
+    int index = 0;
+    for (const std::string& tool_id : tool_ids) {
+        AddToolButton(tools_layout_, tools_panel_, tool_id, index / 2, index % 2);
+        ++index;
+    }
+
+    if (tab == "Solid") {
+        const std::vector<std::pair<QString, QString>> placeholders = {
+            {"SolidSphereTool", "Sphere"},
+            {"SolidPrismTool", "Prism"},
+            {"SolidTorusTool", "Torus"},
+            {"SolidSweptTool", "Swept Solid"},
+            {"DeleteFaceOrEdge", "Delete Face or Edge"},
+            {"ExtractFaceTool", "Extract Face"},
+            {"SewingFaceTool", "Sew Faces"},
+            {"SplitRings", "Split Rings"},
+            {"SolidInSet", "Inset"},
+            {"SolidTransform", "Solid Transform"}
+        };
+        for (const auto& placeholder : placeholders) {
+            AddPlaceholderButton(tools_layout_, tools_panel_, placeholder.first, placeholder.second, index / 2, index % 2);
+            ++index;
+        }
+    } else if (tab == "Surfaces") {
+        const std::vector<std::pair<QString, QString>> placeholders = {
+            {"SurfaceSweep", "Sweep Surface"},
+            {"SurfacePatch", "Patch Surface"},
+            {"SurfaceOffset", "Offset Surface"}
+        };
+        for (const auto& placeholder : placeholders) {
+            AddPlaceholderButton(tools_layout_, tools_panel_, placeholder.first, placeholder.second, index / 2, index % 2);
+            ++index;
+        }
+    }
+
+    tools_layout_->setRowStretch((index + 1) / 2, 1);
+    UpdateActiveToolUi(active_tool_key_);
 }

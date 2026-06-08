@@ -1,5 +1,6 @@
 #include "ProjectIO.h"
 
+#include "CBSpline.h"
 #include "CMesh3D.h"
 
 #include <fstream>
@@ -85,6 +86,13 @@ bool ProjectIO::Load(const std::string& path, CAlfaDoc& document, std::string& e
                     return false;
                 }
                 object = std::move(polyline);
+            } else if (next == 'B') {
+                auto spline = std::make_unique<CBSpline>();
+                if (!spline->Load(file)) {
+                    error = "Project file has invalid object data.";
+                    return false;
+                }
+                object = std::move(spline);
             } else if (next == 'M') {
                 auto mesh = std::make_unique<CMesh3D>();
                 if (!mesh->Load(file)) {

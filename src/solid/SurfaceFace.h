@@ -45,7 +45,12 @@ public:
 	bool BuldMeshTriangle(float Deflection, float AngDeflection);
 	bool InitEdges();
 	bool BuldMesh(float Deflection, bool MeshQuadro);
+	bool IsPlanar() const;
+	bool GetCenterAndNormal(Vec3& center, Vec3& normal) const;
 	void RenderEdges(bool selected, const std::vector<int>& selected_edge_indices = {}) const;
+	void PreviewTranslate(Vec3 delta);
+	void PreviewRotate(Vec3 center, Vec3 axis, float angle);
+	void PreviewScale(Vec3 center, Vec3 axis, float factor);
 	bool HitTestEdgeScreen(DomPoint point,
 	                       const std::function<bool(Vec3, DomPoint&)>& world_to_screen,
 	                       float tolerance,

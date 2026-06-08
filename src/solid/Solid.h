@@ -2,6 +2,7 @@
 #include "../CAlfaObject.h"
 
 #include <TopoDS_Shape.hxx>
+#include <TopoDS_Face.hxx>
 #include <AIS_Shape.hxx>
 
 #include "SurfaceFace.h"
@@ -82,9 +83,14 @@ public:
 	void Render2d(float center_x, float center_y, float scale) const override;
 	bool HitTest(CurvePoint point, float tolerance) const override;
 	bool Save(std::ostream& stream) const override;
+	std::unique_ptr<CAlfaObject> Clone() const override;
 	void Translate(Vec3 delta) override;
 	void Rotate(Vec3 center, Vec3 axis, float angle) override;
 	void Scale(Vec3 center, Vec3 axis, float factor) override;
+	void PreviewTranslate(Vec3 delta);
+	void PreviewRotate(Vec3 center, Vec3 axis, float angle);
+	void PreviewScale(Vec3 center, Vec3 axis, float factor);
+	bool ReverseNormals();
 	bool GetBounds(Vec3& min_point, Vec3& max_point) const override;
 
 	CSolid();
@@ -93,7 +99,7 @@ public:
 	virtual ~CSolid();
 	void Clear();
 
-	int GetNumSurfaces() {return m_Surfaces.size();}
+	int GetNumSurfaces() const { return static_cast<int>(m_Surfaces.size()); }
 	CSurfaceFace* GetSurfaceFace(int indx);
 	const CSurfaceFace* GetSurfaceFace(int indx) const;
 	bool HitTestEdgeScreen(DomPoint point,
@@ -101,10 +107,27 @@ public:
 	                       float tolerance,
 	                       int& surface_index,
 	                       int& edge_index) const;
+	bool HitTestMeshScreen(DomPoint point,
+	                       const std::function<bool(Vec3, DomPoint&, float&)>& project_world,
+	                       float& depth) const;
+	bool HitTestFaceScreen(DomPoint point,
+	                       const std::function<bool(Vec3, DomPoint&, float&)>& project_world,
+	                       bool planar_only,
+	                       int& surface_index,
+	                       float& depth) const;
+	bool GetFaceCenterAndNormal(int surface_index, Vec3& center, Vec3& normal) const;
+	TopoDS_Face GetTopoFace(int surface_index) const;
 	void SetSelectedEdge(int surface_index, int edge_index);
 	void AddSelectedEdge(int surface_index, int edge_index);
 	void RemoveSelectedEdge(int surface_index, int edge_index);
 	void ClearSelectedEdge();
+	void SetSelectedFace(int surface_index);
+	void AddSelectedFace(int surface_index);
+	void RemoveSelectedFace(int surface_index);
+	void ClearSelectedFace();
+	bool HasSelectedFace() const { return m_SelectedFaceIndex >= 0; }
+	int GetSelectedFaceIndex() const { return m_SelectedFaceIndex; }
+	const std::vector<int>& GetSelectedFaceIndices() const { return m_SelectedFaceIndices; }
 	bool HasSelectedEdge() const;
 	int GetSelectedSurfaceIndex() const { return m_SelectedEdges.empty() ? -1 : m_SelectedEdges.front().first; }
 	int GetSelectedEdgeIndex() const { return m_SelectedEdges.empty() ? -1 : m_SelectedEdges.front().second; }
@@ -159,6 +182,8 @@ static	int NumReadFile;
 //	cList <CDimens*> m_Dimens;
 
 	std::vector<std::pair<int, int>> m_SelectedEdges;
+	std::vector<int> m_SelectedFaceIndices;
+	int m_SelectedFaceIndex = -1;
 
 //	SERIALIZE_LATER();
 

@@ -20,8 +20,8 @@ struct cVec2;
 
 struct CPoint6d
 {
-	Coord x, y, z;
-	Coord w, t, s;
+	double x, y, z;
+	double w, t, s;
 };
 
 class CPoint3d

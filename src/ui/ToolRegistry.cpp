@@ -3,6 +3,7 @@
 #include "../CMesh3D.h"
 #include "../solid/Solid.h"
 #include "../solid/SolidBoxTool.h"
+#include "../solid/SolidCylinderTool.h"
 
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
@@ -148,41 +149,53 @@ void apply_boolean_to_selected_solids(CAlfaDoc& document, BooleanKind kind, cons
 
 ToolRegistry::ToolRegistry() {
     static const SolidBoxTool solid_box_tool;
+    static const SolidCylinderTool solid_cylinder_tool;
     tools_.push_back(solid_box_tool.CreateToolDefinition());
+    tools_.push_back(solid_cylinder_tool.CreateToolDefinition());
 
     tools_.push_back({
-        "boolean_union",
-        "Boolean Union",
+        "PolylineCurve",
+        "Polyline",
         {},
-        [](CAlfaDoc& document, const std::vector<ToolParameter>&) {
-            apply_boolean_to_selected_solids(document, BooleanKind::Union, "Boolean Union", {0.58f, 0.68f, 0.76f});
+        [](CAlfaDoc&, const std::vector<ToolParameter>&) {
         },
         [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {
         }
     });
 
     tools_.push_back({
-        "boolean_cut",
-        "Boolean Cut",
+        "BSplineCurve",
+        "B-Spline",
         {},
-        [](CAlfaDoc& document, const std::vector<ToolParameter>&) {
-            apply_boolean_to_selected_solids(document, BooleanKind::Cut, "Boolean Cut", {0.70f, 0.55f, 0.42f});
+        [](CAlfaDoc&, const std::vector<ToolParameter>&) {
         },
         [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {
         }
     });
 
     tools_.push_back({
-        "boolean_common",
-        "Boolean Common",
+        "EditPoint",
+        "Edit Point",
         {},
-        [](CAlfaDoc& document, const std::vector<ToolParameter>&) {
-            apply_boolean_to_selected_solids(document, BooleanKind::Common, "Boolean Common", {0.48f, 0.70f, 0.62f});
+        [](CAlfaDoc&, const std::vector<ToolParameter>&) {
         },
         [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {
         }
     });
 
+    // ������ boolean-���������� � UI ������� ������ ������ �������� � �������� ������������� ������
+    tools_.push_back({
+        "boolean",
+        "Boolean",
+        {},
+        [](CAlfaDoc&, const std::vector<ToolParameter>&) {
+            // �������� ��������� ���������� � UI (MainWindow) � ����� ������ ����������
+        },
+        [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {
+        }
+    });
+
+    // ��������������� ����������� (������)
     tools_.push_back({
         "fillet_edge",
         "Fillet Edge",
@@ -196,6 +209,88 @@ ToolRegistry::ToolRegistry() {
     tools_.push_back({
         "fillet_all_edges",
         "Fillet All Edges",
+        {},
+        [](CAlfaDoc&, const std::vector<ToolParameter>&) {
+        },
+        [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {
+        }
+    });
+
+    tools_.push_back({
+        "ChamferSolid",
+        "Chamfer",
+        {},
+        [](CAlfaDoc&, const std::vector<ToolParameter>&) {
+        },
+        [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {
+        }
+    });
+
+    tools_.push_back({
+        "SolidExtrudeFace",
+        "Extrude Face",
+        {},
+        [](CAlfaDoc&, const std::vector<ToolParameter>&) {
+        },
+        [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {
+        }
+    });
+
+    tools_.push_back({
+        "SolidExtrudeTool",
+        "Extrude",
+        {},
+        [](CAlfaDoc&, const std::vector<ToolParameter>&) {
+        },
+        [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {
+        }
+    });
+
+    tools_.push_back({
+        "SurfaceOfRevolution",
+        "Revolve",
+        {},
+        [](CAlfaDoc&, const std::vector<ToolParameter>&) {
+        },
+        [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {
+        }
+    });
+
+    tools_.push_back({
+        "SurfaceLoft",
+        "Loft Surface",
+        {},
+        [](CAlfaDoc& document, const std::vector<ToolParameter>&) {
+            document.CreateLoftSurfaceFromSelectedBSplines();
+        },
+        [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {
+        }
+    });
+
+    tools_.push_back({
+        "SurfaceReverseNormals",
+        "Reverse Normals",
+        {},
+        [](CAlfaDoc& document, const std::vector<ToolParameter>&) {
+            document.ReverseSelectedSurfaceNormals();
+        },
+        [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {
+        }
+    });
+
+    tools_.push_back({
+        "SolidDraft",
+        "Draft Face",
+        {},
+        [](CAlfaDoc&, const std::vector<ToolParameter>&) {
+        },
+        [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {
+        }
+    });
+
+    tools_.push_back({
+        "ThickSolidTool",
+        "Thick Solid",
         {},
         [](CAlfaDoc&, const std::vector<ToolParameter>&) {
         },

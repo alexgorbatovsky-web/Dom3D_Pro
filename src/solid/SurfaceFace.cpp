@@ -34,7 +34,9 @@
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <Geom_BezierCurve.hxx>
 #include <BRepBuilderAPI_GTransform.hxx>
+#include <BRepAdaptor_Surface.hxx>
 #include <BRep_Tool.hxx>
+#include <GeomAbs_SurfaceType.hxx>
 #include <Poly_Triangle.hxx>
 #include <TopAbs_Orientation.hxx>
 #include <TopLoc_Location.hxx>
@@ -230,6 +232,48 @@ bool CSurfaceFace::BuldMesh(float Deflection, bool MeshQuadro)
 	return BuldMeshTriangle(Deflection, 0.3);
 }
 
+bool CSurfaceFace::IsPlanar() const
+{
+	if (m_Face.IsNull())
+		return false;
+	try {
+		const TopoDS_Face face = TopoDS::Face(m_Face);
+		BRepAdaptor_Surface surface(face);
+		return surface.GetType() == GeomAbs_Plane;
+	} catch (const Standard_Failure&) {
+		return false;
+	}
+}
+
+bool CSurfaceFace::GetCenterAndNormal(Vec3& center, Vec3& normal) const
+{
+	if (!pMesh3D)
+		return false;
+
+	Vec3 min_point{};
+	Vec3 max_point{};
+	if (!pMesh3D->GetBounds(min_point, max_point))
+		return false;
+	center = (min_point + max_point) * 0.5f;
+
+	if (m_Face.IsNull())
+		return false;
+	try {
+		const TopoDS_Face face = TopoDS::Face(m_Face);
+		BRepAdaptor_Surface surface(face);
+		if (surface.GetType() != GeomAbs_Plane)
+			return false;
+
+		const gp_Dir direction = surface.Plane().Axis().Direction();
+		const float sign = face.Orientation() == TopAbs_REVERSED ? -1.0f : 1.0f;
+		normal = normalize({static_cast<float>(direction.X()) * sign,
+		                    static_cast<float>(direction.Y()) * sign,
+		                    static_cast<float>(direction.Z()) * sign});
+		return dot(normal, normal) > 0.000001f;
+	} catch (const Standard_Failure&) {
+		return false;
+	}
+}
 
 void CSurfaceFace::UpdateRGB()
 {
@@ -321,6 +365,58 @@ void CSurfaceFace::RenderEdges(bool selected, const std::vector<int>& selected_e
 		if (!edge)
 			continue;
 		edge->Draw(1.0f, 0.22f, 0.12f, 5.5f, 24, false, true);
+	}
+}
+
+void CSurfaceFace::PreviewTranslate(Vec3 delta)
+{
+	if (pMesh3D)
+		pMesh3D->Translate(delta);
+
+	CPoint3d from(0.0, 0.0, 0.0);
+	CPoint3d to(delta.x, delta.y, delta.z);
+	for (CSplineCurve* edge : m_Edges) {
+		if (edge) {
+			edge->Move(&from, &to);
+			edge->Update();
+		}
+	}
+}
+
+void CSurfaceFace::PreviewRotate(Vec3 center, Vec3 axis, float angle)
+{
+	const Vec3 unit_axis = normalize(axis);
+	if (std::fabs(angle) <= 0.000001f || dot(unit_axis, unit_axis) <= 0.000001f)
+		return;
+
+	if (pMesh3D)
+		pMesh3D->Rotate(center, unit_axis, angle);
+
+	CPoint3d p0(center.x, center.y, center.z);
+	CPoint3d p1(center.x + unit_axis.x, center.y + unit_axis.y, center.z + unit_axis.z);
+	for (CSplineCurve* edge : m_Edges) {
+		if (edge)
+			edge->Rotate(&p0, &p1, angle);
+	}
+}
+
+void CSurfaceFace::PreviewScale(Vec3 center, Vec3 axis, float factor)
+{
+	if (factor <= 0.000001f || std::fabs(factor - 1.0f) <= 0.000001f)
+		return;
+
+	if (pMesh3D)
+		pMesh3D->Scale(center, axis, factor);
+
+	const Vec3 unit_axis = normalize(axis);
+	const bool uniform = dot(unit_axis, unit_axis) <= 0.000001f;
+	const double sx = uniform || std::fabs(unit_axis.x) > 0.5f ? factor : 1.0;
+	const double sy = uniform || std::fabs(unit_axis.y) > 0.5f ? factor : 1.0;
+	const double sz = uniform || std::fabs(unit_axis.z) > 0.5f ? factor : 1.0;
+	CPoint3d p0(center.x, center.y, center.z);
+	for (CSplineCurve* edge : m_Edges) {
+		if (edge)
+			edge->Zoom(&p0, sx, sy, sz);
 	}
 }
 

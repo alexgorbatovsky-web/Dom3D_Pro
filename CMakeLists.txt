@@ -48,6 +48,7 @@ set(DOM3D_OPENCASCADE_LIBS
     TKFillet
     TKTopAlgo
     TKBO
+    TKOffset
     TKMesh
     TKGeomBase
     TKG2d
@@ -65,24 +66,35 @@ set(DOM3D_OPENCASCADE_LIBS
 set(DOM3D_SOURCES
     src/main.cpp
     src/Material.cpp
+    src/MaterialLibrary.cpp
     src/CAlfaObject.cpp
     src/CAlfaDoc.cpp
     src/CMesh3D.cpp
+    src/CBSpline.cpp
     src/CPolyline.cpp
     src/CView2d.cpp
     src/CView3d.cpp
     src/Dom3DProjectSerializer.cpp
+    src/CadCurve3D.cpp
+    src/IgesIO.cpp
     src/ObjIO.cpp
     src/ProjectIO.cpp
     src/StepIO.cpp
     src/solid/SolidBoxTool.cpp
+    src/solid/SolidCylinderTool.cpp
+    src/solid/SurfaceSet.cpp
     src/solid/SolidTool.cpp
     src/ui/MainWindow.cpp
+    src/ui/MaterialEditorDialog.cpp
+    src/ui/MaterialDrag.cpp
+    src/ui/MaterialSphereBrowser.cpp
     src/ui/OpenGLViewport.cpp
     src/ui/PreferencesDialog.cpp
     src/ui/PropertyPanel.cpp
     src/ui/QtSceneRenderer.cpp
     src/ui/ToolRegistry.cpp
+    src/ui/BooleanDialog.cpp
+    src/ui/ExtrudeFaceDialog.cpp
     src/resources/icons.qrc
     src/solid/Solid.cpp
     src/solid/SurfaceFace.cpp
@@ -107,25 +119,36 @@ set(DOM3D_SOURCES
 set(DOM3D_HEADERS
     src/CAlfaObject.h
     src/Material.h
+    src/MaterialLibrary.h
     src/CAlfaDoc.h
     src/Common.h
     src/CMesh3D.h
+    src/CBSpline.h
     src/CPolyline.h
     src/CView2d.h
     src/CView3d.h
     src/Dom3DProjectSerializer.h
+    src/CadCurve3D.h
+    src/IgesIO.h
     src/ObjIO.h
     src/OpenGLCompat.h
     src/ProjectIO.h
     src/StepIO.h
     src/solid/SolidBoxTool.h
+    src/solid/SolidCylinderTool.h
+    src/solid/SurfaceSet.h
     src/solid/SolidTool.h
     src/ui/MainWindow.h
+    src/ui/MaterialEditorDialog.h
+    src/ui/MaterialDrag.h
+    src/ui/MaterialSphereBrowser.h
     src/ui/OpenGLViewport.h
     src/ui/PreferencesDialog.h
     src/ui/PropertyPanel.h
     src/ui/QtSceneRenderer.h
     src/ui/ToolRegistry.h
+    src/ui/BooleanDialog.h
+    src/ui/ExtrudeFaceDialog.h
     src/solid/Solid.h
     src/solid/SurfaceFace.h
     src/Point3d.h
@@ -167,13 +190,24 @@ target_link_directories(Dom3D_Pro PRIVATE "${DOM3D_OPENCASCADE_LIBRARY_DIR}")
 target_link_libraries(Dom3D_Pro PRIVATE Qt6::Widgets Qt6::OpenGLWidgets Qt6::Xml OpenGL::GL ${DOM3D_OPENCASCADE_LIBS})
 
 if(WIN32)
+    file(GLOB DOM3D_OPENCASCADE_RUNTIME_DLLS
+        "${DOM3D_OPENCASCADE_BINARY_DIR}/*.dll"
+    )
     add_custom_command(TARGET Dom3D_Pro POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${DOM3D_OPENCASCADE_BINARY_DIR}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${DOM3D_OPENCASCADE_RUNTIME_DLLS}
             "$<TARGET_FILE_DIR:Dom3D_Pro>"
         COMMENT "Copying OpenCascade runtime DLLs"
+        COMMAND_EXPAND_LISTS
     )
 endif()
+
+add_custom_command(TARGET Dom3D_Pro POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_CURRENT_SOURCE_DIR}/materials"
+        "$<TARGET_FILE_DIR:Dom3D_Pro>/materials"
+    COMMENT "Copying material library"
+)
 
 set(DOM3D_WINDEPLOYQT "${DOM3D_QT_MSVC2022_PATH}/bin/windeployqt.exe")
 if(WIN32 AND EXISTS "${DOM3D_WINDEPLOYQT}")

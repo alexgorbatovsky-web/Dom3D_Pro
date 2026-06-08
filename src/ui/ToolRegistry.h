@@ -6,6 +6,12 @@
 #include <string>
 #include <vector>
 
+enum class ToolParameterType {
+    Number,
+    Checkbox,
+    Combo
+};
+
 struct ToolParameter {
     std::string id;
     std::string label;
@@ -13,6 +19,8 @@ struct ToolParameter {
     double minimum = 0.0;
     double maximum = 100.0;
     double step = 0.1;
+    ToolParameterType type = ToolParameterType::Number;
+    std::vector<std::string> options;
 };
 
 struct ToolDefinition {
