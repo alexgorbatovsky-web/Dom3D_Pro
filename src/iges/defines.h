@@ -24,4 +24,4 @@ inline int __IntAbs(const int n) {
     int s = n >> 31;
     return (n ^ s) - s;
 }
-
+extern void Step(char* text);

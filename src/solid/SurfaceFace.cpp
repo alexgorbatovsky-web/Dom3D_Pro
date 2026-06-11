@@ -168,8 +168,12 @@ bool CSurfaceFace::BuldMeshTriangle(float Deflection, float AngDeflection)
 //	PrepareEdges(Deflection);
 	TopLoc_Location aLoc;
 	const TopoDS_Face theFace = TopoDS::Face(m_Face);
-	const Standard_Real    theLinDeflection = Deflection;
-	const Standard_Real    theAngDeflection = AngDeflection;
+//	const Standard_Real    theLinDeflection = Deflection;
+//	const Standard_Real    theAngDeflection = AngDeflection;
+	const Standard_Real    theLinDeflection = 1.0;
+	const Standard_Real    theAngDeflection = 1.0;
+
+
 	BRepMesh_IncrementalMesh bim(theFace, theLinDeflection, false, theAngDeflection, false);
 	bim.Perform();
 	const Handle(Poly_Triangulation)& aTriangulation = BRep_Tool::Triangulation(theFace, aLoc, Poly_MeshPurpose_NONE);

@@ -52,6 +52,8 @@ public:
     void SetSketchRectangleTool();
     void BeginSketchFillet(double radius);
     void EndSketch();
+    void DrawFPS();
+    void UpdateFPS();
 
 signals:
     void DocumentChanged();
@@ -195,4 +197,7 @@ private:
     // raw (unwrapped) angles to avoid flip oscillation when crossing +/-90°
     float raw_yaw_ = 0.0f;
     float raw_pitch_ = 0.0f;
+    int    m_frameCounter = 0;
+    float  m_fps = 0.0f;
+	int m_lastFpsTime = 0;
 };

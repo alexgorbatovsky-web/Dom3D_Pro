@@ -1,4 +1,6 @@
+#include <windows.h>
 #include "OpenGLViewport.h"
+
 
 #include "../solid/Solid.h"
 #include "MaterialDrag.h"
@@ -14,6 +16,7 @@
 
 #include <algorithm>
 #include <cmath>
+
 
 namespace {
 constexpr float kGridHalfSize = 12.0f;
@@ -429,6 +432,7 @@ void OpenGLViewport::paintGL() {
     if (!document_) {
         return;
     }
+   UpdateFPS();
     renderer_.Render(*document_, camera_, orthographic_projection_, show_coordinate_axes_, tool_, transform_operation_, highlighted_transform_axis_, highlighted_draft_face_gizmo_, width(), height());
     if (show_coordinate_axes_) {
         DrawCoordinateAxisLabels();
@@ -451,6 +455,8 @@ void OpenGLViewport::paintGL() {
         const QPixmap sphere = MaterialDrag::SpherePixmap(material_drag_preview_, 58, true);
         painter.drawPixmap(material_drag_pos_ - QPoint(sphere.width() / 2, sphere.height() / 2), sphere);
     }
+    DrawFPS();
+
 }
 
 void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
@@ -777,22 +783,7 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
             update();
         }
     }
-/*
-    if (!xy_plane_view_enabled_ && (orbiting_ || alt_orbiting_)) {
-        camera_.yaw -= static_cast<float>(delta.x()) * 0.35f;
-        camera_.pitch += static_cast<float>(delta.y()) * 0.25f;
-        if (orbit_mode_ == OrbitMode::Architectural) {
-            camera_.pitch = std::clamp(camera_.pitch, -10.0f, 75.0f);
-        } else if (std::fabs(camera_.pitch) > 360.0f) {
-            camera_.pitch = std::fmod(camera_.pitch, 360.0f);
-        }
-        last_mouse_ = event->pos();
-        update();
-        return;
-    }
-*/
 
-/*
     if (!xy_plane_view_enabled_ && (orbiting_ || alt_orbiting_)) {
         camera_.yaw -= static_cast<float>(delta.x()) * 0.35f;
         camera_.pitch += static_cast<float>(delta.y()) * 0.25f;
@@ -811,42 +802,7 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
         update();
         return;
     }
-*/
-    if (!xy_plane_view_enabled_ && (orbiting_ || alt_orbiting_)) {
-        const float yaw_delta = static_cast<float>(delta.x()) * 0.35f;
-        const float pitch_delta = static_cast<float>(delta.y()) * 0.25f;
 
-        float newYaw = camera_.yaw - yaw_delta;
-        float newPitch = camera_.pitch + pitch_delta;
-
-        if (orbit_mode_ == OrbitMode::Architectural) {
-            // Жёсткие лимиты для архитектурного режима
-            newPitch = std::clamp(newPitch, -10.0f, 75.0f);
-        }
-        else {
-            // Плавный "перепрыг": если пересекли вертикаль, отразим pitch и повернём yaw на 180°
-            if (newPitch > 89.9f) {
-                newPitch = 180.0f - newPitch;
-                newYaw += 180.0f;
-            }
-            else if (newPitch < -89.9f) {
-                newPitch = -180.0f - newPitch;
-                newYaw += 180.0f;
-            }
-
-            // Нормализация yaw в диапазон (-180, 180]
-            newYaw = std::fmod(newYaw, 360.0f);
-            if (newYaw <= -180.0f) newYaw += 360.0f;
-            if (newYaw > 180.0f) newYaw -= 360.0f;
-        }
-
-        camera_.yaw = newYaw;
-        camera_.pitch = newPitch;
-
-        last_mouse_ = event->pos();
-        update();
-        return;
-    }
     if (panning_) {
         const float scale = camera_.distance * 0.0018f;
         if (sketch_active_) {
@@ -2516,4 +2472,34 @@ void OpenGLViewport::DrawCoordinateAxisLabels() {
     if (has_z) {
         draw_label(z_screen, QColor(55, 85, 255), "Z");
     }
+}
+void OpenGLViewport::UpdateFPS()
+{
+    int now = static_cast<int>(GetTickCount64());
+
+    if (m_lastFpsTime == 0)
+        m_lastFpsTime = now;
+
+    m_frameCounter++;
+
+    int dt = now - m_lastFpsTime;
+    if (dt >= 500) // обновлять 2 раза в секунду
+    {
+        m_fps = 1000.0f * m_frameCounter / float(dt);
+        m_frameCounter = 0;
+        m_lastFpsTime = now;
+    }
+}
+
+void OpenGLViewport::DrawFPS()
+{
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::TextAntialiasing, true);
+    QFont fps_font = painter.font();
+    fps_font.setBold(true);
+    fps_font.setPointSize(10);
+    painter.setFont(fps_font);
+    QString fps_text = QString("FPS: %1").arg(m_fps, 0, 'f', 1);
+    painter.setPen(Qt::yellow);
+	painter.drawText(QPoint(10, 20), fps_text);
 }

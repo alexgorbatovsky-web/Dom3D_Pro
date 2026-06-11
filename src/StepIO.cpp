@@ -17,6 +17,8 @@
 
 #include <memory>
 #include <vector>
+#include <iostream>
+#include <iomanip>
 
 namespace {
 bool shape_has_type(const TopoDS_Shape& shape, TopAbs_ShapeEnum type)
@@ -45,7 +47,7 @@ void collect_top_level_shapes(const TopoDS_Shape& shape, std::vector<TopoDS_Shap
         shapes.push_back(shape);
     }
 }
-
+/*
 std::unique_ptr<CSolid> make_imported_solid(const TopoDS_Shape& source_shape, int index, int count)
 {
     TopoDS_Shape shape = source_shape;
@@ -63,20 +65,62 @@ std::unique_ptr<CSolid> make_imported_solid(const TopoDS_Shape& source_shape, in
     loaded->SetColor({0.58f, 0.68f, 0.76f});
     loaded->InitSurfaces();
     loaded->InitEdges();
-    loaded->BuldMesh(0.1f);
+    loaded->BuldMesh(1.0f);
+    return loaded;
+}
+*/
+
+std::unique_ptr<CSolid> make_imported_solid(
+    const TopoDS_Shape& source_shape,
+    int index,
+    int count)
+{
+    TopoDS_Shape shape = source_shape;
+
+    std::unique_ptr<CSolid> loaded;
+
+    const bool has_solid = shape_has_type(shape, TopAbs_SOLID);
+
+    if (has_solid)
+    {
+        loaded = std::make_unique<CSolid>(shape);
+        loaded->SetName(count > 1 ? "Imported STEP " + std::to_string(index) : "Imported STEP");
+        loaded->SetGroupName(count > 1 ? "Solids from STEP" : "");
+    }
+    else
+    {
+        loaded = std::make_unique<CSurfaceSet>(shape);
+        loaded->SetName(count > 1 ? "Imported STEP Surface Set " + std::to_string(index) : "Imported STEP Surface Set");
+        loaded->SetGroupName(count > 1 ? "Surfaces from STEP" : "");
+    }
+
+    loaded->SetColor({ 0.58f, 0.68f, 0.76f });
+
+    loaded->InitSurfaces();
+    loaded->InitEdges();
+    loaded->BuldMesh(1.0f);
+
     return loaded;
 }
 }
 
+/*
 bool StepIO::Import(const std::string& path, std::vector<std::unique_ptr<CSolid>>& solids, std::string& error) const {
     solids.clear();
     STEPControl_Reader reader;
+    char buffer[100];
+    void Step(char* text);
+    SYSTEMTIME st;
+    // ѕолучаем текущее системное врем€ (местное)
+    GetLocalTime(&st);
+    sprintf(buffer, "STEP file read Started at %02d:%02d:%02d.%03d", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    Step(buffer);
+
     const IFSelect_ReturnStatus status = reader.ReadFile(path.c_str());
     if (status != IFSelect_RetDone) {
         error = "Could not read STEP file.";
         return false;
     }
-
     try {
         const Standard_Integer transferred = reader.TransferRoots();
         if (transferred <= 0) {
@@ -97,11 +141,18 @@ bool StepIO::Import(const std::string& path, std::vector<std::unique_ptr<CSolid>
         if (imported_shapes.empty()) {
             collect_top_level_shapes(shape, imported_shapes);
         }
+        GetLocalTime(&st);
+        sprintf(buffer, "STEP file read completed at %02d:%02d:%02d.%03d", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+        Step(buffer);
 
         const int imported_count = static_cast<int>(imported_shapes.size());
         for (int i = 0; i < imported_count; ++i) {
             solids.push_back(make_imported_solid(imported_shapes[static_cast<size_t>(i)], i + 1, imported_count));
         }
+
+        GetLocalTime(&st);
+        sprintf(buffer, "Imported solid completed at %02d:%02d:%02d.%03d", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+        Step(buffer);
         return true;
     } catch (const Standard_Failure& failure) {
         error = failure.GetMessageString();
@@ -111,7 +162,92 @@ bool StepIO::Import(const std::string& path, std::vector<std::unique_ptr<CSolid>
         return false;
     }
 }
+*/
 
+bool StepIO::Import(
+    const std::string& path,
+    std::vector<std::unique_ptr<CSolid>>& solids,
+    std::string& error) const
+{
+    solids.clear();
+
+    STEPControl_Reader reader;
+
+    char buffer[100];
+    void Step(char* text);
+    SYSTEMTIME st;
+
+    auto LogTime = [&](const char* text)
+        {
+            GetLocalTime(&st);
+            sprintf(buffer, "%s at %02d:%02d:%02d.%03d",
+                text, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+            Step(buffer);
+        };
+
+    try
+    {
+        LogTime("STEP ReadFile started");
+
+        const IFSelect_ReturnStatus status = reader.ReadFile(path.c_str());
+        if (status != IFSelect_RetDone)
+        {
+            error = "Could not read STEP file.";
+            return false;
+        }
+
+        LogTime("STEP ReadFile completed");
+
+        LogTime("STEP TransferRoot started");
+
+        const Standard_Integer roots = reader.NbRootsForTransfer();
+
+        for (Standard_Integer n = 1; n <= roots; ++n)
+        {
+            reader.TransferRoot(n);
+        }
+
+        LogTime("STEP TransferRoot completed");
+
+        const Standard_Integer nbs = reader.NbShapes();
+
+        if (nbs <= 0)
+        {
+            error = "STEP file does not contain transferable shapes.";
+            return false;
+        }
+
+        sprintf(buffer, "STEP NbShapes = %d", (int)nbs);
+        Step(buffer);
+
+        LogTime("Make solids started");
+
+        solids.reserve((size_t)nbs);
+
+        for (Standard_Integer i = 1; i <= nbs; ++i)
+        {
+            TopoDS_Shape sh = reader.Shape(i);
+
+            if (sh.IsNull())
+                continue;
+
+            solids.push_back(make_imported_solid(sh, (int)i, (int)nbs));
+        }
+
+        LogTime("Make solids completed");
+
+        return true;
+    }
+    catch (const Standard_Failure& failure)
+    {
+        error = failure.GetMessageString();
+
+        if (error.empty())
+            error = "OpenCascade failed while importing STEP.";
+
+        return false;
+    }
+}
 bool StepIO::Export(const std::string& path, const CAlfaDoc& document, std::string& error) const {
     TopoDS_Shape export_shape;
 
