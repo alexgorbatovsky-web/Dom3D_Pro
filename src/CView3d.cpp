@@ -11,29 +11,33 @@ void set_color(float r, float g, float b, float a = 1.0f) {
 }
 }
 
-void CView3d::Draw(const CAlfaDoc& document) const {
-    DrawGrid();
+void CView3d::Draw(const CAlfaDoc& document, bool xy_plane_grid, bool show_grid) const {
+    if (show_grid) {
+        DrawGrid(xy_plane_grid);
+    }
     DrawObjects(document);
 }
 
-void CView3d::DrawGrid() const {
+void CView3d::DrawGrid(bool xy_plane_grid) const {
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glEnable(GL_LINE_SMOOTH);
     glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
     glLineWidth(1.0f);
     glBegin(GL_LINES);
-    for (int i = -12; i <= 12; ++i) {
+    const int first = xy_plane_grid ? 0 : -12;
+    const int last = 12;
+    for (int i = first; i <= last; ++i) {
         const bool major = i % 4 == 0;
         const float r = major ? 0.34f : 0.22f;
         const float g = major ? 0.40f : 0.27f;
         const float b = major ? 0.48f : 0.34f;
         const float a = major ? 0.58f : 0.34f;
         set_color(r, g, b, a);
-        glVertex3f(static_cast<float>(i), 0.0f, -12.0f);
-        glVertex3f(static_cast<float>(i), 0.0f, 12.0f);
-        glVertex3f(-12.0f, 0.0f, static_cast<float>(i));
-        glVertex3f(12.0f, 0.0f, static_cast<float>(i));
+        glVertex3f(static_cast<float>(i), static_cast<float>(first), 0.0f);
+        glVertex3f(static_cast<float>(i), static_cast<float>(last), 0.0f);
+        glVertex3f(static_cast<float>(first), static_cast<float>(i), 0.0f);
+        glVertex3f(static_cast<float>(last), static_cast<float>(i), 0.0f);
     }
     glEnd();
     glDisable(GL_LINE_SMOOTH);

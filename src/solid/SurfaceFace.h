@@ -35,6 +35,14 @@ enum TypeGeom {
 	REVOLUTION_SURF,
 };
 
+struct SurfaceTextureTransform {
+	float offset_u = 0.0f;
+	float offset_v = 0.0f;
+	float scale_u = 1.0f;
+	float scale_v = 1.0f;
+	float rotation_degrees = 0.0f;
+};
+
 class CSurfaceFace {
 public:
 	CSurfaceFace();
@@ -56,6 +64,7 @@ public:
 	                       float tolerance,
 	                       int& edge_index) const;
 	const TopoDS_Edge* GetTopoEdge(int edge_index) const;
+	bool GetEdgeEndpoints(int edge_index, Vec3& start, Vec3& end) const;
 	int GetEdgeCount() const { return static_cast<int>(m_Edges.size()); }
 
 	CMesh3D* pMesh3D;
@@ -77,6 +86,7 @@ public:
 	int m_QtyU;
 	int m_QtyV;
 	bool IsSelected;
+	SurfaceTextureTransform TextureTransform;
 
 
 protected:

@@ -64,6 +64,9 @@ public:
                                  bool planar_only = false,
                                  SelectionAction action = SelectionAction::Replace);
     bool HasSelectedSolidFace() const;
+    bool SelectEdgesOfSelectedFaces();
+    CSolid* GetSelectedFaceSolid();
+    const CSolid* GetSelectedFaceSolid() const;
     bool GetSelectedSolidFaceCenterAndNormal(Vec3& center, Vec3& normal) const;
     bool PreviewExtrudeSelectedSolidFace(Vec3 delta);
     bool BeginLiveExtrudeSelectedSolidFace(double taper_angle_degrees = 0.0);
@@ -121,11 +124,13 @@ public:
     void ClearSelection();
     void ClearPointSelection();
     bool HasSelection() const;
+    bool ExpandSelectedGroups();
     bool HasSelectedPoint() const;
     bool HasSelectedSolidEdge() const;
     size_t GetSelectedObjectIndex() const;
     size_t GetSelectedPointIndex() const;
     bool IsObjectSelected(size_t index) const;
+    void SetObjectSelectionHighlightHidden(size_t index, bool hidden);
     size_t GetSelectedObjectCount() const;
     const std::vector<size_t>& GetSelectedObjectIndices() const;
     CAlfaObject* GetSelectedObject();
@@ -138,9 +143,15 @@ public:
     const CBSpline* GetSelectedBSpline() const;
     CSolid* GetSelectedSolid();
     const CSolid* GetSelectedSolid() const;
+    CAlfaObject* FindObjectById(unsigned long id);
+    const CAlfaObject* FindObjectById(unsigned long id) const;
+    size_t FindObjectIndexById(unsigned long id) const;
+    void EnsureObjectId(CAlfaObject& object);
+    void EnsureObjectIds();
     void AddObject(std::unique_ptr<CAlfaObject> object);
     void AddMesh(std::unique_ptr<CMesh3D> mesh);
     bool DuplicateSelectedObject();
+    bool MirrorSelectedObjects(Vec3 plane_point, Vec3 plane_normal);
     bool CreateLoftSurfaceFromSelectedBSplines();
     bool ReverseSelectedSurfaceNormals();
     bool DeleteSelectedObject();
@@ -172,11 +183,15 @@ public:
     bool ApplyFilletToAllSelectedSolidEdges(double radius);
     bool BeginLiveFilletSelectedEdges(bool all_edges);
     bool HasLiveFillet() const;
+    std::vector<std::pair<int, int>> GetLiveFilletEdgeRefs() const;
+    std::vector<int> GetLiveFilletCreatedSurfaceIndices() const;
     bool UpdateLiveFillet(double radius);
     void FinishLiveFillet();
     void CancelLiveFillet();
     bool BeginLiveChamferSelectedEdges();
     bool HasLiveChamfer() const;
+    std::vector<std::pair<int, int>> GetLiveChamferEdgeRefs() const;
+    std::vector<int> GetLiveChamferCreatedSurfaceIndices() const;
     bool UpdateLiveChamfer(double distance);
     void FinishLiveChamfer();
     void CancelLiveChamfer();
@@ -215,6 +230,7 @@ private:
 
     ObjectList objects_;
     std::vector<Material> materials_;
+    unsigned long next_object_id_ = 1;
     size_t active_object_index_ = 0;
     size_t selected_object_index_ = 0;
     size_t selected_face_object_index_ = 0;
@@ -232,4 +248,5 @@ private:
     bool has_selected_solid_face_ = false;
     bool has_selected_object_ = false;
     bool has_selected_point_ = false;
+    size_t hidden_selection_highlight_index_ = static_cast<size_t>(-1);
 };

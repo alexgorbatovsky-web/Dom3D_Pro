@@ -80,8 +80,10 @@ set(DOM3D_SOURCES
     src/ObjIO.cpp
     src/ProjectIO.cpp
     src/StepIO.cpp
+    src/ThreeDSIO.cpp
     src/solid/SolidBoxTool.cpp
     src/solid/SolidCylinderTool.cpp
+    src/solid/SolidPrismTool.cpp
     src/solid/SurfaceSet.cpp
     src/solid/SolidTool.cpp
     src/ui/MainWindow.cpp
@@ -134,8 +136,10 @@ set(DOM3D_HEADERS
     src/OpenGLCompat.h
     src/ProjectIO.h
     src/StepIO.h
+    src/ThreeDSIO.h
     src/solid/SolidBoxTool.h
     src/solid/SolidCylinderTool.h
+    src/solid/SolidPrismTool.h
     src/solid/SurfaceSet.h
     src/solid/SolidTool.h
     src/ui/MainWindow.h

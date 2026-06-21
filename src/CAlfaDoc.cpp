@@ -11,6 +11,7 @@
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
+#include <BRepBuilderAPI_MakeShape.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepFilletAPI_MakeChamfer.hxx>
@@ -25,6 +26,7 @@
 #include <GeomAbs_CurveType.hxx>
 #include <TColgp_Array1OfPnt.hxx>
 #include <gp_Dir.hxx>
+#include <gp_Ax1.hxx>
 #include <gp_Lin.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
@@ -38,13 +40,16 @@
 #include <TopoDS_Wire.hxx>
 #include <TopoDS.hxx>
 #include <TopTools_ListOfShape.hxx>
+#include <TopTools_ListIteratorOfListOfShape.hxx>
 #include <TopTools_MapOfShape.hxx>
 
 #include <algorithm>
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -69,15 +74,95 @@ bool rebuild_solid_from_shape(CAlfaDoc::ObjectList& objects, size_t solid_index,
 
     TopoDS_Shape shape_copy = result_shape;
     auto result = std::make_unique<CSolid>(shape_copy);
+    result->m_id = source_solid->m_id;
     result->SetName(source_solid->GetName());
     result->SetMaterial(source_solid->GetMaterial());
     result->SetMaterialId(source_solid->GetMaterialId());
+    result->SetGroupName(source_solid->GetGroupName());
+    result->SetVisible(source_solid->IsVisible());
+    if (source_solid->GetNumOperations() > 0) {
+        result->CopyOperationTreeFrom(*source_solid);
+    }
     result->InitSurfaces();
     result->InitEdges();
     result->BuldMesh(0.1f);
 
     objects[solid_index] = std::move(result);
     return true;
+}
+
+std::vector<int> generated_face_indices(BRepBuilderAPI_MakeShape& builder,
+                                        const std::vector<TopoDS_Edge>& source_edges,
+                                        const TopoDS_Shape& result_shape)
+{
+    std::vector<TopoDS_Face> generated_faces;
+    for (const TopoDS_Edge& edge : source_edges) {
+        const TopTools_ListOfShape& generated = builder.Generated(edge);
+        for (TopTools_ListIteratorOfListOfShape it(generated); it.More(); it.Next()) {
+            if (it.Value().ShapeType() == TopAbs_FACE) {
+                generated_faces.push_back(TopoDS::Face(it.Value()));
+            }
+        }
+    }
+
+    std::vector<int> indices;
+    int index = 0;
+    for (TopExp_Explorer explorer(result_shape, TopAbs_FACE); explorer.More(); explorer.Next(), ++index) {
+        const TopoDS_Face face = TopoDS::Face(explorer.Current());
+        if (std::any_of(generated_faces.begin(), generated_faces.end(), [&face](const TopoDS_Face& generated) {
+                return face.IsSame(generated);
+            })) {
+            indices.push_back(index);
+        }
+    }
+    return indices;
+}
+
+bool build_boolean_shape(BooleanOperation operation, const TopoDS_Shape& body, const TopoDS_Shape& tool, TopoDS_Shape& result)
+{
+    if (body.IsNull() || tool.IsNull()) {
+        return false;
+    }
+
+    try {
+        if (operation == BooleanOperation::Union) {
+            BRepAlgoAPI_Fuse algo(body, tool);
+            algo.Build();
+            if (!algo.IsDone()) {
+                return false;
+            }
+            result = algo.Shape();
+        } else if (operation == BooleanOperation::Cut) {
+            BRepAlgoAPI_Cut algo(body, tool);
+            algo.Build();
+            if (!algo.IsDone()) {
+                return false;
+            }
+            result = algo.Shape();
+        } else {
+            BRepAlgoAPI_Common algo(body, tool);
+            algo.Build();
+            if (!algo.IsDone()) {
+                return false;
+            }
+            result = algo.Shape();
+        }
+    } catch (const Standard_Failure&) {
+        return false;
+    }
+
+    return !result.IsNull();
+}
+
+const char* boolean_operation_name(BooleanOperation operation)
+{
+    if (operation == BooleanOperation::Union) {
+        return "Boolean Union";
+    }
+    if (operation == BooleanOperation::Cut) {
+        return "Boolean Cut";
+    }
+    return "Boolean Common";
 }
 
 TopoDS_Shape make_extrude_prism(const TopoDS_Face& face, Vec3 normal, float distance, double taper_angle_degrees)
@@ -150,10 +235,17 @@ TopoDS_Shape make_draft_face_shape(const TopoDS_Shape& base_shape,
         return base_shape;
     }
 
+    const Vec3 unit_draft = normalize(draft_direction);
+    if (dot(unit_draft, unit_draft) <= 0.000001f) {
+        return {};
+    }
+
     try {
-        const double angle = angle_degrees * 3.14159265358979323846 / 180.0;
         BRepOffsetAPI_DraftAngle draft(base_shape);
-        draft.Add(face, gp_Dir(draft_direction.x, draft_direction.y, draft_direction.z), angle, neutral_plane);
+        draft.Add(face,
+                  gp_Dir(unit_draft.x, unit_draft.y, unit_draft.z),
+                  angle_degrees * 3.14159265358979323846 / 180.0,
+                  neutral_plane);
         if (!draft.AddDone()) {
             return {};
         }
@@ -165,6 +257,40 @@ TopoDS_Shape make_draft_face_shape(const TopoDS_Shape& base_shape,
     } catch (const Standard_Failure&) {
         return {};
     }
+}
+
+double parameter_value(const std::vector<ParametricParameterValue>& parameters,
+                       const char* id,
+                       double fallback)
+{
+    for (const ParametricParameterValue& parameter : parameters) {
+        if (parameter.id == id) {
+            return parameter.value;
+        }
+    }
+    return fallback;
+}
+
+bool has_non_uniform_scale_operation(const CSolid& solid)
+{
+    for (const ParametricFunction* operation : solid.GetOperationTree()) {
+        if (!operation || operation->ToolId != "SolidTransform" || operation->Name != "Scale") {
+            continue;
+        }
+        const double type = parameter_value(operation->Parameters, "type", -1.0);
+        if (std::fabs(type - 2.0) > 0.001) {
+            continue;
+        }
+        const Vec3 axis{
+            static_cast<float>(parameter_value(operation->Parameters, "axis.x", 0.0)),
+            static_cast<float>(parameter_value(operation->Parameters, "axis.y", 0.0)),
+            static_cast<float>(parameter_value(operation->Parameters, "axis.z", 0.0))
+        };
+        if (dot(axis, axis) > 0.000001f) {
+            return true;
+        }
+    }
+    return false;
 }
 
 int count_faces(const TopoDS_Shape& shape)
@@ -365,9 +491,9 @@ bool is_polyline_on_xy_plane(const std::vector<CPoint3d>& points, double toleran
         return true;
     }
 
-    const double plane_height = points.front().y;
+    const double plane_height = points.front().z;
     for (const CPoint3d& point : points) {
-        if (std::fabs(point.y - plane_height) > tolerance) {
+        if (std::fabs(point.z - plane_height) > tolerance) {
             return false;
         }
     }
@@ -426,7 +552,7 @@ bool build_revolve_profile_from_polyline(const CPolyline& polyline, int axis_ind
         return false;
     }
 
-    axis_origin = {0.0f, static_cast<float>(points.front().y), 0.0f};
+    axis_origin = {0.0f, 0.0f, static_cast<float>(points.front().z)};
 
     if (polyline.IsClosed()) {
         BRepBuilderAPI_MakePolygon polygon;
@@ -479,9 +605,9 @@ Vec3 revolve_axis_direction(int axis_index)
         return {1.0f, 0.0f, 0.0f};
     }
     if (axis_index == 1) {
-        return {0.0f, 0.0f, 1.0f};
+        return {0.0f, 1.0f, 0.0f};
     }
-    return {0.0f, 1.0f, 0.0f};
+    return {0.0f, 0.0f, 1.0f};
 }
 
 TopoDS_Shape make_polyline_revolve_shape(const TopoDS_Shape& profile_shape,
@@ -665,11 +791,17 @@ struct CAlfaDoc::LiveExtrudeData {
     double taper_angle_degrees = 0.0;
     size_t object_index = 0;
     int face_index = -1;
+    float distance = 0.0f;
+    std::vector<int> created_surface_indices;
 };
 
 struct CAlfaDoc::LivePolylineExtrudeData {
     TopoDS_Face profile_face;
     Vec3 normal{};
+    unsigned long profile_id = 0;
+    double distance = 1.0;
+    bool reverse = false;
+    double taper_angle_degrees = 0.0;
     size_t polyline_index = 0;
     size_t solid_index = 0;
     bool has_solid = false;
@@ -678,6 +810,9 @@ struct CAlfaDoc::LivePolylineExtrudeData {
 struct CAlfaDoc::LivePolylineRevolveData {
     TopoDS_Shape profile_shape;
     Vec3 axis_origin{};
+    unsigned long profile_id = 0;
+    double angle_degrees = 360.0;
+    int axis_index = 2;
     size_t polyline_index = 0;
     size_t solid_index = 0;
     bool has_solid = false;
@@ -686,12 +821,16 @@ struct CAlfaDoc::LivePolylineRevolveData {
 struct CAlfaDoc::LiveFilletData {
     TopoDS_Shape base_shape;
     std::vector<TopoDS_Edge> edges;
+    std::vector<std::pair<int, int>> edge_refs;
+    std::vector<int> created_surface_indices;
     size_t object_index = 0;
 };
 
 struct CAlfaDoc::LiveChamferData {
     TopoDS_Shape base_shape;
     std::vector<TopoDS_Edge> edges;
+    std::vector<std::pair<int, int>> edge_refs;
+    std::vector<int> created_surface_indices;
     size_t object_index = 0;
 };
 
@@ -705,6 +844,9 @@ struct CAlfaDoc::DraftFaceData {
     Vec3 axis_dir{};
     size_t object_index = 0;
     int face_index = -1;
+    int axis_edge_index = -1;
+    double angle_degrees = 0.0;
+    std::vector<int> created_surface_indices;
     bool has_axis = false;
     bool live_active = false;
 };
@@ -716,6 +858,7 @@ struct CAlfaDoc::LiveThickSolidData {
     double thickness = 0.0;
     int base_face_count = 0;
     bool rebuild_on_update = false;
+    std::vector<int> created_surface_indices;
 };
 
 CAlfaDoc::~CAlfaDoc() = default;
@@ -723,6 +866,7 @@ CAlfaDoc::~CAlfaDoc() = default;
 void CAlfaDoc::Clear() {
     objects_.clear();
     ResetDefaultMaterials();
+    next_object_id_ = 1;
     active_object_index_ = 0;
     ClearSelection();
     EnsureActivePolyline();
@@ -736,6 +880,7 @@ void CAlfaDoc::CreatePolyline() {
     const size_t next_number = objects_.size() + 1;
     auto polyline = std::make_unique<CPolyline>("Curve " + std::to_string(next_number));
     polyline->SetColor({0.98f, 0.77f, 0.30f});
+    EnsureObjectId(*polyline);
     AssignDefaultMaterial(*polyline);
     objects_.push_back(std::move(polyline));
     active_object_index_ = objects_.size() - 1;
@@ -746,6 +891,7 @@ void CAlfaDoc::CreateBSpline() {
     const size_t next_number = objects_.size() + 1;
     auto spline = std::make_unique<CBSpline>("B-Spline " + std::to_string(next_number));
     spline->SetColor({1.0f, 0.08f, 0.10f});
+    EnsureObjectId(*spline);
     AssignDefaultMaterial(*spline);
     objects_.push_back(std::move(spline));
     active_object_index_ = objects_.size() - 1;
@@ -793,6 +939,7 @@ void CAlfaDoc::CreateSketchRectangle(const std::vector<CPoint3d>& points, const 
     const Vec3 p1 = to_vec3(points[1]);
     const Vec3 p2 = to_vec3(points[2]);
     polyline->SetLockedPlane(p0, cross(p1 - p0, p2 - p0));
+    EnsureObjectId(*polyline);
     AssignDefaultMaterial(*polyline);
     objects_.push_back(std::move(polyline));
     active_object_index_ = objects_.size() - 1;
@@ -841,6 +988,7 @@ bool CAlfaDoc::CreateMeshFromSelectedPolyline(CVector3d dir, float dist) {
         return false;
     }
 
+    EnsureObjectId(*mesh);
     objects_.push_back(std::move(mesh));
     selected_object_index_ = objects_.size() - 1;
     selected_object_indices_ = {selected_object_index_};
@@ -854,6 +1002,7 @@ bool CAlfaDoc::BeginLiveExtrudeSelectedPolyline(double distance, bool reverse, d
     if (!polyline) {
         return false;
     }
+    EnsureObjectId(*polyline);
 
     TopoDS_Face profile_face;
     Vec3 normal{};
@@ -864,6 +1013,7 @@ bool CAlfaDoc::BeginLiveExtrudeSelectedPolyline(double distance, bool reverse, d
     live_polyline_extrude_ = std::make_unique<LivePolylineExtrudeData>();
     live_polyline_extrude_->profile_face = profile_face;
     live_polyline_extrude_->normal = normal;
+    live_polyline_extrude_->profile_id = polyline->m_id;
     live_polyline_extrude_->polyline_index = selected_object_index_;
     live_polyline_extrude_->solid_index = objects_.size();
     live_polyline_extrude_->has_solid = false;
@@ -896,6 +1046,9 @@ bool CAlfaDoc::UpdateLiveExtrudeSelectedPolyline(double distance, bool reverse, 
     }
 
     const double signed_distance = reverse ? -distance : distance;
+    live_polyline_extrude_->distance = distance;
+    live_polyline_extrude_->reverse = reverse;
+    live_polyline_extrude_->taper_angle_degrees = taper_angle_degrees;
     try {
         TopoDS_Shape shape = make_polyline_extrude_shape(live_polyline_extrude_->profile_face,
                                                          live_polyline_extrude_->normal,
@@ -908,6 +1061,10 @@ bool CAlfaDoc::UpdateLiveExtrudeSelectedPolyline(double distance, bool reverse, 
         auto solid = std::make_unique<CSolid>(shape);
         solid->SetName("Extrude Solid");
         solid->SetColor({0.64f, 0.70f, 0.58f});
+        if (live_polyline_extrude_->has_solid && live_polyline_extrude_->solid_index < objects_.size() && objects_[live_polyline_extrude_->solid_index]) {
+            solid->m_id = objects_[live_polyline_extrude_->solid_index]->m_id;
+        }
+        EnsureObjectId(*solid);
         AssignDefaultMaterial(*solid);
         solid->InitSurfaces();
         solid->InitEdges();
@@ -940,8 +1097,23 @@ bool CAlfaDoc::FinishLiveExtrudeSelectedPolyline() {
     }
 
     const size_t solid_index = live_polyline_extrude_->solid_index;
+    const unsigned long profile_id = live_polyline_extrude_->profile_id;
+    const double distance = live_polyline_extrude_->distance;
+    const bool reverse = live_polyline_extrude_->reverse;
+    const double taper_angle_degrees = live_polyline_extrude_->taper_angle_degrees;
     live_polyline_extrude_.reset();
     if (solid_index < objects_.size()) {
+        if (auto* solid = dynamic_cast<CSolid*>(objects_[solid_index].get())) {
+            solid->SetParametricOperation(0,
+                                          "SolidExtrudeTool",
+                                          "Extrude",
+                                          {
+                                              {"distance", distance},
+                                              {"reverse", reverse ? 1.0 : 0.0},
+                                              {"taper", taper_angle_degrees},
+                                              {"profile.id", static_cast<double>(profile_id)}
+                                          });
+        }
         selected_object_index_ = solid_index;
         active_object_index_ = solid_index;
         selected_object_indices_ = {solid_index};
@@ -976,8 +1148,10 @@ bool CAlfaDoc::BeginLiveRevolveSelectedPolyline(double angle_degrees, int axis_i
     if (!polyline) {
         return false;
     }
+    EnsureObjectId(*polyline);
 
     live_polyline_revolve_ = std::make_unique<LivePolylineRevolveData>();
+    live_polyline_revolve_->profile_id = polyline->m_id;
     live_polyline_revolve_->polyline_index = selected_object_index_;
     live_polyline_revolve_->solid_index = objects_.size();
     live_polyline_revolve_->has_solid = false;
@@ -1014,6 +1188,8 @@ bool CAlfaDoc::UpdateLiveRevolveSelectedPolyline(double angle_degrees, int axis_
         return false;
     }
 
+    live_polyline_revolve_->angle_degrees = angle_degrees;
+    live_polyline_revolve_->axis_index = std::clamp(axis_index, 0, 2);
     try {
         if (live_polyline_revolve_->polyline_index >= objects_.size()) {
             return false;
@@ -1044,6 +1220,12 @@ bool CAlfaDoc::UpdateLiveRevolveSelectedPolyline(double angle_degrees, int axis_
         auto solid = std::make_unique<CSolid>(shape);
         solid->SetName("Revolve Solid");
         solid->SetColor({0.64f, 0.70f, 0.58f});
+        if (live_polyline_revolve_->has_solid
+            && live_polyline_revolve_->solid_index < objects_.size()
+            && objects_[live_polyline_revolve_->solid_index]) {
+            solid->m_id = objects_[live_polyline_revolve_->solid_index]->m_id;
+        }
+        EnsureObjectId(*solid);
         AssignDefaultMaterial(*solid);
         solid->InitSurfaces();
         solid->InitEdges();
@@ -1076,8 +1258,21 @@ bool CAlfaDoc::FinishLiveRevolveSelectedPolyline() {
     }
 
     const size_t solid_index = live_polyline_revolve_->solid_index;
+    const unsigned long profile_id = live_polyline_revolve_->profile_id;
+    const double angle_degrees = live_polyline_revolve_->angle_degrees;
+    const int axis_index = live_polyline_revolve_->axis_index;
     live_polyline_revolve_.reset();
     if (solid_index < objects_.size()) {
+        if (auto* solid = dynamic_cast<CSolid*>(objects_[solid_index].get())) {
+            solid->SetParametricOperation(0,
+                                          "SurfaceOfRevolution",
+                                          "Revolve",
+                                          {
+                                              {"angle", angle_degrees},
+                                              {"axis", static_cast<double>(axis_index)},
+                                              {"profile.id", static_cast<double>(profile_id)}
+                                          });
+        }
         selected_object_index_ = solid_index;
         active_object_index_ = solid_index;
         selected_object_indices_ = {solid_index};
@@ -1459,6 +1654,67 @@ bool CAlfaDoc::HasSelectedSolidFace() const {
     return solid && solid->HasSelectedFace();
 }
 
+bool CAlfaDoc::SelectEdgesOfSelectedFaces() {
+    if (!HasSelectedSolidFace()) {
+        return false;
+    }
+
+    const size_t solid_index = selected_face_object_index_;
+    auto* solid = dynamic_cast<CSolid*>(objects_[solid_index].get());
+    if (!solid) {
+        return false;
+    }
+
+    const std::vector<int> face_indices = solid->GetSelectedFaceIndices();
+    TopTools_MapOfShape selected_topology;
+    solid->ClearSelectedEdge();
+
+    for (int face_index : face_indices) {
+        const CSurfaceFace* surface = solid->GetSurfaceFace(face_index);
+        if (!surface) {
+            continue;
+        }
+        for (int edge_index = 0; edge_index < surface->GetEdgeCount(); ++edge_index) {
+            const TopoDS_Edge* edge = surface->GetTopoEdge(edge_index);
+            if (!edge || edge->IsNull() || !selected_topology.Add(*edge)) {
+                continue;
+            }
+            solid->AddSelectedEdge(face_index, edge_index);
+        }
+    }
+
+    solid->ClearSelectedFace();
+    selected_solid_face_indices_.clear();
+    has_selected_solid_face_ = false;
+    selected_face_object_index_ = 0;
+
+    if (!solid->HasSelectedEdge()) {
+        ClearSelection();
+        return false;
+    }
+
+    selected_object_index_ = solid_index;
+    active_object_index_ = solid_index;
+    selected_object_indices_ = {solid_index};
+    has_selected_object_ = true;
+    ClearPointSelection();
+    return true;
+}
+
+CSolid* CAlfaDoc::GetSelectedFaceSolid() {
+    if (!HasSelectedSolidFace()) {
+        return nullptr;
+    }
+    return dynamic_cast<CSolid*>(objects_[selected_face_object_index_].get());
+}
+
+const CSolid* CAlfaDoc::GetSelectedFaceSolid() const {
+    if (!HasSelectedSolidFace()) {
+        return nullptr;
+    }
+    return dynamic_cast<const CSolid*>(objects_[selected_face_object_index_].get());
+}
+
 bool CAlfaDoc::GetSelectedSolidFaceCenterAndNormal(Vec3& center, Vec3& normal) const {
     if (!has_selected_solid_face_ || selected_face_object_index_ >= objects_.size()) {
         return false;
@@ -1570,6 +1826,8 @@ bool CAlfaDoc::UpdateLiveExtrudeSelectedSolidFace(float distance) {
     solid->InitSurfaces();
     solid->InitEdges();
     solid->BuldMesh(0.1f);
+    live_extrude_->distance = distance;
+    live_extrude_->created_surface_indices = solid->FindCreatedSurfaceIndices(live_extrude_->base_shape);
     active_object_index_ = live_extrude_->object_index;
     selected_face_object_index_ = 0;
     has_selected_solid_face_ = false;
@@ -1577,6 +1835,21 @@ bool CAlfaDoc::UpdateLiveExtrudeSelectedSolidFace(float distance) {
 }
 
 void CAlfaDoc::FinishLiveExtrudeSelectedSolidFace() {
+    if (live_extrude_ && live_extrude_->object_index < objects_.size()
+        && std::fabs(live_extrude_->distance) > 0.0001f) {
+        if (auto* solid = dynamic_cast<CSolid*>(objects_[live_extrude_->object_index].get())) {
+            solid->SetParametricOperation(
+                solid->GetOperationTree().size(),
+                "SolidExtrudeFace",
+                "Extrude Face",
+                {
+                    {"distance", live_extrude_->distance},
+                    {"taper", live_extrude_->taper_angle_degrees},
+                    {"face.index", static_cast<double>(live_extrude_->face_index)}
+                },
+                live_extrude_->created_surface_indices);
+        }
+    }
     live_extrude_.reset();
     ClearSelection();
 }
@@ -1664,6 +1937,9 @@ bool CAlfaDoc::BeginDraftFaceFromSelectedFace() {
     if (!solid || !solid->HasSelectedFace() || solid->m_Shape.IsNull()) {
         return false;
     }
+    if (has_non_uniform_scale_operation(*solid)) {
+        return false;
+    }
 
     const int face_index = solid->GetSelectedFaceIndex();
     TopoDS_Face face = solid->GetTopoFace(face_index);
@@ -1715,49 +1991,59 @@ bool CAlfaDoc::SelectDraftFaceAxisEdgeAtScreen(DomPoint point,
         return false;
     }
 
-    int surface_index = -1;
+    int surface_index = draft_face_->face_index;
     int edge_index = -1;
-    if (!solid->HitTestEdgeScreen(point, world_to_screen, tolerance, surface_index, edge_index)) {
-        return false;
-    }
-
     CSurfaceFace* surface = solid->GetSurfaceFace(surface_index);
-    const TopoDS_Edge* edge = surface ? surface->GetTopoEdge(edge_index) : nullptr;
-    if (!edge || edge->IsNull()) {
+    if (!surface || !surface->HitTestEdgeScreen(point, world_to_screen, tolerance, edge_index)) {
         return false;
     }
 
-    bool edge_belongs_to_face = false;
-    for (TopExp_Explorer explorer(draft_face_->face, TopAbs_EDGE); explorer.More(); explorer.Next()) {
-        if (explorer.Current().IsSame(*edge)) {
-            edge_belongs_to_face = true;
-            break;
-        }
-    }
-    if (!edge_belongs_to_face) {
-        return false;
-    }
+    const TopoDS_Edge* edge = surface->GetTopoEdge(edge_index);
 
     try {
-        BRepAdaptor_Curve curve(*edge);
-        if (curve.GetType() != GeomAbs_Line) {
-            return false;
+        Vec3 edge_start{};
+        Vec3 edge_end{};
+        if (edge && !edge->IsNull()) {
+            BRepAdaptor_Curve curve(*edge);
+            const Standard_Real first = curve.FirstParameter();
+            const Standard_Real last = curve.LastParameter();
+            if (last <= first) {
+                return false;
+            }
+
+            const gp_Pnt p0 = curve.Value(first);
+            const gp_Pnt p1 = curve.Value(last);
+            edge_start = {static_cast<float>(p0.X()), static_cast<float>(p0.Y()), static_cast<float>(p0.Z())};
+            edge_end = {static_cast<float>(p1.X()), static_cast<float>(p1.Y()), static_cast<float>(p1.Z())};
+            const Vec3 chord = edge_end - edge_start;
+            const float chord_length = std::sqrt(dot(chord, chord));
+            if (chord_length <= 0.000001f) {
+                return false;
+            }
+            const Vec3 chord_dir = chord * (1.0f / chord_length);
+            const float tolerance_3d = std::max(0.001f, chord_length * 0.001f);
+            for (int sample = 1; sample < 6; ++sample) {
+                const Standard_Real t = first + (last - first) * static_cast<Standard_Real>(sample) / 6.0;
+                const gp_Pnt p = curve.Value(t);
+                const Vec3 sample_point{static_cast<float>(p.X()), static_cast<float>(p.Y()), static_cast<float>(p.Z())};
+                const Vec3 from_start = sample_point - edge_start;
+                const Vec3 closest = edge_start + chord_dir * dot(from_start, chord_dir);
+                if (std::sqrt(dot(sample_point - closest, sample_point - closest)) > tolerance_3d) {
+                    return false;
+                }
+            }
+        } else {
+            if (!surface->GetEdgeEndpoints(edge_index, edge_start, edge_end)) {
+                return false;
+            }
         }
 
-        const Standard_Real first = curve.FirstParameter();
-        const Standard_Real last = curve.LastParameter();
-        if (last <= first) {
-            return false;
-        }
-
-        const gp_Pnt p0 = curve.Value(first);
-        const gp_Pnt p1 = curve.Value(last);
-        Vec3 axis_point{static_cast<float>((p0.X() + p1.X()) * 0.5),
-                        static_cast<float>((p0.Y() + p1.Y()) * 0.5),
-                        static_cast<float>((p0.Z() + p1.Z()) * 0.5)};
-        Vec3 axis_dir{static_cast<float>(p1.X() - p0.X()),
-                      static_cast<float>(p1.Y() - p0.Y()),
-                      static_cast<float>(p1.Z() - p0.Z())};
+        Vec3 axis_point{(edge_start.x + edge_end.x) * 0.5f,
+                        (edge_start.y + edge_end.y) * 0.5f,
+                        (edge_start.z + edge_end.z) * 0.5f};
+        Vec3 axis_dir{edge_end.x - edge_start.x,
+                      edge_end.y - edge_start.y,
+                      edge_end.z - edge_start.z};
         axis_dir = normalize(axis_dir);
         if (dot(axis_dir, axis_dir) <= 0.000001f) {
             return false;
@@ -1771,6 +2057,7 @@ bool CAlfaDoc::SelectDraftFaceAxisEdgeAtScreen(DomPoint point,
 
         draft_face_->axis_point = axis_point;
         draft_face_->axis_dir = axis_dir;
+        draft_face_->axis_edge_index = edge_index;
         draft_face_->draft_direction = plane_normal;
         draft_face_->neutral_plane = gp_Pln(gp_Pnt(axis_point.x, axis_point.y, axis_point.z),
                                             gp_Dir(plane_normal.x, plane_normal.y, plane_normal.z));
@@ -1826,11 +2113,30 @@ bool CAlfaDoc::UpdateLiveDraftFace(double angle_degrees) {
     solid->InitSurfaces();
     solid->InitEdges();
     solid->BuldMesh(0.1f);
+    draft_face_->angle_degrees = angle_degrees;
+    draft_face_->created_surface_indices = solid->FindCreatedSurfaceIndices(draft_face_->base_shape);
     active_object_index_ = draft_face_->object_index;
     return true;
 }
 
 void CAlfaDoc::FinishLiveDraftFace() {
+    if (draft_face_ && draft_face_->object_index < objects_.size()
+        && draft_face_->face_index >= 0
+        && draft_face_->axis_edge_index >= 0
+        && std::fabs(draft_face_->angle_degrees) > 0.0001) {
+        if (auto* solid = dynamic_cast<CSolid*>(objects_[draft_face_->object_index].get())) {
+            solid->SetParametricOperation(
+                solid->GetOperationTree().size(),
+                "SolidDraft",
+                "Draft Face",
+                {
+                    {"angle", draft_face_->angle_degrees},
+                    {"face.index", static_cast<double>(draft_face_->face_index)},
+                    {"axis.edge", static_cast<double>(draft_face_->axis_edge_index)}
+                },
+                draft_face_->created_surface_indices);
+        }
+    }
     draft_face_.reset();
     ClearSelection();
 }
@@ -1972,6 +2278,10 @@ bool CAlfaDoc::UpdateLiveThickSolid(double thickness) {
         || !rebuild_solid_from_shape(objects_, live_thick_solid_->object_index, solid, result_shape)) {
         return false;
     }
+    if (auto* rebuilt = dynamic_cast<CSolid*>(objects_[live_thick_solid_->object_index].get())) {
+        live_thick_solid_->created_surface_indices =
+            rebuilt->FindCreatedSurfaceIndices(live_thick_solid_->base_shape);
+    }
 
     return true;
 }
@@ -2000,6 +2310,28 @@ bool CAlfaDoc::FinishLiveThickSolid() {
             || !rebuild_solid_from_shape(objects_, live_thick_solid_->object_index, solid, result_shape)) {
             return false;
         }
+        if (auto* rebuilt = dynamic_cast<CSolid*>(objects_[live_thick_solid_->object_index].get())) {
+            live_thick_solid_->created_surface_indices =
+                rebuilt->FindCreatedSurfaceIndices(live_thick_solid_->base_shape);
+        }
+    }
+
+    if (auto* solid = dynamic_cast<CSolid*>(objects_[live_thick_solid_->object_index].get())) {
+        std::vector<ParametricParameterValue> parameters{
+            {"thick", live_thick_solid_->thickness},
+            {"face.count", static_cast<double>(live_thick_solid_->face_indices.size())}
+        };
+        for (size_t i = 0; i < live_thick_solid_->face_indices.size(); ++i) {
+            parameters.push_back({
+                "face." + std::to_string(i) + ".index",
+                static_cast<double>(live_thick_solid_->face_indices[i])
+            });
+        }
+        solid->SetParametricOperation(solid->GetOperationTree().size(),
+                                      "ThickSolidTool",
+                                      "Thick Solid",
+                                      std::move(parameters),
+                                      live_thick_solid_->created_surface_indices);
     }
 
     selected_object_index_ = live_thick_solid_->object_index;
@@ -2418,6 +2750,36 @@ bool CAlfaDoc::HasSelection() const {
     return has_selected_object_ && !selected_object_indices_.empty() && selected_object_index_ < objects_.size();
 }
 
+bool CAlfaDoc::ExpandSelectedGroups() {
+    if (!HasSelection()) {
+        return false;
+    }
+
+    std::set<std::string> selected_groups;
+    for (size_t index : selected_object_indices_) {
+        if (index < objects_.size() && objects_[index] && !objects_[index]->GetGroupName().empty()) {
+            selected_groups.insert(objects_[index]->GetGroupName());
+        }
+    }
+
+    if (selected_groups.empty()) {
+        return false;
+    }
+
+    bool expanded = false;
+    for (size_t index = 0; index < objects_.size(); ++index) {
+        if (!objects_[index]
+            || selected_groups.find(objects_[index]->GetGroupName()) == selected_groups.end()
+            || std::find(selected_object_indices_.begin(), selected_object_indices_.end(), index)
+                != selected_object_indices_.end()) {
+            continue;
+        }
+        selected_object_indices_.push_back(index);
+        expanded = true;
+    }
+    return expanded;
+}
+
 bool CAlfaDoc::HasSelectedPoint() const {
     const CPolyline* polyline = GetSelectedPolyline();
     if (has_selected_point_ && polyline && selected_point_index_ < polyline->GetPointCount()) {
@@ -2441,7 +2803,14 @@ size_t CAlfaDoc::GetSelectedPointIndex() const {
 }
 
 bool CAlfaDoc::IsObjectSelected(size_t index) const {
+    if (index == hidden_selection_highlight_index_) {
+        return false;
+    }
     return std::find(selected_object_indices_.begin(), selected_object_indices_.end(), index) != selected_object_indices_.end();
+}
+
+void CAlfaDoc::SetObjectSelectionHighlightHidden(size_t index, bool hidden) {
+    hidden_selection_highlight_index_ = hidden ? index : static_cast<size_t>(-1);
 }
 
 size_t CAlfaDoc::GetSelectedObjectCount() const {
@@ -2500,11 +2869,69 @@ const CSolid* CAlfaDoc::GetSelectedSolid() const {
     return dynamic_cast<const CSolid*>(GetSelectedObject());
 }
 
+CAlfaObject* CAlfaDoc::FindObjectById(unsigned long id) {
+    if (id == 0) {
+        return nullptr;
+    }
+    for (const ObjectPtr& object : objects_) {
+        if (object && object->m_id == id) {
+            return object.get();
+        }
+    }
+    return nullptr;
+}
+
+const CAlfaObject* CAlfaDoc::FindObjectById(unsigned long id) const {
+    if (id == 0) {
+        return nullptr;
+    }
+    for (const ObjectPtr& object : objects_) {
+        if (object && object->m_id == id) {
+            return object.get();
+        }
+    }
+    return nullptr;
+}
+
+size_t CAlfaDoc::FindObjectIndexById(unsigned long id) const {
+    if (id == 0) {
+        return objects_.size();
+    }
+    for (size_t i = 0; i < objects_.size(); ++i) {
+        if (objects_[i] && objects_[i]->m_id == id) {
+            return i;
+        }
+    }
+    return objects_.size();
+}
+
+void CAlfaDoc::EnsureObjectId(CAlfaObject& object) {
+    const CAlfaObject* existing = FindObjectById(object.m_id);
+    if (object.m_id == 0 || (existing != nullptr && existing != &object)) {
+        while (FindObjectById(next_object_id_) != nullptr) {
+            ++next_object_id_;
+        }
+        object.m_id = next_object_id_++;
+        return;
+    }
+    next_object_id_ = std::max(next_object_id_, object.m_id + 1);
+}
+
+void CAlfaDoc::EnsureObjectIds() {
+    next_object_id_ = 1;
+    for (const ObjectPtr& object : objects_) {
+        if (object) {
+            EnsureObjectId(*object);
+        }
+    }
+}
+
 void CAlfaDoc::AddObject(std::unique_ptr<CAlfaObject> object) {
     if (!object) {
         return;
     }
 
+    EnsureObjectId(*object);
     AssignDefaultMaterial(*object);
     objects_.push_back(std::move(object));
     selected_object_index_ = objects_.size() - 1;
@@ -2518,26 +2945,92 @@ void CAlfaDoc::AddMesh(std::unique_ptr<CMesh3D> mesh) {
 }
 
 bool CAlfaDoc::DuplicateSelectedObject() {
-    const CAlfaObject* selected = GetSelectedObject();
-    if (!selected) {
+    if (!HasSelection()) {
         return false;
     }
 
-    std::unique_ptr<CAlfaObject> copy = selected->Clone();
-    if (!copy) {
+    ExpandSelectedGroups();
+    const std::vector<size_t> source_indices = selected_object_indices_;
+    std::map<std::string, std::string> copied_group_names;
+
+    const auto unique_group_name = [this, &copied_group_names](const std::string& source_name) {
+        const auto existing_copy = copied_group_names.find(source_name);
+        if (existing_copy != copied_group_names.end()) {
+            return existing_copy->second;
+        }
+
+        const std::string base = source_name + " Copy";
+        std::string candidate = base;
+        int suffix = 2;
+        const auto group_exists = [this, &copied_group_names](const std::string& name) {
+            for (const ObjectPtr& object : objects_) {
+                if (object && object->GetGroupName() == name) {
+                    return true;
+                }
+            }
+            for (const auto& entry : copied_group_names) {
+                if (entry.second == name) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        while (group_exists(candidate)) {
+            candidate = base + " " + std::to_string(suffix++);
+        }
+        copied_group_names[source_name] = candidate;
+        return candidate;
+    };
+
+    std::vector<std::unique_ptr<CAlfaObject>> copies;
+    copies.reserve(source_indices.size());
+    for (size_t source_index : source_indices) {
+        if (source_index >= objects_.size() || !objects_[source_index]) {
+            continue;
+        }
+
+        std::unique_ptr<CAlfaObject> copy = objects_[source_index]->Clone();
+        if (!copy) {
+            continue;
+        }
+        if (!copy->GetGroupName().empty()) {
+            copy->SetGroupName(unique_group_name(copy->GetGroupName()));
+        }
+        copy->m_id = 0;
+        EnsureObjectId(*copy);
+        AssignDefaultMaterial(*copy);
+        copies.push_back(std::move(copy));
+    }
+
+    if (copies.empty()) {
         return false;
     }
 
-    const size_t copy_index = objects_.size();
-    AssignDefaultMaterial(*copy);
-    objects_.push_back(std::move(copy));
-    selected_object_index_ = copy_index;
-    active_object_index_ = copy_index;
-    selected_object_indices_ = {copy_index};
+    selected_object_indices_.clear();
+    for (auto& copy : copies) {
+        const size_t copy_index = objects_.size();
+        objects_.push_back(std::move(copy));
+        selected_object_indices_.push_back(copy_index);
+    }
+    selected_object_index_ = selected_object_indices_.back();
+    active_object_index_ = selected_object_index_;
     has_selected_object_ = true;
     ClearPointSelection();
     selected_solid_face_indices_.clear();
     has_selected_solid_face_ = false;
+    return true;
+}
+
+bool CAlfaDoc::MirrorSelectedObjects(Vec3 plane_point, Vec3 plane_normal) {
+    if (dot(plane_normal, plane_normal) <= 0.000001f || !DuplicateSelectedObject()) {
+        return false;
+    }
+
+    for (size_t index : selected_object_indices_) {
+        if (index < objects_.size() && objects_[index]) {
+            objects_[index]->Mirror(plane_point, plane_normal);
+        }
+    }
     return true;
 }
 
@@ -2954,49 +3447,42 @@ bool CAlfaDoc::ApplyBooleanToSolids(size_t body_index, size_t tool_index, Boolea
     }
 
     TopoDS_Shape result_shape;
-    if (operation == BooleanOperation::Union) {
-        BRepAlgoAPI_Fuse algo(body->m_Shape, tool->m_Shape);
-        algo.Build();
-        if (!algo.IsDone()) {
-            return false;
-        }
-        result_shape = algo.Shape();
-    } else if (operation == BooleanOperation::Cut) {
-        BRepAlgoAPI_Cut algo(body->m_Shape, tool->m_Shape);
-        algo.Build();
-        if (!algo.IsDone()) {
-            return false;
-        }
-        result_shape = algo.Shape();
-    } else {
-        BRepAlgoAPI_Common algo(body->m_Shape, tool->m_Shape);
-        algo.Build();
-        if (!algo.IsDone()) {
-            return false;
-        }
-        result_shape = algo.Shape();
-    }
-
-    if (result_shape.IsNull()) {
+    if (!build_boolean_shape(operation, body->m_Shape, tool->m_Shape, result_shape)) {
         return false;
     }
 
     auto result = std::make_unique<CSolid>(result_shape);
-    result->SetName(operation == BooleanOperation::Union ? "Boolean Union" : operation == BooleanOperation::Cut ? "Boolean Cut" : "Boolean Common");
+    result->m_id = body->m_id;
+    result->SetName(boolean_operation_name(operation));
     result->SetColor(body->GetColor());
+    result->SetMaterial(body->GetMaterial());
+    result->SetMaterialId(body->GetMaterialId());
+    result->SetGroupName(body->GetGroupName());
+    result->SetVisible(body->IsVisible());
+    result->CopyOperationTreeFrom(*body);
+    const size_t boolean_tool_index = result->AddBooleanToolCopy(*tool);
+    if (result->GetNumOperations() > 0) {
+        result->SetParametricOperation(result->GetOperationTree().size(),
+                                      "boolean",
+                                      boolean_operation_name(operation),
+                                      {
+                                          {"operation", static_cast<double>(operation == BooleanOperation::Union ? 0 : operation == BooleanOperation::Cut ? 1 : 2)},
+                                          {"tool", static_cast<double>(boolean_tool_index)}
+                                      });
+    }
     result->InitSurfaces();
     result->InitEdges();
     result->BuldMesh(0.1f);
 
-    std::vector<size_t> erase_indices = {body_index, tool_index};
-    std::sort(erase_indices.begin(), erase_indices.end(), std::greater<size_t>());
-    erase_indices.erase(std::unique(erase_indices.begin(), erase_indices.end()), erase_indices.end());
-    for (size_t index : erase_indices) {
-        objects_.erase(objects_.begin() + static_cast<ObjectList::difference_type>(index));
+    objects_[body_index] = std::move(result);
+    objects_.erase(objects_.begin() + static_cast<ObjectList::difference_type>(tool_index));
+
+    size_t result_index = body_index;
+    if (tool_index < body_index) {
+        --result_index;
     }
 
-    objects_.push_back(std::move(result));
-    selected_object_index_ = objects_.size() - 1;
+    selected_object_index_ = result_index;
     selected_object_indices_ = {selected_object_index_};
     active_object_index_ = selected_object_index_;
     has_selected_object_ = true;
@@ -3116,6 +3602,10 @@ bool CAlfaDoc::BeginLiveFilletSelectedEdges(bool all_edges) {
         return false;
     }
 
+    std::vector<std::pair<int, int>> edge_refs;
+    if (!all_edges) {
+        edge_refs = solid->GetSelectedEdgeRefs();
+    }
     std::vector<TopoDS_Edge> edges = all_edges ? solid->GetAllTopoEdges() : solid->GetSelectedTopoEdges();
     edges = unique_edges(edges);
     if (edges.empty()) {
@@ -3125,12 +3615,24 @@ bool CAlfaDoc::BeginLiveFilletSelectedEdges(bool all_edges) {
     live_fillet_ = std::make_unique<LiveFilletData>();
     live_fillet_->base_shape = solid->m_Shape;
     live_fillet_->edges = std::move(edges);
+    live_fillet_->edge_refs = std::move(edge_refs);
     live_fillet_->object_index = solid_index;
     return true;
 }
 
 bool CAlfaDoc::HasLiveFillet() const {
     return live_fillet_ && live_fillet_->object_index < objects_.size();
+}
+
+std::vector<std::pair<int, int>> CAlfaDoc::GetLiveFilletEdgeRefs() const {
+    return live_fillet_ ? live_fillet_->edge_refs : std::vector<std::pair<int, int>>{};
+}
+
+std::vector<int> CAlfaDoc::GetLiveFilletCreatedSurfaceIndices() const {
+    if (!live_fillet_ || live_fillet_->object_index >= objects_.size()) {
+        return {};
+    }
+    return live_fillet_->created_surface_indices;
 }
 
 bool CAlfaDoc::UpdateLiveFillet(double radius) {
@@ -3146,6 +3648,7 @@ bool CAlfaDoc::UpdateLiveFillet(double radius) {
     TopoDS_Shape result_shape;
     if (radius <= 0.0001) {
         result_shape = live_fillet_->base_shape;
+        live_fillet_->created_surface_indices.clear();
     } else {
         try {
             BRepFilletAPI_MakeFillet fillet(live_fillet_->base_shape);
@@ -3157,6 +3660,8 @@ bool CAlfaDoc::UpdateLiveFillet(double radius) {
                 return false;
             }
             result_shape = fillet.Shape();
+            live_fillet_->created_surface_indices =
+                generated_face_indices(fillet, live_fillet_->edges, result_shape);
         } catch (const Standard_Failure&) {
             return false;
         }
@@ -3215,12 +3720,24 @@ bool CAlfaDoc::BeginLiveChamferSelectedEdges() {
     live_chamfer_ = std::make_unique<LiveChamferData>();
     live_chamfer_->base_shape = solid->m_Shape;
     live_chamfer_->edges = std::move(edges);
+    live_chamfer_->edge_refs = solid->GetSelectedEdgeRefs();
     live_chamfer_->object_index = solid_index;
     return true;
 }
 
 bool CAlfaDoc::HasLiveChamfer() const {
     return live_chamfer_ && live_chamfer_->object_index < objects_.size();
+}
+
+std::vector<std::pair<int, int>> CAlfaDoc::GetLiveChamferEdgeRefs() const {
+    return live_chamfer_ ? live_chamfer_->edge_refs : std::vector<std::pair<int, int>>{};
+}
+
+std::vector<int> CAlfaDoc::GetLiveChamferCreatedSurfaceIndices() const {
+    if (!live_chamfer_ || live_chamfer_->object_index >= objects_.size()) {
+        return {};
+    }
+    return live_chamfer_->created_surface_indices;
 }
 
 bool CAlfaDoc::UpdateLiveChamfer(double distance) {
@@ -3236,6 +3753,7 @@ bool CAlfaDoc::UpdateLiveChamfer(double distance) {
     TopoDS_Shape result_shape;
     if (distance <= 0.0001) {
         result_shape = live_chamfer_->base_shape;
+        live_chamfer_->created_surface_indices.clear();
     } else {
         try {
             BRepFilletAPI_MakeChamfer chamfer(live_chamfer_->base_shape);
@@ -3247,6 +3765,8 @@ bool CAlfaDoc::UpdateLiveChamfer(double distance) {
                 return false;
             }
             result_shape = chamfer.Shape();
+            live_chamfer_->created_surface_indices =
+                generated_face_indices(chamfer, live_chamfer_->edges, result_shape);
         } catch (const Standard_Failure&) {
             return false;
         }
@@ -3438,6 +3958,7 @@ void CAlfaDoc::EnsureActivePolyline() {
     if (objects_.empty()) {
         auto polyline = std::make_unique<CPolyline>("Curve 1");
         polyline->SetColor({0.98f, 0.77f, 0.30f});
+        EnsureObjectId(*polyline);
         AssignDefaultMaterial(*polyline);
         objects_.push_back(std::move(polyline));
         active_object_index_ = 0;
@@ -3455,6 +3976,7 @@ void CAlfaDoc::EnsureActivePolyline() {
     if (dynamic_cast<CPolyline*>(objects_[active_object_index_].get()) == nullptr) {
         auto polyline = std::make_unique<CPolyline>("Curve " + std::to_string(objects_.size() + 1));
         polyline->SetColor({0.98f, 0.77f, 0.30f});
+        EnsureObjectId(*polyline);
         AssignDefaultMaterial(*polyline);
         objects_.push_back(std::move(polyline));
         active_object_index_ = objects_.size() - 1;
@@ -3471,6 +3993,7 @@ void CAlfaDoc::EnsureActiveBSpline() {
     if (objects_.empty()) {
         auto spline = std::make_unique<CBSpline>("B-Spline 1");
         spline->SetColor({1.0f, 0.08f, 0.10f});
+        EnsureObjectId(*spline);
         AssignDefaultMaterial(*spline);
         objects_.push_back(std::move(spline));
         active_object_index_ = 0;
@@ -3489,6 +4012,7 @@ void CAlfaDoc::EnsureActiveBSpline() {
     if (dynamic_cast<CBSpline*>(objects_[active_object_index_].get()) == nullptr) {
         auto spline = std::make_unique<CBSpline>("B-Spline " + std::to_string(objects_.size() + 1));
         spline->SetColor({1.0f, 0.08f, 0.10f});
+        EnsureObjectId(*spline);
         AssignDefaultMaterial(*spline);
         objects_.push_back(std::move(spline));
         active_object_index_ = objects_.size() - 1;

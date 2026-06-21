@@ -5,6 +5,7 @@
 #include "ToolRegistry.h"
 
 #include "../ObjIO.h"
+#include "../ThreeDSIO.h"
 #include "../ProjectIO.h"
 #include "../Dom3DProjectSerializer.h"
 #include "../IgesIO.h"
@@ -51,12 +52,17 @@ private:
     void SetSolidDisplayMode(SolidDisplayMode mode);
     void SetMeshDisplayMode(MeshDisplayMode mode);
     void SetMeshWireOpacity(float opacity);
+    void ToggleWireShadedDisplay();
     void SetOrthographicProjection(bool enabled);
     void SetOrbitMode(OrbitMode mode);
     void SetXYPlaneViewEnabled(bool enabled);
     void SetCoordinateAxesVisible(bool visible);
+    void SetFloorGridVisible(bool visible);
     void UpdateProjectionStatus();
     void ShowMaterialEditor(const Material* initial_material = nullptr, const QString& material_file_path = {});
+    void ShowSurfaceTextureEditor();
+    void RequestObjectColor();
+    void EditSelectedObjectColor();
     void SaveMaterialToDocument(const Material& material);
     void ApplyMaterialToSelection(const Material& material);
     void BeginTransformTool(TransformOperation operation);
@@ -64,6 +70,7 @@ private:
     void BeginSketchFillet();
     void ShowSketchPanel();
     void ActivateParametricTool(const std::string& tool_id);
+    void EditSelectedParametricObject();
     bool TryStartLiveEdgeToolFromSelection();
     bool TryStartLivePolylineExtrudeFromSelection();
     bool TryStartLivePolylineRevolveFromSelection();
@@ -84,6 +91,7 @@ private:
     void ImportFile();
     void ExportFile();
     void DuplicateSelectedObject();
+    void MirrorSelectedObject();
     void DeleteSelected();
     void LoadUserSettings();
     void RememberLastDialogDir(const QString& path);
@@ -113,9 +121,12 @@ private:
     QAction* surfaces_edges_action_ = nullptr;
     QAction* mesh_only_action_ = nullptr;
     QAction* surfaces_wire_action_ = nullptr;
+    QAction* solid_wireframe_action_ = nullptr;
     QCheckBox* coordinate_axes_check_box_ = nullptr;
+    QCheckBox* floor_grid_check_box_ = nullptr;
     QCheckBox* xy_plane_view_check_box_ = nullptr;
     QPushButton* mesh_display_button_ = nullptr;
+    QPushButton* edit_texture_button_ = nullptr;
     QMenu* mesh_display_menu_ = nullptr;
     QSlider* mesh_opacity_slider_ = nullptr;
     QLabel* mesh_opacity_value_label_ = nullptr;
@@ -134,9 +145,13 @@ private:
     Dom3DProjectSerializer dom3d_serializer_;
     ProjectIO project_io_;
     ObjIO obj_io_;
+    ThreeDSIO three_ds_io_;
     IgesIO iges_io_;
     StepIO step_io_;
     ToolRegistry tool_registry_;
     ActiveParametricObject active_parametric_object_;
+    bool active_parametric_edit_existing_ = false;
+    bool reopen_solid_editor_after_properties_ = false;
+    bool object_color_pick_pending_ = false;
     std::string project_path_;
 };

@@ -29,6 +29,13 @@ struct Vec3 {
     float z = 0.0f;
 };
 
+struct Quaternion {
+    float w = 1.0f;
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+};
+
 using CVector3d = Vec3;
 
 struct CurvePoint {
@@ -49,8 +56,7 @@ struct Color {
 
 struct Camera {
     Vec3 target{0.0f, 1.2f, 0.0f};
-    float yaw = -35.0f;
-    float pitch = 24.0f;
+    Quaternion orientation{0.924396f, 0.198992f, -0.299310f, 0.064417f};
     float distance = 15.0f;
 };
 
@@ -127,13 +133,15 @@ enum class TransformOperation {
 enum class SolidDisplayMode {
     SurfacesAndEdges,
     MeshOnly,
-    SurfacesAndRaisedMesh
+    SurfacesAndRaisedMesh,
+    Wireframe
 };
 
 enum class MeshDisplayMode {
     SurfaceGray,
     SurfaceColored,
-    Wire
+    Wire,
+    SurfaceMaterial
 };
 
 enum class OrbitMode {
@@ -181,6 +189,51 @@ inline Vec3 normalize(Vec3 value) {
     return value * (1.0f / length);
 }
 
+inline Quaternion normalize_quaternion(Quaternion value) {
+    const float length = std::sqrt(value.w * value.w + value.x * value.x + value.y * value.y + value.z * value.z);
+    if (length <= 0.00001f) {
+        return {};
+    }
+    const float inv_length = 1.0f / length;
+    return {value.w * inv_length, value.x * inv_length, value.y * inv_length, value.z * inv_length};
+}
+
+inline Quaternion operator*(Quaternion a, Quaternion b) {
+    return {
+        a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+        a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+        a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+        a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w
+    };
+}
+
+inline Quaternion quaternion_from_axis_angle(Vec3 axis, float angle) {
+    const Vec3 unit_axis = normalize(axis);
+    const float half_angle = angle * 0.5f;
+    const float s = std::sin(half_angle);
+    return normalize_quaternion({std::cos(half_angle), unit_axis.x * s, unit_axis.y * s, unit_axis.z * s});
+}
+
+inline Vec3 rotate(Quaternion orientation, Vec3 value) {
+    const Quaternion q = normalize_quaternion(orientation);
+    const Vec3 qv{q.x, q.y, q.z};
+    const Vec3 t = cross(qv, value) * 2.0f;
+    return value + t * q.w + cross(qv, t);
+}
+
+inline Quaternion camera_orientation_from_yaw_pitch(float yaw_degrees, float pitch_degrees) {
+    const Quaternion yaw = quaternion_from_axis_angle({0.0f, 1.0f, 0.0f}, deg_to_rad(yaw_degrees));
+    const Quaternion pitch = quaternion_from_axis_angle({1.0f, 0.0f, 0.0f}, deg_to_rad(-pitch_degrees));
+    return normalize_quaternion(yaw * pitch);
+}
+
+inline void orbit_camera(Camera& camera, float yaw_delta_degrees, float pitch_delta_degrees) {
+    const Quaternion yaw_delta = quaternion_from_axis_angle({0.0f, 1.0f, 0.0f}, deg_to_rad(yaw_delta_degrees));
+    const Vec3 right = rotate(camera.orientation, {1.0f, 0.0f, 0.0f});
+    const Quaternion pitch_delta = quaternion_from_axis_angle(right, deg_to_rad(-pitch_delta_degrees));
+    camera.orientation = normalize_quaternion(pitch_delta * yaw_delta * camera.orientation);
+}
+
 inline Vec3 rotate_around_axis(Vec3 value, Vec3 axis, float angle) {
     const Vec3 unit_axis = normalize(axis);
     const float c = std::cos(angle);
@@ -199,13 +252,17 @@ inline Vec3 scale_uniform(Vec3 value, float factor) {
 }
 
 inline Vec3 camera_position(const Camera& camera) {
-    const float yaw = deg_to_rad(camera.yaw);
-    const float pitch = deg_to_rad(camera.pitch);
-    const Vec3 offset{
-        std::cos(pitch) * std::sin(yaw) * camera.distance,
-        std::sin(pitch) * camera.distance,
-        std::cos(pitch) * std::cos(yaw) * camera.distance
-    };
+    const Vec3 forward = rotate(camera.orientation, {0.0f, 0.0f, -1.0f});
+    return camera.target - forward * camera.distance;
+}
 
-    return camera.target + offset;
+inline void camera_basis(const Camera& camera, Vec3& forward, Vec3& right, Vec3& up) {
+    forward = normalize(rotate(camera.orientation, {0.0f, 0.0f, -1.0f}));
+    right = normalize(rotate(camera.orientation, {1.0f, 0.0f, 0.0f}));
+    up = normalize(rotate(camera.orientation, {0.0f, 1.0f, 0.0f}));
+}
+
+inline void camera_basis(const Camera& camera, Vec3& eye, Vec3& forward, Vec3& right, Vec3& up) {
+    eye = camera_position(camera);
+    camera_basis(camera, forward, right, up);
 }

@@ -34,6 +34,7 @@ struct ToolDefinition {
 struct ActiveParametricObject {
     std::string tool_id;
     size_t object_index = 0;
+    size_t operation_index = 0;
     std::vector<ToolParameter> parameters;
 };
 
@@ -45,6 +46,11 @@ public:
     const ToolDefinition* Find(const std::string& id) const;
     ActiveParametricObject Activate(const std::string& id, CAlfaDoc& document) const;
     void Rebuild(const ActiveParametricObject& active_object, CAlfaDoc& document) const;
+    bool ReplayOperations(size_t object_index, CAlfaDoc& document) const;
+    bool ReplayProfileDependents(unsigned long profile_id, CAlfaDoc& document) const;
+    bool ReplayAllProfileDependents(CAlfaDoc& document) const;
+    ActiveParametricObject ActiveObjectFromDocument(size_t object_index, const CAlfaObject& object, size_t operation_index = 0) const;
+    std::string LabelFor(const std::string& id) const;
 
 private:
     std::vector<ToolDefinition> tools_;

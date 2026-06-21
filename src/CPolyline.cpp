@@ -585,3 +585,23 @@ CPoint3d CPolyline::ToPoint3d(CurvePoint point) {
 CurvePoint CPolyline::ToCurvePoint(const CPoint3d& point) {
     return {static_cast<float>(point.x), static_cast<float>(point.z)};
 }
+
+bool CPolyline::CreatePolygone(float Length, int qty)
+{
+    if (qty < 3)
+        return false;
+	points_.resize(qty + 1);
+    float alfa = PI / (float)qty;
+    CPoint3d p;
+    p.x = -Length / 2.0;
+    p.y = -Length / tan(alfa) / 2.0;
+
+    points_[0] = p;
+    CPoint3d p0;
+    CPoint3d pz(0, 0, 100);
+    for (int i = 0; i < qty; i++) {
+        p.Rotate(&p0, &pz, alfa * 2.0);
+        points_[i + 1] = p;
+    }
+    return true;
+}

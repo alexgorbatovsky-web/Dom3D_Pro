@@ -13,6 +13,23 @@
 #include <string>
 #include <utility>
 
+namespace {
+unsigned long pack_color(Color color) {
+    const auto channel = [](float value) {
+        return static_cast<unsigned long>(std::clamp(value, 0.0f, 1.0f) * 255.0f + 0.5f);
+    };
+    return (channel(color.r) << 16) | (channel(color.g) << 8) | channel(color.b);
+}
+
+Color unpack_color(unsigned long color) {
+    return {
+        static_cast<float>((color >> 16) & 0xffUL) / 255.0f,
+        static_cast<float>((color >> 8) & 0xffUL) / 255.0f,
+        static_cast<float>(color & 0xffUL) / 255.0f
+    };
+}
+}
+
 #if defined(_WIN32)
 namespace {
 constexpr int kMaterialOk = 1;
@@ -153,10 +170,12 @@ bool EditMaterialNumbers(HWND parent_window, Material& material) {
 
 CAlfaObject::CAlfaObject()
     : name_("Object") {
+    m_col = pack_color(material_.diffuse);
 }
 
 CAlfaObject::CAlfaObject(std::string name)
     : name_(std::move(name)) {
+    m_col = pack_color(material_.diffuse);
 }
 
 void CAlfaObject::Edit(NativeWindowHandle parent_window) {
@@ -192,6 +211,13 @@ void CAlfaObject::Render3d(bool selected, bool, size_t) const {
     Render3d(selected);
 }
 
+void CAlfaObject::Mirror(Vec3 plane_point, Vec3 plane_normal) {
+    if (dot(plane_normal, plane_normal) <= 0.000001f) {
+        return;
+    }
+    Scale(plane_point, normalize(plane_normal), -1.0f);
+}
+
 std::unique_ptr<CAlfaObject> CAlfaObject::Clone() const {
     return nullptr;
 }
@@ -221,20 +247,24 @@ void CAlfaObject::SetVisible(bool visible) {
 }
 
 Color CAlfaObject::GetColor() const {
-    return material_.diffuse;
+    return unpack_color(m_col);
 }
 
 void CAlfaObject::SetColor(Color color) {
     material_.diffuse = color;
+    m_col = pack_color(color);
 }
 
 Material CAlfaObject::GetMaterial() const {
-    return material_;
+    Material material = material_;
+    material.diffuse = GetColor();
+    return material;
 }
 
 void CAlfaObject::SetMaterial(Material material) {
     material_ = material;
     material_id_ = material.id;
+    m_col = pack_color(material_.diffuse);
 }
 
 unsigned long CAlfaObject::GetMaterialId() const {
@@ -243,4 +273,26 @@ unsigned long CAlfaObject::GetMaterialId() const {
 
 void CAlfaObject::SetMaterialId(unsigned long id) {
     material_id_ = id;
+}
+
+bool CAlfaObject::IsParametric() const {
+    return !parametric_tool_id_.empty();
+}
+
+const std::string& CAlfaObject::GetParametricToolId() const {
+    return parametric_tool_id_;
+}
+
+const std::vector<ParametricParameterValue>& CAlfaObject::GetParametricParameters() const {
+    return parametric_parameters_;
+}
+
+void CAlfaObject::SetParametricDefinition(std::string tool_id, std::vector<ParametricParameterValue> parameters) {
+    parametric_tool_id_ = std::move(tool_id);
+    parametric_parameters_ = std::move(parameters);
+}
+
+void CAlfaObject::ClearParametricDefinition() {
+    parametric_tool_id_.clear();
+    parametric_parameters_.clear();
 }

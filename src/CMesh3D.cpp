@@ -105,6 +105,21 @@ UV projected_uv_for_face(Vec3 vertex, Vec3 face_normal) {
     return {vertex.z, vertex.y};
 }
 
+UV transform_uv(UV uv, const Material& material) {
+    const float scale_u = std::fabs(material.texture_scale_u) <= 0.00001f ? 1.0f : material.texture_scale_u;
+    const float scale_v = std::fabs(material.texture_scale_v) <= 0.00001f ? 1.0f : material.texture_scale_v;
+    const float angle = deg_to_rad(material.texture_rotation_degrees);
+    const float c = std::cos(angle);
+    const float s = std::sin(angle);
+    const float u = uv.u * scale_u;
+    const float v = uv.v * scale_v;
+
+    return {
+        u * c - v * s + material.texture_offset_u,
+        u * s + v * c + material.texture_offset_v
+    };
+}
+
 float clamp01(float value) {
     return std::clamp(value, 0.0f, 1.0f);
 }
@@ -157,7 +172,16 @@ Color wire_color(Color base, MeshDisplayMode mode, bool selected) {
         return selected ? Color{0.045f, 0.050f, 0.052f} : Color{0.075f, 0.083f, 0.087f};
     }
     if (mode == MeshDisplayMode::Wire) {
-        return selected ? Color{0.080f, 0.130f, 0.105f} : Color{0.120f, 0.175f, 0.140f};
+        const float luminance = base.r * 0.30f + base.g * 0.59f + base.b * 0.11f;
+        const float lift = std::max(0.0f, 0.42f - luminance);
+        const Color visible{
+            clamp01(base.r + lift),
+            clamp01(base.g + lift),
+            clamp01(base.b + lift)
+        };
+        return selected
+            ? Color{clamp01(visible.r * 1.18f), clamp01(visible.g * 1.18f), clamp01(visible.b * 1.18f)}
+            : visible;
     }
 
     const float luminance = base.r * 0.30f + base.g * 0.59f + base.b * 0.11f;
@@ -202,11 +226,22 @@ const std::vector<UV>& CMesh3D::GetUVs() const {
     return uvs_;
 }
 
+const std::vector<Vec3>& CMesh3D::GetNormals() const {
+    return normals_;
+}
+
 bool CMesh3D::SetGeometry(std::vector<Vec3> vertices, std::vector<Face> faces) {
-    return SetGeometry(std::move(vertices), std::move(faces), {});
+    return SetGeometry(std::move(vertices), std::move(faces), {}, {});
 }
 
 bool CMesh3D::SetGeometry(std::vector<Vec3> vertices, std::vector<Face> faces, std::vector<UV> uvs) {
+    return SetGeometry(std::move(vertices), std::move(faces), std::move(uvs), {});
+}
+
+bool CMesh3D::SetGeometry(std::vector<Vec3> vertices,
+                          std::vector<Face> faces,
+                          std::vector<UV> uvs,
+                          std::vector<Vec3> normals) {
     if (vertices.empty() || faces.empty()) {
         return false;
     }
@@ -220,8 +255,16 @@ bool CMesh3D::SetGeometry(std::vector<Vec3> vertices, std::vector<Face> faces, s
     vertices_ = std::move(vertices);
     faces_ = std::move(faces);
     uvs_ = std::move(uvs);
+    normals_ = std::move(normals);
     if (uvs_.size() != vertices_.size()) {
         GeneratePlanarUVs();
+    }
+    if (normals_.size() != vertices_.size()) {
+        normals_.clear();
+    } else {
+        for (Vec3& normal : normals_) {
+            normal = normalize(normal);
+        }
     }
     return true;
 }
@@ -259,15 +302,18 @@ void CMesh3D::Render() {
 void CMesh3D::Render3d(bool selected) const {
     const MeshDisplayMode mode = GetDisplayMode();
     if (mode == MeshDisplayMode::Wire) {
-        const Material material = mode == MeshDisplayMode::SurfaceGray ? material_Defailt : GetMaterial();
-        RenderWire(selected, true, &material.diffuse);
+        const Color color = GetColor();
+        RenderWire(selected, true, &color);
         return;
     }
 
     const Material material = mode == MeshDisplayMode::SurfaceGray ? material_Defailt : GetMaterial();
 
-    RenderFaces(selected, true, &material);
-    RenderWire(selected, true, &material.diffuse);
+    const bool draw_edges = mode != MeshDisplayMode::SurfaceMaterial;
+    RenderFaces(selected, draw_edges, &material);
+    if (draw_edges) {
+        RenderWire(selected, true, &material.diffuse);
+    }
 }
 
 void CMesh3D::RenderFaces(bool selected, bool offset_fill, const Material* material_override) const {
@@ -283,20 +329,25 @@ void CMesh3D::RenderFaces(bool selected, bool offset_fill, const Material* mater
     const GLuint color_texture = texture_id_for_path(material.color_texture_path);
     const bool has_texture = color_texture != 0;
 
-    std::vector<Vec3> vertex_normals(vertices_.size(), {0.0f, 0.0f, 0.0f});
-    for (const Face& face : faces_) {
-        if (!IsValidFace(face, vertices_.size())) {
-            continue;
+    std::vector<Vec3> vertex_normals;
+    if (normals_.size() == vertices_.size()) {
+        vertex_normals = normals_;
+    } else {
+        vertex_normals.assign(vertices_.size(), {0.0f, 0.0f, 0.0f});
+        for (const Face& face : faces_) {
+            if (!IsValidFace(face, vertices_.size())) {
+                continue;
+            }
+            const Vec3 normal = FaceNormal(face);
+            for (size_t index : face) {
+                vertex_normals[index] = vertex_normals[index] + normal;
+            }
         }
-        const Vec3 normal = FaceNormal(face);
-        for (size_t index : face) {
-            vertex_normals[index] = vertex_normals[index] + normal;
-        }
-    }
-    for (Vec3& normal : vertex_normals) {
-        normal = normalize(normal);
-        if (std::fabs(normal.x) <= 0.00001f && std::fabs(normal.y) <= 0.00001f && std::fabs(normal.z) <= 0.00001f) {
-            normal = {0.0f, 1.0f, 0.0f};
+        for (Vec3& normal : vertex_normals) {
+            normal = normalize(normal);
+            if (std::fabs(normal.x) <= 0.00001f && std::fabs(normal.y) <= 0.00001f && std::fabs(normal.z) <= 0.00001f) {
+                normal = {0.0f, 1.0f, 0.0f};
+            }
         }
     }
 
@@ -316,6 +367,8 @@ void CMesh3D::RenderFaces(bool selected, bool offset_fill, const Material* mater
         glPolygonOffset(0.55f, 0.55f);
     }
 
+    const GLboolean cull_face_was_enabled = glIsEnabled(GL_CULL_FACE);
+    glDisable(GL_CULL_FACE);
     glBegin(GL_TRIANGLES);
     for (const Face& face : faces_) {
         if (!IsValidFace(face, vertices_.size())) {
@@ -332,7 +385,10 @@ void CMesh3D::RenderFaces(bool selected, bool offset_fill, const Material* mater
                 glNormal3f(normal.x, normal.y, normal.z);
                 glColor4f(shade.r, shade.g, shade.b, alpha);
                 if (has_texture) {
-                    const UV uv = projected_uv_for_face(vertex, face_normal);
+                    const UV base_uv = uvs_.size() == vertices_.size()
+                        ? uvs_[vertex_index]
+                        : projected_uv_for_face(vertex, face_normal);
+                    const UV uv = transform_uv(base_uv, material);
                     glTexCoord2f(uv.u, uv.v);
                 }
                 glVertex3f(vertex.x, vertex.y, vertex.z);
@@ -340,6 +396,9 @@ void CMesh3D::RenderFaces(bool selected, bool offset_fill, const Material* mater
         }
     }
     glEnd();
+    if (cull_face_was_enabled) {
+        glEnable(GL_CULL_FACE);
+    }
 
     if (has_texture) {
         glBindTexture(GL_TEXTURE_2D, 0);
@@ -563,6 +622,7 @@ std::unique_ptr<CAlfaObject> CMesh3D::Clone() const {
     auto copy = std::make_unique<CMesh3D>(GetName() + " Copy");
     copy->vertices_ = vertices_;
     copy->uvs_ = uvs_;
+    copy->normals_ = normals_;
     copy->faces_ = faces_;
     copy->SetGroupName(GetGroupName());
     copy->SetVisible(IsVisible());
@@ -581,6 +641,9 @@ void CMesh3D::Rotate(Vec3 center, Vec3 axis, float angle) {
     for (Vec3& vertex : vertices_) {
         vertex = rotate_around_axis(vertex - center, axis, angle) + center;
     }
+    for (Vec3& normal : normals_) {
+        normal = normalize(rotate_around_axis(normal, axis, angle));
+    }
 }
 
 void CMesh3D::Scale(Vec3 center, Vec3 axis, float factor) {
@@ -591,6 +654,32 @@ void CMesh3D::Scale(Vec3 center, Vec3 axis, float factor) {
         } else {
             vertex = scale_along_axis(local, axis, factor) + center;
         }
+    }
+    if (std::fabs(factor) > 0.000001f && dot(axis, axis) > 0.000001f) {
+        const Vec3 unit_axis = normalize(axis);
+        for (Vec3& normal : normals_) {
+            const Vec3 parallel = unit_axis * dot(normal, unit_axis);
+            const Vec3 perpendicular = normal - parallel;
+            normal = normalize(perpendicular + parallel * (1.0f / factor));
+        }
+    }
+}
+
+void CMesh3D::Mirror(Vec3 plane_point, Vec3 plane_normal) {
+    if (dot(plane_normal, plane_normal) <= 0.000001f) {
+        return;
+    }
+
+    const Vec3 unit_normal = normalize(plane_normal);
+    for (Vec3& vertex : vertices_) {
+        const float distance = dot(vertex - plane_point, unit_normal);
+        vertex = vertex - unit_normal * (2.0f * distance);
+    }
+    for (Vec3& normal : normals_) {
+        normal = normalize(normal - unit_normal * (2.0f * dot(normal, unit_normal)));
+    }
+    for (Face& face : faces_) {
+        std::reverse(face.begin(), face.end());
     }
 }
 
@@ -774,6 +863,7 @@ bool CMesh3D::Create(CPolyline* pline, CVector3d dir, float dist) {
     SetMaterial(colored_mesh_material());
     vertices_ = std::move(created_vertices);
     faces_ = std::move(created_faces);
+    normals_.clear();
     GeneratePlanarUVs();
     return true;
 }
@@ -781,6 +871,7 @@ bool CMesh3D::Create(CPolyline* pline, CVector3d dir, float dist) {
 void CMesh3D::Clear() {
     vertices_.clear();
     uvs_.clear();
+    normals_.clear();
     faces_.clear();
 }
 

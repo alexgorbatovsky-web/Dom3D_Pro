@@ -35,14 +35,11 @@ void set_axis_color(TransformAxis axis, bool highlighted) {
     }
 }
 
-void camera_basis(const Camera& camera, Vec3& eye, Vec3& forward, Vec3& right, Vec3& up) {
+void qt_camera_basis(const Camera& camera, Vec3& eye, Vec3& forward, Vec3& right, Vec3& up) {
     eye = camera_position(camera);
-    forward = normalize(camera.target - eye);
-    right = normalize(cross(forward, {0.0f, 1.0f, 0.0f}));
-    if (std::fabs(right.x) <= 0.00001f && std::fabs(right.y) <= 0.00001f && std::fabs(right.z) <= 0.00001f) {
-        right = normalize(cross(forward, {0.0f, 0.0f, 1.0f}));
-    }
-    up = normalize(cross(right, forward));
+    forward = normalize(rotate(camera.orientation, {0.0f, 0.0f, -1.0f}));
+    right = normalize(rotate(camera.orientation, {1.0f, 0.0f, 0.0f}));
+    up = normalize(rotate(camera.orientation, {0.0f, 1.0f, 0.0f}));
 }
 
 void draw_arrow_head(Vec3 tip, Vec3 axis, Vec3 camera_forward, float size) {
@@ -156,6 +153,8 @@ void QtSceneRenderer::Render(const CAlfaDoc& document,
                              const Camera& camera,
                              bool orthographic,
                              bool show_coordinate_axes,
+                             bool show_floor_grid,
+                             bool xy_plane_view,
                              ToolMode tool,
                              TransformOperation transform_operation,
                              TransformAxis highlighted_transform_axis,
@@ -188,12 +187,12 @@ void QtSceneRenderer::Render(const CAlfaDoc& document,
     Vec3 view_forward{};
     Vec3 view_right{};
     Vec3 view_up{};
-    camera_basis(camera, view_eye, view_forward, view_right, view_up);
+    qt_camera_basis(camera, view_eye, view_forward, view_right, view_up);
     LookAt(view_eye, camera.target, view_up);
 
-    view3d_.Draw(document);
+    view3d_.Draw(document, xy_plane_view, show_floor_grid);
     if (show_coordinate_axes) {
-        DrawCoordinateAxes();
+        DrawCoordinateAxes(xy_plane_view);
     }
     if (tool == ToolMode::Transform) {
         DrawTransformGizmo(document, camera, transform_operation, highlighted_transform_axis);
@@ -206,7 +205,7 @@ void QtSceneRenderer::Render(const CAlfaDoc& document,
             Vec3 camera_forward{};
             Vec3 camera_right{};
             Vec3 camera_up{};
-            camera_basis(camera, eye, camera_forward, camera_right, camera_up);
+            qt_camera_basis(camera, eye, camera_forward, camera_right, camera_up);
 
             glDisable(GL_DEPTH_TEST);
             glEnable(GL_BLEND);
@@ -239,7 +238,7 @@ void QtSceneRenderer::Render(const CAlfaDoc& document,
             Vec3 camera_forward{};
             Vec3 camera_right{};
             Vec3 camera_up{};
-            camera_basis(camera, eye, camera_forward, camera_right, camera_up);
+            qt_camera_basis(camera, eye, camera_forward, camera_right, camera_up);
 
             glDisable(GL_DEPTH_TEST);
             glEnable(GL_BLEND);
@@ -283,7 +282,7 @@ bool QtSceneRenderer::ScreenToFloor(int screen_x, int screen_y, int width, int h
     Vec3 forward{};
     Vec3 right{};
     Vec3 up{};
-    camera_basis(camera, eye, forward, right, up);
+    qt_camera_basis(camera, eye, forward, right, up);
 
     Vec3 ray_origin = eye;
     Vec3 ray = normalize(forward + right * (ndc_x * aspect * tan_half) + up * (ndc_y * tan_half));
@@ -315,7 +314,7 @@ bool QtSceneRenderer::WorldToScreen(Vec3 point, const Camera& camera, bool ortho
     Vec3 forward{};
     Vec3 right{};
     Vec3 up{};
-    camera_basis(camera, eye, forward, right, up);
+    qt_camera_basis(camera, eye, forward, right, up);
     const Vec3 local = point - eye;
 
     const float camera_x = dot(local, right);
@@ -342,8 +341,11 @@ bool QtSceneRenderer::WorldToScreen(Vec3 point, const Camera& camera, bool ortho
 }
 
 void QtSceneRenderer::CalculateClipPlanes(const CAlfaDoc& document, const Camera& camera, float& z_near, float& z_far) const {
-    const Vec3 eye = camera_position(camera);
-    const Vec3 forward = normalize(camera.target - eye);
+    Vec3 eye{};
+    Vec3 forward{};
+    Vec3 right{};
+    Vec3 up{};
+    qt_camera_basis(camera, eye, forward, right, up);
 
     float min_depth = camera.distance;
     float max_depth = camera.distance;
@@ -390,8 +392,9 @@ void QtSceneRenderer::CalculateClipPlanes(const CAlfaDoc& document, const Camera
     z_far = std::max(z_near + 10.0f, max_depth + scene_scale * 2.0f);
 }
 
-void QtSceneRenderer::DrawCoordinateAxes() const {
+void QtSceneRenderer::DrawCoordinateAxes(bool) const {
     const float length = kGridHalfSize;
+    const float lift = 0.02f;
 
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
@@ -401,16 +404,16 @@ void QtSceneRenderer::DrawCoordinateAxes() const {
     glLineWidth(2.2f);
     glBegin(GL_LINES);
     set_color(1.0f, 0.05f, 0.04f, 0.95f);
-    glVertex3f(0.0f, 0.02f, 0.0f);
-    glVertex3f(length, 0.02f, 0.0f);
+    glVertex3f(0.0f, 0.0f, lift);
+    glVertex3f(length, 0.0f, lift);
 
     set_color(0.10f, 1.0f, 0.12f, 0.95f);
-    glVertex3f(0.0f, 0.02f, 0.0f);
-    glVertex3f(0.0f, length, 0.0f);
+    glVertex3f(0.0f, 0.0f, lift);
+    glVertex3f(0.0f, length, lift);
 
     set_color(0.08f, 0.22f, 1.0f, 0.95f);
-    glVertex3f(0.0f, 0.02f, 0.0f);
-   glVertex3f(0.0f, 0.02f, length);
+    glVertex3f(0.0f, 0.0f, 0.0f);
+    glVertex3f(0.0f, 0.0f, length);
     glEnd();
     glDisable(GL_LINE_SMOOTH);
     glDisable(GL_BLEND);
@@ -431,7 +434,7 @@ void QtSceneRenderer::DrawTransformGizmo(const CAlfaDoc& document, const Camera&
     Vec3 camera_forward{};
     Vec3 camera_right{};
     Vec3 camera_up{};
-    camera_basis(camera, eye, camera_forward, camera_right, camera_up);
+    qt_camera_basis(camera, eye, camera_forward, camera_right, camera_up);
 
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);

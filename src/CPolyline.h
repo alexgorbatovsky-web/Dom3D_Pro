@@ -61,9 +61,10 @@ public:
     void Scale(Vec3 center, Vec3 axis, float factor) override;
     bool GetBounds(Vec3& min_point, Vec3& max_point) const override;
     void Edit(NativeWindowHandle parent_window) override;
-
     bool Save(std::ostream& stream) const override;
     bool Load(std::istream& stream);
+    bool CreatePolygone(float Length, int qty);
+
 
 private:
     static CPoint3d ToPoint3d(CurvePoint point);

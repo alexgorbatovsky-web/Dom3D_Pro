@@ -13,6 +13,12 @@ public:
     bool Export(const std::string& path, const CAlfaDoc& document, std::string& error) const;
 
 private:
-    bool ExportMesh(std::ostream& stream, const CMesh3D& mesh, size_t& vertex_offset, const std::string& object_name) const;
+    bool ExportMesh(std::ostream& stream,
+                    const CMesh3D& mesh,
+                    const Material& material,
+                    const std::string& material_name,
+                    size_t& vertex_offset,
+                    size_t& uv_offset,
+                    const std::string& object_name) const;
     bool ParseFaceIndex(const std::string& token, size_t vertex_count, size_t& index) const;
 };

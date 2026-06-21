@@ -1,6 +1,7 @@
 #include "SurfaceFace.h"
 #include "Solid.h"
 #include "SolidTool.h"
+#include "../iges/SplineCurve.h"
 
 
 #include "Poly_Triangulation.hxx"
@@ -38,11 +39,118 @@
 #include <BRep_Tool.hxx>
 #include <GeomAbs_SurfaceType.hxx>
 #include <Poly_Triangle.hxx>
+
+#include <algorithm>
+#include <cmath>
+#include <map>
+
+namespace {
+bool mesh_plane_normal(const CMesh3D* mesh, Vec3& normal)
+{
+	if (!mesh)
+		return false;
+
+	const std::vector<Vec3>& vertices = mesh->GetVertices();
+	const std::vector<CMesh3D::Face>& faces = mesh->GetFaces();
+	if (vertices.size() < 3 || faces.empty())
+		return false;
+
+	Vec3 origin{};
+	bool has_origin = false;
+	for (const CMesh3D::Face& face : faces) {
+		if (face.size() < 3)
+			continue;
+		for (size_t i = 1; i + 1 < face.size(); ++i) {
+			if (face[0] >= vertices.size() || face[i] >= vertices.size() || face[i + 1] >= vertices.size())
+				continue;
+			const Vec3 edge_a = vertices[face[i]] - vertices[face[0]];
+			const Vec3 edge_b = vertices[face[i + 1]] - vertices[face[0]];
+			normal = normalize(cross(edge_a, edge_b));
+			if (dot(normal, normal) > 0.000001f) {
+				origin = vertices[face[0]];
+				has_origin = true;
+				break;
+			}
+		}
+		if (has_origin)
+			break;
+	}
+
+	if (!has_origin)
+		return false;
+
+	float max_span = 1.0f;
+	Vec3 min_point = vertices.front();
+	Vec3 max_point = vertices.front();
+	for (const Vec3& vertex : vertices) {
+		min_point.x = std::min(min_point.x, vertex.x);
+		min_point.y = std::min(min_point.y, vertex.y);
+		min_point.z = std::min(min_point.z, vertex.z);
+		max_point.x = std::max(max_point.x, vertex.x);
+		max_point.y = std::max(max_point.y, vertex.y);
+		max_point.z = std::max(max_point.z, vertex.z);
+	}
+	max_span = std::max({max_span, max_point.x - min_point.x, max_point.y - min_point.y, max_point.z - min_point.z});
+	const float tolerance = std::max(0.001f, max_span * 0.001f);
+
+	for (const Vec3& vertex : vertices) {
+		if (std::fabs(dot(vertex - origin, normal)) > tolerance)
+			return false;
+	}
+	return true;
+}
+
+bool add_mesh_boundary_edges(const CMesh3D* mesh, std::vector<CSplineCurve*>& edges)
+{
+	if (!mesh)
+		return false;
+
+	const std::vector<Vec3>& vertices = mesh->GetVertices();
+	const std::vector<CMesh3D::Face>& faces = mesh->GetFaces();
+	std::map<std::pair<size_t, size_t>, int> edge_counts;
+	for (const CMesh3D::Face& face : faces) {
+		if (face.size() < 3)
+			continue;
+		for (size_t i = 0; i < face.size(); ++i) {
+			const size_t a = face[i];
+			const size_t b = face[(i + 1) % face.size()];
+			if (a >= vertices.size() || b >= vertices.size() || a == b)
+				continue;
+			++edge_counts[{std::min(a, b), std::max(a, b)}];
+		}
+	}
+
+	bool added = false;
+	for (const auto& entry : edge_counts) {
+		if (entry.second != 1)
+			continue;
+
+		const Vec3& a = vertices[entry.first.first];
+		const Vec3& b = vertices[entry.first.second];
+		if (dot(b - a, b - a) <= 0.000001f)
+			continue;
+
+		CSplineCurve* spline = new CSplineCurve;
+		CPoint3d p0(a.x, a.y, a.z);
+		CPoint3d p1(b.x, b.y, b.z);
+		spline->AddPoint(&p0, false);
+		spline->AddPoint(&p1, false);
+		if (spline->Build()) {
+			edges.push_back(spline);
+			added = true;
+		} else {
+			delete spline;
+		}
+	}
+	return added;
+}
+}
 #include <TopAbs_Orientation.hxx>
 #include <TopLoc_Location.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <GCPnts_UniformAbscissa.hxx>
 #include <Standard_Failure.hxx>
+#include <gp_Pnt2d.hxx>
 
 #include <algorithm>
 #include <cmath>
@@ -165,23 +273,32 @@ CSurfaceFace::CSurfaceFace(TopoDS_Shape shape)
 
 bool CSurfaceFace::BuldMeshTriangle(float Deflection, float AngDeflection)
 {
-//	PrepareEdges(Deflection);
 	TopLoc_Location aLoc;
 	const TopoDS_Face theFace = TopoDS::Face(m_Face);
-//	const Standard_Real    theLinDeflection = Deflection;
-//	const Standard_Real    theAngDeflection = AngDeflection;
-	const Standard_Real    theLinDeflection = 1.0;
-	const Standard_Real    theAngDeflection = 1.0;
-
-
-	BRepMesh_IncrementalMesh bim(theFace, theLinDeflection, false, theAngDeflection, false);
-	bim.Perform();
-	const Handle(Poly_Triangulation)& aTriangulation = BRep_Tool::Triangulation(theFace, aLoc, Poly_MeshPurpose_NONE);
+	Handle(Poly_Triangulation) aTriangulation =
+		BRep_Tool::Triangulation(theFace, aLoc, Poly_MeshPurpose_NONE);
+	if (aTriangulation.IsNull()) {
+		const Standard_Real linear_deflection = std::max<Standard_Real>(Deflection, 0.0001);
+		const Standard_Real angular_deflection =
+			std::clamp<Standard_Real>(AngDeflection, 0.01, 1.0);
+		BRepMesh_IncrementalMesh mesher(
+			theFace,
+			linear_deflection,
+			false,
+			angular_deflection,
+			true);
+		mesher.Perform();
+		aTriangulation = BRep_Tool::Triangulation(theFace, aLoc, Poly_MeshPurpose_NONE);
+	}
 	if (aTriangulation.IsNull())
 		return false;
 
 	std::vector<Vec3> vertices;
 	vertices.reserve(static_cast<size_t>(aTriangulation->NbNodes()));
+	std::vector<UV> uvs;
+	if (aTriangulation->HasUVNodes()) {
+		uvs.reserve(static_cast<size_t>(aTriangulation->NbNodes()));
+	}
 	const gp_Trsf& transform = aLoc.Transformation();
 	for (Standard_Integer nodeIndex = 1; nodeIndex <= aTriangulation->NbNodes(); ++nodeIndex) {
 		gp_Pnt point = aTriangulation->Node(nodeIndex);
@@ -191,6 +308,10 @@ bool CSurfaceFace::BuldMeshTriangle(float Deflection, float AngDeflection)
 			static_cast<float>(point.Y()),
 			static_cast<float>(point.Z())
 		});
+		if (aTriangulation->HasUVNodes()) {
+			const gp_Pnt2d uv = aTriangulation->UVNode(nodeIndex);
+			uvs.push_back({static_cast<float>(uv.X()), static_cast<float>(uv.Y())});
+		}
 	}
 
 	std::vector<CMesh3D::Face> faces;
@@ -216,7 +337,7 @@ bool CSurfaceFace::BuldMeshTriangle(float Deflection, float AngDeflection)
 	}
 	pMesh3D->SetName("Solid Face");
 	pMesh3D->SetColor({0.64f, 0.70f, 0.58f});
-	if (!pMesh3D->SetGeometry(std::move(vertices), std::move(faces))) {
+	if (!pMesh3D->SetGeometry(std::move(vertices), std::move(faces), std::move(uvs))) {
 		return false;
 	}
 
@@ -243,10 +364,13 @@ bool CSurfaceFace::IsPlanar() const
 	try {
 		const TopoDS_Face face = TopoDS::Face(m_Face);
 		BRepAdaptor_Surface surface(face);
-		return surface.GetType() == GeomAbs_Plane;
+		if (surface.GetType() == GeomAbs_Plane)
+			return true;
 	} catch (const Standard_Failure&) {
-		return false;
 	}
+
+	Vec3 normal{};
+	return mesh_plane_normal(pMesh3D, normal);
 }
 
 bool CSurfaceFace::GetCenterAndNormal(Vec3& center, Vec3& normal) const
@@ -265,18 +389,18 @@ bool CSurfaceFace::GetCenterAndNormal(Vec3& center, Vec3& normal) const
 	try {
 		const TopoDS_Face face = TopoDS::Face(m_Face);
 		BRepAdaptor_Surface surface(face);
-		if (surface.GetType() != GeomAbs_Plane)
-			return false;
-
-		const gp_Dir direction = surface.Plane().Axis().Direction();
-		const float sign = face.Orientation() == TopAbs_REVERSED ? -1.0f : 1.0f;
-		normal = normalize({static_cast<float>(direction.X()) * sign,
-		                    static_cast<float>(direction.Y()) * sign,
-		                    static_cast<float>(direction.Z()) * sign});
-		return dot(normal, normal) > 0.000001f;
+		if (surface.GetType() == GeomAbs_Plane) {
+			const gp_Dir direction = surface.Plane().Axis().Direction();
+			const float sign = face.Orientation() == TopAbs_REVERSED ? -1.0f : 1.0f;
+			normal = normalize({static_cast<float>(direction.X()) * sign,
+			                    static_cast<float>(direction.Y()) * sign,
+			                    static_cast<float>(direction.Z()) * sign});
+			return dot(normal, normal) > 0.000001f;
+		}
 	} catch (const Standard_Failure&) {
-		return false;
 	}
+
+	return mesh_plane_normal(pMesh3D, normal);
 }
 
 void CSurfaceFace::UpdateRGB()
@@ -300,17 +424,17 @@ bool CSurfaceFace::InitEdges()
 	if (m_Face.IsNull())
 		return false;
 
-	try {
-		const TopoDS_Face face = TopoDS::Face(m_Face);
-		for (TopExp_Explorer edge_explorer(face, TopAbs_EDGE); edge_explorer.More(); edge_explorer.Next()) {
-			const TopoDS_Edge edge = TopoDS::Edge(edge_explorer.Current());
-			if (edge.IsNull())
-				continue;
+	const TopoDS_Face face = TopoDS::Face(m_Face);
+	for (TopExp_Explorer edge_explorer(face, TopAbs_EDGE); edge_explorer.More(); edge_explorer.Next()) {
+		const TopoDS_Edge edge = TopoDS::Edge(edge_explorer.Current());
+		if (edge.IsNull() || BRep_Tool::Degenerated(edge))
+			continue;
 
+		try {
 			BRepAdaptor_Curve curve(edge);
 			const Standard_Real first = curve.FirstParameter();
 			const Standard_Real last = curve.LastParameter();
-			if (last <= first)
+			if (!std::isfinite(first) || !std::isfinite(last) || last <= first)
 				continue;
 
 			const int sample_count = 18;
@@ -332,17 +456,19 @@ bool CSurfaceFace::InitEdges()
 			} else {
 				delete spline;
 			}
+		} catch (const Standard_Failure&) {
+			// A face may contain a singular/degenerated edge (common for
+			// revolved profiles touching the axis). Keep the other valid
+			// edges selectable instead of discarding the whole face.
 		}
-	} catch (const Standard_Failure&) {
-		for (CSplineCurve* edge : m_Edges)
-			delete edge;
-		m_Edges.clear();
-		m_TopoEdges.clear();
-		return false;
+	}
+
+	if (m_Edges.empty()) {
+		add_mesh_boundary_edges(pMesh3D, m_Edges);
 	}
 
 	IsInitEdges = true;
-	return true;
+	return !m_Edges.empty();
 }
 
 void CSurfaceFace::RenderEdges(bool selected, const std::vector<int>& selected_edge_indices) const
@@ -476,4 +602,23 @@ const TopoDS_Edge* CSurfaceFace::GetTopoEdge(int edge_index) const
 	if (edge_index < 0 || edge_index >= static_cast<int>(m_TopoEdges.size()))
 		return nullptr;
 	return &m_TopoEdges[static_cast<size_t>(edge_index)];
+}
+
+bool CSurfaceFace::GetEdgeEndpoints(int edge_index, Vec3& start, Vec3& end) const
+{
+	if (edge_index < 0 || edge_index >= static_cast<int>(m_Edges.size()))
+		return false;
+
+	CSplineCurve* edge = m_Edges[static_cast<size_t>(edge_index)];
+	if (!edge || edge->np() < 2)
+		return false;
+
+	CPoint3d p0;
+	CPoint3d p1;
+	if (!edge->GetPoint(0.0, &p0) || !edge->GetPoint(static_cast<double>(edge->np() - 1), &p1))
+		return false;
+
+	start = {static_cast<float>(p0.x), static_cast<float>(p0.y), static_cast<float>(p0.z)};
+	end = {static_cast<float>(p1.x), static_cast<float>(p1.y), static_cast<float>(p1.z)};
+	return dot(end - start, end - start) > 0.000001f;
 }

@@ -13,6 +13,9 @@
 #include <utility>
 #include <vector>
 
+class QDomElement;
+class QString;
+class QXmlStreamWriter;
 class CPolyline;
 class CSurface;
 class CSplineCurve;
@@ -46,9 +49,13 @@ public:
 	SolidTool* m_Tool;//Operation
 	int m_ID;
 	std::string Name;
+	std::string ToolId;
+	std::vector<ParametricParameterValue> Parameters;
+	std::vector<int> CreatedSurfaceIndices;
 	ParametricFunction();
 	ParametricFunction(int ID, std::string name);
 	ParametricFunction(const char* text, std::function<void()> onClick = nullptr);
+	ParametricFunction(std::string tool_id, std::string name, std::vector<ParametricParameterValue> parameters);
 
 //	SERIALIZE_LATER();
 };
@@ -59,8 +66,8 @@ class CSolid :public CAlfaObject {
 //	cList<CPolyline*> m_Edges;
 	Poly_Triangulation* m_Mesh;
 	std::vector<CSurfaceFace*> m_Surfaces;
-	std::vector<ParametricFunction> m_OperatonTree;
-
+	std::vector<ParametricFunction*> m_OperatonTree;
+	std::vector<CSolid*> m_BooleanTools;//tools used for this solid
 
 
 public:
@@ -83,10 +90,13 @@ public:
 	void Render2d(float center_x, float center_y, float scale) const override;
 	bool HitTest(CurvePoint point, float tolerance) const override;
 	bool Save(std::ostream& stream) const override;
+	bool Save(QXmlStreamWriter& xml, QString& error) const;
+	static std::unique_ptr<CSolid> Load(const QDomElement& object_element, QString& error);
 	std::unique_ptr<CAlfaObject> Clone() const override;
 	void Translate(Vec3 delta) override;
 	void Rotate(Vec3 center, Vec3 axis, float angle) override;
 	void Scale(Vec3 center, Vec3 axis, float factor) override;
+	void Mirror(Vec3 plane_point, Vec3 plane_normal) override;
 	void PreviewTranslate(Vec3 delta);
 	void PreviewRotate(Vec3 center, Vec3 axis, float angle);
 	void PreviewScale(Vec3 center, Vec3 axis, float factor);
@@ -98,6 +108,23 @@ public:
 	void Alloc();
 	virtual ~CSolid();
 	void Clear();
+	int GetNumOperations() const { return static_cast<int>(m_OperatonTree.size()); }
+	const ParametricFunction* GetOperation(int index) const;
+	ParametricFunction* GetOperation(int index);
+	const std::vector<ParametricFunction*>& GetOperationTree() const { return m_OperatonTree; }
+	void ClearOperationTree();
+	void SetParametricOperation(size_t operation_index,
+	                            std::string tool_id,
+	                            std::string name,
+	                            std::vector<ParametricParameterValue> parameters,
+	                            std::vector<int> created_surface_indices = {});
+	bool RemoveParametricOperation(size_t operation_index);
+	void CopyOperationTreeFrom(const CSolid& source);
+	size_t AddBooleanToolCopy(const CSolid& tool);
+	size_t AddBooleanTool(std::unique_ptr<CSolid> tool);
+	const CSolid* GetBooleanTool(size_t tool_index) const;
+	size_t GetBooleanToolCount() const { return m_BooleanTools.size(); }
+	void ClearBooleanTools();
 
 	int GetNumSurfaces() const { return static_cast<int>(m_Surfaces.size()); }
 	CSurfaceFace* GetSurfaceFace(int indx);
@@ -128,11 +155,18 @@ public:
 	bool HasSelectedFace() const { return m_SelectedFaceIndex >= 0; }
 	int GetSelectedFaceIndex() const { return m_SelectedFaceIndex; }
 	const std::vector<int>& GetSelectedFaceIndices() const { return m_SelectedFaceIndices; }
+	bool SetSurfaceTextureTransform(int surface_index, const SurfaceTextureTransform& transform);
+	bool SetSelectedSurfaceTextureTransform(const SurfaceTextureTransform& transform);
+	std::vector<int> FindCreatedSurfaceIndices(const TopoDS_Shape& previous_shape) const;
+	void SetOperationHighlightedSurfaces(std::vector<int> surface_indices);
+	void ClearOperationHighlightedSurfaces();
+	const std::vector<std::pair<int, int>>& GetSelectedEdgeRefs() const { return m_SelectedEdges; }
 	bool HasSelectedEdge() const;
 	int GetSelectedSurfaceIndex() const { return m_SelectedEdges.empty() ? -1 : m_SelectedEdges.front().first; }
 	int GetSelectedEdgeIndex() const { return m_SelectedEdges.empty() ? -1 : m_SelectedEdges.front().second; }
 	const TopoDS_Edge* GetSelectedTopoEdge() const;
 	std::vector<TopoDS_Edge> GetSelectedTopoEdges() const;
+	std::vector<TopoDS_Edge> GetTopoEdgesByRefs(const std::vector<std::pair<int, int>>& edge_refs) const;
 	std::vector<TopoDS_Edge> GetAllTopoEdges() const;
 
 	static CSolid* pCSolidTool;
@@ -183,6 +217,7 @@ static	int NumReadFile;
 
 	std::vector<std::pair<int, int>> m_SelectedEdges;
 	std::vector<int> m_SelectedFaceIndices;
+	std::vector<int> m_OperationHighlightedSurfaceIndices;
 	int m_SelectedFaceIndex = -1;
 
 //	SERIALIZE_LATER();

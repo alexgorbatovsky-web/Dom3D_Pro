@@ -78,10 +78,11 @@ bool Renderer::ScreenToFloor(int screen_x, int screen_y, int width, int height, 
     const float aspect = static_cast<float>(scene_width) / scene_height;
     const float tan_half = std::tan(deg_to_rad(48.0f) * 0.5f);
 
-    const Vec3 eye = camera_position(camera);
-    const Vec3 forward = normalize(camera.target - eye);
-    const Vec3 right = normalize(cross(forward, {0.0f, 1.0f, 0.0f}));
-    const Vec3 up = cross(right, forward);
+    Vec3 eye{};
+    Vec3 forward{};
+    Vec3 right{};
+    Vec3 up{};
+    camera_basis(camera, eye, forward, right, up);
 
     const Vec3 ray = normalize(forward + right * (ndc_x * aspect * tan_half) + up * (ndc_y * tan_half));
     if (std::fabs(ray.y) < 0.0001f) {
@@ -102,10 +103,11 @@ bool Renderer::WorldToScreen(Vec3 point, const Camera& camera, int width, int he
     const int scene_width = std::max(1, width - kPanelWidth);
     const int scene_height = std::max(1, height - kToolbarHeight);
 
-    const Vec3 eye = camera_position(camera);
-    const Vec3 forward = normalize(camera.target - eye);
-    const Vec3 right = normalize(cross(forward, {0.0f, 1.0f, 0.0f}));
-    const Vec3 up = cross(right, forward);
+    Vec3 eye{};
+    Vec3 forward{};
+    Vec3 right{};
+    Vec3 up{};
+    camera_basis(camera, eye, forward, right, up);
     const Vec3 local = point - eye;
 
     const float camera_x = dot(local, right);
@@ -152,7 +154,12 @@ void Renderer::DrawScene(const CAlfaDoc& document, const Camera& camera, ToolMod
 
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
-    LookAt(camera_position(camera), camera.target, {0.0f, 1.0f, 0.0f});
+    Vec3 eye{};
+    Vec3 forward{};
+    Vec3 right{};
+    Vec3 up{};
+    camera_basis(camera, eye, forward, right, up);
+    LookAt(eye, camera.target, up);
 
     view3d_.Draw(document);
     if (tool == ToolMode::Transform) {

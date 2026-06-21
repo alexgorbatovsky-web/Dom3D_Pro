@@ -176,9 +176,9 @@ LRESULT Dom3DApp::WindowProc(HWND window, UINT message, WPARAM w_param, LPARAM l
         if (alt_orbiting_ && (w_param & MK_LBUTTON) != 0) {
             const int x = GET_X_LPARAM(l_param);
             const int y = GET_Y_LPARAM(l_param);
-            camera_.yaw -= static_cast<float>(x - last_mouse_.x) * 0.35f;
-            camera_.pitch += static_cast<float>(y - last_mouse_.y) * 0.25f;
-            camera_.pitch = std::clamp(camera_.pitch, -10.0f, 75.0f);
+            orbit_camera(camera_,
+                         -static_cast<float>(x - last_mouse_.x) * 0.35f,
+                         static_cast<float>(y - last_mouse_.y) * 0.25f);
             last_mouse_.x = x;
             last_mouse_.y = y;
             Invalidate();
@@ -190,10 +190,19 @@ LRESULT Dom3DApp::WindowProc(HWND window, UINT message, WPARAM w_param, LPARAM l
             const int y = GET_Y_LPARAM(l_param);
             const float dx = static_cast<float>(x - last_mouse_.x);
             const float dy = static_cast<float>(y - last_mouse_.y);
-            const float yaw = deg_to_rad(camera_.yaw);
             const float scale = camera_.distance * 0.0018f;
-            const Vec3 right{std::cos(yaw), 0.0f, -std::sin(yaw)};
-            const Vec3 forward_ground{-std::sin(yaw), 0.0f, -std::cos(yaw)};
+            Vec3 forward{};
+            Vec3 right{};
+            Vec3 up{};
+            camera_basis(camera_, forward, right, up);
+            right = normalize({right.x, 0.0f, right.z});
+            Vec3 forward_ground = normalize({forward.x, 0.0f, forward.z});
+            if (dot(right, right) <= 0.00001f) {
+                right = {1.0f, 0.0f, 0.0f};
+            }
+            if (dot(forward_ground, forward_ground) <= 0.00001f) {
+                forward_ground = {0.0f, 0.0f, -1.0f};
+            }
             camera_.target = camera_.target - right * (dx * scale) + forward_ground * (dy * scale);
             last_mouse_.x = x;
             last_mouse_.y = y;
@@ -231,9 +240,9 @@ LRESULT Dom3DApp::WindowProc(HWND window, UINT message, WPARAM w_param, LPARAM l
         if (dragging_ && tool_ == ToolMode::Orbit) {
             const int x = GET_X_LPARAM(l_param);
             const int y = GET_Y_LPARAM(l_param);
-            camera_.yaw -= static_cast<float>(x - last_mouse_.x) * 0.35f;
-            camera_.pitch += static_cast<float>(y - last_mouse_.y) * 0.25f;
-            camera_.pitch = std::clamp(camera_.pitch, -10.0f, 75.0f);
+            orbit_camera(camera_,
+                         -static_cast<float>(x - last_mouse_.x) * 0.35f,
+                         static_cast<float>(y - last_mouse_.y) * 0.25f);
             last_mouse_.x = x;
             last_mouse_.y = y;
             Invalidate();
@@ -696,10 +705,10 @@ bool Dom3DApp::SelectMeshCurveAt(int x, int y) {
 Vec3 Dom3DApp::ScreenDragToWorldVector(POINT start, POINT end) const {
     const float dx = static_cast<float>(end.x - start.x);
     const float dy = static_cast<float>(end.y - start.y);
-    const Vec3 eye = camera_position(camera_);
-    const Vec3 forward = normalize(camera_.target - eye);
-    const Vec3 right = normalize(cross(forward, {0.0f, 1.0f, 0.0f}));
-    const Vec3 up = cross(right, forward);
+    Vec3 forward{};
+    Vec3 right{};
+    Vec3 up{};
+    camera_basis(camera_, forward, right, up);
     const float scale = camera_.distance * 0.0025f;
     return right * (dx * scale) - up * (dy * scale);
 }

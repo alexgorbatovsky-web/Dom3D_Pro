@@ -7,19 +7,10 @@
 #include "solid/Solid.h"
 #include "solid/SurfaceSet.h"
 
-#include <IFSelect_ReturnStatus.hxx>
-#include <STEPControl_Reader.hxx>
-#include <STEPControl_StepModelType.hxx>
-#include <STEPControl_Writer.hxx>
-#include <Standard_Failure.hxx>
-
-#include <QByteArray>
 #include <QDomDocument>
-#include <QDir>
 #include <QFile>
 #include <QSaveFile>
 #include <QStringList>
-#include <QTemporaryFile>
 #include <QXmlStreamWriter>
 
 #include <memory>
@@ -28,6 +19,18 @@
 
 namespace {
 constexpr const char* kProjectVersion = "1";
+
+QString bool_text(bool value) {
+    return value ? "true" : "false";
+}
+
+QString orbit_mode_text(OrbitMode mode) {
+    return mode == OrbitMode::Architectural ? "architectural" : "cad";
+}
+
+OrbitMode parse_orbit_mode(const QString& value) {
+    return value.compare("architectural", Qt::CaseInsensitive) == 0 ? OrbitMode::Architectural : OrbitMode::CAD;
+}
 
 QString object_type_name(const CAlfaObject& object) {
     if (dynamic_cast<const CSurfaceSet*>(&object)) {
@@ -90,6 +93,25 @@ QString operation_name_for_object(const CAlfaObject& object) {
     return {};
 }
 
+void write_surface_texture_transforms(QXmlStreamWriter& xml, const CSolid& solid) {
+    xml.writeStartElement("surfaceTextureTransforms");
+    for (int i = 0; i < solid.GetNumSurfaces(); ++i) {
+        const CSurfaceFace* surface = solid.GetSurfaceFace(i);
+        if (!surface) {
+            continue;
+        }
+        const SurfaceTextureTransform& transform = surface->TextureTransform;
+        xml.writeEmptyElement("surface");
+        xml.writeAttribute("index", QString::number(i));
+        xml.writeAttribute("offsetU", QString::number(transform.offset_u, 'g', 9));
+        xml.writeAttribute("offsetV", QString::number(transform.offset_v, 'g', 9));
+        xml.writeAttribute("scaleU", QString::number(transform.scale_u, 'g', 9));
+        xml.writeAttribute("scaleV", QString::number(transform.scale_v, 'g', 9));
+        xml.writeAttribute("rotation", QString::number(transform.rotation_degrees, 'g', 9));
+    }
+    xml.writeEndElement();
+}
+
 bool read_float_attr(const QDomElement& element, const char* name, float& value, QString& error, bool required = true) {
     if (!element.hasAttribute(name)) {
         if (required) {
@@ -106,6 +128,134 @@ bool read_float_attr(const QDomElement& element, const char* name, float& value,
         return false;
     }
     value = parsed;
+    return true;
+}
+
+bool read_surface_texture_transforms(const QDomElement& object_element, CSolid& solid, QString& error) {
+    const QDomElement transforms = object_element.firstChildElement("surfaceTextureTransforms");
+    if (transforms.isNull()) {
+        return true;
+    }
+
+    for (QDomElement surface_element = transforms.firstChildElement("surface");
+         !surface_element.isNull();
+         surface_element = surface_element.nextSiblingElement("surface")) {
+        bool index_ok = false;
+        const int index = surface_element.attribute("index").toInt(&index_ok);
+        if (!index_ok || index < 0 || index >= solid.GetNumSurfaces()) {
+            error = "Surface texture transform contains an invalid face index.";
+            return false;
+        }
+
+        SurfaceTextureTransform transform;
+        if (!read_float_attr(surface_element, "offsetU", transform.offset_u, error, false)
+            || !read_float_attr(surface_element, "offsetV", transform.offset_v, error, false)
+            || !read_float_attr(surface_element, "scaleU", transform.scale_u, error, false)
+            || !read_float_attr(surface_element, "scaleV", transform.scale_v, error, false)
+            || !read_float_attr(surface_element, "rotation", transform.rotation_degrees, error, false)) {
+            return false;
+        }
+        if (!surface_element.hasAttribute("scaleU")) {
+            transform.scale_u = 1.0f;
+        }
+        if (!surface_element.hasAttribute("scaleV")) {
+            transform.scale_v = 1.0f;
+        }
+        solid.SetSurfaceTextureTransform(index, transform);
+    }
+    return true;
+}
+
+bool read_bool_attr(const QDomElement& element, const char* name, bool& value, bool required = true) {
+    if (!element.hasAttribute(name)) {
+        return !required;
+    }
+    const QString text = element.attribute(name).trimmed().toLower();
+    value = text == "true" || text == "1" || text == "yes";
+    return true;
+}
+
+void write_view_state(QXmlStreamWriter& xml, const ProjectViewState& view_state) {
+    xml.writeStartElement("view");
+    xml.writeAttribute("orthographicProjection", bool_text(view_state.orthographic_projection));
+    xml.writeAttribute("orbitMode", orbit_mode_text(view_state.orbit_mode));
+    xml.writeAttribute("showCoordinateAxes", bool_text(view_state.show_coordinate_axes));
+    xml.writeAttribute("showFloorGrid", bool_text(view_state.show_floor_grid));
+    xml.writeAttribute("xyPlaneView", bool_text(view_state.xy_plane_view));
+
+    xml.writeStartElement("camera");
+    xml.writeAttribute("distance", QString::number(view_state.camera.distance, 'g', 9));
+
+    xml.writeEmptyElement("target");
+    xml.writeAttribute("x", QString::number(view_state.camera.target.x, 'g', 9));
+    xml.writeAttribute("y", QString::number(view_state.camera.target.y, 'g', 9));
+    xml.writeAttribute("z", QString::number(view_state.camera.target.z, 'g', 9));
+
+    xml.writeEmptyElement("orientation");
+    xml.writeAttribute("w", QString::number(view_state.camera.orientation.w, 'g', 9));
+    xml.writeAttribute("x", QString::number(view_state.camera.orientation.x, 'g', 9));
+    xml.writeAttribute("y", QString::number(view_state.camera.orientation.y, 'g', 9));
+    xml.writeAttribute("z", QString::number(view_state.camera.orientation.z, 'g', 9));
+
+    xml.writeEndElement();
+    xml.writeEndElement();
+}
+
+bool read_view_state(const QDomElement& metadata, ProjectViewState& view_state, QString& error) {
+    view_state = {};
+    const QDomElement view_element = metadata.firstChildElement("view");
+    if (view_element.isNull()) {
+        return true;
+    }
+
+    if (read_bool_attr(view_element, "orthographicProjection", view_state.orthographic_projection, false)) {
+        view_state.has_orthographic_projection = view_element.hasAttribute("orthographicProjection");
+    }
+    if (view_element.hasAttribute("orbitMode")) {
+        view_state.orbit_mode = parse_orbit_mode(view_element.attribute("orbitMode"));
+        view_state.has_orbit_mode = true;
+    }
+    if (read_bool_attr(view_element, "showCoordinateAxes", view_state.show_coordinate_axes, false)) {
+        view_state.has_show_coordinate_axes = view_element.hasAttribute("showCoordinateAxes");
+    }
+    if (read_bool_attr(view_element, "showFloorGrid", view_state.show_floor_grid, false)) {
+        view_state.has_show_floor_grid = view_element.hasAttribute("showFloorGrid");
+    }
+    if (read_bool_attr(view_element, "xyPlaneView", view_state.xy_plane_view, false)) {
+        view_state.has_xy_plane_view = view_element.hasAttribute("xyPlaneView");
+    }
+
+    const QDomElement camera_element = view_element.firstChildElement("camera");
+    if (camera_element.isNull()) {
+        return true;
+    }
+
+    Camera camera{};
+    if (!read_float_attr(camera_element, "distance", camera.distance, error, false)) {
+        return false;
+    }
+
+    const QDomElement target_element = camera_element.firstChildElement("target");
+    if (!target_element.isNull()) {
+        if (!read_float_attr(target_element, "x", camera.target.x, error)
+            || !read_float_attr(target_element, "y", camera.target.y, error)
+            || !read_float_attr(target_element, "z", camera.target.z, error)) {
+            return false;
+        }
+    }
+
+    const QDomElement orientation_element = camera_element.firstChildElement("orientation");
+    if (!orientation_element.isNull()) {
+        if (!read_float_attr(orientation_element, "w", camera.orientation.w, error)
+            || !read_float_attr(orientation_element, "x", camera.orientation.x, error)
+            || !read_float_attr(orientation_element, "y", camera.orientation.y, error)
+            || !read_float_attr(orientation_element, "z", camera.orientation.z, error)) {
+            return false;
+        }
+    }
+
+    view_state.camera = camera;
+    view_state.has_camera = true;
     return true;
 }
 
@@ -145,6 +295,11 @@ void write_material(QXmlStreamWriter& xml, const Material& material) {
     xml.writeAttribute("specular", QString::number(material.specular, 'g', 9));
     xml.writeAttribute("shininess", QString::number(material.shininess, 'g', 9));
     xml.writeAttribute("reflectivity", QString::number(material.reflectivity, 'g', 9));
+    xml.writeAttribute("textureOffsetU", QString::number(material.texture_offset_u, 'g', 9));
+    xml.writeAttribute("textureOffsetV", QString::number(material.texture_offset_v, 'g', 9));
+    xml.writeAttribute("textureScaleU", QString::number(material.texture_scale_u, 'g', 9));
+    xml.writeAttribute("textureScaleV", QString::number(material.texture_scale_v, 'g', 9));
+    xml.writeAttribute("textureRotation", QString::number(material.texture_rotation_degrees, 'g', 9));
     xml.writeAttribute("colorTexture", QString::fromStdString(material.color_texture_path));
     xml.writeAttribute("lightTexture", QString::fromStdString(material.light_texture_path));
     xml.writeAttribute("bumpTexture", QString::fromStdString(material.bump_texture_path));
@@ -174,7 +329,12 @@ bool read_material_element(const QDomElement& material_element, Material& materi
         || !read_float_attr(material_element, "alpha", material.alpha, error, false)
         || !read_float_attr(material_element, "specular", material.specular, error, false)
         || !read_float_attr(material_element, "shininess", material.shininess, error, false)
-        || !read_float_attr(material_element, "reflectivity", material.reflectivity, error, false)) {
+        || !read_float_attr(material_element, "reflectivity", material.reflectivity, error, false)
+        || !read_float_attr(material_element, "textureOffsetU", material.texture_offset_u, error, false)
+        || !read_float_attr(material_element, "textureOffsetV", material.texture_offset_v, error, false)
+        || !read_float_attr(material_element, "textureScaleU", material.texture_scale_u, error, false)
+        || !read_float_attr(material_element, "textureScaleV", material.texture_scale_v, error, false)
+        || !read_float_attr(material_element, "textureRotation", material.texture_rotation_degrees, error, false)) {
         return false;
     }
     material.color_texture_path = material_element.attribute("colorTexture", QString::fromStdString(material.color_texture_path)).toStdString();
@@ -260,18 +420,166 @@ void write_parameters(QXmlStreamWriter& xml, const CAlfaObject& object) {
     xml.writeEmptyElement("parameter");
     xml.writeAttribute("name", "color.b");
     xml.writeAttribute("value", QString::number(material.diffuse.b, 'g', 9));
+    for (const ParametricParameterValue& parameter : object.GetParametricParameters()) {
+        xml.writeEmptyElement("parameter");
+        xml.writeAttribute("name", QString::fromStdString(parameter.id));
+        xml.writeAttribute("value", QString::number(parameter.value, 'g', 12));
+    }
     xml.writeEndElement();
 }
 
 void write_operation_history(QXmlStreamWriter& xml, const CAlfaObject& object) {
     xml.writeStartElement("operationHistory");
-    const QString operation_name = operation_name_for_object(object);
+    if (const auto* solid = dynamic_cast<const CSolid*>(&object)) {
+        bool wrote_operation = false;
+        for (const ParametricFunction* operation : solid->GetOperationTree()) {
+            if (!operation || operation->ToolId.empty()) {
+                continue;
+            }
+            wrote_operation = true;
+            xml.writeStartElement("operation");
+            xml.writeAttribute("type", QString::fromStdString(operation->ToolId));
+            xml.writeAttribute("status", "parametric");
+            for (const ParametricParameterValue& parameter : operation->Parameters) {
+                xml.writeEmptyElement("parameter");
+                xml.writeAttribute("name", QString::fromStdString(parameter.id));
+                xml.writeAttribute("value", QString::number(parameter.value, 'g', 12));
+            }
+            for (int surface_index : operation->CreatedSurfaceIndices) {
+                xml.writeEmptyElement("createdSurface");
+                xml.writeAttribute("index", QString::number(surface_index));
+            }
+            xml.writeEndElement();
+        }
+        if (wrote_operation) {
+            xml.writeEndElement();
+            return;
+        }
+    }
+    QString operation_name = QString::fromStdString(object.GetParametricToolId());
+    if (operation_name.isEmpty()) {
+        operation_name = operation_name_for_object(object);
+    }
     if (!operation_name.isEmpty()) {
         xml.writeEmptyElement("operation");
         xml.writeAttribute("type", operation_name);
-        xml.writeAttribute("status", "baked");
+        xml.writeAttribute("status", object.IsParametric() ? "parametric" : "baked");
     }
     xml.writeEndElement();
+}
+
+bool write_boolean_tools(QXmlStreamWriter& xml, const CSolid& solid, QString& error) {
+    if (solid.GetBooleanToolCount() == 0) {
+        return true;
+    }
+
+    xml.writeStartElement("booleanTools");
+    for (size_t i = 0; i < solid.GetBooleanToolCount(); ++i) {
+        const CSolid* tool = solid.GetBooleanTool(i);
+        if (!tool) {
+            continue;
+        }
+        xml.writeStartElement("tool");
+        xml.writeAttribute("index", QString::number(i));
+        if (!tool->Save(xml, error)) {
+            return false;
+        }
+        xml.writeEndElement();
+    }
+    xml.writeEndElement();
+    return true;
+}
+
+bool read_boolean_tools(const QDomElement& object_element, CSolid& solid, QString& error) {
+    const QDomElement tools_element = object_element.firstChildElement("booleanTools");
+    if (tools_element.isNull()) {
+        return true;
+    }
+
+    solid.ClearBooleanTools();
+    for (QDomElement tool_element = tools_element.firstChildElement("tool");
+         !tool_element.isNull();
+         tool_element = tool_element.nextSiblingElement("tool")) {
+        std::unique_ptr<CSolid> tool = CSolid::Load(tool_element, error);
+        if (!tool) {
+            return false;
+        }
+        solid.AddBooleanTool(std::move(tool));
+    }
+    return true;
+}
+
+std::vector<ParametricParameterValue> read_parameters_from(const QDomElement& parameters_element) {
+    std::vector<ParametricParameterValue> parameters;
+    for (QDomElement parameter_element = parameters_element.firstChildElement("parameter");
+         !parameter_element.isNull();
+         parameter_element = parameter_element.nextSiblingElement("parameter")) {
+        const QString name = parameter_element.attribute("name");
+        if (name.isEmpty() || name.startsWith("color.")) {
+            continue;
+        }
+        bool ok = false;
+        const double value = parameter_element.attribute("value").toDouble(&ok);
+        if (ok) {
+            parameters.push_back({name.toStdString(), value});
+        }
+    }
+    return parameters;
+}
+
+void read_parametric_definition(const QDomElement& object_element, CAlfaObject& object) {
+    const QDomElement history = object_element.firstChildElement("operationHistory");
+    const QDomElement first_operation = history.firstChildElement("operation");
+    if (first_operation.isNull()) {
+        return;
+    }
+
+    const std::vector<ParametricParameterValue> legacy_parameters =
+        read_parameters_from(object_element.firstChildElement("parameters"));
+
+    auto* solid = dynamic_cast<CSolid*>(&object);
+    if (solid) {
+        solid->ClearOperationTree();
+    }
+
+    bool first_parametric_operation = true;
+    size_t operation_index = 0;
+    for (QDomElement operation = first_operation;
+         !operation.isNull();
+         operation = operation.nextSiblingElement("operation")) {
+        const QString tool_id = operation.attribute("type");
+        if (tool_id.isEmpty() || operation.attribute("status") == "baked") {
+            continue;
+        }
+
+        std::vector<ParametricParameterValue> parameters = read_parameters_from(operation);
+        if (parameters.empty()) {
+            parameters = legacy_parameters;
+        }
+
+        if (first_parametric_operation) {
+            object.SetParametricDefinition(tool_id.toStdString(), parameters);
+            first_parametric_operation = false;
+        }
+        if (solid) {
+            std::vector<int> created_surface_indices;
+            for (QDomElement surface = operation.firstChildElement("createdSurface");
+                 !surface.isNull();
+                 surface = surface.nextSiblingElement("createdSurface")) {
+                bool ok = false;
+                const int surface_index = surface.attribute("index").toInt(&ok);
+                if (ok && surface_index >= 0) {
+                    created_surface_indices.push_back(surface_index);
+                }
+            }
+            solid->SetParametricOperation(operation_index,
+                                          tool_id.toStdString(),
+                                          std::string(),
+                                          parameters,
+                                          std::move(created_surface_indices));
+        }
+        ++operation_index;
+    }
 }
 
 QDomElement required_child(const QDomElement& parent, const char* name, QString& error) {
@@ -283,7 +591,11 @@ QDomElement required_child(const QDomElement& parent, const char* name, QString&
 }
 }
 
-bool Dom3DProjectSerializer::Save(const QString& path, const CAlfaDoc& document, const QString& active_room, QString& error) const {
+bool Dom3DProjectSerializer::Save(const QString& path,
+                                  const CAlfaDoc& document,
+                                  const QString& active_room,
+                                  const ProjectViewState& view_state,
+                                  QString& error) const {
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
         error = file.errorString();
@@ -298,6 +610,7 @@ bool Dom3DProjectSerializer::Save(const QString& path, const CAlfaDoc& document,
 
     xml.writeStartElement("metadata");
     xml.writeTextElement("activeRoom", active_room);
+    write_view_state(xml, view_state);
     xml.writeEndElement();
 
     xml.writeStartElement("materials");
@@ -313,7 +626,7 @@ bool Dom3DProjectSerializer::Save(const QString& path, const CAlfaDoc& document,
         const QString type = object_type_name(object);
 
         xml.writeStartElement("object");
-        xml.writeAttribute("id", QString::number(i + 1));
+        xml.writeAttribute("id", QString::number(object.m_id != 0 ? object.m_id : static_cast<unsigned long>(i + 1)));
         xml.writeAttribute("type", type);
         xml.writeAttribute("name", QString::fromStdString(object.GetName()));
         xml.writeAttribute("room", default_room_name(object));
@@ -382,6 +695,17 @@ bool Dom3DProjectSerializer::Save(const QString& path, const CAlfaDoc& document,
                 xml.writeEndElement();
             }
 
+            if (mesh->GetNormals().size() == mesh->GetVertices().size()) {
+                xml.writeStartElement("normals");
+                for (const Vec3& normal : mesh->GetNormals()) {
+                    xml.writeEmptyElement("normal");
+                    xml.writeAttribute("x", QString::number(normal.x, 'g', 9));
+                    xml.writeAttribute("y", QString::number(normal.y, 'g', 9));
+                    xml.writeAttribute("z", QString::number(normal.z, 'g', 9));
+                }
+                xml.writeEndElement();
+            }
+
             xml.writeStartElement("faces");
             for (const CMesh3D::Face& face : mesh->GetFaces()) {
                 QStringList indices;
@@ -393,16 +717,13 @@ bool Dom3DProjectSerializer::Save(const QString& path, const CAlfaDoc& document,
             xml.writeEndElement();
             xml.writeEndElement();
         } else if (const auto* solid = dynamic_cast<const CSolid*>(&object)) {
-            QByteArray step_data;
-            if (!SaveSolidStep(*solid, step_data, error)) {
+            if (!solid->Save(xml, error)) {
                 return false;
             }
-
-            xml.writeStartElement("geometry");
-            xml.writeAttribute("kind", "brep-step");
-            xml.writeAttribute("encoding", "base64");
-            xml.writeCharacters(QString::fromLatin1(step_data.toBase64()));
-            xml.writeEndElement();
+            write_surface_texture_transforms(xml, *solid);
+            if (!write_boolean_tools(xml, *solid, error)) {
+                return false;
+            }
         }
 
         xml.writeEndElement();
@@ -423,7 +744,11 @@ bool Dom3DProjectSerializer::Save(const QString& path, const CAlfaDoc& document,
     return true;
 }
 
-bool Dom3DProjectSerializer::Load(const QString& path, CAlfaDoc& document, QString& active_room, QString& error) const {
+bool Dom3DProjectSerializer::Load(const QString& path,
+                                  CAlfaDoc& document,
+                                  QString& active_room,
+                                  ProjectViewState& view_state,
+                                  QString& error) const {
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
         error = file.errorString();
@@ -457,6 +782,9 @@ bool Dom3DProjectSerializer::Load(const QString& path, CAlfaDoc& document, QStri
     active_room = metadata.firstChildElement("activeRoom").text();
     if (active_room.isEmpty()) {
         active_room = "Architecture";
+    }
+    if (!read_view_state(metadata, view_state, error)) {
+        return false;
     }
 
     std::vector<Material> loaded_materials = Material::InitialDocumentMaterials();
@@ -608,6 +936,26 @@ bool Dom3DProjectSerializer::Load(const QString& path, CAlfaDoc& document, QStri
             }
 
             std::vector<CMesh3D::Face> faces;
+            std::vector<Vec3> normals;
+            const QDomElement normals_element = geometry.firstChildElement("normals");
+            if (!normals_element.isNull()) {
+                for (QDomElement normal_element = normals_element.firstChildElement("normal");
+                     !normal_element.isNull();
+                     normal_element = normal_element.nextSiblingElement("normal")) {
+                    Vec3 normal{};
+                    if (!read_float_attr(normal_element, "x", normal.x, error)
+                        || !read_float_attr(normal_element, "y", normal.y, error)
+                        || !read_float_attr(normal_element, "z", normal.z, error)) {
+                        return false;
+                    }
+                    normals.push_back(normal);
+                }
+                if (!normals.empty() && normals.size() != vertices.size()) {
+                    error = "Mesh normal count must match vertex count.";
+                    return false;
+                }
+            }
+
             const QDomElement faces_element = required_child(geometry, "faces", error);
             if (faces_element.isNull()) {
                 return false;
@@ -633,24 +981,20 @@ bool Dom3DProjectSerializer::Load(const QString& path, CAlfaDoc& document, QStri
                 faces.push_back(std::move(face));
             }
 
-            if (!mesh->SetGeometry(std::move(vertices), std::move(faces), std::move(uvs))) {
+            if (!mesh->SetGeometry(std::move(vertices),
+                                   std::move(faces),
+                                   std::move(uvs),
+                                   std::move(normals))) {
                 error = "Mesh geometry is invalid.";
                 return false;
             }
             object = std::move(mesh);
         } else if (type == "Solid" || type == "SurfaceSet") {
-            const QDomElement geometry = required_child(object_element, "geometry", error);
-            if (geometry.isNull()) {
+            std::unique_ptr<CSolid> solid = CSolid::Load(object_element, error);
+            if (!solid) {
                 return false;
             }
-            if (geometry.attribute("kind") != "brep-step" || geometry.attribute("encoding") != "base64") {
-                error = "Unsupported solid geometry encoding.";
-                return false;
-            }
-
-            std::unique_ptr<CSolid> solid;
-            const QByteArray step_data = QByteArray::fromBase64(geometry.text().toLatin1());
-            if (step_data.isEmpty() || !LoadSolidStep(step_data, solid, error)) {
+            if (!read_boolean_tools(object_element, *solid, error)) {
                 return false;
             }
             if (type == "SurfaceSet") {
@@ -670,8 +1014,20 @@ bool Dom3DProjectSerializer::Load(const QString& path, CAlfaDoc& document, QStri
             return false;
         }
 
+        if (auto* solid = dynamic_cast<CSolid*>(object.get())) {
+            if (!read_surface_texture_transforms(object_element, *solid, error)) {
+                return false;
+            }
+        }
         if (!read_material(object_element, *object, error)) {
             return false;
+        }
+        if (object_element.hasAttribute("id")) {
+            bool ok = false;
+            const unsigned long object_id = object_element.attribute("id").toULong(&ok);
+            if (ok) {
+                object->m_id = object_id;
+            }
         }
         if (object_element.hasAttribute("materialId")) {
             bool ok = false;
@@ -684,6 +1040,7 @@ bool Dom3DProjectSerializer::Load(const QString& path, CAlfaDoc& document, QStri
             }
         }
         upsert_loaded_material(loaded_materials, object->GetMaterial());
+        read_parametric_definition(object_element, *object);
         object->SetGroupName(object_element.attribute("group").toStdString());
         object->SetVisible(object_element.attribute("visible", "true") != "false");
         loaded_objects.push_back(std::move(object));
@@ -692,101 +1049,10 @@ bool Dom3DProjectSerializer::Load(const QString& path, CAlfaDoc& document, QStri
     document.Clear();
     document.GetMaterials() = std::move(loaded_materials);
     document.GetObjects() = std::move(loaded_objects);
+    document.EnsureObjectIds();
     if (document.GetObjects().empty()) {
         document.CreatePolyline();
     }
     document.ClearSelection();
     return true;
-}
-
-bool Dom3DProjectSerializer::SaveSolidStep(const CSolid& solid, QByteArray& step_data, QString& error) const {
-    if (solid.m_Shape.IsNull()) {
-        error = "Solid has no BRep shape.";
-        return false;
-    }
-
-    QTemporaryFile temp_file(QDir::tempPath() + "/Dom3DProjectSolidXXXXXX.step");
-    temp_file.setAutoRemove(true);
-    if (!temp_file.open()) {
-        error = temp_file.errorString();
-        return false;
-    }
-    const QString temp_path = temp_file.fileName();
-    temp_file.close();
-
-    try {
-        STEPControl_Writer writer;
-        const IFSelect_ReturnStatus transfer_status = writer.Transfer(solid.m_Shape, STEPControl_AsIs);
-        if (transfer_status != IFSelect_RetDone) {
-            error = "Could not transfer solid shape to STEP.";
-            return false;
-        }
-        const IFSelect_ReturnStatus write_status = writer.Write(temp_path.toLocal8Bit().constData());
-        if (write_status != IFSelect_RetDone) {
-            error = "Could not write temporary STEP data.";
-            return false;
-        }
-    } catch (const Standard_Failure& failure) {
-        error = failure.GetMessageString();
-        if (error.isEmpty()) {
-            error = "OpenCascade failed while saving solid STEP data.";
-        }
-        return false;
-    }
-
-    QFile step_file(temp_path);
-    if (!step_file.open(QIODevice::ReadOnly)) {
-        error = step_file.errorString();
-        return false;
-    }
-    step_data = step_file.readAll();
-    return !step_data.isEmpty();
-}
-
-bool Dom3DProjectSerializer::LoadSolidStep(const QByteArray& step_data, std::unique_ptr<CSolid>& solid, QString& error) const {
-    QTemporaryFile temp_file(QDir::tempPath() + "/Dom3DProjectSolidXXXXXX.step");
-    temp_file.setAutoRemove(true);
-    if (!temp_file.open()) {
-        error = temp_file.errorString();
-        return false;
-    }
-    if (temp_file.write(step_data) != step_data.size()) {
-        error = temp_file.errorString();
-        return false;
-    }
-    temp_file.flush();
-
-    try {
-        STEPControl_Reader reader;
-        const IFSelect_ReturnStatus read_status = reader.ReadFile(temp_file.fileName().toLocal8Bit().constData());
-        if (read_status != IFSelect_RetDone) {
-            error = "Could not read STEP data from XML project.";
-            return false;
-        }
-
-        const Standard_Integer transferred = reader.TransferRoots();
-        if (transferred <= 0) {
-            error = "STEP data does not contain transferable shapes.";
-            return false;
-        }
-
-        TopoDS_Shape shape = reader.OneShape();
-        if (shape.IsNull()) {
-            error = "STEP data does not contain a valid shape.";
-            return false;
-        }
-
-        auto loaded = std::make_unique<CSolid>(shape);
-        loaded->InitSurfaces();
-        loaded->InitEdges();
-        loaded->BuldMesh(0.1f);
-        solid = std::move(loaded);
-        return true;
-    } catch (const Standard_Failure& failure) {
-        error = failure.GetMessageString();
-        if (error.isEmpty()) {
-            error = "OpenCascade failed while loading solid STEP data.";
-        }
-        return false;
-    }
 }

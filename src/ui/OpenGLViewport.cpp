@@ -22,14 +22,10 @@ namespace {
 constexpr float kGridHalfSize = 12.0f;
 constexpr double kCurvePlaneY = 0.08;
 
-void camera_basis(const Camera& camera, Vec3& forward, Vec3& right, Vec3& up) {
-    const Vec3 eye = camera_position(camera);
-    forward = normalize(camera.target - eye);
-    right = normalize(cross(forward, {0.0f, 1.0f, 0.0f}));
-    if (std::fabs(right.x) <= 0.00001f && std::fabs(right.y) <= 0.00001f && std::fabs(right.z) <= 0.00001f) {
-        right = normalize(cross(forward, {0.0f, 0.0f, 1.0f}));
-    }
-    up = normalize(cross(right, forward));
+void viewport_camera_basis(const Camera& camera, Vec3& forward, Vec3& right, Vec3& up) {
+    forward = normalize(rotate(camera.orientation, {0.0f, 0.0f, -1.0f}));
+    right = normalize(rotate(camera.orientation, {1.0f, 0.0f, 0.0f}));
+    up = normalize(rotate(camera.orientation, {0.0f, 1.0f, 0.0f}));
 }
 
 void rotation_arc_basis(Vec3 axis, Vec3 camera_forward, Vec3& tangent, Vec3& bitangent) {
@@ -69,6 +65,136 @@ bool plane_from_points(const std::vector<CPoint3d>& points, Vec3& plane_point, V
     plane_point = point_to_vec3(points.front());
     plane_normal = normal;
     return true;
+}
+
+Quaternion quaternion_from_basis(Vec3 right, Vec3 up, Vec3 back) {
+    const float m00 = right.x;
+    const float m01 = up.x;
+    const float m02 = back.x;
+    const float m10 = right.y;
+    const float m11 = up.y;
+    const float m12 = back.y;
+    const float m20 = right.z;
+    const float m21 = up.z;
+    const float m22 = back.z;
+    const float trace = m00 + m11 + m22;
+
+    Quaternion q{};
+    if (trace > 0.0f) {
+        const float s = std::sqrt(trace + 1.0f) * 2.0f;
+        q.w = 0.25f * s;
+        q.x = (m21 - m12) / s;
+        q.y = (m02 - m20) / s;
+        q.z = (m10 - m01) / s;
+    } else if (m00 > m11 && m00 > m22) {
+        const float s = std::sqrt(1.0f + m00 - m11 - m22) * 2.0f;
+        q.w = (m21 - m12) / s;
+        q.x = 0.25f * s;
+        q.y = (m01 + m10) / s;
+        q.z = (m02 + m20) / s;
+    } else if (m11 > m22) {
+        const float s = std::sqrt(1.0f + m11 - m00 - m22) * 2.0f;
+        q.w = (m02 - m20) / s;
+        q.x = (m01 + m10) / s;
+        q.y = 0.25f * s;
+        q.z = (m12 + m21) / s;
+    } else {
+        const float s = std::sqrt(1.0f + m22 - m00 - m11) * 2.0f;
+        q.w = (m10 - m01) / s;
+        q.x = (m02 + m20) / s;
+        q.y = (m12 + m21) / s;
+        q.z = 0.25f * s;
+    }
+    return normalize_quaternion(q);
+}
+
+Quaternion z_up_orientation_from_forward(Vec3 forward, Vec3 fallback_right) {
+    constexpr Vec3 kWorldUp{0.0f, 0.0f, 1.0f};
+    forward = normalize(forward);
+    const Vec3 back = forward * -1.0f;
+    Vec3 right = normalize(cross(kWorldUp, back));
+    if (dot(right, right) <= 0.00001f) {
+        right = normalize(fallback_right - back * dot(fallback_right, back));
+    }
+    if (dot(right, right) <= 0.00001f) {
+        right = {1.0f, 0.0f, 0.0f};
+    }
+    const Vec3 up = normalize(cross(back, right));
+    return quaternion_from_basis(right, up, back);
+}
+
+Quaternion orientation_from_forward_up(Vec3 forward, Vec3 desired_up) {
+    forward = normalize(forward);
+    const Vec3 back = forward * -1.0f;
+    Vec3 up = normalize(desired_up - back * dot(desired_up, back));
+    if (dot(up, up) <= 0.00001f) {
+        up = {0.0f, 1.0f, 0.0f};
+    }
+    Vec3 right = normalize(cross(up, back));
+    if (dot(right, right) <= 0.00001f) {
+        right = {1.0f, 0.0f, 0.0f};
+    }
+    up = normalize(cross(back, right));
+    return quaternion_from_basis(right, up, back);
+}
+
+void cad_orbit_camera(Camera& camera, float yaw_delta_degrees, float pitch_delta_degrees) {
+    const Vec3 right = normalize(rotate(camera.orientation, {1.0f, 0.0f, 0.0f}));
+    const Vec3 up = normalize(rotate(camera.orientation, {0.0f, 1.0f, 0.0f}));
+    const Quaternion yaw_delta = quaternion_from_axis_angle(up, deg_to_rad(yaw_delta_degrees));
+    const Quaternion pitch_delta = quaternion_from_axis_angle(right, deg_to_rad(-pitch_delta_degrees));
+    camera.orientation = normalize_quaternion(pitch_delta * yaw_delta * camera.orientation);
+}
+
+void architectural_orbit_camera(Camera& camera, float yaw_delta_degrees, float pitch_delta_degrees) {
+    constexpr Vec3 kWorldUp{0.0f, 0.0f, 1.0f};
+    Vec3 forward = normalize(rotate(camera.orientation, {0.0f, 0.0f, -1.0f}));
+    const Vec3 current_right = normalize(rotate(camera.orientation, {1.0f, 0.0f, 0.0f}));
+
+    forward = normalize(rotate_around_axis(forward, kWorldUp, deg_to_rad(yaw_delta_degrees)));
+    const float horizontal = std::sqrt(forward.x * forward.x + forward.y * forward.y);
+    const float current_pitch = std::atan2(-forward.z, horizontal) * 180.0f / kPi;
+    const float target_pitch = std::clamp(current_pitch + pitch_delta_degrees, -10.0f, 89.0f);
+    Vec3 horizontal_forward{forward.x, forward.y, 0.0f};
+    if (dot(horizontal_forward, horizontal_forward) <= 0.00001f) {
+        horizontal_forward = normalize(cross(kWorldUp, current_right));
+    } else {
+        horizontal_forward = normalize(horizontal_forward);
+    }
+    if (dot(horizontal_forward, horizontal_forward) <= 0.00001f) {
+        horizontal_forward = {0.0f, -1.0f, 0.0f};
+    }
+
+    const float pitch = deg_to_rad(target_pitch);
+    forward = normalize(horizontal_forward * std::cos(pitch) + Vec3{0.0f, 0.0f, -1.0f} * std::sin(pitch));
+    camera.orientation = z_up_orientation_from_forward(forward, current_right);
+}
+
+void set_view_by_camera_ray(Camera& camera) {
+    const Vec3 forward = normalize(rotate(camera.orientation, {0.0f, 0.0f, -1.0f}));
+    const Vec3 axes[] = {
+        {1.0f, 0.0f, 0.0f},
+        {0.0f, 1.0f, 0.0f},
+        {0.0f, 0.0f, 1.0f},
+        {-1.0f, 0.0f, 0.0f},
+        {0.0f, -1.0f, 0.0f},
+        {0.0f, 0.0f, -1.0f}
+    };
+
+    Vec3 best_axis = axes[0];
+    float best_dot = dot(forward, axes[0]);
+    for (size_t i = 1; i < std::size(axes); ++i) {
+        const float value = dot(forward, axes[i]);
+        if (value > best_dot) {
+            best_dot = value;
+            best_axis = axes[i];
+        }
+    }
+
+    const Vec3 desired_up = std::fabs(best_axis.z) > 0.5f
+        ? Vec3{0.0f, 1.0f, 0.0f}
+        : Vec3{0.0f, 0.0f, 1.0f};
+    camera.orientation = orientation_from_forward_up(best_axis, desired_up);
 }
 }
 
@@ -194,11 +320,17 @@ void OpenGLViewport::SetSelectionMode(SelectionMode mode) {
     if (selection_mode_ == mode) {
         return;
     }
+    const bool converted_faces_to_edges =
+        document_
+        && selection_mode_ == SelectionMode::Face
+        && mode == SelectionMode::Edge
+        && document_->SelectEdgesOfSelectedFaces();
     selection_mode_ = mode;
     if (document_) {
-        document_->ClearSelection();
+        if (!converted_faces_to_edges) {
+            document_->ClearSelection();
+        }
         emit SelectionChanged();
-        emit DocumentChanged();
     }
     update();
 }
@@ -256,6 +388,15 @@ bool OpenGLViewport::IsOrthographicProjection() const {
     return orthographic_projection_;
 }
 
+Camera OpenGLViewport::GetCamera() const {
+    return camera_;
+}
+
+void OpenGLViewport::SetCamera(const Camera& camera) {
+    camera_ = camera;
+    update();
+}
+
 void OpenGLViewport::SetOrthographicProjection(bool enabled) {
     if (xy_plane_view_enabled_ && !enabled) {
         enabled = true;
@@ -273,21 +414,6 @@ OrbitMode OpenGLViewport::GetOrbitMode() const {
 
 void OpenGLViewport::SetOrbitMode(OrbitMode mode) {
     orbit_mode_ = mode;
- //   if (orbit_mode_ == OrbitMode::Architectural) {
- //       camera_.pitch = std::clamp(camera_.pitch, -10.0f, 75.0f);
- //  }
-    if (orbit_mode_ == OrbitMode::Architectural) {
-        camera_.pitch = std::clamp(camera_.pitch, -10.0f, 75.0f);
-    }
-    else {
-        // В CAD-режиме ограничиваем pitch, чтобы избежать резкого переворота при прохождении через 90°
-        camera_.pitch = std::clamp(camera_.pitch, -89.9f, 89.9f);
-        // Нормализуем yaw в диапазон [-180, 180)
-        if (camera_.yaw > 180.0f || camera_.yaw <= -180.0f) {
-            camera_.yaw = std::fmod(camera_.yaw + 180.0f, 360.0f) - 180.0f;
-        }
-    }
-
     update();
 }
 
@@ -305,9 +431,8 @@ void OpenGLViewport::SetXYPlaneViewEnabled(bool enabled) {
     zooming_ = false;
     if (enabled) {
         orthographic_projection_ = true;
-        camera_.yaw = 0.0f;
-        camera_.pitch = 89.9f;
-        camera_.target.y = 0.0f;
+        camera_.orientation = camera_orientation_from_yaw_pitch(0.0f, 0.0f);
+        camera_.target = {kGridHalfSize * 0.5f, kGridHalfSize * 0.5f, 0.0f};
     }
     update();
 }
@@ -321,6 +446,18 @@ void OpenGLViewport::SetCoordinateAxesVisible(bool visible) {
         return;
     }
     show_coordinate_axes_ = visible;
+    update();
+}
+
+bool OpenGLViewport::IsFloorGridVisible() const {
+    return show_floor_grid_;
+}
+
+void OpenGLViewport::SetFloorGridVisible(bool visible) {
+    if (show_floor_grid_ == visible) {
+        return;
+    }
+    show_floor_grid_ = visible;
     update();
 }
 
@@ -370,22 +507,19 @@ void OpenGLViewport::BeginSketch(const QString& name, SketchPlane plane) {
     sketch_origin_ = {};
     if (plane == SketchPlane::XY) {
         sketch_u_ = {1.0f, 0.0f, 0.0f};
-        sketch_v_ = {0.0f, 0.0f, 1.0f};
-        sketch_normal_ = {0.0f, 1.0f, 0.0f};
-        camera_.yaw = 0.0f;
-        camera_.pitch = -89.9f;
-    } else if (plane == SketchPlane::XZ) {
-        sketch_u_ = {1.0f, 0.0f, 0.0f};
         sketch_v_ = {0.0f, 1.0f, 0.0f};
         sketch_normal_ = {0.0f, 0.0f, 1.0f};
-        camera_.yaw = 0.0f;
-        camera_.pitch = 0.0f;
+        camera_.orientation = camera_orientation_from_yaw_pitch(0.0f, 0.0f);
+    } else if (plane == SketchPlane::XZ) {
+        sketch_u_ = {1.0f, 0.0f, 0.0f};
+        sketch_v_ = {0.0f, 0.0f, 1.0f};
+        sketch_normal_ = {0.0f, 1.0f, 0.0f};
+        camera_.orientation = camera_orientation_from_yaw_pitch(0.0f, -89.9f);
     } else {
-        sketch_u_ = {0.0f, 0.0f, 1.0f};
-        sketch_v_ = {0.0f, 1.0f, 0.0f};
+        sketch_u_ = {0.0f, 1.0f, 0.0f};
+        sketch_v_ = {0.0f, 0.0f, 1.0f};
         sketch_normal_ = {1.0f, 0.0f, 0.0f};
-        camera_.yaw = -90.0f;
-        camera_.pitch = 0.0f;
+        camera_.orientation = camera_orientation_from_yaw_pitch(-90.0f, 0.0f);
     }
 
     camera_.target = sketch_origin_;
@@ -433,7 +567,7 @@ void OpenGLViewport::paintGL() {
         return;
     }
    UpdateFPS();
-    renderer_.Render(*document_, camera_, orthographic_projection_, show_coordinate_axes_, tool_, transform_operation_, highlighted_transform_axis_, highlighted_draft_face_gizmo_, width(), height());
+    renderer_.Render(*document_, camera_, orthographic_projection_, show_coordinate_axes_, show_floor_grid_, xy_plane_view_enabled_, tool_, transform_operation_, highlighted_transform_axis_, highlighted_draft_face_gizmo_, width(), height());
     if (show_coordinate_axes_) {
         DrawCoordinateAxisLabels();
     }
@@ -554,7 +688,6 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
             if (hit_selected_point || document_->GetSelectedPointPosition(point)) {
                 BeginCurvePointDrag(point);
                 emit SelectionChanged();
-                emit DocumentChanged();
                 update();
             }
         } else {
@@ -605,7 +738,6 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
                 BeginCurvePointDrag(point);
                 last_mouse_ = event->pos();
                 emit SelectionChanged();
-                emit DocumentChanged();
                 update();
                 return;
             }
@@ -627,7 +759,8 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
 }
 
 void OpenGLViewport::mouseDoubleClickEvent(QMouseEvent* event) {
-    if (!document_ || tool_ != ToolMode::Select) {
+    if (!document_ || (tool_ != ToolMode::Select && tool_ != ToolMode::Orbit)
+        || event->button() != Qt::LeftButton) {
         QOpenGLWidget::mouseDoubleClickEvent(event);
         return;
     }
@@ -637,12 +770,37 @@ void OpenGLViewport::mouseDoubleClickEvent(QMouseEvent* event) {
         return renderer_.WorldToScreen(world, camera_, orthographic_projection_, width(), height(), screen);
     };
 
-    if (document_->SelectPolylineAtScreen(screen_point, world_to_screen, 8.0f, SelectionAction::Replace)) {
+    if (tool_ == ToolMode::Select
+        && document_->SelectPolylineAtScreen(screen_point, world_to_screen, 8.0f, SelectionAction::Replace)) {
         editing_polyline_ = true;
         highlighted_polyline_handle_ = false;
         emit SelectionChanged();
-        emit DocumentChanged();
         emit StatusTextChanged("Curve edit: drag handles, Esc to finish");
+        update();
+        event->accept();
+        return;
+    }
+
+    auto project_world = [this](Vec3 world, DomPoint& screen, float& depth) {
+        Vec3 forward{};
+        Vec3 right{};
+        Vec3 up{};
+        viewport_camera_basis(camera_, forward, right, up);
+        depth = dot(world - camera_position(camera_), forward);
+        return depth > 0.0f && renderer_.WorldToScreen(world, camera_, orthographic_projection_, width(), height(), screen);
+    };
+
+    bool selected_object = document_->SelectSolidMeshAtScreen(screen_point, project_world, SelectionAction::Replace)
+        || document_->SelectMeshAtScreen(screen_point, project_world, SelectionAction::Replace);
+    if (!selected_object) {
+        CurvePoint scene_point{};
+        selected_object = renderer_.ScreenToFloor(event->pos().x(), event->pos().y(), width(), height(), camera_, orthographic_projection_, scene_point)
+            && document_->SelectObjectAt(scene_point, 0.35f, false);
+    }
+
+    if (selected_object) {
+        emit SelectionChanged();
+        emit ObjectDoubleClicked();
         update();
         event->accept();
         return;
@@ -785,17 +943,15 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
     }
 
     if (!xy_plane_view_enabled_ && (orbiting_ || alt_orbiting_)) {
-        camera_.yaw -= static_cast<float>(delta.x()) * 0.35f;
-        camera_.pitch += static_cast<float>(delta.y()) * 0.25f;
-        if (orbit_mode_ == OrbitMode::Architectural) {
-            camera_.pitch = std::clamp(camera_.pitch, -10.0f, 75.0f);
-        }
-        else {
-            // Ограничиваем pitch чуть менее 90°, чтобы не пересекать вертикаль и не получить инверсию
-            camera_.pitch = std::clamp(camera_.pitch, -89.9f, 89.9f);
-            // Нормализуем yaw, чтобы значения не росли бесконтрольно
-            if (camera_.yaw > 180.0f || camera_.yaw <= -180.0f) {
-                camera_.yaw = std::fmod(camera_.yaw + 180.0f, 360.0f) - 180.0f;
+        if (event->modifiers().testFlag(Qt::ShiftModifier)) {
+            set_view_by_camera_ray(camera_);
+        } else {
+            const float yaw_delta = -static_cast<float>(delta.x()) * 0.35f;
+            const float pitch_delta = static_cast<float>(delta.y()) * 0.25f;
+            if (orbit_mode_ == OrbitMode::Architectural) {
+                architectural_orbit_camera(camera_, yaw_delta, pitch_delta);
+            } else {
+                cad_orbit_camera(camera_, yaw_delta, pitch_delta);
             }
         }
         last_mouse_ = event->pos();
@@ -804,19 +960,21 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
     }
 
     if (panning_) {
-        const float scale = camera_.distance * 0.0018f;
-        if (sketch_active_) {
-            Vec3 forward{};
-            Vec3 right{};
-            Vec3 up{};
-            camera_basis(camera_, forward, right, up);
-            camera_.target = camera_.target - right * (static_cast<float>(delta.x()) * scale) + up * (static_cast<float>(delta.y()) * scale);
+        Vec3 forward{};
+        Vec3 right{};
+        Vec3 up{};
+        viewport_camera_basis(camera_, forward, right, up);
+        const int viewport_height = std::max(1, height());
+        float world_per_pixel = camera_.distance * 0.0018f;
+        if (orthographic_projection_) {
+            const float half_height = std::max(0.25f, camera_.distance * 0.42f);
+            world_per_pixel = (2.0f * half_height) / static_cast<float>(viewport_height);
         } else {
-            const float yaw = deg_to_rad(camera_.yaw);
-            const Vec3 right{std::cos(yaw), 0.0f, -std::sin(yaw)};
-            const Vec3 forward_ground{-std::sin(yaw), 0.0f, -std::cos(yaw)};
-            camera_.target = camera_.target - right * (static_cast<float>(delta.x()) * scale) + forward_ground * (static_cast<float>(delta.y()) * scale);
+            const float depth = std::max(0.001f, dot(camera_.target - camera_position(camera_), forward));
+            world_per_pixel = (2.0f * depth * std::tan(deg_to_rad(48.0f) * 0.5f)) / static_cast<float>(viewport_height);
         }
+        camera_.target = camera_.target - right * (static_cast<float>(delta.x()) * world_per_pixel)
+            + up * (static_cast<float>(delta.y()) * world_per_pixel);
         last_mouse_ = event->pos();
         update();
         return;
@@ -846,7 +1004,6 @@ void OpenGLViewport::mouseReleaseEvent(QMouseEvent* event) {
         document_->SelectCurvePointsInScreenRect(rect, world_to_screen, edit_point_selection_action_);
         selecting_edit_points_ = false;
         emit SelectionChanged();
-        emit DocumentChanged();
         update();
     }
     if (dragging_face_extrude_ && tool_ == ToolMode::FaceExtrude) {
@@ -983,7 +1140,6 @@ void OpenGLViewport::keyPressEvent(QKeyEvent* event) {
         active_transform_axis_ = TransformAxis::None;
         highlighted_transform_axis_ = TransformAxis::None;
         emit SelectionChanged();
-        emit DocumentChanged();
         emit StatusTextChanged("Selection cleared");
         update();
         event->accept();
@@ -1066,26 +1222,24 @@ void OpenGLViewport::SelectAt(const QPoint& point, SelectionAction action) {
         Vec3 forward{};
         Vec3 right{};
         Vec3 up{};
-        camera_basis(camera_, forward, right, up);
+        viewport_camera_basis(camera_, forward, right, up);
         depth = dot(world - camera_position(camera_), forward);
         return depth > 0.0f && renderer_.WorldToScreen(world, camera_, orthographic_projection_, width(), height(), screen);
     };
 
     if (selection_mode_ == SelectionMode::Face) {
-        if (document_->SelectSolidPlanarFaceAtScreen(screen_point, project_world, action)) {
+        if (document_->SelectSolidFaceAtScreen(screen_point, project_world, false, action)) {
             emit SelectionChanged();
-            emit DocumentChanged();
             update();
             return;
         }
-        emit StatusTextChanged("Select Face: planar face not found");
+        emit StatusTextChanged("Select Face: face not found");
         return;
     }
 
     if (selection_mode_ == SelectionMode::Edge) {
         if (document_->SelectSolidEdgeAtScreen(screen_point, world_to_screen, 10.0f, action)) {
             emit SelectionChanged();
-            emit DocumentChanged();
             update();
             return;
         }
@@ -1095,14 +1249,12 @@ void OpenGLViewport::SelectAt(const QPoint& point, SelectionAction action) {
 
     if (selection_mode_ == SelectionMode::Object && document_->SelectSolidMeshAtScreen(screen_point, project_world, action)) {
         emit SelectionChanged();
-        emit DocumentChanged();
         update();
         return;
     }
 
     if (selection_mode_ == SelectionMode::Object && document_->SelectMeshAtScreen(screen_point, project_world, action)) {
         emit SelectionChanged();
-        emit DocumentChanged();
         update();
         return;
     }
@@ -1110,7 +1262,6 @@ void OpenGLViewport::SelectAt(const QPoint& point, SelectionAction action) {
     if (selection_mode_ == SelectionMode::Object
         && document_->SelectPolylineAtScreen(screen_point, world_to_screen, 8.0f, action)) {
         emit SelectionChanged();
-        emit DocumentChanged();
         update();
         return;
     }
@@ -1118,7 +1269,6 @@ void OpenGLViewport::SelectAt(const QPoint& point, SelectionAction action) {
     if (selection_mode_ == SelectionMode::Point
         && document_->SelectPolylinePointAtScreen(screen_point, world_to_screen, 8.0f)) {
         emit SelectionChanged();
-        emit DocumentChanged();
         update();
         return;
     }
@@ -1141,7 +1291,6 @@ void OpenGLViewport::SelectAt(const QPoint& point, SelectionAction action) {
     }
 
     emit SelectionChanged();
-    emit DocumentChanged();
     update();
 }
 
@@ -1173,7 +1322,7 @@ CAlfaObject* OpenGLViewport::FindObjectForMaterialAt(const QPoint& point) {
         Vec3 forward{};
         Vec3 right{};
         Vec3 up{};
-        camera_basis(camera_, forward, right, up);
+        viewport_camera_basis(camera_, forward, right, up);
         depth = dot(world - camera_position(camera_), forward);
         return depth > 0.0f && renderer_.WorldToScreen(world, camera_, orthographic_projection_, width(), height(), screen);
     };
@@ -1260,7 +1409,7 @@ void OpenGLViewport::HandleBooleanClick(const QPoint& point) {
         Vec3 forward{};
         Vec3 right{};
         Vec3 up{};
-        camera_basis(camera_, forward, right, up);
+        viewport_camera_basis(camera_, forward, right, up);
         depth = dot(world - camera_position(camera_), forward);
         return depth > 0.0f && renderer_.WorldToScreen(world, camera_, orthographic_projection_, width(), height(), screen);
     };
@@ -1352,7 +1501,7 @@ void OpenGLViewport::HandleFaceExtrudeClick(const QPoint& point) {
         Vec3 forward{};
         Vec3 right{};
         Vec3 up{};
-        camera_basis(camera_, forward, right, up);
+        viewport_camera_basis(camera_, forward, right, up);
         depth = dot(world - camera_position(camera_), forward);
         return depth > 0.0f && renderer_.WorldToScreen(world, camera_, orthographic_projection_, width(), height(), screen);
     };
@@ -1467,16 +1616,21 @@ void OpenGLViewport::HandleDraftFaceClick(const QPoint& point) {
         Vec3 forward{};
         Vec3 right{};
         Vec3 up{};
-        camera_basis(camera_, forward, right, up);
+        viewport_camera_basis(camera_, forward, right, up);
         depth = dot(world - camera_position(camera_), forward);
         return depth > 0.0f && renderer_.WorldToScreen(world, camera_, orthographic_projection_, width(), height(), screen);
     };
 
     if (!document_->HasDraftFace()) {
-        if (document_->SelectSolidPlanarFaceAtScreen(screen_point, project_world) && document_->BeginDraftFaceFromSelectedFace()) {
-            emit SelectionChanged();
-            emit DocumentChanged();
-            emit StatusTextChanged("Draft Face: choose a straight edge axis");
+        if (document_->SelectSolidPlanarFaceAtScreen(screen_point, project_world)) {
+            if (document_->BeginDraftFaceFromSelectedFace()) {
+                emit SelectionChanged();
+                emit DocumentChanged();
+                emit StatusTextChanged("Draft Face: choose a straight edge axis");
+                update();
+                return;
+            }
+            emit StatusTextChanged("Draft Face: unavailable after Non Uniform Scale");
             update();
             return;
         }
@@ -1508,7 +1662,7 @@ void OpenGLViewport::HandleThickSolidClick(const QPoint& point) {
         Vec3 forward{};
         Vec3 right{};
         Vec3 up{};
-        camera_basis(camera_, forward, right, up);
+        viewport_camera_basis(camera_, forward, right, up);
         depth = dot(world - camera_position(camera_), forward);
         return depth > 0.0f && renderer_.WorldToScreen(world, camera_, orthographic_projection_, width(), height(), screen);
     };
@@ -1610,7 +1764,7 @@ bool OpenGLViewport::HitTestDraftFaceGizmo(const QPoint& point) const {
     Vec3 forward{};
     Vec3 right{};
     Vec3 up{};
-    camera_basis(camera_, forward, right, up);
+    viewport_camera_basis(camera_, forward, right, up);
     Vec3 tangent{};
     Vec3 bitangent{};
     rotation_arc_basis(axis, forward, tangent, bitangent);
@@ -1662,13 +1816,14 @@ void OpenGLViewport::HandleTransformClick(const QPoint& point, bool add_to_selec
         Vec3 forward{};
         Vec3 right{};
         Vec3 up{};
-        camera_basis(camera_, forward, right, up);
+        viewport_camera_basis(camera_, forward, right, up);
         depth = dot(world - camera_position(camera_), forward);
         return depth > 0.0f && renderer_.WorldToScreen(world, camera_, orthographic_projection_, width(), height(), screen);
     };
 
     const SelectionAction solid_action = add_to_selection ? SelectionAction::Add : SelectionAction::Replace;
     if (document_->SelectSolidMeshAtScreen(screen_point, project_world, solid_action)) {
+        document_->ExpandSelectedGroups();
         emit SelectionChanged();
         emit DocumentChanged();
         update();
@@ -1676,6 +1831,7 @@ void OpenGLViewport::HandleTransformClick(const QPoint& point, bool add_to_selec
     }
 
     if (document_->SelectMeshAtScreen(screen_point, project_world, solid_action)) {
+        document_->ExpandSelectedGroups();
         emit SelectionChanged();
         emit DocumentChanged();
         update();
@@ -1691,6 +1847,7 @@ void OpenGLViewport::HandleTransformClick(const QPoint& point, bool add_to_selec
     } else {
         document_->SelectObjectAt(scene_point, 0.35f, false);
     }
+    document_->ExpandSelectedGroups();
 
     emit SelectionChanged();
     emit DocumentChanged();
@@ -1716,7 +1873,7 @@ void OpenGLViewport::HandleTransformDrag(const QPoint& point) {
         Vec3 forward{};
         Vec3 right{};
         Vec3 up{};
-        camera_basis(camera_, forward, right, up);
+        viewport_camera_basis(camera_, forward, right, up);
 
         const int viewport_height = std::max(1, height());
         float world_per_pixel = 1.0f;
@@ -1848,7 +2005,7 @@ TransformAxis OpenGLViewport::HitTestTransformGizmo(const QPoint& point) const {
         Vec3 forward{};
         Vec3 right{};
         Vec3 up{};
-        camera_basis(camera_, forward, right, up);
+        viewport_camera_basis(camera_, forward, right, up);
         if (renderer_.WorldToScreen(center + right * ring_radius, camera_, orthographic_projection_, width(), height(), ring_edge)) {
             const float ring_dx = static_cast<float>(ring_edge.x - center_screen.x);
             const float ring_dy = static_cast<float>(ring_edge.y - center_screen.y);
@@ -1866,7 +2023,7 @@ TransformAxis OpenGLViewport::HitTestTransformGizmo(const QPoint& point) const {
         Vec3 forward{};
         Vec3 right{};
         Vec3 up{};
-        camera_basis(camera_, forward, right, up);
+        viewport_camera_basis(camera_, forward, right, up);
         if (renderer_.WorldToScreen(center + right * cube_half_size, camera_, orthographic_projection_, width(), height(), cube_edge)) {
             const float cube_dx = static_cast<float>(cube_edge.x - center_screen.x);
             const float cube_dy = static_cast<float>(cube_edge.y - center_screen.y);
@@ -1881,7 +2038,7 @@ TransformAxis OpenGLViewport::HitTestTransformGizmo(const QPoint& point) const {
         Vec3 forward{};
         Vec3 right{};
         Vec3 up{};
-        camera_basis(camera_, forward, right, up);
+        viewport_camera_basis(camera_, forward, right, up);
 
         TransformAxis best_arc_axis = TransformAxis::None;
         float best_arc_distance = 18.0f;
@@ -2090,7 +2247,7 @@ bool OpenGLViewport::ScreenToSketchPlane(const QPoint& point, CPoint3d& result) 
     Vec3 forward{};
     Vec3 right{};
     Vec3 up{};
-    camera_basis(camera_, forward, right, up);
+    viewport_camera_basis(camera_, forward, right, up);
 
     Vec3 ray_origin = camera_position(camera_);
     Vec3 ray_direction{};
@@ -2147,7 +2304,7 @@ bool OpenGLViewport::ScreenToWorldPlane(const QPoint& point, Vec3 plane_point, V
     Vec3 forward{};
     Vec3 right{};
     Vec3 up{};
-    camera_basis(camera_, forward, right, up);
+    viewport_camera_basis(camera_, forward, right, up);
 
     Vec3 ray_origin = camera_position(camera_);
     Vec3 ray_direction{};
@@ -2179,7 +2336,7 @@ bool OpenGLViewport::ScreenToWorldPlane(const QPoint& point, Vec3 plane_point, V
 
 bool OpenGLViewport::ScreenToCurvePlane(const QPoint& point, CPoint3d& result) {
     if (xy_plane_view_enabled_) {
-        return ScreenToPlaneY(point, kCurvePlaneY, result);
+        return ScreenToWorldPlane(point, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, result);
     }
 
     const std::vector<CPoint3d>& points = tool_ == ToolMode::DrawBSpline
@@ -2210,7 +2367,7 @@ bool OpenGLViewport::ScreenToPlaneY(const QPoint& point, double y, CPoint3d& res
     Vec3 forward{};
     Vec3 right{};
     Vec3 up{};
-    camera_basis(camera_, forward, right, up);
+    viewport_camera_basis(camera_, forward, right, up);
 
     Vec3 ray_origin = camera_position(camera_);
     Vec3 ray_direction{};
@@ -2248,7 +2405,7 @@ bool OpenGLViewport::ScreenToViewPlane(const QPoint& point, Vec3 plane_point, CP
     Vec3 forward{};
     Vec3 right{};
     Vec3 up{};
-    camera_basis(camera_, forward, right, up);
+    viewport_camera_basis(camera_, forward, right, up);
 
     Vec3 ray_origin = camera_position(camera_);
     Vec3 ray_direction{};
@@ -2447,8 +2604,11 @@ void OpenGLViewport::DrawCoordinateAxisLabels() {
     DomPoint x_screen{};
     DomPoint y_screen{};
     DomPoint z_screen{};
-    const bool has_x = renderer_.WorldToScreen({kGridHalfSize, 0.02f, 0.0f}, camera_, orthographic_projection_, width(), height(), x_screen);
-    const bool has_y = renderer_.WorldToScreen({0.0f, kGridHalfSize, 0.02f}, camera_, orthographic_projection_, width(), height(), y_screen);
+    const float lift = 0.02f;
+    const Vec3 x_label{kGridHalfSize, 0.0f, lift};
+    const Vec3 y_label{0.0f, kGridHalfSize, lift};
+    const bool has_x = renderer_.WorldToScreen(x_label, camera_, orthographic_projection_, width(), height(), x_screen);
+    const bool has_y = renderer_.WorldToScreen(y_label, camera_, orthographic_projection_, width(), height(), y_screen);
     const bool has_z = renderer_.WorldToScreen({0.0f, 0.0f, kGridHalfSize}, camera_, orthographic_projection_, width(), height(), z_screen);
 
     QPainter painter(this);

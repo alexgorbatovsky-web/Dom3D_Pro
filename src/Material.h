@@ -13,6 +13,11 @@ struct Material {
     float specular = 0.2f;
     float shininess = 24.0f;
     float reflectivity = 0.0f;
+    float texture_offset_u = 0.0f;
+    float texture_offset_v = 0.0f;
+    float texture_scale_u = 1.0f;
+    float texture_scale_v = 1.0f;
+    float texture_rotation_degrees = 0.0f;
     unsigned long id = 0;
     std::string name = "Material";
     std::string color_texture_path;

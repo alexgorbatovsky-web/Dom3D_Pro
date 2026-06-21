@@ -39,12 +39,16 @@ public:
     ToolMode CurrentTool() const;
     bool IsOrthographicProjection() const;
     void SetOrthographicProjection(bool enabled);
+    Camera GetCamera() const;
+    void SetCamera(const Camera& camera);
     OrbitMode GetOrbitMode() const;
     void SetOrbitMode(OrbitMode mode);
     bool IsXYPlaneViewEnabled() const;
     void SetXYPlaneViewEnabled(bool enabled);
     bool IsCoordinateAxesVisible() const;
     void SetCoordinateAxesVisible(bool visible);
+    bool IsFloorGridVisible() const;
+    void SetFloorGridVisible(bool visible);
     void BeginMaterialPaint(const Material& material);
     void BeginMaterialPick();
     void CancelMaterialInteraction();
@@ -62,6 +66,7 @@ signals:
     void BooleanFinished();
     void MaterialPicked(const Material& material);
     void ToolModeChanged(ToolMode tool);
+    void ObjectDoubleClicked();
 
 protected:
     void initializeGL() override;
@@ -176,6 +181,7 @@ private:
     bool has_boolean_body_ = false;
     bool orthographic_projection_ = false;
     bool show_coordinate_axes_ = true;
+    bool show_floor_grid_ = true;
     bool material_drag_active_ = false;
     bool sketch_active_ = false;
     bool sketch_rectangle_has_first_point_ = false;
@@ -194,9 +200,6 @@ private:
     Material active_paint_material_;
     OrbitMode orbit_mode_ = OrbitMode::CAD;
     size_t boolean_body_index_ = 0;
-    // raw (unwrapped) angles to avoid flip oscillation when crossing +/-90°
-    float raw_yaw_ = 0.0f;
-    float raw_pitch_ = 0.0f;
     int    m_frameCounter = 0;
     float  m_fps = 0.0f;
 	int m_lastFpsTime = 0;

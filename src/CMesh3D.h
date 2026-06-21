@@ -18,8 +18,13 @@ public:
     const std::vector<Vec3>& GetVertices() const;
     const std::vector<Face>& GetFaces() const;
     const std::vector<UV>& GetUVs() const;
+    const std::vector<Vec3>& GetNormals() const;
     bool SetGeometry(std::vector<Vec3> vertices, std::vector<Face> faces);
     bool SetGeometry(std::vector<Vec3> vertices, std::vector<Face> faces, std::vector<UV> uvs);
+    bool SetGeometry(std::vector<Vec3> vertices,
+                     std::vector<Face> faces,
+                     std::vector<UV> uvs,
+                     std::vector<Vec3> normals);
     void GeneratePlanarUVs();
 
     void Render();
@@ -40,6 +45,7 @@ public:
     void Translate(Vec3 delta) override;
     void Rotate(Vec3 center, Vec3 axis, float angle) override;
     void Scale(Vec3 center, Vec3 axis, float factor) override;
+    void Mirror(Vec3 plane_point, Vec3 plane_normal) override;
     bool GetBounds(Vec3& min_point, Vec3& max_point) const override;
     bool Save(std::ostream& stream) const override;
     bool Load(std::istream& stream);
@@ -54,6 +60,7 @@ private:
 
     std::vector<Vec3> vertices_;
     std::vector<UV> uvs_;
+    std::vector<Vec3> normals_;
     std::vector<Face> faces_;
     static float s_WireOpacity;
     static MeshDisplayMode s_DisplayMode;
