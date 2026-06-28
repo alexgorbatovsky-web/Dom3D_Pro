@@ -12,6 +12,9 @@
 #include <vector>
 
 class CSolid;
+class CAlfaDoc;
+
+CAlfaDoc* GetAlfaDoc();
 
 class CAlfaDoc {
 public:

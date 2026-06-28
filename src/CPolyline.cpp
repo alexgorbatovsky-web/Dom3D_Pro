@@ -1,10 +1,16 @@
 #include "CPolyline.h"
 
 #include "OpenGLCompat.h"
+#include "SurfaceUVMapping.h"
+#include "solid/SurfaceFace.h"
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <istream>
+#include <limits>
 #include <memory>
 #include <ostream>
 #include <sstream>
@@ -42,10 +48,19 @@ bool plane_from_polyline_points(const std::vector<CPoint3d>& points, Vec3& plane
     plane_normal = normal;
     return true;
 }
+
+std::filesystem::path obj_output_path(const std::string& name) {
+    std::filesystem::path path(name);
+    if (!path.has_extension()) {
+        path += ".obj";
+    }
+    return path;
+}
 }
 
 CPolyline::CPolyline()
     : CAlfaObject("Polyline") {
+    IsReversed = false;
 }
 
 CPolyline::CPolyline(std::string name)
@@ -92,6 +107,9 @@ void CPolyline::Open() {
 size_t CPolyline::GetPointCount() const {
     return points_.size();
 }
+size_t CPolyline::np() const {
+    return points_.size();
+}
 
 void CPolyline::Clear() {
     points_.clear();
@@ -131,6 +149,127 @@ bool CPolyline::SetPoint(size_t index, CPoint3d point) {
 
 bool CPolyline::SetPoint(size_t index, CurvePoint point) {
     return SetPoint(index, ToPoint3d(point));
+}
+
+bool CPolyline::PutOnSurface(CSurfaceFace* surface) {
+    if (!surface || points_.empty()) {
+        return false;
+    }
+
+    SurfaceUVMapping mapping(surface);
+    if (!mapping.IsValid()) {
+        return false;
+    }
+
+    std::vector<CPoint3d> uv_points;
+    uv_points.reserve(points_.size());
+    SurfaceUVPoint previous{};
+    bool has_previous = false;
+    for (const CPoint3d& point : points_) {
+        SurfaceUVPoint uv{};
+        if (!mapping.Project(to_vec3(point), uv)) {
+            return false;
+        }
+        if (has_previous) {
+            uv = mapping.UnwrapNear(uv, previous);
+        }
+        uv_points.emplace_back(uv.u, uv.v, 0.0);
+        previous = uv;
+        has_previous = true;
+    }
+
+    points_ = std::move(uv_points);
+    SetLockedPlane({0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
+    return true;
+}
+bool CPolyline::RestoreTo3DFromUVSurface(CSurfaceFace* mm)
+{
+    if (!mm) {
+        return false;
+    }
+
+    for (CPoint3d& point : points_) {
+        CPoint8d ps;
+        if (!mm->GetPoint(point.x, point.y, &ps)) {
+            return false;
+        }
+        point.x = ps.x;
+        point.y = ps.y;
+        point.z = ps.z;
+    }
+    ClearLockedPlane();
+
+    return true;
+}
+
+
+bool CPolyline::ExportToObj(const std::string& name) const {
+    if (name.empty() || points_.empty()) {
+        return false;
+    }
+
+    std::ofstream stream(obj_output_path(name), std::ios::out | std::ios::trunc);
+    if (!stream) {
+        return false;
+    }
+
+    stream << std::setprecision(std::numeric_limits<double>::max_digits10);
+    stream << "# Dom3D Pro CPolyline export\n";
+    stream << "o " << (GetName().empty() ? "Polyline" : GetName()) << "\n";
+    for (const CPoint3d& point : points_) {
+        stream << "v " << point.x << " " << point.y << " " << point.z << "\n";
+    }
+
+    if (points_.size() == 1) {
+        stream << "p 1\n";
+    } else {
+        stream << "l";
+        for (size_t i = 0; i < points_.size(); ++i) {
+            stream << " " << i + 1;
+        }
+        if (IsClosed()) {
+            stream << " 1";
+        }
+        stream << "\n";
+    }
+
+    return static_cast<bool>(stream);
+}
+
+bool CPolyline::printToFile(const std::string& name) const {
+    if (name.empty() || points_.empty()) {
+        return false;
+    }
+
+    std::filesystem::path path(name);
+    if (!path.has_parent_path()) {
+        path = std::filesystem::path("C:\\temp") / path;
+    }
+    if (!path.has_extension()) {
+        path += ".txt";
+    }
+
+    std::error_code error;
+    if (path.has_parent_path()) {
+        std::filesystem::create_directories(path.parent_path(), error);
+        if (error) {
+            return false;
+        }
+    }
+
+    std::ofstream stream(path, std::ios::out | std::ios::app);
+    if (!stream) {
+        return false;
+    }
+
+    stream << "POLYLINE\n";
+    stream << points_.size() << "\n";
+    stream << std::fixed << std::setprecision(9);
+    for (const CPoint3d& point : points_) {
+        stream << point.x << " " << point.y << " " << point.z << "\n";
+    }
+
+    return static_cast<bool>(stream);
 }
 
 bool CPolyline::RemovePoint(size_t index) {
@@ -602,6 +741,170 @@ bool CPolyline::CreatePolygone(float Length, int qty)
     for (int i = 0; i < qty; i++) {
         p.Rotate(&p0, &pz, alfa * 2.0);
         points_[i + 1] = p;
+    }
+    return true;
+}
+CPoint3d* CPolyline::P(int n)
+{
+    if (n >= GetPointCount())
+        return NULL;
+    return &points_[n];
+
+}
+CPoint3d* CPolyline::PLast()
+{
+    return &points_[points_.size()-1];
+}
+void CPolyline::Revers()
+{
+    CPoint3d ptm;
+    int i, j;
+    for (i = 0, j = np() - 1; i < j; i++, j--) {
+        ptm = points_[i];
+        points_[i] = points_[j];
+        points_[j] = ptm;
+    }
+    IsReversed = !IsReversed;
+}
+double CPolyline::GetLength()
+{
+    double Length = 0;
+    for (int i = 0; i < np() - 1; i++)
+        Length += P(i)->DistTo(P(i + 1));
+
+    return Length;
+}
+bool CPolyline::IsConcavePolygonOnXY()
+{
+    int n = np();
+    if (n < 3) return false;
+
+    // Oriented area (projection onto XY)
+    double area = 0.0;
+    for (int i = 0; i < n; ++i) {
+        CPoint3d* p = P(i);
+        CPoint3d* q = P((i + 1) % n);
+        area += p->x * q->y - q->x * p->y;
+    }
+    // degenerate/collinear case - considered non-concave
+    const double AREA_EPS = 1e-12;
+    if (fabs(area) < AREA_EPS) return false;
+
+    int polySign = (area > 0.0) ? 1 : -1; // +1 � CCW, -1 � CW
+
+    const double eps = 1e-10;
+    // Walk along the peaks and check the sign cross(prev->cur, cur->next)
+    for (int i = 0; i < n; ++i) {
+        CPoint3d* prev = P((i - 1 + n) % n);
+        CPoint3d* cur = P(i);
+        CPoint3d* next = P((i + 1) % n);
+
+        double vx1 = cur->x - prev->x;
+        double vy1 = cur->y - prev->y;
+        double vx2 = next->x - cur->x;
+        double vy2 = next->y - cur->y;
+
+        double crossZ = vx1 * vy2 - vy1 * vx2;
+
+        // Ignoring nearly collinear triples
+        if (fabs(crossZ) <= eps) continue;
+
+        int sign = (crossZ > 0.0) ? 1 : -1;
+        if (sign != polySign) {
+            // a concave angle was found
+            return true;
+        }
+    }
+
+
+    return false;
+}
+
+bool CPolyline::JoinG(CPolyline* line2)
+{
+    if (!line2 || this == line2 || line2->IsEmpty()) {
+        return false;
+    }
+
+    if (IsEmpty()) {
+        points_ = line2->GetPoints();
+        closed_ = false;
+        TmpLen = static_cast<float>(GetLength());
+        return true;
+    }
+
+    const std::vector<CPoint3d>& line2_points = line2->GetPoints();
+    if (line2_points.size() > 1) {
+        points_.insert(points_.end(), line2_points.begin() + 1, line2_points.end());
+    }
+    closed_ = false;
+    TmpLen = static_cast<float>(GetLength());
+    return true;
+}
+
+
+bool CPolyline::JoinLine(CPolyline* line2, double delta)
+{
+    if (!line2 || this == line2 || line2->IsEmpty()) {
+        return false;
+    }
+    if (IsEmpty())
+        return JoinG(line2);
+    double dist1 = PLast()->DistTo(line2->P(0));
+    if (dist1 < delta)
+        return JoinG(line2);
+
+    double dist2 = PLast()->DistTo(line2->PLast());
+    if (dist2 < delta) {
+        line2->Revers();
+        return JoinG(line2);
+    }
+
+    double dist3 = P(0)->DistTo(line2->P(0));
+    if (dist3 < delta) {
+        Revers();
+        return JoinG(line2);
+    }
+    double dist4 = P(0)->DistTo(line2->PLast());
+    if (dist4 > delta) {
+        return false;
+    }
+    Revers();
+    line2->Revers();
+    return JoinG(line2);
+}
+bool CPolyline::JoinMultuLines(std::vector<CPolyline*>* lines, std::vector<CPolyline*>* LinesJoin, double delta)
+{
+    if (!lines || !LinesJoin)
+        return false;
+
+    while (!lines->empty()) {
+        CPolyline* line1 = lines->front();
+        if (!line1)
+            return false;
+        lines->erase(lines->begin());
+        LinesJoin->push_back(line1);
+
+        bool joined = true;
+        while (joined && !lines->empty()) {
+            joined = false;
+            for (size_t i = 0; i < lines->size(); ++i) {
+                CPolyline* line2 = (*lines)[i];
+                if (!line2 || line2->IsEmpty())
+                    continue;
+
+                if (line1->P(0)->DistTo(line2->P(0)) < delta
+                    || line1->P(0)->DistTo(line2->PLast()) < delta
+                    || line1->PLast()->DistTo(line2->P(0)) < delta
+                    || line1->PLast()->DistTo(line2->PLast()) < delta) {
+                    if (!line1->JoinLine(line2, delta))
+                        return false;
+                    lines->erase(lines->begin() + static_cast<std::vector<CPolyline*>::difference_type>(i));
+                    joined = true;
+                    break;
+                }
+            }
+        }
     }
     return true;
 }

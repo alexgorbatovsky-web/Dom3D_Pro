@@ -62,13 +62,10 @@ std::unique_ptr<CAlfaObject> SolidBoxTool::CreateObject(const std::vector<ToolPa
 
     return solid;
 }
-
 bool SolidBoxTool::CreateBox(CSolid& solid, float width, float height, float depth) const {
     const Standard_Real dx = width;
     const Standard_Real dy = height;
     const Standard_Real dz = depth;
     solid.m_Shape = BRepPrimAPI_MakeBox(dx, dy, dz).Shape();
-    solid.InitSurfaces();
-    solid.InitEdges();
-    return solid.BuldMesh(0.1f);
+    return solid.ReBuldMesh();
 }

@@ -54,6 +54,8 @@
 #include <vector>
 
 namespace {
+CAlfaDoc* g_current_alfa_doc = nullptr;
+
 std::vector<TopoDS_Edge> unique_edges(const std::vector<TopoDS_Edge>& edges)
 {
     std::vector<TopoDS_Edge> unique;
@@ -83,9 +85,7 @@ bool rebuild_solid_from_shape(CAlfaDoc::ObjectList& objects, size_t solid_index,
     if (source_solid->GetNumOperations() > 0) {
         result->CopyOperationTreeFrom(*source_solid);
     }
-    result->InitSurfaces();
-    result->InitEdges();
-    result->BuldMesh(0.1f);
+    result->ReBuldMesh();
 
     objects[solid_index] = std::move(result);
     return true;
@@ -779,7 +779,13 @@ bool hit_test_bspline_screen(const CBSpline& spline,
 }
 }
 
+CAlfaDoc* GetAlfaDoc()
+{
+    return g_current_alfa_doc;
+}
+
 CAlfaDoc::CAlfaDoc() {
+    g_current_alfa_doc = this;
     ResetDefaultMaterials();
     EnsureActivePolyline();
 }
@@ -861,7 +867,11 @@ struct CAlfaDoc::LiveThickSolidData {
     std::vector<int> created_surface_indices;
 };
 
-CAlfaDoc::~CAlfaDoc() = default;
+CAlfaDoc::~CAlfaDoc() {
+    if (g_current_alfa_doc == this) {
+        g_current_alfa_doc = nullptr;
+    }
+}
 
 void CAlfaDoc::Clear() {
     objects_.clear();
@@ -1066,9 +1076,7 @@ bool CAlfaDoc::UpdateLiveExtrudeSelectedPolyline(double distance, bool reverse, 
         }
         EnsureObjectId(*solid);
         AssignDefaultMaterial(*solid);
-        solid->InitSurfaces();
-        solid->InitEdges();
-        if (!solid->BuldMesh(0.1f)) {
+        if (!solid->ReBuldMesh()) {
             return false;
         }
 
@@ -1227,9 +1235,7 @@ bool CAlfaDoc::UpdateLiveRevolveSelectedPolyline(double angle_degrees, int axis_
         }
         EnsureObjectId(*solid);
         AssignDefaultMaterial(*solid);
-        solid->InitSurfaces();
-        solid->InitEdges();
-        if (!solid->BuldMesh(0.1f)) {
+        if (!solid->ReBuldMesh()) {
             return false;
         }
 
@@ -1823,9 +1829,7 @@ bool CAlfaDoc::UpdateLiveExtrudeSelectedSolidFace(float distance) {
 
     solid->ClearSelectedEdge();
     solid->ClearSelectedFace();
-    solid->InitSurfaces();
-    solid->InitEdges();
-    solid->BuldMesh(0.1f);
+    solid->ReBuldMesh();
     live_extrude_->distance = distance;
     live_extrude_->created_surface_indices = solid->FindCreatedSurfaceIndices(live_extrude_->base_shape);
     active_object_index_ = live_extrude_->object_index;
@@ -1858,9 +1862,7 @@ void CAlfaDoc::CancelLiveExtrudeSelectedSolidFace() {
     if (live_extrude_ && live_extrude_->object_index < objects_.size()) {
         if (auto* solid = dynamic_cast<CSolid*>(objects_[live_extrude_->object_index].get())) {
             solid->m_Shape = live_extrude_->base_shape;
-            solid->InitSurfaces();
-            solid->InitEdges();
-            solid->BuldMesh(0.1f);
+            solid->ReBuldMesh();
         }
     }
     live_extrude_.reset();
@@ -1917,9 +1919,7 @@ bool CAlfaDoc::ApplyExtrudeSelectedSolidFace(float distance) {
         solid->m_Shape = result_shape;
         solid->ClearSelectedFace();
         solid->ClearSelectedEdge();
-        solid->InitSurfaces();
-        solid->InitEdges();
-        solid->BuldMesh(0.1f);
+        solid->ReBuldMesh();
         has_selected_solid_face_ = false;
         selected_face_object_index_ = 0;
         return true;
@@ -2110,9 +2110,7 @@ bool CAlfaDoc::UpdateLiveDraftFace(double angle_degrees) {
     solid->m_Shape = result_shape;
     solid->ClearSelectedEdge();
     solid->ClearSelectedFace();
-    solid->InitSurfaces();
-    solid->InitEdges();
-    solid->BuldMesh(0.1f);
+    solid->ReBuldMesh();
     draft_face_->angle_degrees = angle_degrees;
     draft_face_->created_surface_indices = solid->FindCreatedSurfaceIndices(draft_face_->base_shape);
     active_object_index_ = draft_face_->object_index;
@@ -2145,9 +2143,7 @@ void CAlfaDoc::CancelLiveDraftFace() {
     if (draft_face_ && draft_face_->object_index < objects_.size()) {
         if (auto* solid = dynamic_cast<CSolid*>(objects_[draft_face_->object_index].get())) {
             solid->m_Shape = draft_face_->base_shape;
-            solid->InitSurfaces();
-            solid->InitEdges();
-            solid->BuldMesh(0.1f);
+            solid->ReBuldMesh();
         }
     }
     draft_face_.reset();
@@ -3060,9 +3056,7 @@ bool CAlfaDoc::CreateLoftSurfaceFromSelectedBSplines() {
     auto surface = std::make_unique<CSurfaceSet>(loft_shape);
     surface->SetName("Loft Surface");
     surface->SetColor({0.70f, 0.72f, 0.68f});
-    surface->InitSurfaces();
-    surface->InitEdges();
-    surface->BuldMesh(0.1f);
+    surface->ReBuldMesh();
     AddObject(std::move(surface));
     return true;
 }
@@ -3470,9 +3464,7 @@ bool CAlfaDoc::ApplyBooleanToSolids(size_t body_index, size_t tool_index, Boolea
                                           {"tool", static_cast<double>(boolean_tool_index)}
                                       });
     }
-    result->InitSurfaces();
-    result->InitEdges();
-    result->BuldMesh(0.1f);
+    result->ReBuldMesh();
 
     objects_[body_index] = std::move(result);
     objects_.erase(objects_.begin() + static_cast<ObjectList::difference_type>(tool_index));

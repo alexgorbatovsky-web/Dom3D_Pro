@@ -394,7 +394,7 @@ bool ObjIO::Import(const std::string& path, std::vector<std::unique_ptr<CMesh3D>
                     local_uvs.push_back(global_index.has_uv ? texture_coordinates[global_index.uv] : UV{});
                 }
                 has_complete_uvs = has_complete_uvs && global_index.has_uv;
-                local_face.push_back(it->second);
+                local_face.corners.push_back({it->second, it->second, it->second});
             }
             local_faces.push_back(std::move(local_face));
         }
@@ -548,18 +548,22 @@ bool ObjIO::ExportMesh(std::ostream& stream,
     }
 
     for (const CMesh3D::Face& face : mesh.GetFaces()) {
-        if (face.size() < 3) {
+        if (face.deleted || face.corners.size() < 3) {
             continue;
         }
 
         stream << "f";
-        for (size_t index : face) {
+        for (const MeshCorner& corner : face.corners) {
+            const size_t index = corner.v;
             if (index >= mesh.GetVertices().size()) {
                 return false;
             }
             stream << " " << (index + vertex_offset + 1);
             if (has_uvs) {
-                stream << "/" << (index + uv_offset + 1);
+                if (corner.uv >= mesh.GetUVs().size()) {
+                    return false;
+                }
+                stream << "/" << (corner.uv + uv_offset + 1);
             }
         }
         stream << "\n";

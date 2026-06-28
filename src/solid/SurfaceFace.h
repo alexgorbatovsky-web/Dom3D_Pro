@@ -1,5 +1,6 @@
 #pragma once
 #include "../CMesh3D.h"
+#include "../Net.h"
 
 #include <TopoDS_Shape.hxx>
 #include <TopoDS_Edge.hxx>
@@ -10,12 +11,14 @@
 
 
 class CPolyline;
+class CPoint8d;
 class CSurface;
 class CSplineCurve;
 class TopoDS_Face;
 class Poly_Triangulation;
 class CMesh3D_XL;
 class CFreeSurface;
+class CSolid;
 
 enum TypeMesh {
 	REGULAR_MESH,
@@ -52,9 +55,11 @@ public:
 
 	bool BuldMeshTriangle(float Deflection, float AngDeflection);
 	bool InitEdges();
+	bool InitEdges3DCoat();
 	bool BuldMesh(float Deflection, bool MeshQuadro);
 	bool IsPlanar() const;
 	bool GetCenterAndNormal(Vec3& center, Vec3& normal) const;
+	bool GetPoint(double U, double V, CPoint8d* pnt);
 	void RenderEdges(bool selected, const std::vector<int>& selected_edge_indices = {}) const;
 	void PreviewTranslate(Vec3 delta);
 	void PreviewRotate(Vec3 center, Vec3 axis, float angle);
@@ -66,6 +71,17 @@ public:
 	const TopoDS_Edge* GetTopoEdge(int edge_index) const;
 	bool GetEdgeEndpoints(int edge_index, Vec3& start, Vec3& end) const;
 	int GetEdgeCount() const { return static_cast<int>(m_Edges.size()); }
+	void PrepareEdges(float Deflection);
+	int GetPreparedPolylineCount() const;
+	int GetPreparedPolylinePointCount(int edge_index) const;
+	bool GetPreparedPolylineEndpoints(int edge_index, Vec3& start, Vec3& end) const;
+	bool GetPreparedPolylinePoints(int edge_index, std::vector<CPoint3d>& points) const;
+	bool SetPreparedPolylinePointCount(int edge_index, int point_count);
+	bool SetPreparedPolylinePoints(int edge_index, const std::vector<CPoint3d>& points);
+	void DumpPreparedPolylinesToScene() const;
+	bool BuildTrimmingMesh(CSolid* psol, float Deflection);
+	void GetEdges(std::vector<CPolyline*>& plines);
+	bool IsBoundLine(CPolyline* line);
 
 	CMesh3D* pMesh3D;
 	int m_ID;
@@ -101,8 +117,11 @@ protected:
 	CPolyline* m_BoundLine;
 	bool IsInitEdges;
 	Poly_Triangulation* m_Mesh;
+	CNet* m_Net;
 
 	void UpdateRGB();
+
+
 };
 
 

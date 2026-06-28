@@ -78,6 +78,213 @@ namespace {
 constexpr int kMaxRecentProjectFiles = 18;
 constexpr int kSceneTreeObjectIndexRole = Qt::UserRole + 1;
 constexpr int kSceneTreeGroupRole = Qt::UserRole + 2;
+
+std::unique_ptr<CMesh3D> CreateLowPolyMeshFromSolid(const CSolid& solid)
+{
+    std::vector<Vec3> vertices;
+    std::vector<CMesh3D::Face> faces;
+    for (int surface_index = 0; surface_index < solid.GetNumSurfaces(); ++surface_index) {
+        const CSurfaceFace* surface = solid.GetSurfaceFace(surface_index);
+        if (!surface || !surface->pMesh3D) {
+            continue;
+        }
+
+        const std::vector<Vec3>& source_vertices = surface->pMesh3D->GetVertices();
+        const std::vector<CMesh3D::Face>& source_faces = surface->pMesh3D->GetFaces();
+        const size_t vertex_offset = vertices.size();
+        vertices.insert(vertices.end(), source_vertices.begin(), source_vertices.end());
+
+        for (CMesh3D::Face face : source_faces) {
+            if (face.deleted || face.corners.empty()) {
+                continue;
+            }
+            for (MeshCorner& corner : face.corners) {
+                corner.v += vertex_offset;
+                corner.uv = corner.v;
+                corner.n = corner.v;
+            }
+            face.sourceFaceId = surface_index;
+            faces.push_back(std::move(face));
+        }
+    }
+
+    if (vertices.empty() || faces.empty()) {
+        return {};
+    }
+
+    auto mesh = std::make_unique<CMesh3D>(solid.GetName() + " Low Poly");
+    if (!mesh->SetGeometry(std::move(vertices), std::move(faces))) {
+        return {};
+    }
+    mesh->SetMaterial(solid.GetMaterial());
+    mesh->SetMaterialId(solid.GetMaterialId());
+    return mesh;
+}
+
+class SolidLowPolyDialog : public QDialog {
+public:
+    SolidLowPolyDialog(CAlfaDoc& document,
+                       std::function<void()> refresh_scene,
+                       std::function<void(const QString&)> set_status,
+                       QWidget* parent)
+        : QDialog(parent),
+          document_(document),
+          refresh_scene_(std::move(refresh_scene)),
+          set_status_(std::move(set_status)) {
+        setWindowTitle("Tool Options");
+        setAttribute(Qt::WA_DeleteOnClose, true);
+
+        auto* layout = new QVBoxLayout(this);
+        auto* list_label = new QLabel("Bodies", this);
+        bodies_list_ = new QListWidget(this);
+        bodies_list_->setMinimumHeight(68);
+        layout->addWidget(list_label);
+        layout->addWidget(bodies_list_);
+
+        auto* form = new QFormLayout();
+        density_ = new QDoubleSpinBox(this);
+        density_->setRange(0.05, 100.0);
+        density_->setSingleStep(0.05);
+        density_->setDecimals(2);
+        density_->setValue(1.0);
+        form->addRow("Density", density_);
+
+        mesh_quadro_ = new QCheckBox("Mesh Quadro", this);
+        form->addRow(mesh_quadro_);
+        layout->addLayout(form);
+
+        auto* buttons = new QHBoxLayout();
+        auto* create = new QPushButton("Create Low Poly", this);
+        auto* close = new QPushButton("Close", this);
+        buttons->addWidget(create);
+        buttons->addWidget(close);
+        layout->addLayout(buttons);
+
+        RememberSelectedSolids();
+        RebuildBodiesList();
+        LoadInitialSolidSettings();
+
+        connect(density_, &QDoubleSpinBox::valueChanged, this, [this](double) {
+            RebuildSolids();
+        });
+        connect(mesh_quadro_, &QCheckBox::toggled, this, [this](bool) {
+            RebuildSolids();
+        });
+        connect(create, &QPushButton::clicked, this, [this]() {
+            CreateLowPoly();
+        });
+        connect(close, &QPushButton::clicked, this, &QDialog::close);
+    }
+
+    bool HasBodies() const
+    {
+        return !solid_ids_.empty();
+    }
+
+private:
+    void RememberSelectedSolids()
+    {
+        const CAlfaDoc::ObjectList& objects = document_.GetObjects();
+        for (size_t index : document_.GetSelectedObjectIndices()) {
+            if (index >= objects.size()) {
+                continue;
+            }
+            const auto* solid = dynamic_cast<const CSolid*>(objects[index].get());
+            if (solid) {
+                solid_ids_.push_back(solid->m_id);
+            }
+        }
+    }
+
+    CSolid* FindSolid(unsigned long id)
+    {
+        for (const CAlfaDoc::ObjectPtr& object : document_.GetObjects()) {
+            auto* solid = dynamic_cast<CSolid*>(object.get());
+            if (solid && solid->m_id == id) {
+                return solid;
+            }
+        }
+        return nullptr;
+    }
+
+    std::vector<CSolid*> Solids()
+    {
+        std::vector<CSolid*> solids;
+        for (unsigned long id : solid_ids_) {
+            if (CSolid* solid = FindSolid(id)) {
+                solids.push_back(solid);
+            }
+        }
+        return solids;
+    }
+
+    void RebuildBodiesList()
+    {
+        bodies_list_->clear();
+        for (CSolid* solid : Solids()) {
+            bodies_list_->addItem(QString::fromStdString(solid->GetName()));
+        }
+    }
+
+    void LoadInitialSolidSettings()
+    {
+        const std::vector<CSolid*> solids = Solids();
+        if (solids.empty()) {
+            return;
+        }
+        density_->setValue(solids.front()->ptchDensity);
+        mesh_quadro_->setChecked(solids.front()->MeshQuadro);
+    }
+
+    void RebuildSolids()
+    {
+        const double density = density_->value();
+        const bool mesh_quadro = mesh_quadro_->isChecked();
+        int rebuilt = 0;
+        for (CSolid* solid : Solids()) {
+            solid->ptchDensity = static_cast<float>(density);
+            solid->MeshQuadro = mesh_quadro;
+            if (solid->ReBuldMesh()) {
+                ++rebuilt;
+            }
+        }
+        if (refresh_scene_) {
+            refresh_scene_();
+        }
+        if (set_status_) {
+            set_status_(QString("Low Poly: rebuilt %1 bodies").arg(rebuilt));
+        }
+    }
+
+    void CreateLowPoly()
+    {
+        int created = 0;
+        for (CSolid* solid : Solids()) {
+            std::unique_ptr<CMesh3D> mesh = CreateLowPolyMeshFromSolid(*solid);
+            if (!mesh) {
+                continue;
+            }
+            document_.AddMesh(std::move(mesh));
+            ++created;
+        }
+        if (refresh_scene_) {
+            refresh_scene_();
+        }
+        if (set_status_) {
+            set_status_(created > 0
+                ? QString("Low Poly: created %1 meshes").arg(created)
+                : QString("Low Poly: no mesh created"));
+        }
+    }
+
+    CAlfaDoc& document_;
+    std::function<void()> refresh_scene_;
+    std::function<void(const QString&)> set_status_;
+    std::vector<unsigned long> solid_ids_;
+    QListWidget* bodies_list_ = nullptr;
+    QDoubleSpinBox* density_ = nullptr;
+    QCheckBox* mesh_quadro_ = nullptr;
+};
 constexpr int kMaterialLibraryEntryRole = Qt::UserRole + 20;
 constexpr int kMaterialDocumentIndexRole = Qt::UserRole + 21;
 constexpr int kMaterialSourceRole = Qt::UserRole + 22;
@@ -570,7 +777,7 @@ MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent),
       viewport_(new OpenGLViewport(this)),
       property_panel_(new PropertyPanel(this)) {
-    setWindowTitle("Dom3D Pro");
+    UpdateWindowTitle();
     resize(1280, 760);
 
     viewport_->SetDocument(&document_);
@@ -590,6 +797,12 @@ MainWindow::MainWindow(QWidget* parent)
             object_color_pick_pending_ = false;
             QTimer::singleShot(0, this, [this]() {
                 EditSelectedObjectColor();
+            });
+        }
+        if (low_poly_pick_pending_ && document_.GetSelectedSolid()) {
+            low_poly_pick_pending_ = false;
+            QTimer::singleShot(0, this, [this]() {
+                ShowLowPolyTool();
             });
         }
         const bool active_edge_tool = active_parametric_object_.tool_id == "fillet_edge"
@@ -1706,6 +1919,7 @@ void MainWindow::OnSceneTreeItemClicked(QTreeWidgetItem* item, int column) {
 }
 
 void MainWindow::SetTool(ToolMode tool, const QString& status_text) {
+    low_poly_pick_pending_ = false;
     ClearActiveProperties();
     viewport_->SetTool(tool);
     if (tool == ToolMode::Orbit) {
@@ -2432,6 +2646,14 @@ void MainWindow::ShowSketchPanel() {
 
 void MainWindow::ActivateParametricTool(const std::string& tool_id) {
     active_parametric_edit_existing_ = false;
+    if (tool_id != "SolidLowPoly") {
+        low_poly_pick_pending_ = false;
+    }
+    if (tool_id == "SolidLowPoly") {
+        ShowLowPolyTool();
+        return;
+    }
+
     if (tool_id == "PolylineCurve") {
         ClearActiveProperties();
         document_.CreatePolyline();
@@ -2741,6 +2963,40 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
     RefreshSceneTree();
     viewport_->update();
     statusBar()->showMessage(QString("%1 applied").arg(QString::fromStdString(tool_id)));
+}
+
+void MainWindow::ShowLowPolyTool() {
+    auto* dialog = new SolidLowPolyDialog(
+        document_,
+        [this]() {
+            RefreshSceneTree();
+            viewport_->update();
+        },
+        [this](const QString& text) {
+            statusBar()->showMessage(text, 1600);
+        },
+        this);
+
+    if (!dialog->HasBodies()) {
+        dialog->deleteLater();
+        low_poly_pick_pending_ = true;
+        ClearActiveProperties();
+        viewport_->SetTool(ToolMode::Select);
+        viewport_->SetSelectionMode(SelectionMode::Object);
+        UpdateActiveToolUi("SolidLowPoly");
+        statusBar()->showMessage("Low Poly: выбери тело");
+        return;
+    }
+
+    low_poly_pick_pending_ = false;
+    ClearActiveProperties();
+    viewport_->SetTool(ToolMode::Select);
+    viewport_->SetSelectionMode(SelectionMode::Object);
+    UpdateActiveToolUi("SolidLowPoly");
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
+    statusBar()->showMessage("Low Poly: меняй параметры или Create Low Poly", 1600);
 }
 
 void MainWindow::EditSelectedParametricObject() {
@@ -3276,6 +3532,7 @@ void MainWindow::NewProject() {
     ClearActiveProperties();
     RefreshSceneTree();
     viewport_->update();
+    UpdateWindowTitle();
     statusBar()->showMessage("New project");
 }
 
@@ -3350,6 +3607,7 @@ void MainWindow::OpenProjectFromPath(const QString& path) {
     }
 
     project_path_ = path.toStdString();
+    UpdateWindowTitle();
     RememberLastDialogDir(path);
     AddRecentProjectFile(path);
     ClearActiveProperties();
@@ -3394,9 +3652,21 @@ void MainWindow::SaveProject() {
     }
 
     project_path_ = path.toStdString();
+    UpdateWindowTitle();
     RememberLastDialogDir(path);
     AddRecentProjectFile(path);
     statusBar()->showMessage("Project saved", 1400);
+}
+
+void MainWindow::UpdateWindowTitle() {
+    QString title = "Dom3D Pro";
+    if (!project_path_.empty()) {
+        const QString file_name = QFileInfo(QString::fromStdString(project_path_)).completeBaseName();
+        if (!file_name.isEmpty()) {
+            title += " - [" + file_name + "]";
+        }
+    }
+    setWindowTitle(title);
 }
 
 void MainWindow::ShowPreferences() {
@@ -3863,7 +4133,7 @@ void MainWindow::PopulateToolsPanelForTab(int tab_index) {
         tool_ids = {"SurfaceLoft", "SurfaceReverseNormals", "SurfaceOfRevolution"};
     } else if (tab == "Solid") {
         // единый boolean-инструмент вместо трёх отдельных
-        tool_ids = {"SolidBox", "SolidCylinder", "SolidPrismTool", "SolidExtrudeTool", "SurfaceOfRevolution", "boolean", "fillet_edge", "fillet_all_edges", "ChamferSolid", "SolidExtrudeFace", "SolidDraft", "ThickSolidTool"};
+        tool_ids = {"SolidBox", "SolidCylinder", "SolidPrismTool", "SolidExtrudeTool", "SurfaceOfRevolution", "boolean", "fillet_edge", "fillet_all_edges", "ChamferSolid", "SolidExtrudeFace", "SolidDraft", "ThickSolidTool", "SolidLowPoly"};
     }
 
     int index = 0;

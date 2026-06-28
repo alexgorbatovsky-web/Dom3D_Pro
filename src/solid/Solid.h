@@ -174,7 +174,8 @@ public:
 	bool InitEdges();
 	bool InitSurfaces();
 	bool BuldMesh(float Deflection);
-
+	bool ReBuldMesh();
+	bool DefineDirTriming(CSurfaceFace* surf, CPolyline* pLine, CPoint3d& pc);
 
 
 	bool IsInitEdges;
@@ -213,6 +214,7 @@ static	int NumReadFile;
 	int QtySurf;
 	bool DimensVisible;
 	static int m_DimensId;
+	float ptchDensity;
 //	cList <CDimens*> m_Dimens;
 
 	std::vector<std::pair<int, int>> m_SelectedEdges;

@@ -1,5 +1,7 @@
+#include "../OpenGLCompat.h"
 #include "Solid.h"
 #include "SolidTool.h"
+#include "../SurfaceUVMapping.h"
 
 
 #include "Poly_Triangulation.hxx"
@@ -57,9 +59,483 @@
 
 #include <limits>
 #include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
 #include <memory>
+#include <tuple>
+#include <unordered_map>
 
 namespace {
+struct MeshVertexRef {
+	CMesh3D* mesh = nullptr;
+	size_t vertex_index = 0;
+};
+
+struct PreparedEdgeRef {
+	CSurfaceFace* surface = nullptr;
+	int edge_index = -1;
+	int point_count = 0;
+	Vec3 start{};
+	Vec3 end{};
+};
+
+#if defined(_WIN32)
+GLuint surface_index_font_base()
+{
+	static HDC cached_dc = nullptr;
+	static GLuint font_base = 0;
+
+	HDC dc = wglGetCurrentDC();
+	if (!dc)
+		return 0;
+	if (font_base && dc == cached_dc)
+		return font_base;
+	if (font_base) {
+		glDeleteLists(font_base, 256);
+		font_base = 0;
+	}
+
+	HFONT font = CreateFontA(
+		16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+		ANSI_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
+		ANTIALIASED_QUALITY, FF_DONTCARE | DEFAULT_PITCH, "Segoe UI");
+	if (!font)
+		return 0;
+
+	HGDIOBJ previous_font = SelectObject(dc, font);
+	font_base = glGenLists(256);
+	if (font_base)
+		wglUseFontBitmapsA(dc, 0, 256, font_base);
+	if (previous_font)
+		SelectObject(dc, previous_font);
+	DeleteObject(font);
+	cached_dc = dc;
+	return font_base;
+}
+#endif
+
+void draw_surface_index_label(Vec3 point, const char* text)
+{
+	if (!text || !text[0])
+		return;
+
+#if defined(_WIN32)
+	const GLuint font_base = surface_index_font_base();
+	if (!font_base)
+		return;
+
+	glPushAttrib(GL_ENABLE_BIT | GL_CURRENT_BIT | GL_DEPTH_BUFFER_BIT | GL_LIST_BIT);
+	glDisable(GL_LIGHTING);
+	glDisable(GL_TEXTURE_2D);
+	glEnable(GL_DEPTH_TEST);
+	glDepthFunc(GL_LEQUAL);
+	glColor3f(1.0f, 0.0f, 0.0f);
+	glRasterPos3f(point.x, point.y, point.z);
+	glListBase(font_base);
+	glCallLists(static_cast<GLsizei>(std::strlen(text)), GL_UNSIGNED_BYTE, text);
+	glPopAttrib();
+#else
+	(void)point;
+#endif
+}
+
+bool get_surface_index_label_pose(const CSurfaceFace& surface, Vec3& center, Vec3& normal)
+{
+	if (!surface.pMesh3D)
+		return surface.GetCenterAndNormal(center, normal);
+
+	const std::vector<Vec3>& vertices = surface.pMesh3D->GetVertices();
+	const std::vector<CMesh3D::Face>& faces = surface.pMesh3D->GetFaces();
+	Vec3 weighted_center{};
+	Vec3 weighted_normal{};
+	float total_area = 0.0f;
+
+	for (const CMesh3D::Face& face : faces) {
+		if (face.deleted || face.corners.size() < 3)
+			continue;
+		const size_t first_index = face.corners[0].v;
+		if (first_index >= vertices.size())
+			continue;
+		const Vec3& first = vertices[first_index];
+
+		for (size_t i = 1; i + 1 < face.corners.size(); ++i) {
+			const size_t second_index = face.corners[i].v;
+			const size_t third_index = face.corners[i + 1].v;
+			if (second_index >= vertices.size() || third_index >= vertices.size())
+				continue;
+
+			const Vec3& second = vertices[second_index];
+			const Vec3& third = vertices[third_index];
+			const Vec3 area_vector = cross(second - first, third - first);
+			const float area = std::sqrt(dot(area_vector, area_vector)) * 0.5f;
+			if (area <= 0.000001f)
+				continue;
+
+			const Vec3 triangle_center = (first + second + third) / 3.0f;
+			weighted_center = weighted_center + triangle_center * area;
+			weighted_normal = weighted_normal + area_vector;
+			total_area += area;
+		}
+	}
+
+	if (total_area <= 0.000001f)
+		return surface.GetCenterAndNormal(center, normal);
+
+	center = weighted_center / total_area;
+	normal = normalize(weighted_normal);
+	if (dot(normal, normal) <= 0.000001f)
+		return surface.GetCenterAndNormal(center, normal);
+	return true;
+}
+
+
+struct VertexKey {
+	long long x = 0;
+	long long y = 0;
+	long long z = 0;
+
+	bool operator==(const VertexKey& other) const
+	{
+		return x == other.x && y == other.y && z == other.z;
+	}
+};
+
+struct VertexKeyHash {
+	size_t operator()(const VertexKey& key) const
+	{
+		const size_t hx = std::hash<long long>{}(key.x);
+		const size_t hy = std::hash<long long>{}(key.y);
+		const size_t hz = std::hash<long long>{}(key.z);
+		return hx ^ (hy + 0x9e3779b97f4a7c15ull + (hx << 6) + (hx >> 2))
+		          ^ (hz + 0x9e3779b97f4a7c15ull + (hy << 6) + (hy >> 2));
+	}
+};
+
+bool vertex_key_less(const VertexKey& left, const VertexKey& right)
+{
+	if (left.x != right.x)
+		return left.x < right.x;
+	if (left.y != right.y)
+		return left.y < right.y;
+	return left.z < right.z;
+}
+
+struct EdgeKey {
+	VertexKey first;
+	VertexKey second;
+
+	bool operator==(const EdgeKey& other) const
+	{
+		return first == other.first && second == other.second;
+	}
+};
+
+struct EdgeKeyHash {
+	size_t operator()(const EdgeKey& key) const
+	{
+		const VertexKeyHash vertex_hash;
+		const size_t h1 = vertex_hash(key.first);
+		const size_t h2 = vertex_hash(key.second);
+		return h1 ^ (h2 + 0x9e3779b97f4a7c15ull + (h1 << 6) + (h1 >> 2));
+	}
+};
+
+VertexKey vertex_key(Vec3 point, float tolerance)
+{
+	const float inv_tolerance = 1.0f / tolerance;
+	return {
+		static_cast<long long>(std::llround(point.x * inv_tolerance)),
+		static_cast<long long>(std::llround(point.y * inv_tolerance)),
+		static_cast<long long>(std::llround(point.z * inv_tolerance))
+	};
+}
+
+EdgeKey edge_key(Vec3 start, Vec3 end, float tolerance)
+{
+	VertexKey first = vertex_key(start, tolerance);
+	VertexKey second = vertex_key(end, tolerance);
+	if (vertex_key_less(second, first))
+		std::swap(first, second);
+	return { first, second };
+}
+
+float mesh_snap_tolerance(const std::vector<CSurfaceFace*>& surfaces)
+{
+	bool has_point = false;
+	Vec3 min_point{};
+	Vec3 max_point{};
+	for (const CSurfaceFace* surface : surfaces) {
+		if (!surface || !surface->pMesh3D)
+			continue;
+		for (Vec3 point : surface->pMesh3D->GetVertices()) {
+			if (!has_point) {
+				min_point = point;
+				max_point = point;
+				has_point = true;
+				continue;
+			}
+			min_point.x = std::min(min_point.x, point.x);
+			min_point.y = std::min(min_point.y, point.y);
+			min_point.z = std::min(min_point.z, point.z);
+			max_point.x = std::max(max_point.x, point.x);
+			max_point.y = std::max(max_point.y, point.y);
+			max_point.z = std::max(max_point.z, point.z);
+		}
+	}
+
+	if (!has_point)
+		return 1.0e-5f;
+
+	const Vec3 diagonal = max_point - min_point;
+	const float diagonal_length = std::sqrt(dot(diagonal, diagonal));
+	return std::max(diagonal_length * 1.0e-6f, 1.0e-5f);
+}
+
+float prepared_edge_tolerance(const std::vector<CSurfaceFace*>& surfaces)
+{
+	bool has_point = false;
+	Vec3 min_point{};
+	Vec3 max_point{};
+	for (const CSurfaceFace* surface : surfaces) {
+		if (!surface)
+			continue;
+		for (int edge_index = 0; edge_index < surface->GetPreparedPolylineCount(); ++edge_index) {
+			Vec3 start{};
+			Vec3 end{};
+			if (!surface->GetPreparedPolylineEndpoints(edge_index, start, end))
+				continue;
+			const Vec3 points[] = { start, end };
+			for (Vec3 point : points) {
+				if (!has_point) {
+					min_point = point;
+					max_point = point;
+					has_point = true;
+					continue;
+				}
+				min_point.x = std::min(min_point.x, point.x);
+				min_point.y = std::min(min_point.y, point.y);
+				min_point.z = std::min(min_point.z, point.z);
+				max_point.x = std::max(max_point.x, point.x);
+				max_point.y = std::max(max_point.y, point.y);
+				max_point.z = std::max(max_point.z, point.z);
+			}
+		}
+	}
+
+	if (!has_point)
+		return 1.0e-4f;
+
+	const Vec3 diagonal = max_point - min_point;
+	const float diagonal_length = std::sqrt(dot(diagonal, diagonal));
+	return std::max(diagonal_length * 1.0e-5f, 1.0e-4f);
+}
+
+void sync_surface_edge_polyline_counts(const std::vector<CSurfaceFace*>& surfaces)
+{
+	const float tolerance = prepared_edge_tolerance(surfaces);
+	if (!(tolerance > 0.0f))
+		return;
+
+	std::vector<PreparedEdgeRef> edges;
+	for (CSurfaceFace* surface : surfaces) {
+		if (!surface)
+			continue;
+		for (int edge_index = 0; edge_index < surface->GetPreparedPolylineCount(); ++edge_index) {
+			Vec3 start{};
+			Vec3 end{};
+			if (!surface->GetPreparedPolylineEndpoints(edge_index, start, end))
+				continue;
+			const int point_count = surface->GetPreparedPolylinePointCount(edge_index);
+			if (point_count < 2)
+				continue;
+			edges.push_back({ surface, edge_index, point_count, start, end });
+		}
+	}
+
+	const auto endpoint_distance_sq = [](Vec3 first, Vec3 second) {
+		return dot(first - second, first - second);
+	};
+
+	const float tolerance_sq = tolerance * tolerance;
+	const auto same_edge = [&](const PreparedEdgeRef& first, const PreparedEdgeRef& second) {
+		const bool same_direction =
+			endpoint_distance_sq(first.start, second.start) <= tolerance_sq
+			&& endpoint_distance_sq(first.end, second.end) <= tolerance_sq;
+		const bool opposite_direction =
+			endpoint_distance_sq(first.start, second.end) <= tolerance_sq
+			&& endpoint_distance_sq(first.end, second.start) <= tolerance_sq;
+		return same_direction || opposite_direction;
+	};
+
+	std::vector<bool> used(edges.size(), false);
+	for (size_t i = 0; i < edges.size(); ++i) {
+		if (used[i])
+			continue;
+
+		std::vector<size_t> group;
+		group.push_back(i);
+		used[i] = true;
+		for (size_t j = i + 1; j < edges.size(); ++j) {
+			if (!used[j] && same_edge(edges[i], edges[j])) {
+				group.push_back(j);
+				used[j] = true;
+			}
+		}
+		if (group.size() < 2)
+			continue;
+
+		int max_point_count = edges[i].point_count;
+		for (size_t index : group)
+			max_point_count = std::max(max_point_count, edges[index].point_count);
+		if (max_point_count < 2)
+			continue;
+
+		for (size_t index : group) {
+			PreparedEdgeRef& ref = edges[index];
+			if (ref.surface && ref.surface->SetPreparedPolylinePointCount(ref.edge_index, max_point_count))
+				ref.point_count = max_point_count;
+		}
+	}
+
+	// A second pass catches chains where an edge is first matched to one
+	// neighbor and that neighbor carries a larger count from another face.
+	for (size_t i = 0; i < edges.size(); ++i) {
+		std::vector<size_t> group;
+		group.push_back(i);
+		for (size_t j = 0; j < edges.size(); ++j) {
+			if (i != j && same_edge(edges[i], edges[j]))
+				group.push_back(j);
+		}
+		if (group.size() < 2)
+			continue;
+
+		int max_point_count = edges[i].point_count;
+		for (size_t index : group)
+			max_point_count = std::max(max_point_count, edges[index].point_count);
+		if (max_point_count < 2)
+			continue;
+
+		for (size_t index : group) {
+			PreparedEdgeRef& ref = edges[index];
+			if (ref.surface && ref.surface->SetPreparedPolylinePointCount(ref.edge_index, max_point_count))
+				ref.point_count = max_point_count;
+		}
+	}
+
+	edges.clear();
+	for (CSurfaceFace* surface : surfaces) {
+		if (!surface)
+			continue;
+		for (int edge_index = 0; edge_index < surface->GetPreparedPolylineCount(); ++edge_index) {
+			Vec3 start{};
+			Vec3 end{};
+			if (!surface->GetPreparedPolylineEndpoints(edge_index, start, end))
+				continue;
+			const int point_count = surface->GetPreparedPolylinePointCount(edge_index);
+			if (point_count < 2)
+				continue;
+			edges.push_back({ surface, edge_index, point_count, start, end });
+		}
+	}
+
+	used.assign(edges.size(), false);
+	for (size_t i = 0; i < edges.size(); ++i) {
+		if (used[i])
+			continue;
+
+		std::vector<size_t> group;
+		group.push_back(i);
+		used[i] = true;
+		for (size_t j = i + 1; j < edges.size(); ++j) {
+			if (!used[j] && same_edge(edges[i], edges[j])) {
+				group.push_back(j);
+				used[j] = true;
+			}
+		}
+		if (group.size() < 2)
+			continue;
+
+		size_t source_index = group.front();
+		for (size_t index : group) {
+			if (edges[index].point_count > edges[source_index].point_count)
+				source_index = index;
+		}
+
+		const PreparedEdgeRef& source = edges[source_index];
+		std::vector<CPoint3d> source_points;
+		if (!source.surface || !source.surface->GetPreparedPolylinePoints(source.edge_index, source_points))
+			continue;
+
+		for (size_t index : group) {
+			if (index == source_index)
+				continue;
+
+			PreparedEdgeRef& target = edges[index];
+			if (!target.surface)
+				continue;
+
+			std::vector<CPoint3d> target_points = source_points;
+			const bool same_direction =
+				endpoint_distance_sq(target.start, source.start) <= tolerance_sq
+				&& endpoint_distance_sq(target.end, source.end) <= tolerance_sq;
+			if (!same_direction)
+				std::reverse(target_points.begin(), target_points.end());
+			if (target.surface->SetPreparedPolylinePoints(target.edge_index, target_points))
+				target.point_count = static_cast<int>(target_points.size());
+		}
+	}
+}
+
+void snap_surface_mesh_seams(const std::vector<CSurfaceFace*>& surfaces)
+{
+	const float tolerance = mesh_snap_tolerance(surfaces);
+	if (!(tolerance > 0.0f))
+		return;
+
+	std::unordered_map<VertexKey, std::vector<MeshVertexRef>, VertexKeyHash> buckets;
+	for (CSurfaceFace* surface : surfaces) {
+		if (!surface || !surface->pMesh3D)
+			continue;
+		std::vector<Vec3>& vertices = surface->pMesh3D->GetVertices();
+		for (size_t i = 0; i < vertices.size(); ++i) {
+			buckets[vertex_key(vertices[i], tolerance)].push_back({ surface->pMesh3D, i });
+		}
+	}
+
+	const float tolerance_sq = tolerance * tolerance;
+	for (auto& bucket : buckets) {
+		std::vector<MeshVertexRef>& refs = bucket.second;
+		if (refs.size() < 2)
+			continue;
+
+		Vec3 center{};
+		int count = 0;
+		for (const MeshVertexRef& ref : refs) {
+			if (!ref.mesh)
+				continue;
+			const std::vector<Vec3>& vertices = ref.mesh->GetVertices();
+			if (ref.vertex_index >= vertices.size())
+				continue;
+			center = center + vertices[ref.vertex_index];
+			++count;
+		}
+		if (count < 2)
+			continue;
+
+		center = center / static_cast<float>(count);
+		for (const MeshVertexRef& ref : refs) {
+			if (!ref.mesh)
+				continue;
+			std::vector<Vec3>& vertices = ref.mesh->GetVertices();
+			if (ref.vertex_index >= vertices.size())
+				continue;
+			if (dot(vertices[ref.vertex_index] - center, vertices[ref.vertex_index] - center) <= tolerance_sq)
+				vertices[ref.vertex_index] = center;
+		}
+	}
+}
+
 bool apply_shape_transform(TopoDS_Shape& shape, const gp_Trsf& transform)
 {
 	if (shape.IsNull())
@@ -227,9 +703,7 @@ std::unique_ptr<CSolid> load_solid_step(const QByteArray& step_data, QString& er
 		}
 
 		auto solid = std::make_unique<CSolid>(shape);
-		solid->InitSurfaces();
-		solid->InitEdges();
-		solid->BuldMesh(0.1f);
+		solid->ReBuldMesh();
 		return solid;
 	} catch (const Standard_Failure& failure) {
 		error = failure.GetMessageString();
@@ -482,6 +956,7 @@ void CSolid::Alloc()
 	FastMeshQuadro = false;
 	DimensVisible = true;
 	BinData = NULL;
+	ptchDensity = 0.5;
 }
 
 
@@ -543,11 +1018,11 @@ bool CSolid::HitTestMeshScreen(DomPoint point,
 		const std::vector<Vec3>& vertices = surface->pMesh3D->GetVertices();
 		const std::vector<CMesh3D::Face>& faces = surface->pMesh3D->GetFaces();
 		for (const CMesh3D::Face& face : faces) {
-			if (face.size() < 3)
+			if (face.deleted || face.corners.size() < 3)
 				continue;
 
-			for (size_t i = 1; i + 1 < face.size(); ++i) {
-				const size_t indices[] = {face[0], face[i], face[i + 1]};
+			for (size_t i = 1; i + 1 < face.corners.size(); ++i) {
+				const size_t indices[] = {face.corners[0].v, face.corners[i].v, face.corners[i + 1].v};
 				if (indices[0] >= vertices.size() || indices[1] >= vertices.size() || indices[2] >= vertices.size())
 					continue;
 
@@ -602,11 +1077,11 @@ bool CSolid::HitTestFaceScreen(DomPoint point,
 		const std::vector<Vec3>& vertices = surface->pMesh3D->GetVertices();
 		const std::vector<CMesh3D::Face>& faces = surface->pMesh3D->GetFaces();
 		for (const CMesh3D::Face& face : faces) {
-			if (face.size() < 3)
+			if (face.deleted || face.corners.size() < 3)
 				continue;
 
-			for (size_t i = 1; i + 1 < face.size(); ++i) {
-				const size_t indices[] = {face[0], face[i], face[i + 1]};
+			for (size_t i = 1; i + 1 < face.corners.size(); ++i) {
+				const size_t indices[] = {face.corners[0].v, face.corners[i].v, face.corners[i + 1].v};
 				if (indices[0] >= vertices.size() || indices[1] >= vertices.size() || indices[2] >= vertices.size())
 					continue;
 
@@ -866,8 +1341,11 @@ bool CSolid::BuldMesh(float Deflection)
 	if (!IsSurfaceInit)
 		return false;
 	if (!MeshQuadro) {
+
+		Deflection /= 10.0;
 		if (m_Shape.IsNull())
 			return false;
+/*
 		try {
 			BRepTools::Clean(m_Shape);
 			const Standard_Real linear_deflection =
@@ -886,6 +1364,8 @@ bool CSolid::BuldMesh(float Deflection)
 		} catch (const Standard_Failure&) {
 			return false;
 		}
+*/
+
 
 		bool ok = true;
 		for (int i = 0; i < m_Surfaces.size(); i++) {
@@ -898,10 +1378,35 @@ bool CSolid::BuldMesh(float Deflection)
 	for (int i = 0; i < m_Surfaces.size(); i++)
 		m_Surfaces[i]->TypeGeom = m_TypeGeom;
 
-	// Prepare edges of Surfaces
-//	for (int i = 0; i < m_Surfaces.size(); i++)
-//		m_Surfaces[i]->PrepareEdges(Deflection);
+	float global_len_edge_max = 0.0f;
+	for (CSurfaceFace* surface : m_Surfaces) {
+		if (!surface)
+			continue;
+		surface->InitEdges();
+		global_len_edge_max = std::max(global_len_edge_max, surface->lenEdgeMax);
+	}
+	if (global_len_edge_max > 0.0f) {
+		for (CSurfaceFace* surface : m_Surfaces) {
+			if (surface)
+				surface->lenEdgeMax = global_len_edge_max;
+		}
+	}
 
+	// Prepare edges of Surfaces
+	for (int i = 0; i < m_Surfaces.size(); i++)
+		m_Surfaces[i]->PrepareEdges(Deflection);
+	sync_surface_edge_polyline_counts(m_Surfaces);
+	const bool dump_prepared_polylines_to_scene = false;
+	if (dump_prepared_polylines_to_scene) {
+		for (CSurfaceFace* surface : m_Surfaces) {
+			if (surface)
+				surface->DumpPreparedPolylinesToScene();
+		}
+	}
+	for (int i = 0; i < m_Surfaces.size(); i++)
+		m_Surfaces[i]->BuildTrimmingMesh(this, Deflection);
+	snap_surface_mesh_seams(m_Surfaces);
+	
 	return true;
 }
 
@@ -920,6 +1425,7 @@ void CSolid::Clear()
 
 void CSolid::Render3d(bool selected) const
 {
+	bool DrawIndexSurf = true;
 	const SolidDisplayMode mode = GetDisplayMode();
 	const MeshDisplayMode mesh_mode = CMesh3D::GetDisplayMode();
 	const bool draw_faces = mode == SolidDisplayMode::SurfacesAndEdges || mode == SolidDisplayMode::SurfacesAndRaisedMesh;
@@ -945,6 +1451,27 @@ void CSolid::Render3d(bool selected) const
 		material.texture_rotation_degrees += surface.TextureTransform.rotation_degrees;
 		return material;
 	};
+	const auto draw_surface_indices = [this, DrawIndexSurf]() {
+		if (!DrawIndexSurf)
+			return;
+
+		for (int i = 0; i < static_cast<int>(m_Surfaces.size()); ++i) {
+			const CSurfaceFace* surface = m_Surfaces[static_cast<size_t>(i)];
+			if (!surface)
+				continue;
+
+			Vec3 center{};
+			Vec3 normal{};
+			if (!get_surface_index_label_pose(*surface, center, normal))
+				continue;
+
+			char label[32]{};
+			std::snprintf(label, sizeof(label), "ID= %d", surface->m_ID);
+
+			const Vec3 label_position = center + normalize(normal) * 0.06f;
+			draw_surface_index_label(label_position, label);
+		}
+	};
 
 	if (mode == SolidDisplayMode::Wireframe) {
 		for (int i = 0; i < static_cast<int>(m_Surfaces.size()); ++i) {
@@ -960,6 +1487,7 @@ void CSolid::Render3d(bool selected) const
 			}
 			surface->RenderEdges(selected, selected_edges);
 		}
+		draw_surface_indices();
 		return;
 	}
 
@@ -969,6 +1497,7 @@ void CSolid::Render3d(bool selected) const
 				surface->pMesh3D->RenderWire(selected, true, &solid_color);
 			}
 		}
+		draw_surface_indices();
 		return;
 	}
 
@@ -1015,8 +1544,10 @@ void CSolid::Render3d(bool selected) const
 		}
 	}
 
-	if (!draw_edges)
+	if (!draw_edges) {
+		draw_surface_indices();
 		return;
+	}
 
 	for (int i = 0; i < static_cast<int>(m_Surfaces.size()); ++i) {
 		CSurfaceFace* surface = m_Surfaces[static_cast<size_t>(i)];
@@ -1029,6 +1560,7 @@ void CSolid::Render3d(bool selected) const
 			surface->RenderEdges(selected, selected_edges);
 		}
 	}
+	draw_surface_indices();
 }
 
 void CSolid::Render2d(float center_x, float center_y, float scale) const
@@ -1111,8 +1643,7 @@ std::unique_ptr<CAlfaObject> CSolid::Clone() const
 		if (source_surface)
 			copy->SetSurfaceTextureTransform(i, source_surface->TextureTransform);
 	}
-	copy->InitEdges();
-	copy->BuldMesh(0.1f);
+	copy->ReBuldMesh();
 	return copy;
 }
 
@@ -1123,9 +1654,7 @@ void CSolid::Translate(Vec3 delta)
 	if (!apply_shape_transform(m_Shape, transform))
 		return;
 	ClearSelectedEdge();
-	InitSurfaces();
-	InitEdges();
-	BuldMesh(0.1f);
+	ReBuldMesh();
 	if (!m_OperatonTree.empty()) {
 		SetParametricOperation(m_OperatonTree.size(),
 		                      "SolidTransform",
@@ -1149,9 +1678,7 @@ void CSolid::Rotate(Vec3 center, Vec3 axis, float angle)
 	if (!apply_shape_transform(m_Shape, transform))
 		return;
 	ClearSelectedEdge();
-	InitSurfaces();
-	InitEdges();
-	BuldMesh(0.1f);
+	ReBuldMesh();
 	if (!m_OperatonTree.empty()) {
 		SetParametricOperation(m_OperatonTree.size(),
 		                      "SolidTransform",
@@ -1201,9 +1728,7 @@ void CSolid::Scale(Vec3 center, Vec3 axis, float factor)
 	}
 
 	ClearSelectedEdge();
-	InitSurfaces();
-	InitEdges();
-	BuldMesh(0.1f);
+	ReBuldMesh();
 	if (!m_OperatonTree.empty()) {
 		SetParametricOperation(m_OperatonTree.size(),
 		                      "SolidTransform",
@@ -1226,9 +1751,7 @@ void CSolid::Mirror(Vec3 plane_point, Vec3 plane_normal)
 		return;
 
 	ClearSelectedEdge();
-	InitSurfaces();
-	InitEdges();
-	BuldMesh(0.1f);
+	ReBuldMesh();
 	if (!m_OperatonTree.empty()) {
 		SetParametricOperation(m_OperatonTree.size(),
 		                      "SolidTransform",
@@ -1269,9 +1792,7 @@ bool CSolid::ReverseNormals()
 	m_Shape.Reverse();
 	ClearSelectedEdge();
 	ClearSelectedFace();
-	InitSurfaces();
-	InitEdges();
-	BuldMesh(0.1f);
+	ReBuldMesh();
 	return true;
 }
 
@@ -1325,5 +1846,132 @@ bool CSolid::GetBounds(Vec3& min_point, Vec3& max_point) const
 	box.Get(xmin, ymin, zmin, xmax, ymax, zmax);
 	min_point = {static_cast<float>(xmin), static_cast<float>(ymin), static_cast<float>(zmin)};
 	max_point = {static_cast<float>(xmax), static_cast<float>(ymax), static_cast<float>(zmax)};
+	return true;
+}
+
+bool CSolid::ReBuldMesh()
+{
+	if (!InitSurfaces())
+		return false;
+	if (!InitEdges())
+		return false;
+	float Deflection = 1.0 / ptchDensity;
+	if (!BuldMesh(Deflection))
+		return false;
+	return true;
+}
+
+bool CSolid::DefineDirTriming(CSurfaceFace* surf, CPolyline* pLine, CPoint3d& pc)
+{
+	if (!surf || !pLine || pLine->GetPointCount() < 2)
+		return false;
+
+	SurfaceUVMapping mapping(surf);
+	if (!mapping.IsValid())
+		return false;
+
+	const std::vector<CPoint3d>& points = pLine->GetPoints();
+	const size_t middle_index = points.size() / 2;
+	const CPoint3d& middle_point = points[middle_index];
+	const Vec3 line_mid{
+		static_cast<float>(middle_point.x),
+		static_cast<float>(middle_point.y),
+		static_cast<float>(middle_point.z)
+	};
+
+	const auto surface_normal_near_point = [](CSurfaceFace* surface, Vec3 world_point, Vec3& normal) {
+		if (!surface)
+			return false;
+
+		SurfaceUVMapping surface_mapping(surface);
+		if (surface_mapping.IsValid()) {
+			SurfaceUVPoint uv{};
+			if (surface_mapping.Project(world_point, uv)) {
+				CPoint8d point{};
+				if (surface->GetPoint(uv.u, uv.v, &point)) {
+					normal = normalize({
+						static_cast<float>(point.l),
+						static_cast<float>(point.m),
+						static_cast<float>(point.n)
+					});
+					if (dot(normal, normal) > 0.000001f)
+						return true;
+				}
+			}
+		}
+
+		Vec3 center{};
+		return surface->GetCenterAndNormal(center, normal);
+	};
+
+	CSurfaceFace* neighbor_surface = nullptr;
+	for (CSurfaceFace* candidate : m_Surfaces) {
+		if (!candidate || candidate == surf)
+			continue;
+		if (candidate->IsBoundLine(pLine)) {
+			neighbor_surface = candidate;
+			break;
+		}
+	}
+
+	Vec3 current_normal{};
+	Vec3 neighbor_normal{};
+	if (neighbor_surface
+		&& surface_normal_near_point(surf, line_mid, current_normal)
+		&& surface_normal_near_point(neighbor_surface, line_mid, neighbor_normal)) {
+		Vec3 keep_direction = neighbor_normal * -1.0f;
+		keep_direction = keep_direction - current_normal * dot(keep_direction, current_normal);
+		keep_direction = normalize(keep_direction);
+		if (dot(keep_direction, keep_direction) > 0.000001f) {
+			const float shift = std::max(static_cast<float>(pLine->GetLength()) * 0.01f, 0.001f);
+			SurfaceUVPoint uv{};
+			if (mapping.Project(line_mid + keep_direction * shift, uv)) {
+				pc.x = uv.u;
+				pc.y = uv.v;
+				pc.z = 0.0;
+				return true;
+			}
+			if (mapping.Project(line_mid - keep_direction * shift, uv)) {
+				pc.x = uv.u;
+				pc.y = uv.v;
+				pc.z = 0.0;
+				return true;
+			}
+		}
+	}
+
+	Vec3 center{};
+	Vec3 normal{};
+	if (!surf->GetCenterAndNormal(center, normal)) {
+		center = {};
+		int count = 0;
+		for (const CPoint3d& point : points) {
+			center.x += static_cast<float>(point.x);
+			center.y += static_cast<float>(point.y);
+			center.z += static_cast<float>(point.z);
+			++count;
+		}
+		if (count > 0) {
+			center.x /= static_cast<float>(count);
+			center.y /= static_cast<float>(count);
+			center.z /= static_cast<float>(count);
+		}
+	}
+
+	SurfaceUVPoint uv{};
+	if (!mapping.Project(center, uv)) {
+		const CPoint3d& point = pLine->GetPoints().front();
+		const Vec3 fallback{
+			static_cast<float>(point.x),
+			static_cast<float>(point.y),
+			static_cast<float>(point.z)
+		};
+		if (!mapping.Project(fallback, uv))
+			return false;
+	}
+
+	pc.x = uv.u;
+	pc.y = uv.v;
+	pc.z = 0.0;
 	return true;
 }

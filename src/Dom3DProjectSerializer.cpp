@@ -709,8 +709,8 @@ bool Dom3DProjectSerializer::Save(const QString& path,
             xml.writeStartElement("faces");
             for (const CMesh3D::Face& face : mesh->GetFaces()) {
                 QStringList indices;
-                for (size_t index : face) {
-                    indices.push_back(QString::number(index));
+                for (const MeshCorner& corner : face.corners) {
+                    indices.push_back(QString::number(corner.v));
                 }
                 xml.writeTextElement("face", indices.join(' '));
             }
@@ -972,9 +972,10 @@ bool Dom3DProjectSerializer::Load(const QString& path,
                         error = "Mesh face contains an unsupported vertex index.";
                         return false;
                     }
-                    face.push_back(static_cast<size_t>(index));
+                    const size_t vertex_index = static_cast<size_t>(index);
+                    face.corners.push_back({vertex_index, vertex_index, vertex_index});
                 }
-                if (face.size() < 3) {
+                if (face.corners.size() < 3) {
                     error = "Mesh face has fewer than 3 vertices.";
                     return false;
                 }

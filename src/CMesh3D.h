@@ -5,20 +5,49 @@
 
 #include <iosfwd>
 #include <functional>
+#include <initializer_list>
 #include <string>
 #include <vector>
 
+class CSurfaceFace;
+
+struct MeshCorner {
+    size_t v = 0;
+    size_t n = 0;
+    size_t uv = 0;
+};
+
+struct MeshFace {
+    Vec3 normal{};
+    std::vector<MeshCorner> corners;
+    bool selected = false;
+    int id = 0;
+    bool deleted = false;
+    int sourceFaceId = -1;
+
+    MeshFace() = default;
+    MeshFace(std::initializer_list<size_t> vertex_indices);
+};
+
 class CMesh3D : public CAlfaObject {
 public:
-    using Face = std::vector<size_t>;
+    using Face = MeshFace;
 
     CMesh3D();
     explicit CMesh3D(std::string name);
 
     const std::vector<Vec3>& GetVertices() const;
+    std::vector<Vec3>& GetVertices();
     const std::vector<Face>& GetFaces() const;
     const std::vector<UV>& GetUVs() const;
     const std::vector<Vec3>& GetNormals() const;
+    static size_t GetFaceVertexIndex(const Face& face, size_t i);
+    static void SetFaceVertexIndex(Face& face, size_t i, size_t v);
+    static size_t FaceVertexCount(const Face& face);
+    bool PutOnSurface(CSurfaceFace* surface);
+    bool RestoreTo3DFromUVSurface(CSurfaceFace* surface);
+
+    bool ExportToObj(const std::string& name) const;
     bool SetGeometry(std::vector<Vec3> vertices, std::vector<Face> faces);
     bool SetGeometry(std::vector<Vec3> vertices, std::vector<Face> faces, std::vector<UV> uvs);
     bool SetGeometry(std::vector<Vec3> vertices,
@@ -50,6 +79,10 @@ public:
     bool Save(std::ostream& stream) const override;
     bool Load(std::istream& stream);
     bool Create(CPolyline* pline, CVector3d dir, float dist);
+    bool TrimByPline(CPolyline* pLine, CPoint3d pc);
+    bool SplitFaceByPoint(int face_index, int ind1, int ind2, const cVec2& pm);
+    bool SplitFaceByPointVar4(int face_index, int ind1, int ind2, const cVec2& pm);
+    bool SplitFaceByPointVar3(int face_index, int ind1, int ind2, const cVec2& pm);
 
 private:
     void Clear();

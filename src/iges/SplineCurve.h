@@ -1,11 +1,14 @@
 #pragma once
 
 #include <vector>
+#include <string>
 
 #include "../Point3d.h"
 #include "../Plane.h"
 #include "../SystemCoord.h"
 #include "../Vector.h"
+
+class CPolyline;
 
 class CSplineCurve
 {
@@ -82,6 +85,9 @@ public:
     void print();
     void printS();
     void printKnots();
+    void printToFile(std::string Name);
+    bool MakePolylineByQtyKnots(CPolyline* pline, int Qty);
+    bool Create(CPolyline* pline);
 
 public:
     bool ShowPoints;

@@ -73,6 +73,7 @@ public:
 	double GetDistLine(CPoint3d* p1, CPoint3d* p2);
 	double GetDistLine(CPoint3d* p, CVector* line);
 	double DistTo(CPoint3d* p2);
+
 	int In_P1_P2(CPoint3d* p1, CPoint3d* p2);
 	bool IsPointIn(CSizeBlock* block);
 	double GetDistLineSegment(CPoint3d* p1, CPoint3d* p2);

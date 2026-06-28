@@ -96,9 +96,8 @@ std::unique_ptr<CSolid> make_imported_solid(
 
     loaded->SetColor({ 0.58f, 0.68f, 0.76f });
 
-    loaded->InitSurfaces();
-    loaded->InitEdges();
-    loaded->BuldMesh(1.0f);
+  
+    loaded->ReBuldMesh();
 
     return loaded;
 }

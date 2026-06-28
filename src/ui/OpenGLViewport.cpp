@@ -1247,6 +1247,13 @@ void OpenGLViewport::SelectAt(const QPoint& point, SelectionAction action) {
         return;
     }
 
+    if (selection_mode_ == SelectionMode::Object
+        && document_->SelectPolylineAtScreen(screen_point, world_to_screen, 8.0f, action)) {
+        emit SelectionChanged();
+        update();
+        return;
+    }
+
     if (selection_mode_ == SelectionMode::Object && document_->SelectSolidMeshAtScreen(screen_point, project_world, action)) {
         emit SelectionChanged();
         update();
@@ -1254,13 +1261,6 @@ void OpenGLViewport::SelectAt(const QPoint& point, SelectionAction action) {
     }
 
     if (selection_mode_ == SelectionMode::Object && document_->SelectMeshAtScreen(screen_point, project_world, action)) {
-        emit SelectionChanged();
-        update();
-        return;
-    }
-
-    if (selection_mode_ == SelectionMode::Object
-        && document_->SelectPolylineAtScreen(screen_point, world_to_screen, 8.0f, action)) {
         emit SelectionChanged();
         update();
         return;

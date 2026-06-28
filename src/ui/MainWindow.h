@@ -70,6 +70,7 @@ private:
     void BeginSketchFillet();
     void ShowSketchPanel();
     void ActivateParametricTool(const std::string& tool_id);
+    void ShowLowPolyTool();
     void EditSelectedParametricObject();
     bool TryStartLiveEdgeToolFromSelection();
     bool TryStartLivePolylineExtrudeFromSelection();
@@ -87,6 +88,7 @@ private:
     void OpenProject();
     void OpenProjectFromPath(const QString& path);
     void SaveProject();
+    void UpdateWindowTitle();
     void ShowPreferences();
     void ImportFile();
     void ExportFile();
@@ -153,5 +155,6 @@ private:
     bool active_parametric_edit_existing_ = false;
     bool reopen_solid_editor_after_properties_ = false;
     bool object_color_pick_pending_ = false;
+    bool low_poly_pick_pending_ = false;
     std::string project_path_;
 };

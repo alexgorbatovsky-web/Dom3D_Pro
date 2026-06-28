@@ -247,9 +247,7 @@ bool apply_fillet_all_edges(CSolid& solid,
     solid.m_Shape = result_shape;
     solid.ClearSelectedEdge();
     solid.ClearSelectedFace();
-    solid.InitSurfaces();
-    solid.InitEdges();
-    return solid.BuldMesh(0.1f);
+    return solid.ReBuldMesh();
 }
 
 std::vector<std::pair<int, int>> edge_refs_from_saved_parameters(const std::vector<ParametricParameterValue>& saved_parameters) {
@@ -324,9 +322,7 @@ bool apply_fillet_edges(CSolid& solid,
     solid.m_Shape = result_shape;
     solid.ClearSelectedEdge();
     solid.ClearSelectedFace();
-    solid.InitSurfaces();
-    solid.InitEdges();
-    return solid.BuldMesh(0.1f);
+    return solid.ReBuldMesh();
 }
 
 bool apply_chamfer_edges(CSolid& solid,
@@ -365,9 +361,7 @@ bool apply_chamfer_edges(CSolid& solid,
 
     solid.ClearSelectedEdge();
     solid.ClearSelectedFace();
-    solid.InitSurfaces();
-    solid.InitEdges();
-    return solid.BuldMesh(0.1f);
+    return solid.ReBuldMesh();
 }
 
 bool apply_extrude_face(CSolid& solid,
@@ -466,9 +460,7 @@ bool apply_extrude_face(CSolid& solid,
 
     solid.ClearSelectedEdge();
     solid.ClearSelectedFace();
-    solid.InitSurfaces();
-    solid.InitEdges();
-    return solid.BuldMesh(0.1f);
+    return solid.ReBuldMesh();
 }
 
 double saved_param(const std::vector<ParametricParameterValue>& parameters,
@@ -532,9 +524,7 @@ bool apply_draft_face(CSolid& solid,
 
     solid.ClearSelectedEdge();
     solid.ClearSelectedFace();
-    solid.InitSurfaces();
-    solid.InitEdges();
-    return solid.BuldMesh(0.1f);
+    return solid.ReBuldMesh();
 }
 
 std::vector<int> face_indices_from_saved_parameters(
@@ -595,9 +585,7 @@ bool apply_thick_solid(CSolid& solid,
 
     solid.ClearSelectedEdge();
     solid.ClearSelectedFace();
-    solid.InitSurfaces();
-    solid.InitEdges();
-    return solid.BuldMesh(0.1f);
+    return solid.ReBuldMesh();
 }
 
 bool apply_solid_shape_transform(CSolid& solid, const gp_Trsf& transform) {
@@ -620,9 +608,7 @@ bool apply_solid_shape_transform(CSolid& solid, const gp_Trsf& transform) {
     }
     solid.ClearSelectedEdge();
     solid.ClearSelectedFace();
-    solid.InitSurfaces();
-    solid.InitEdges();
-    return solid.BuldMesh(0.1f);
+    return solid.ReBuldMesh();
 }
 
 bool apply_solid_shape_transform(CSolid& solid, const gp_GTrsf& transform) {
@@ -645,9 +631,7 @@ bool apply_solid_shape_transform(CSolid& solid, const gp_GTrsf& transform) {
     }
     solid.ClearSelectedEdge();
     solid.ClearSelectedFace();
-    solid.InitSurfaces();
-    solid.InitEdges();
-    return solid.BuldMesh(0.1f);
+    return solid.ReBuldMesh();
 }
 
 bool apply_solid_transform(CSolid& solid, const std::vector<ToolParameter>& parameters) {
@@ -787,9 +771,7 @@ bool apply_boolean_tool(CSolid& solid, const std::vector<ToolParameter>& paramet
     solid.m_Shape = result_shape;
     solid.ClearSelectedEdge();
     solid.ClearSelectedFace();
-    solid.InitSurfaces();
-    solid.InitEdges();
-    return solid.BuldMesh(0.1f);
+    return solid.ReBuldMesh();
 }
 
 Vec3 point_to_vec3(const CPoint3d& point) {
@@ -938,9 +920,7 @@ bool rebuild_extrude_base(CAlfaDoc& document, size_t object_index, const std::ve
     solid->SetGroupName(old_solid->GetGroupName());
     solid->SetVisible(old_solid->IsVisible());
     solid->CopyOperationTreeFrom(*old_solid);
-    solid->InitSurfaces();
-    solid->InitEdges();
-    if (!solid->BuldMesh(0.1f)) {
+    if (!solid->ReBuldMesh()) {
         return false;
     }
 
@@ -1073,9 +1053,7 @@ bool rebuild_revolve_base(CAlfaDoc& document,
     solid->SetGroupName(old_solid->GetGroupName());
     solid->SetVisible(old_solid->IsVisible());
     solid->CopyOperationTreeFrom(*old_solid);
-    solid->InitSurfaces();
-    solid->InitEdges();
-    if (!solid->BuldMesh(0.1f)) {
+    if (!solid->ReBuldMesh()) {
         return false;
     }
     objects[object_index] = std::move(solid);
@@ -1314,9 +1292,7 @@ void apply_boolean_to_selected_solids(CAlfaDoc& document, BooleanKind kind, cons
     auto result = std::make_unique<CSolid>(result_shape);
     result->SetName(result_name);
     result->SetColor(color);
-    result->InitSurfaces();
-    result->InitEdges();
-    result->BuldMesh(0.1f);
+    result->ReBuldMesh();
 
     std::vector<size_t> erase_indices = {first_index, second_index};
     std::sort(erase_indices.begin(), erase_indices.end(), std::greater<size_t>());
@@ -1513,6 +1489,16 @@ ToolRegistry::ToolRegistry() {
         {
             {"thick", "Thick", 1.0, -100.0, 100.0, 0.1}
         },
+        [](CAlfaDoc&, const std::vector<ToolParameter>&) {
+        },
+        [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {
+        }
+    });
+
+    tools_.push_back({
+        "SolidLowPoly",
+        "Low Poly",
+        {},
         [](CAlfaDoc&, const std::vector<ToolParameter>&) {
         },
         [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {

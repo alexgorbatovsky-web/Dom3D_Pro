@@ -23,6 +23,8 @@
 #include <string>
 #include <vector>
 
+class CSurfaceFace;
+
 class CPolyline : public CAlfaObject {
 public:
     CPolyline();
@@ -30,6 +32,9 @@ public:
 
     const std::vector<CPoint3d>& GetPoints() const;
     std::vector<CPoint3d>& GetPoints();
+    float TmpLen;
+    CVector Dir1;
+    bool IsReversed;
 
     bool IsEmpty() const;
     bool IsClosed() const;
@@ -38,6 +43,8 @@ public:
     bool Close();
     void Open();
     size_t GetPointCount() const;
+    size_t np() const;
+
     void Clear();
     void AddPoint(CPoint3d point);
     void AddPoint(CurvePoint point);
@@ -45,6 +52,11 @@ public:
     bool InsertPoint(size_t index, CurvePoint point);
     bool SetPoint(size_t index, CPoint3d point);
     bool SetPoint(size_t index, CurvePoint point);
+    bool PutOnSurface(CSurfaceFace* surface);
+    bool RestoreTo3DFromUVSurface(CSurfaceFace* surface);
+
+    bool ExportToObj(const std::string& name) const;
+    bool printToFile(const std::string& name) const;
     bool RemovePoint(size_t index);
     void SetLockedPlane(Vec3 plane_point, Vec3 plane_normal);
     void ClearLockedPlane();
@@ -64,7 +76,14 @@ public:
     bool Save(std::ostream& stream) const override;
     bool Load(std::istream& stream);
     bool CreatePolygone(float Length, int qty);
-
+    CPoint3d* P(int);
+    CPoint3d* PLast();
+    void Revers();
+    double GetLength();
+    bool IsConcavePolygonOnXY();
+    bool JoinG(CPolyline* line2);
+    bool JoinLine(CPolyline* line2, double delta);
+    static bool JoinMultuLines(std::vector<CPolyline*>* lines, std::vector<CPolyline*>* LinesJoin, double delta);
 
 private:
     static CPoint3d ToPoint3d(CurvePoint point);

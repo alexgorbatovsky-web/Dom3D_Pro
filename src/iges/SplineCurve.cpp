@@ -1,6 +1,7 @@
 #include "../OpenGLCompat.h"
 
 #include "SplineCurve.h"
+#include "../CPolyline.h"
 
 #include "defines.h"
 #include "../ageom.h"
@@ -8,6 +9,8 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 
 extern int INKM(double RES[39], int ISK[7], double T[3], double* A);
 extern int STAFM2(int IPR, int N, int LR[], double D, double* A);
@@ -705,4 +708,50 @@ void CSplineCurve::printKnots()
     for (const CPoint3d& knot : m_Knots)
         std::fprintf(strm, "%10.4lf  %10.4lf %10.4lf\n", knot.x, knot.y, knot.z);
     std::fclose(strm);
+}
+void CSplineCurve::printToFile(std::string Name)
+{
+    std::string fileName = std::string("c:\\temp\\") + Name + ".txt";
+    FILE* strm = std::fopen(fileName.c_str(), "a+");
+    if (nullptr == strm)
+        return;
+    fprintf(strm, "SPLINE\n");
+    fprintf(strm, " %d\n", m_n);
+
+    for (int i = 0; i < m_n; i++)
+        fprintf(strm, "%10.4lf  %10.4lf %10.4lf\n", P(i)->x, P(i)->y, P(i)->z);
+    fclose(strm);
+}
+
+bool CSplineCurve::MakePolylineByQtyKnots(CPolyline* pline, int Qty)
+{
+    if (Qty < 2) {
+        Message_err("Qty< 2, MakePolylineByQtyKnots");
+        return false;
+    }
+    double Length = GetLength();
+    double dLen = Length / (double)(Qty - 1);
+    for (int i = 0; i < Qty; i++) {
+        double len = dLen * i;
+        CPoint7d p7;
+        GetPointLength(len, &p7);
+        CPoint3d p3d(p7.x, p7.y, p7.z);
+        pline->AddPoint(&p3d);
+    }
+
+    return true;
+}
+
+bool CSplineCurve::Create(CPolyline* pline)
+{
+    if (Realloc(pline->np()))
+        return false;
+  
+    for (int i = 0; i < pline->np(); i++) {
+        Pnt(i)->x = pline->P(i)->x;
+        Pnt(i)->y = pline->P(i)->y;
+        Pnt(i)->z = pline->P(i)->z;
+    }
+    Build();
+    return true;
 }
