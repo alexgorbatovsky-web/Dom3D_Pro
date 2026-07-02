@@ -4,6 +4,7 @@
 #include "Common.h"
 
 #include <QString>
+#include <QImage>
 
 struct ProjectViewState {
     Camera camera{};
@@ -26,10 +27,12 @@ public:
               const CAlfaDoc& document,
               const QString& active_room,
               const ProjectViewState& view_state,
+              const QImage& thumbnail,
               QString& error) const;
     bool Load(const QString& path,
               CAlfaDoc& document,
               QString& active_room,
               ProjectViewState& view_state,
               QString& error) const;
+    bool LoadThumbnail(const QString& path, QImage& thumbnail, QString& error) const;
 };

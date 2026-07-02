@@ -3,6 +3,7 @@
 #include <QDialog>
 
 class QCheckBox;
+class QComboBox;
 class QDoubleSpinBox;
 class QRadioButton;
 class QSpinBox;
@@ -13,12 +14,17 @@ class PreferencesDialog : public QDialog {
 public:
     explicit PreferencesDialog(QWidget* parent = nullptr);
 
+signals:
+    void SettingsApplied();
+
 private:
+    QWidget* CreateProjectPage();
     QWidget* CreateModelingPage();
     QWidget* CreatePlaceholderPage(const QString& text);
     void LoadSettings();
     void ApplySettings();
 
+    QComboBox* length_unit_ = nullptr;
     QDoubleSpinBox* tolerance_modeling_ = nullptr;
     QCheckBox* delete_loop_ = nullptr;
     QRadioButton* offset_corner_ = nullptr;

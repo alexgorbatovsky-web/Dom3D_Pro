@@ -307,6 +307,19 @@ CutProjection project_point_to_cut(const cVec2& point, const std::vector<cVec2>&
     return best;
 }
 
+size_t add_or_find_vertex_2d(std::vector<Vec3>& vertices, const cVec2& point, double eps)
+{
+    const double eps2 = eps * eps;
+    for (size_t i = 0; i < vertices.size(); ++i) {
+        if (distance2(mesh_vertex_2d(vertices, i), point) <= eps2)
+            return i;
+    }
+
+    const size_t index = vertices.size();
+    vertices.push_back({static_cast<float>(point.x), static_cast<float>(point.y), 0.0f});
+    return index;
+}
+
 bool point_on_cut_segment(const cVec2& point, const cVec2& a, const cVec2& b, double eps)
 {
     const cVec2 ab = b - a;
@@ -429,31 +442,16 @@ void PrepareAndMoveVertexToTrimLine(std::vector<CMesh3D::Face>& faces,
                                     const Face2D* trim_polygon,
                                     bool keep_inside)
 {
-    struct NodeCandidate {
+    (void)trim_polygon;
+    (void)keep_inside;
+
+    struct IndAndDist {
         size_t cut_index = 0;
-        size_t vertex = 0;
+        size_t face_index = 0;
+        size_t vert_pos = 0;
         double dist2 = std::numeric_limits<double>::max();
+        bool need_move = true;
     };
-
-    std::vector<size_t> candidate_vertices;
-    for (size_t face_index : affected_faces) {
-        if (face_index >= faces.size())
-            continue;
-        const CMesh3D::Face& face = faces[face_index];
-        if (face.deleted || face.corners.size() < 3)
-            continue;
-
-        for (const MeshCorner& corner : face.corners) {
-            if (corner.v >= vertices.size())
-                continue;
-            candidate_vertices.push_back(corner.v);
-        }
-    }
-
-    std::sort(candidate_vertices.begin(), candidate_vertices.end());
-    candidate_vertices.erase(std::unique(candidate_vertices.begin(), candidate_vertices.end()), candidate_vertices.end());
-    if (candidate_vertices.empty())
-        return;
 
     std::vector<cVec2> cut_nodes;
     cut_nodes.reserve(cut.size());
@@ -463,58 +461,77 @@ void PrepareAndMoveVertexToTrimLine(std::vector<CMesh3D::Face>& faces,
     }
     if (cut_nodes.size() > 1 && EqualPoint2(cut_nodes.front(), cut_nodes.back(), EPS2D))
         cut_nodes.pop_back();
+    if (cut_nodes.empty())
+        return;
 
-    std::vector<NodeCandidate> candidates;
-    candidates.reserve(cut_nodes.size() * candidate_vertices.size());
-    for (size_t cut_index = 0; cut_index < cut_nodes.size(); ++cut_index) {
-        for (size_t vertex : candidate_vertices) {
-            candidates.push_back({cut_index, vertex, distance2(mesh_vertex_2d(vertices, vertex), cut_nodes[cut_index])});
+    std::vector<IndAndDist> ind_and_dist_arr;
+    ind_and_dist_arr.reserve(affected_faces.size() * 2);
+
+    for (size_t face_index : affected_faces) {
+        if (face_index >= faces.size())
+            continue;
+        const CMesh3D::Face& face = faces[face_index];
+        if (face.deleted || face.corners.size() < 3)
+            continue;
+
+        std::vector<IndAndDist> face_candidates;
+        face_candidates.reserve(face.corners.size());
+        for (size_t vert_pos = 0; vert_pos < face.corners.size(); ++vert_pos) {
+            const MeshCorner& corner = face.corners[vert_pos];
+            if (corner.v >= vertices.size())
+                continue;
+
+            IndAndDist best;
+            best.face_index = face_index;
+            best.vert_pos = vert_pos;
+            for (size_t cut_index = 0; cut_index < cut_nodes.size(); ++cut_index) {
+                const double dist = distance2(mesh_vertex_2d(vertices, corner.v), cut_nodes[cut_index]);
+                if (best.dist2 > dist) {
+                    best.dist2 = dist;
+                    best.cut_index = cut_index;
+                }
+            }
+            face_candidates.push_back(best);
+        }
+
+        std::sort(face_candidates.begin(), face_candidates.end(), [](const IndAndDist& a, const IndAndDist& b) {
+            return a.dist2 < b.dist2;
+        });
+        const size_t move_count = std::min<size_t>(2, face_candidates.size());
+        for (size_t i = 0; i < move_count; ++i)
+            ind_and_dist_arr.push_back(face_candidates[i]);
+    }
+
+    for (size_t j = 0; j < ind_and_dist_arr.size(); ++j) {
+        for (size_t i = 0; i < ind_and_dist_arr.size(); ++i) {
+            if (j == i)
+                continue;
+            if (ind_and_dist_arr[j].cut_index == ind_and_dist_arr[i].cut_index) {
+                if (ind_and_dist_arr[j].dist2 < ind_and_dist_arr[i].dist2) {
+                    ind_and_dist_arr[j].need_move = true;
+                    ind_and_dist_arr[i].need_move = false;
+                } else {
+                    ind_and_dist_arr[j].need_move = false;
+                    ind_and_dist_arr[i].need_move = true;
+                }
+            }
         }
     }
 
-    std::sort(candidates.begin(), candidates.end(), [](const NodeCandidate& a, const NodeCandidate& b) {
-        return a.dist2 < b.dist2;
-    });
-
-    std::set<size_t> used_cut_nodes;
-    std::set<size_t> used_vertices;
-    for (const NodeCandidate& candidate : candidates) {
-        if (used_cut_nodes.count(candidate.cut_index) || used_vertices.count(candidate.vertex))
+    for (const IndAndDist& ind_and_dist : ind_and_dist_arr) {
+        if (ind_and_dist.face_index >= faces.size() || ind_and_dist.cut_index >= cut_nodes.size())
             continue;
-        if (candidate.vertex >= vertices.size() || candidate.cut_index >= cut_nodes.size())
-            continue;
-        const cVec2& point = cut_nodes[candidate.cut_index];
-        vertices[candidate.vertex].x = static_cast<float>(point.x);
-        vertices[candidate.vertex].y = static_cast<float>(point.y);
-        vertices[candidate.vertex].z = 0.0f;
-        used_cut_nodes.insert(candidate.cut_index);
-        used_vertices.insert(candidate.vertex);
-        if (used_cut_nodes.size() == cut_nodes.size())
-            break;
-    }
-
-    if (!trim_polygon || trim_polygon->verts.size() < 3)
-        return;
-
-    for (size_t vertex : candidate_vertices) {
-        if (used_vertices.count(vertex) || vertex >= vertices.size())
+        CMesh3D::Face& face = faces[ind_and_dist.face_index];
+        if (face.deleted || ind_and_dist.vert_pos >= face.corners.size())
             continue;
 
-        const cVec2 point = mesh_vertex_2d(vertices, vertex);
-        const PointFacePos pos = ClassifyPointInFace2(*trim_polygon, point, EPS2D);
-        if (pos == PFP_BOUNDARY)
+        const size_t vertex = face.corners[ind_and_dist.vert_pos].v;
+        if (vertex >= vertices.size())
             continue;
 
-        const bool vertex_inside = pos == PFP_INSIDE;
-        if (vertex_inside == keep_inside)
-            continue;
-
-        const CutProjection projection = project_point_to_cut(point, cut);
-        if (projection.segment < 0)
-            continue;
-
-        vertices[vertex].x = static_cast<float>(projection.point.x);
-        vertices[vertex].y = static_cast<float>(projection.point.y);
+        const cVec2& point = cut_nodes[ind_and_dist.cut_index];
+        vertices[vertex].x = static_cast<float>(point.x);
+        vertices[vertex].y = static_cast<float>(point.y);
         vertices[vertex].z = 0.0f;
     }
 }
@@ -597,8 +614,7 @@ bool CMesh3D::SplitFaceByPoint(int face_index, int ind1, int ind2, const cVec2& 
     if (face.corners.size() < 4)
         return false;
  
-    const size_t middle_vertex = vertices_.size();
-    vertices_.push_back({ static_cast<float>(pm.x), static_cast<float>(pm.y), 0.0f }); 
+    const size_t middle_vertex = add_or_find_vertex_2d(vertices_, pm, 0.0001);
     const MeshCorner middle = { middle_vertex, 0, 0 };
 
     CPolyline polygon;
@@ -665,8 +681,7 @@ bool CMesh3D::SplitFaceByPointVar4(int face_index, int ind1, int ind2, const cVe
     if (ind1 == 0 && ind2 == 3)
         std::swap(ind1, ind2);
     
-    const size_t middle_vertex = vertices_.size();
-    vertices_.push_back({ static_cast<float>(pm.x), static_cast<float>(pm.y), 0.0f });
+    const size_t middle_vertex = add_or_find_vertex_2d(vertices_, pm, 0.0001);
     const MeshCorner middle = { middle_vertex, 0, 0 };
  
     int ind3 = 2;
@@ -696,9 +711,9 @@ bool CMesh3D::SplitFaceByPointVar4(int face_index, int ind1, int ind2, const cVe
     seq2.push_back(face.corners[ind4]);
     seq2.push_back(middle);
 
-    seq2.push_back(face.corners[ind2]);
-    seq2.push_back(face.corners[ind3]);
-    seq2.push_back(middle);
+    seq3.push_back(face.corners[ind2]);
+    seq3.push_back(face.corners[ind3]);
+    seq3.push_back(middle);
 
     if (ind1 == 0)
         face.corners[ind3] = middle;
@@ -714,6 +729,7 @@ bool CMesh3D::SplitFaceByPointVar4(int face_index, int ind1, int ind2, const cVe
         face.corners[2] = face.corners[3];
     }
     face.corners.resize(3);
+    face.normal = FaceNormal(face);
 
     MeshFace face1 = face;
     face1.corners = std::move(seq1);
@@ -742,8 +758,7 @@ bool CMesh3D::SplitFaceByPointVar3(int face_index, int ind1, int ind2, const cVe
     if (count < 4)
         return false;
 
-    const size_t middle_vertex = vertices_.size();
-    vertices_.push_back({ static_cast<float>(pm.x), static_cast<float>(pm.y), 0.0f });
+    const size_t middle_vertex = add_or_find_vertex_2d(vertices_, pm, 0.0001);
     const MeshCorner middle = { middle_vertex, 0, 0 };
 
     CPolyline polygon;
@@ -876,6 +891,12 @@ bool CMesh3D::RestoreTo3DFromUVSurface(CSurfaceFace* surface)
             static_cast<float>(point.m),
             static_cast<float>(point.n)
         });
+    }
+    for (Face& face : faces_) {
+        for (MeshCorner& corner : face.corners) {
+            corner.n = corner.v;
+        }
+        face.normal = FaceNormal(face);
     }
     return true;
 }
@@ -1740,16 +1761,14 @@ bool CMesh3D::TrimByPline(CPolyline* pLine, CPoint3d pc) {
         return false;
     }
 
+    const std::vector<Vec3> original_vertices = vertices_;
+    const std::vector<Face> original_faces = faces_;
+
     PrepareAndMoveVertexToTrimLine(faces_, vertices_, affected_faces, cut,
                                    has_trim_polygon ? &trim_polygon : nullptr,
                                    keep_inside);
 
-    std::deque<size_t> split_queue(affected_faces.begin(), affected_faces.end());
-    int split_guard = 0;
-    const int max_split_steps = std::max(1000, static_cast<int>(cut.size() * 8 + affected_faces.size() * 8));
-    while (!split_queue.empty() && split_guard++ < max_split_steps) {
-        const size_t face_index = split_queue.front();
-        split_queue.pop_front();
+    for (size_t face_index : affected_faces) {
         if (face_index >= faces_.size())
             continue;
 
@@ -1763,43 +1782,21 @@ bool CMesh3D::TrimByPline(CPolyline* pLine, CPoint3d pc) {
             continue;
         ClassifyFaceCut(face_2d, cut, info, EPS2D);
 
-        std::vector<int> touched_positions = find_cut_touched_positions(face, vertices_, cut);
-        if (touched_positions.size() < 2)
+        if (info.touchedFaceVertices.size() < 2)
             continue;
 
-        const int pos_a = touched_positions.front();
-        const int pos_b = touched_positions.back();
+        const int pos_a = info.touchedFaceVertices[0];
+        const int pos_b = info.touchedFaceVertices[1];
 
-        bool split_by_point = false;
-        for (int point_index : info.PntInFace) {
-            if (point_index < 0 || point_index >= static_cast<int>(cut.size()))
-                continue;
-
-            const cVec2 point = cut[static_cast<size_t>(point_index)];
-            bool already_vertex = false;
-            for (const MeshCorner& corner : face.corners) {
-                if (corner.v < vertices_.size() && EqualPoint2(mesh_vertex_2d(vertices_, corner.v), point, EPS2D)) {
-                    already_vertex = true;
-                    break;
-                }
-            }
-            if (already_vertex)
-                continue;
-            
-            const size_t old_face_count = faces_.size();
-            if (SplitFaceByPoint(static_cast<int>(face_index), pos_a, pos_b, point)) {
-                split_queue.push_back(face_index);
-                for (size_t new_face_index = old_face_count; new_face_index < faces_.size(); ++new_face_index)
-                    split_queue.push_back(new_face_index);
-                split_by_point = true;
-                break;
-            }
+        if (info.VariantCut == 2) {
+            SplitFaceByLine(faces_, face_index, pos_a, pos_b);
+        } else if (cut_is_closed(cut)) {
+            continue;
+        } else {
+            vertices_ = original_vertices;
+            faces_ = original_faces;
+            return false;
         }
-
-        if (split_by_point)
-            continue;
-
-        SplitFaceByLine(faces_, face_index, pos_a, pos_b);
     }
 
     if (cut_is_closed(cut)) {

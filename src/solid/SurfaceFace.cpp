@@ -207,6 +207,50 @@ bool is_regular_uv_mesh_surface(const TopoDS_Face& face)
 	}
 }
 
+GeomAbs_SurfaceType surface_type_of(const TopoDS_Face& face)
+{
+	try {
+		BRepAdaptor_Surface surface(face);
+		return surface.GetType();
+	} catch (const Standard_Failure&) {
+		return GeomAbs_OtherSurface;
+	}
+}
+
+double target_quad_step(float deflection, GeomAbs_SurfaceType surface_type)
+{
+	const double base_step = std::clamp(static_cast<double>(deflection), 0.25, 20.0);
+//	return base_step * 0.72;
+	switch (surface_type) {
+	case GeomAbs_Plane:
+		return base_step * 0.72;
+	case GeomAbs_Cylinder:
+		return base_step/ 1.7;
+	case GeomAbs_Cone:
+	case GeomAbs_Sphere:
+	case GeomAbs_Torus:
+	case GeomAbs_SurfaceOfRevolution:
+//		return base_step * 1.4;
+		return base_step * 0.8;
+	default:
+		return base_step;
+	}
+}
+
+int mesh_point_quantity_for_length(double length, float deflection, GeomAbs_SurfaceType surface_type)
+{
+	if (!std::isfinite(length) || length <= 0.0)
+		return CSurfaceFace::m_QtyMin;
+
+	const double step = target_quad_step(deflection, surface_type);
+	const int max_quantity = std::max(7, static_cast<int>(std::ceil(160.0 / std::max(0.25, step))) + 1);
+	int quantity = static_cast<int>(std::ceil(length / step)) + 1;
+	quantity = std::clamp(quantity, CSurfaceFace::m_QtyMin, max_quantity);
+	if (IsEven(quantity))
+		++quantity;
+	return quantity;
+}
+
 bool build_regular_uv_mesh(CSurfaceFace* surface, float deflection)
 {
 	if (!surface || surface->m_Face.IsNull())
@@ -232,15 +276,9 @@ bool build_regular_uv_mesh(CSurfaceFace* surface, float deflection)
 	const double mid_v = (v_min + v_max) * 0.5;
 	const double u_length = sampled_iso_length(surface, mid_v, u_min, u_max, true);
 	const double v_length = sampled_iso_length(surface, mid_u, v_min, v_max, false);
-	const double longest = std::max({u_length, v_length, 1.0});
-	const int qty_max = std::max(4, static_cast<int>(20.0 / std::max(0.001f, deflection)));
-	const auto quantity_for = [qty_max, longest](double length) {
-		int quantity = static_cast<int>(std::round(static_cast<double>(qty_max) * length / longest)) + 1;
-		quantity = std::clamp(quantity, CSurfaceFace::m_QtyMin, qty_max + 1);
-		return quantity;
-	};
-	const int qty_u = quantity_for(u_length);
-	const int qty_v = quantity_for(v_length);
+	const GeomAbs_SurfaceType surface_type = surface_type_of(TopoDS::Face(surface->m_Face));
+	const int qty_u = mesh_point_quantity_for_length(u_length, deflection, surface_type);
+	const int qty_v = mesh_point_quantity_for_length(v_length, deflection, surface_type);
 
 	std::vector<Vec3> vertices;
 	std::vector<UV> uvs;
@@ -464,6 +502,142 @@ bool loop_matches_uv_bounds(CSurfaceFace* surface, const Face2D& loop)
 	}
 
 	return touches_u_min && touches_u_max && touches_v_min && touches_v_max;
+}
+
+bool loop_contains_loop(const Face2D& container, const Face2D& candidate)
+{
+	if (container.verts.size() < 3 || candidate.verts.size() < 3)
+		return false;
+
+	const cVec2 center = polygon_centroid_2d(candidate);
+	return ClassifyPointInFace2(container, center, EPS2D) != PFP_OUTSIDE;
+}
+
+bool regular_surface_needs_boundary_trim(CSurfaceFace* surface,
+                                         const std::vector<CPolyline*>& source_lines,
+                                         double delta)
+{
+	if (!surface || source_lines.empty())
+		return false;
+
+	std::vector<std::unique_ptr<CPolyline>> storage;
+	std::vector<CPolyline*> lines;
+	storage.reserve(source_lines.size());
+	lines.reserve(source_lines.size());
+	for (const CPolyline* source : source_lines) {
+		std::unique_ptr<CPolyline> copy = copy_polyline_points(source);
+		if (!copy || copy->GetPointCount() < 2)
+			continue;
+		lines.push_back(copy.get());
+		storage.push_back(std::move(copy));
+	}
+	if (lines.empty())
+		return false;
+
+	std::vector<CPolyline*> loops;
+	CPolyline::JoinMultuLines(&lines, &loops, delta);
+	if (loops.empty())
+		return false;
+
+	std::vector<Face2D> loop_faces;
+	loop_faces.reserve(loops.size());
+	for (CPolyline* loop : loops) {
+		if (!loop || loop->GetPointCount() < 3)
+			continue;
+		if (loop->P(0)->DistTo(loop->PLast()) <= delta)
+			loop->SetClosed(true);
+		if (!loop->PutOnSurface(surface))
+			continue;
+
+		Face2D loop_face = polyline_to_face2d(loop);
+		if (loop_face.verts.size() < 3 || std::fabs(polygon_area_2d(loop_face)) <= 1.0e-9)
+			continue;
+		loop_faces.push_back(std::move(loop_face));
+	}
+	if (loop_faces.empty())
+		return false;
+
+	if (loop_faces.size() == 1)
+		return !loop_matches_uv_bounds(surface, loop_faces.front());
+
+	for (size_t i = 0; i < loop_faces.size(); ++i) {
+		for (size_t j = 0; j < loop_faces.size(); ++j) {
+			if (i == j)
+				continue;
+			if (loop_contains_loop(loop_faces[i], loop_faces[j]))
+				return true;
+		}
+	}
+	return false;
+}
+
+cVec2 choose_point_outside_loop(const CMesh3D* mesh, const Face2D& loop)
+{
+	if (mesh) {
+		const std::vector<Vec3>& vertices = mesh->GetVertices();
+		const std::vector<CMesh3D::Face>& faces = mesh->GetFaces();
+		for (const CMesh3D::Face& face : faces) {
+			if (face.deleted || face.corners.size() < 3)
+				continue;
+			const cVec2 center = mesh_face_center_uv(face, vertices);
+			if (ClassifyPointInFace2(loop, center, EPS2D) == PFP_OUTSIDE)
+				return center;
+		}
+	}
+
+	cVec2 point = polygon_centroid_2d(loop);
+	if (loop.verts.empty())
+		return point;
+	point.x = loop.verts.front().x + 1.0;
+	point.y = loop.verts.front().y + 1.0;
+	return point;
+}
+
+bool trim_mesh_by_independent_boundary_loops(CMesh3D* mesh,
+                                             CSurfaceFace* surface,
+                                             const std::vector<CPolyline*>& source_lines,
+                                             double delta)
+{
+	if (!mesh || !surface || source_lines.empty())
+		return false;
+
+	std::vector<std::unique_ptr<CPolyline>> storage;
+	std::vector<CPolyline*> lines;
+	storage.reserve(source_lines.size());
+	lines.reserve(source_lines.size());
+	for (const CPolyline* source : source_lines) {
+		std::unique_ptr<CPolyline> copy = copy_polyline_points(source);
+		if (!copy || copy->GetPointCount() < 2)
+			continue;
+		lines.push_back(copy.get());
+		storage.push_back(std::move(copy));
+	}
+	if (lines.empty())
+		return false;
+
+	std::vector<CPolyline*> loops;
+	CPolyline::JoinMultuLines(&lines, &loops, delta);
+	if (loops.empty())
+		return false;
+
+	bool changed = false;
+	for (CPolyline* loop : loops) {
+		if (!loop || loop->GetPointCount() < 3)
+			continue;
+		if (loop->P(0)->DistTo(loop->PLast()) <= delta)
+			loop->SetClosed(true);
+		if (!loop->PutOnSurface(surface))
+			continue;
+
+		Face2D loop_face = polyline_to_face2d(loop);
+		if (loop_face.verts.size() < 3 || std::fabs(polygon_area_2d(loop_face)) <= 1.0e-9)
+			continue;
+
+		const cVec2 keep = choose_point_outside_loop(mesh, loop_face);
+		CPoint3d pc(keep.x, keep.y, 0.0);
+		changed = mesh->TrimByPline(loop, pc) || changed;
+	}
+	return changed;
 }
 
 bool trim_mesh_by_surface_boundary(CMesh3D* mesh,
@@ -1207,20 +1381,16 @@ void CSurfaceFace::PrepareEdges(float Deflection)
 		Polylines.erase(Polylines.begin() + j_min);
 	}
 
-	int QtyMax = (int)20.0 / Deflection;
-	if (QtyMax < 4)
-		QtyMax = 4;
+	GeomAbs_SurfaceType surface_type = GeomAbs_OtherSurface;
+	if (!m_Face.IsNull())
+		surface_type = surface_type_of(TopoDS::Face(m_Face));
 
 	for (CPolyline* pLine : Edges2) {
 		CSplineCurve spl;
 		spl.Create(pLine);
 		CPolyline* pline = new CPolyline;
 		float len = spl.GetLength();
-		int Qty = QtyMax / lenEdgeMax * len;
-		if (IsEven(Qty))
-			Qty++;
-		if (Qty < m_QtyMin)
-			Qty = m_QtyMin;
+		int Qty = mesh_point_quantity_for_length(len, Deflection, surface_type);
 		spl.MakePolylineByQtyKnots(pline, Qty);
 		pline->TmpLen = spl.GetLength();
 		pline->Dir1.l = spl.P(0)->l;
@@ -1229,7 +1399,7 @@ void CSurfaceFace::PrepareEdges(float Deflection)
 		Polylines.push_back(pline);
 	}
 
-	char buf[120];
+/*	char buf[120];
 	for (CPolyline* pLine : Polylines) {
 		if (m_ID == 3 || m_ID == 6) {
 			sprintf(buf, "Polylines%d", m_ID);
@@ -1237,6 +1407,8 @@ void CSurfaceFace::PrepareEdges(float Deflection)
 		}
 
 	}
+*/
+
 }
 
 int CSurfaceFace::GetPreparedPolylineCount() const
@@ -1368,8 +1540,17 @@ bool CSurfaceFace::BuildTrimmingMesh(CSolid* psol, float Deflection){
 	TopoDS_Face F1 = TopoDS::Face(m_Face);
 	if (F1.IsNull())
 		return false;
-	if (is_regular_uv_mesh_surface(F1) && build_regular_uv_mesh(this, Deflection))
+	if (is_regular_uv_mesh_surface(F1) && build_regular_uv_mesh(this, Deflection)) {
+		const double delta = 0.01;
+		if (pMesh3D && !Polylines.empty() && pMesh3D->PutOnSurface(this)) {
+			if (regular_surface_needs_boundary_trim(this, Polylines, delta))
+				trim_mesh_by_surface_boundary(pMesh3D, this, Polylines, delta);
+			else
+				trim_mesh_by_independent_boundary_loops(pMesh3D, this, Polylines, delta);
+			pMesh3D->RestoreTo3DFromUVSurface(this);
+		}
 		return true;
+	}
 	Handle(Geom_Surface) surf = BRep_Tool::Surface(F1);
 	if (surf.IsNull())
 		return false;
@@ -1377,22 +1558,12 @@ bool CSurfaceFace::BuildTrimmingMesh(CSolid* psol, float Deflection){
 		return build_regular_uv_mesh(this, Deflection);
 	int QtyS = 2;
 	int QtyT = 2;
-	int QtyMax = (int)20.0 / Deflection;
-	if (QtyMax < 4)
-		QtyMax = 4;
+	const GeomAbs_SurfaceType surface_type = surface_type_of(F1);
 	float len = BoundSpl[0]->GetLength();
-	int Qty1 = QtyMax / lenEdgeMax * len;
-	if (IsEven(Qty1))
-		Qty1++;
-	if (Qty1 < m_QtyMin)
-		Qty1 = m_QtyMin;
+	int Qty1 = mesh_point_quantity_for_length(len, Deflection, surface_type);
 	QtyS = Qty1;
 	len = BoundSpl[2]->GetLength();
-	int Qty2 = QtyMax / lenEdgeMax * len;
-	if (IsEven(Qty2))
-		Qty2++;
-	if (Qty2 < m_QtyMin)
-		Qty2 = m_QtyMin;
+	int Qty2 = mesh_point_quantity_for_length(len, Deflection, surface_type);
 	QtyT = Qty2;
 
 	if (TypeGeom == SPHERES_SURF && Polylines.size() < 3) {
@@ -1412,12 +1583,12 @@ bool CSurfaceFace::BuildTrimmingMesh(CSolid* psol, float Deflection){
 	IsTrimmed = false;
 //  ====== Trimming =====
 	pMesh3D->PutOnSurface(this);
-	if (m_ID == 3) {
-		pMesh3D->ExportToObj("c:\\temp\\Mesh3D_3.obj");
+	if (m_ID == 1) {
+		pMesh3D->ExportToObj("c:\\temp\\Mesh3D_0.obj");
 		for (int i = 0; i < Polylines.size(); i++) {
-			Polylines[i]->printToFile("Polylines3D_ID_3");
+			Polylines[i]->printToFile("Polylines3D_ID_0");
 			Polylines[i]->PutOnSurface(this);
-			Polylines[i]->printToFile("Trim_Polylines_ID_3");
+			Polylines[i]->printToFile("Trim_Polylines_ID_0");
 			Polylines[i]->RestoreTo3DFromUVSurface(this);
 		}
 	}
@@ -1427,8 +1598,8 @@ bool CSurfaceFace::BuildTrimmingMesh(CSolid* psol, float Deflection){
 	trim_mesh_by_surface_boundary(pMesh3D, this, Polylines, delta);
 
 
-	if (m_ID == 3) 
-		pMesh3D->ExportToObj("c:\\temp\\Mesh3D_3Trimmed.obj");
+//	if (m_ID == 0) 
+//		pMesh3D->ExportToObj("c:\\temp\\Mesh3D_0Trimmed.obj");
 
 	pMesh3D->RestoreTo3DFromUVSurface(this);
 

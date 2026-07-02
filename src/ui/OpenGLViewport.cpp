@@ -10,8 +10,10 @@
 #include <QDragMoveEvent>
 #include <QDropEvent>
 #include <QKeyEvent>
+#include <QMimeData>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QUrl>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -376,7 +378,7 @@ void OpenGLViewport::FitToDocument() {
     const Vec3 size = max_point - min_point;
     const float radius = std::max(1.0f, std::sqrt(dot(size, size)) * 0.5f);
     camera_.target = center;
-    camera_.distance = std::clamp(radius * 3.0f, 2.0f, 100000.0f);
+    camera_.distance = std::clamp(radius * 9.0f, 2.0f, 100000.0f);
     update();
 }
 
@@ -1160,6 +1162,14 @@ void OpenGLViewport::wheelEvent(QWheelEvent* event) {
 void OpenGLViewport::dragEnterEvent(QDragEnterEvent* event) {
     Material material;
     if (!MaterialDrag::Decode(event->mimeData(), material)) {
+        if (event->mimeData()->hasUrls()) {
+            for (const QUrl& url : event->mimeData()->urls()) {
+                if (url.isLocalFile()) {
+                    event->acceptProposedAction();
+                    return;
+                }
+            }
+        }
         event->ignore();
         return;
     }
@@ -1174,6 +1184,14 @@ void OpenGLViewport::dragEnterEvent(QDragEnterEvent* event) {
 void OpenGLViewport::dragMoveEvent(QDragMoveEvent* event) {
     Material material;
     if (!MaterialDrag::Decode(event->mimeData(), material)) {
+        if (event->mimeData()->hasUrls()) {
+            for (const QUrl& url : event->mimeData()->urls()) {
+                if (url.isLocalFile()) {
+                    event->acceptProposedAction();
+                    return;
+                }
+            }
+        }
         event->ignore();
         return;
     }
@@ -1193,6 +1211,21 @@ void OpenGLViewport::dragLeaveEvent(QDragLeaveEvent* event) {
 void OpenGLViewport::dropEvent(QDropEvent* event) {
     Material material;
     if (!MaterialDrag::Decode(event->mimeData(), material)) {
+        QStringList paths;
+        if (event->mimeData()->hasUrls()) {
+            for (const QUrl& url : event->mimeData()->urls()) {
+                if (url.isLocalFile()) {
+                    paths.push_back(url.toLocalFile());
+                }
+            }
+        }
+        if (!paths.isEmpty()) {
+            material_drag_active_ = false;
+            event->acceptProposedAction();
+            emit FilesDropped(paths);
+            update();
+            return;
+        }
         event->ignore();
         return;
     }
@@ -1458,6 +1491,7 @@ void OpenGLViewport::HandleBooleanClick(const QPoint& point) {
 
     has_boolean_body_ = false;
     boolean_body_index_ = 0;
+    document_->ClearSelection();
     tool_ = ToolMode::Select;
     emit SelectionChanged();
     emit DocumentChanged();

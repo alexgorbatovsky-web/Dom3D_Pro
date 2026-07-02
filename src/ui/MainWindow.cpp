@@ -28,13 +28,19 @@
 #include <QDockWidget>
 #include <QDoubleSpinBox>
 #include <QDrag>
+#include <QDragEnterEvent>
+#include <QDragMoveEvent>
 #include <QDir>
+#include <QDropEvent>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QFrame>
 #include <QGridLayout>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QIcon>
+#include <QImage>
 #include <QKeySequence>
 #include <QLabel>
 #include <QLayoutItem>
@@ -52,6 +58,7 @@
 #include <QPixmap>
 #include <QPushButton>
 #include <QRadialGradient>
+#include <QScreen>
 #include <QSettings>
 #include <QSize>
 #include <QSignalBlocker>
@@ -66,6 +73,7 @@
 #include <QVariant>
 #include <QVBoxLayout>
 
+#include <algorithm>
 #include <cmath>
 #include <functional>
 #include <map>
@@ -78,6 +86,42 @@ namespace {
 constexpr int kMaxRecentProjectFiles = 18;
 constexpr int kSceneTreeObjectIndexRole = Qt::UserRole + 1;
 constexpr int kSceneTreeGroupRole = Qt::UserRole + 2;
+
+BooleanDialog::Operation DialogOperationFromBoolean(BooleanOperation operation) {
+    if (operation == BooleanOperation::Cut) {
+        return BooleanDialog::Operation::Cut;
+    }
+    if (operation == BooleanOperation::Common) {
+        return BooleanDialog::Operation::Common;
+    }
+    return BooleanDialog::Operation::Union;
+}
+
+BooleanOperation BooleanOperationFromDialog(BooleanDialog::Operation operation) {
+    if (operation == BooleanDialog::Operation::Cut) {
+        return BooleanOperation::Cut;
+    }
+    if (operation == BooleanDialog::Operation::Common) {
+        return BooleanOperation::Common;
+    }
+    return BooleanOperation::Union;
+}
+
+void CenterDialogOnCursor(QDialog& dialog) {
+    dialog.adjustSize();
+
+    const QPoint cursor_pos = QCursor::pos();
+    const QSize dialog_size = dialog.sizeHint().expandedTo(dialog.size());
+    QPoint top_left = cursor_pos - QPoint(dialog_size.width() / 2, dialog_size.height() / 2);
+
+    if (QScreen* screen = QGuiApplication::screenAt(cursor_pos)) {
+        const QRect bounds = screen->availableGeometry();
+        top_left.setX(std::clamp(top_left.x(), bounds.left(), bounds.right() - dialog_size.width() + 1));
+        top_left.setY(std::clamp(top_left.y(), bounds.top(), bounds.bottom() - dialog_size.height() + 1));
+    }
+
+    dialog.move(top_left);
+}
 
 std::unique_ptr<CMesh3D> CreateLowPolyMeshFromSolid(const CSolid& solid)
 {
@@ -779,6 +823,7 @@ MainWindow::MainWindow(QWidget* parent)
       property_panel_(new PropertyPanel(this)) {
     UpdateWindowTitle();
     resize(1280, 760);
+    setAcceptDrops(true);
 
     viewport_->SetDocument(&document_);
     setCentralWidget(viewport_);
@@ -822,6 +867,9 @@ MainWindow::MainWindow(QWidget* parent)
     connect(viewport_, &OpenGLViewport::ObjectDoubleClicked, this, [this]() {
         EditSelectedParametricObject();
     });
+    connect(viewport_, &OpenGLViewport::FilesDropped, this, [this](const QStringList& paths) {
+        HandleDroppedFiles(paths);
+    });
     connect(viewport_, &OpenGLViewport::StatusTextChanged, this, [this](const QString& text) {
         statusBar()->showMessage(text);
     });
@@ -852,7 +900,7 @@ MainWindow::MainWindow(QWidget* parent)
             tool_registry_.Rebuild(active_parametric_object_, document_);
             RefreshSceneTree();
             viewport_->update();
-            const double value = active_parametric_object_.parameters.empty() ? 0.20 : active_parametric_object_.parameters[0].value;
+            const double value = active_parametric_object_.parameters.empty() ? 2.0 : active_parametric_object_.parameters[0].value;
             const QString label = active_parametric_object_.tool_id == "ChamferSolid"
                 ? "Chamfer"
                 : (active_parametric_object_.tool_id == "fillet_edge" ? "Fillet Edge" : "Fillet All");
@@ -860,7 +908,7 @@ MainWindow::MainWindow(QWidget* parent)
             return;
         }
         if (active_parametric_object_.tool_id == "fillet_edge" || active_parametric_object_.tool_id == "fillet_all_edges") {
-            const double radius = active_parametric_object_.parameters.empty() ? 0.20 : active_parametric_object_.parameters[0].value;
+            const double radius = active_parametric_object_.parameters.empty() ? 2.0 : active_parametric_object_.parameters[0].value;
             if (!document_.HasLiveFillet()) {
                 statusBar()->showMessage("Fillet: выбери кромку тела");
                 return;
@@ -874,7 +922,7 @@ MainWindow::MainWindow(QWidget* parent)
             return;
         }
         if (active_parametric_object_.tool_id == "ChamferSolid") {
-            const double distance = active_parametric_object_.parameters.empty() ? 0.20 : active_parametric_object_.parameters[0].value;
+            const double distance = active_parametric_object_.parameters.empty() ? 2.0 : active_parametric_object_.parameters[0].value;
             if (!document_.HasLiveChamfer()) {
                 statusBar()->showMessage("Chamfer: выбери кромку тела");
                 return;
@@ -1060,7 +1108,8 @@ void MainWindow::CreateActions() {
     file_menu->addAction(add_action("&New", QKeySequence::New, [this]() { NewProject(); }));
     file_menu->addAction(add_action("&Open...", QKeySequence::Open, [this]() { OpenProject(); }));
     recent_files_menu_ = file_menu->addMenu("Open &Recent");
-    file_menu->addAction(add_action("&Save...", QKeySequence::Save, [this]() { SaveProject(); }));
+    file_menu->addAction(add_action("&Save", QKeySequence::Save, [this]() { SaveProject(); }));
+    file_menu->addAction(add_action("Save &As...", QKeySequence::SaveAs, [this]() { SaveProjectAs(); }));
     file_menu->addSeparator();
     file_menu->addAction(add_action("&Preferences...", {}, [this]() { ShowPreferences(); }));
     file_menu->addSeparator();
@@ -2689,6 +2738,8 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         ClearActiveProperties();
 
         BooleanDialog dlg(this);
+        dlg.SetSelectedOperation(DialogOperationFromBoolean(last_boolean_operation_));
+        CenterDialogOnCursor(dlg);
         if (dlg.exec() != QDialog::Accepted) {
             // Отмена
             UpdateActiveToolUi("select");
@@ -2697,17 +2748,8 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
             return;
         }
 
-        BooleanOperation operation = BooleanOperation::Union;
-        const BooleanDialog::Operation selected = dlg.SelectedOperation();
-        if (selected == BooleanDialog::Operation::Union) {
-            operation = BooleanOperation::Union;
-        } else if (selected == BooleanDialog::Operation::Cut) {
-            operation = BooleanOperation::Cut;
-        } else if (selected == BooleanDialog::Operation::Common) {
-            operation = BooleanOperation::Common;
-        }
-
-        viewport_->BeginBooleanTool(operation);
+        last_boolean_operation_ = BooleanOperationFromDialog(dlg.SelectedOperation());
+        viewport_->BeginBooleanTool(last_boolean_operation_);
         UpdateActiveToolUi("boolean");
         return;
     }
@@ -2872,7 +2914,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
             tool_id,
             document_.GetSelectedObjectIndex(),
             0,
-            {{"distance", "Distance", 0.20, 0.01, 10.0, 0.01}}
+            {{"distance", "Distance", 2.0, 0.01, 100.0, 0.1}}
         };
         property_panel_->SetActiveObject(active_parametric_object_);
         ShowPropertyPanelAtCursor("Chamfer");
@@ -2909,7 +2951,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
             tool_id,
             document_.GetSelectedObjectIndex(),
             0,
-            {{"radius", "Radius", 0.20, 0.01, 10.0, 0.01}}
+            {{"radius", "Radius", 2.0, 0.01, 100.0, 0.1}}
         };
         const bool all_edges = tool_id == "fillet_all_edges";
         property_panel_->SetActiveObject(active_parametric_object_);
@@ -2952,8 +2994,10 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
     if (!active_parametric_object_.tool_id.empty()) {
         property_panel_->SetActiveObject(active_parametric_object_);
         ShowPropertyPanelAtCursor(QString::fromStdString(tool_registry_.LabelFor(tool_id)));
-        if (tool_id == "SolidBox" || tool_id == "SolidCylinder" || tool_id == "SolidPrismTool") {
+        if (tool_id == "SolidBox" || tool_id == "SolidCylinder" || tool_id == "SolidSphereTool"
+            || tool_id == "SolidTorusTool" || tool_id == "SolidPrismTool") {
             document_.ClearSelection();
+            viewport_->FitToDocument();
         }
     } else {
         ClearActiveProperties();
@@ -3105,7 +3149,7 @@ bool MainWindow::TryStartLiveEdgeToolFromSelection() {
             statusBar()->showMessage("Fillet: выбери кромку тела");
             return false;
         }
-        const double radius = active_parametric_object_.parameters.empty() ? 0.20 : active_parametric_object_.parameters[0].value;
+        const double radius = active_parametric_object_.parameters.empty() ? 2.0 : active_parametric_object_.parameters[0].value;
         if (!document_.BeginLiveFilletSelectedEdges(false) || !document_.UpdateLiveFillet(radius)) {
             document_.CancelLiveFillet();
             statusBar()->showMessage("Fillet: операция не выполнена");
@@ -3125,7 +3169,7 @@ bool MainWindow::TryStartLiveEdgeToolFromSelection() {
             statusBar()->showMessage("Chamfer: выбери кромку тела");
             return false;
         }
-        const double distance = active_parametric_object_.parameters.empty() ? 0.20 : active_parametric_object_.parameters[0].value;
+        const double distance = active_parametric_object_.parameters.empty() ? 2.0 : active_parametric_object_.parameters[0].value;
         if (!document_.BeginLiveChamferSelectedEdges() || !document_.UpdateLiveChamfer(distance)) {
             document_.CancelLiveChamfer();
             statusBar()->showMessage("Chamfer: операция не выполнена");
@@ -3237,7 +3281,7 @@ void MainWindow::AcceptActiveProperties() {
     }
 
     if (active_parametric_object_.tool_id == "fillet_edge" || active_parametric_object_.tool_id == "fillet_all_edges") {
-        const double radius = active_parametric_object_.parameters.empty() ? 0.20 : active_parametric_object_.parameters[0].value;
+        const double radius = active_parametric_object_.parameters.empty() ? 2.0 : active_parametric_object_.parameters[0].value;
         const bool all_edges = active_parametric_object_.tool_id == "fillet_all_edges";
         const std::vector<std::pair<int, int>> edge_refs = document_.GetLiveFilletEdgeRefs();
         if (!document_.HasLiveFillet()) {
@@ -3273,7 +3317,7 @@ void MainWindow::AcceptActiveProperties() {
     }
 
     if (active_parametric_object_.tool_id == "ChamferSolid") {
-        const double distance = active_parametric_object_.parameters.empty() ? 0.20 : active_parametric_object_.parameters[0].value;
+        const double distance = active_parametric_object_.parameters.empty() ? 2.0 : active_parametric_object_.parameters[0].value;
         const std::vector<std::pair<int, int>> edge_refs = document_.GetLiveChamferEdgeRefs();
         if (!document_.HasLiveChamfer()) {
             statusBar()->showMessage("Chamfer: выбери кромку тела", 1600);
@@ -3537,15 +3581,49 @@ void MainWindow::NewProject() {
 }
 
 void MainWindow::OpenProject() {
-    const QString path = QFileDialog::getOpenFileName(this,
-                                                       "Open Dom3D Project",
-                                                       LastDialogDir(),
-                                                       "Dom3D Project (*.dom3d);;Legacy Dom3D Project (*.d3dm);;All files (*.*)");
+    const QString path = SelectProjectToOpen();
     if (path.isEmpty()) {
         return;
     }
 
     OpenProjectFromPath(path);
+}
+
+QString MainWindow::SelectProjectToOpen() {
+    QFileDialog dialog(this, "Open Dom3D Project", LastDialogDir());
+    dialog.setAcceptMode(QFileDialog::AcceptOpen);
+    dialog.setFileMode(QFileDialog::ExistingFile);
+    dialog.setNameFilters({"Dom3D Project (*.dom3d)", "Legacy Dom3D Project (*.d3dm *.wrk)", "All files (*.*)"});
+    dialog.setOption(QFileDialog::DontUseNativeDialog, true);
+
+    auto* preview = new QLabel(&dialog);
+    preview->setFixedSize(250, 150);
+    preview->setAlignment(Qt::AlignCenter);
+    preview->setFrameShape(QFrame::StyledPanel);
+    preview->setText("No thumbnail");
+    preview->setScaledContents(false);
+
+    if (auto* grid = qobject_cast<QGridLayout*>(dialog.layout())) {
+        grid->addWidget(preview, 0, grid->columnCount(), grid->rowCount(), 1, Qt::AlignTop);
+    }
+
+    const auto update_preview = [this, preview](const QString& path) {
+        QImage thumbnail;
+        QString error;
+        if (path.toLower().endsWith(".dom3d") && dom3d_serializer_.LoadThumbnail(path, thumbnail, error) && !thumbnail.isNull()) {
+            preview->setPixmap(QPixmap::fromImage(thumbnail).scaled(preview->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        } else {
+            preview->setPixmap(QPixmap());
+            preview->setText("No thumbnail");
+        }
+    };
+    connect(&dialog, &QFileDialog::currentChanged, this, update_preview);
+    connect(&dialog, &QFileDialog::fileSelected, this, update_preview);
+
+    if (dialog.exec() != QDialog::Accepted || dialog.selectedFiles().isEmpty()) {
+        return {};
+    }
+    return dialog.selectedFiles().first();
 }
 
 void MainWindow::OpenProjectFromPath(const QString& path) {
@@ -3561,7 +3639,8 @@ void MainWindow::OpenProjectFromPath(const QString& path) {
         return;
     }
 
-    const bool legacy_project = path.toLower().endsWith(".d3dm");
+    const QString lower_path = path.toLower();
+    const bool legacy_project = lower_path.endsWith(".d3dm") || lower_path.endsWith(".wrk");
     bool restored_camera = false;
     if (legacy_project) {
         std::string error;
@@ -3619,9 +3698,10 @@ void MainWindow::OpenProjectFromPath(const QString& path) {
     statusBar()->showMessage("Project opened");
 }
 
-void MainWindow::SaveProject() {
+void MainWindow::SaveProject(bool save_as) {
     QString path = QString::fromStdString(project_path_);
-    if (path.isEmpty() || path.toLower().endsWith(".d3dm")) {
+    const QString lower_path = path.toLower();
+    if (save_as || path.isEmpty() || lower_path.endsWith(".d3dm") || lower_path.endsWith(".wrk")) {
         path = QFileDialog::getSaveFileName(this, "Save Dom3D Project", LastDialogDir(), "Dom3D Project (*.dom3d);;All files (*.*)");
     }
     if (path.isEmpty()) {
@@ -3646,7 +3726,7 @@ void MainWindow::SaveProject() {
     view_state.has_show_floor_grid = true;
     view_state.xy_plane_view = viewport_->IsXYPlaneViewEnabled();
     view_state.has_xy_plane_view = true;
-    if (!dom3d_serializer_.Save(path, document_, active_room, view_state, error)) {
+    if (!dom3d_serializer_.Save(path, document_, active_room, view_state, CaptureProjectThumbnail(), error)) {
         QMessageBox::critical(this, "Dom3D Pro", error);
         return;
     }
@@ -3656,6 +3736,22 @@ void MainWindow::SaveProject() {
     RememberLastDialogDir(path);
     AddRecentProjectFile(path);
     statusBar()->showMessage("Project saved", 1400);
+}
+
+void MainWindow::SaveProjectAs() {
+    SaveProject(true);
+}
+
+QImage MainWindow::CaptureProjectThumbnail() const {
+    if (!viewport_) {
+        return {};
+    }
+
+    QImage thumbnail = viewport_->grabFramebuffer();
+    if (thumbnail.isNull()) {
+        return {};
+    }
+    return thumbnail.scaled(750, 450, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
 }
 
 void MainWindow::UpdateWindowTitle() {
@@ -3671,6 +3767,11 @@ void MainWindow::UpdateWindowTitle() {
 
 void MainWindow::ShowPreferences() {
     PreferencesDialog dialog(this);
+    connect(&dialog, &PreferencesDialog::SettingsApplied, this, [this]() {
+        if (!active_parametric_object_.tool_id.empty()) {
+            property_panel_->SetActiveObject(active_parametric_object_);
+        }
+    });
     if (dialog.exec() == QDialog::Accepted) {
         statusBar()->showMessage("Preferences applied", 1400);
     }
@@ -3682,6 +3783,14 @@ void MainWindow::ImportFile() {
     const QString path = QFileDialog::getOpenFileName(this, "Import", LastDialogDir(), filter, &selected_filter);
     if (path.isEmpty()) {
         return;
+    }
+
+    ImportFileFromPath(path);
+}
+
+bool MainWindow::ImportFileFromPath(const QString& path) {
+    if (path.isEmpty()) {
+        return false;
     }
 
     std::string error;
@@ -3708,11 +3817,11 @@ void MainWindow::ImportFile() {
         mesh.SetMaterial(saved);
     };
     const QString lower_path = path.toLower();
-    if (selected_filter.startsWith("3D Studio") || lower_path.endsWith(".3ds")) {
+    if (lower_path.endsWith(".3ds")) {
         std::vector<std::unique_ptr<CMesh3D>> meshes;
         if (!three_ds_io_.Import(path.toStdString(), meshes, error)) {
             QMessageBox::critical(this, "3DS Import", QString::fromStdString(error));
-            return;
+            return false;
         }
         const std::string group_name = meshes.size() > 1
             ? (QFileInfo(path).completeBaseName() + " (3DS)").toStdString()
@@ -3722,34 +3831,37 @@ void MainWindow::ImportFile() {
             register_imported_material(*mesh);
             document_.AddMesh(std::move(mesh));
         }
-    } else if (selected_filter.startsWith("STEP") || lower_path.endsWith(".step") || lower_path.endsWith(".stp")) {
+    } else if (lower_path.endsWith(".step") || lower_path.endsWith(".stp")) {
         std::vector<std::unique_ptr<CSolid>> solids;
         if (!step_io_.Import(path.toStdString(), solids, error)) {
             QMessageBox::critical(this, "STEP Import", QString::fromStdString(error));
-            return;
+            return false;
         }
         for (auto& solid : solids) {
             document_.AddObject(std::move(solid));
         }
-    } else if (selected_filter.startsWith("IGES") || lower_path.endsWith(".iges") || lower_path.endsWith(".igs")) {
+    } else if (lower_path.endsWith(".iges") || lower_path.endsWith(".igs")) {
         std::vector<std::unique_ptr<CAlfaObject>> objects;
         if (!iges_io_.Import(path.toStdString(), objects, error)) {
             QMessageBox::critical(this, "IGES Import", QString::fromStdString(error));
-            return;
+            return false;
         }
         for (auto& object : objects) {
             document_.AddObject(std::move(object));
         }
-    } else {
+    } else if (lower_path.endsWith(".obj")) {
         std::vector<std::unique_ptr<CMesh3D>> meshes;
         if (!obj_io_.Import(path.toStdString(), meshes, error)) {
             QMessageBox::critical(this, "OBJ Import", QString::fromStdString(error));
-            return;
+            return false;
         }
         for (auto& mesh : meshes) {
             register_imported_material(*mesh);
             document_.AddMesh(std::move(mesh));
         }
+    } else {
+        QMessageBox::warning(this, "Dom3D Pro", QString("Unsupported dropped file:\n%1").arg(path));
+        return false;
     }
 
     document_.ClearSelection();
@@ -3758,7 +3870,71 @@ void MainWindow::ImportFile() {
     RefreshSceneTree();
     viewport_->FitToDocument();
     viewport_->update();
-    statusBar()->showMessage("File imported", 1400);
+    statusBar()->showMessage(QString("File imported: %1").arg(QFileInfo(path).fileName()), 1400);
+    return true;
+}
+
+void MainWindow::HandleDroppedFiles(const QStringList& paths) {
+    if (paths.isEmpty()) {
+        return;
+    }
+
+    for (const QString& path : paths) {
+        const QString lower_path = path.toLower();
+        if (lower_path.endsWith(".dom3d") || lower_path.endsWith(".d3dm") || lower_path.endsWith(".wrk")) {
+            OpenProjectFromPath(path);
+            return;
+        }
+    }
+
+    int imported_count = 0;
+    for (const QString& path : paths) {
+        if (ImportFileFromPath(path)) {
+            ++imported_count;
+        }
+    }
+    if (imported_count > 1) {
+        statusBar()->showMessage(QString("Imported %1 files").arg(imported_count), 1400);
+    }
+}
+
+void MainWindow::dragEnterEvent(QDragEnterEvent* event) {
+    if (!event->mimeData()->hasUrls()) {
+        event->ignore();
+        return;
+    }
+
+    for (const QUrl& url : event->mimeData()->urls()) {
+        if (url.isLocalFile()) {
+            event->acceptProposedAction();
+            return;
+        }
+    }
+    event->ignore();
+}
+
+void MainWindow::dragMoveEvent(QDragMoveEvent* event) {
+    if (event->mimeData()->hasUrls()) {
+        event->acceptProposedAction();
+        return;
+    }
+    event->ignore();
+}
+
+void MainWindow::dropEvent(QDropEvent* event) {
+    QStringList paths;
+    for (const QUrl& url : event->mimeData()->urls()) {
+        if (url.isLocalFile()) {
+            paths.push_back(url.toLocalFile());
+        }
+    }
+    if (paths.isEmpty()) {
+        event->ignore();
+        return;
+    }
+
+    event->acceptProposedAction();
+    HandleDroppedFiles(paths);
 }
 
 void MainWindow::ExportFile() {
@@ -4133,7 +4309,7 @@ void MainWindow::PopulateToolsPanelForTab(int tab_index) {
         tool_ids = {"SurfaceLoft", "SurfaceReverseNormals", "SurfaceOfRevolution"};
     } else if (tab == "Solid") {
         // единый boolean-инструмент вместо трёх отдельных
-        tool_ids = {"SolidBox", "SolidCylinder", "SolidPrismTool", "SolidExtrudeTool", "SurfaceOfRevolution", "boolean", "fillet_edge", "fillet_all_edges", "ChamferSolid", "SolidExtrudeFace", "SolidDraft", "ThickSolidTool", "SolidLowPoly"};
+        tool_ids = {"SolidBox", "SolidCylinder", "SolidSphereTool", "SolidTorusTool", "SolidPrismTool", "SolidExtrudeTool", "SurfaceOfRevolution", "boolean", "fillet_edge", "fillet_all_edges", "ChamferSolid", "SolidExtrudeFace", "SolidDraft", "ThickSolidTool", "SolidLowPoly"};
     }
 
     int index = 0;
@@ -4144,8 +4320,6 @@ void MainWindow::PopulateToolsPanelForTab(int tab_index) {
 
     if (tab == "Solid") {
         const std::vector<std::pair<QString, QString>> placeholders = {
-            {"SolidSphereTool", "Sphere"},
-            {"SolidTorusTool", "Torus"},
             {"SolidSweptTool", "Swept Solid"},
             {"DeleteFaceOrEdge", "Delete Face or Edge"},
             {"ExtractFaceTool", "Extract Face"},

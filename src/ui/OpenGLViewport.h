@@ -7,6 +7,7 @@
 
 #include <QOpenGLWidget>
 #include <QString>
+#include <QStringList>
 
 #include <cstddef>
 #include <vector>
@@ -67,6 +68,7 @@ signals:
     void MaterialPicked(const Material& material);
     void ToolModeChanged(ToolMode tool);
     void ObjectDoubleClicked();
+    void FilesDropped(const QStringList& paths);
 
 protected:
     void initializeGL() override;

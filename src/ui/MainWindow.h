@@ -22,6 +22,9 @@
 class QAction;
 class QCheckBox;
 class QDockWidget;
+class QDragEnterEvent;
+class QDragMoveEvent;
+class QDropEvent;
 class QGridLayout;
 class QLabel;
 class QMenu;
@@ -87,10 +90,15 @@ private:
     void NewProject();
     void OpenProject();
     void OpenProjectFromPath(const QString& path);
-    void SaveProject();
+    void SaveProject(bool save_as = false);
+    void SaveProjectAs();
+    QString SelectProjectToOpen();
+    QImage CaptureProjectThumbnail() const;
     void UpdateWindowTitle();
     void ShowPreferences();
     void ImportFile();
+    bool ImportFileFromPath(const QString& path);
+    void HandleDroppedFiles(const QStringList& paths);
     void ExportFile();
     void DuplicateSelectedObject();
     void MirrorSelectedObject();
@@ -103,6 +111,12 @@ private:
     void ClearRecentProjectFiles();
     void ShowGreetingDialog(bool force = false);
 
+protected:
+    void dragEnterEvent(QDragEnterEvent* event) override;
+    void dragMoveEvent(QDragMoveEvent* event) override;
+    void dropEvent(QDropEvent* event) override;
+
+private:
     OpenGLViewport* viewport_ = nullptr;
     QTreeWidget* scene_tree_ = nullptr;
     PropertyPanel* property_panel_ = nullptr;
@@ -156,5 +170,6 @@ private:
     bool reopen_solid_editor_after_properties_ = false;
     bool object_color_pick_pending_ = false;
     bool low_poly_pick_pending_ = false;
+    BooleanOperation last_boolean_operation_ = BooleanOperation::Union;
     std::string project_path_;
 };

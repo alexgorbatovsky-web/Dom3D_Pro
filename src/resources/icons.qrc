@@ -32,6 +32,7 @@
         <file alias="SolidExtrudeFace.png">icons/SolidExtrudeFace.png</file>
         <file alias="SolidExtrudeTool.png">icons/SolidExtrudeTool.png</file>
         <file alias="SolidInSet.png">icons/SolidInSet.png</file>
+        <file alias="SolidLowPoly.png">icons/SolidLowPoly.png</file>
         <file alias="SolidPrismTool.png">icons/SolidPrismTool.png</file>
         <file alias="SolidSphereTool.png">icons/SolidSphereTool.png</file>
         <file alias="SolidSweptTool.png">icons/SolidSweptTool.png</file>

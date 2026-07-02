@@ -87,9 +87,12 @@ set(DOM3D_SOURCES
     src/solid/SolidBoxTool.cpp
     src/solid/SolidCylinderTool.cpp
     src/solid/SolidPrismTool.cpp
+    src/solid/SolidSphereTool.cpp
+    src/solid/SolidTorusTool.cpp
     src/solid/SurfaceSet.cpp
     src/solid/SolidTool.cpp
     src/ui/MainWindow.cpp
+    src/ui/MeasurementUnits.cpp
     src/ui/MaterialEditorDialog.cpp
     src/ui/MaterialDrag.cpp
     src/ui/MaterialSphereBrowser.cpp
@@ -145,9 +148,12 @@ set(DOM3D_HEADERS
     src/solid/SolidBoxTool.h
     src/solid/SolidCylinderTool.h
     src/solid/SolidPrismTool.h
+    src/solid/SolidSphereTool.h
+    src/solid/SolidTorusTool.h
     src/solid/SurfaceSet.h
     src/solid/SolidTool.h
     src/ui/MainWindow.h
+    src/ui/MeasurementUnits.h
     src/ui/MaterialEditorDialog.h
     src/ui/MaterialDrag.h
     src/ui/MaterialSphereBrowser.h
@@ -232,6 +238,26 @@ endif()
 
 if(WIN32)
     target_link_libraries(Dom3D_Pro PRIVATE comdlg32)
+endif()
+
+if(WIN32)
+    add_library(Dom3DThumbnailProvider SHARED
+        src/shell/Dom3DThumbnailProvider.cpp
+        src/shell/Dom3DThumbnailProvider.def
+    )
+    target_compile_features(Dom3DThumbnailProvider PRIVATE cxx_std_17)
+    target_compile_definitions(Dom3DThumbnailProvider PRIVATE UNICODE _UNICODE)
+    target_link_libraries(Dom3DThumbnailProvider PRIVATE
+        advapi32
+        crypt32
+        ole32
+        shell32
+        windowscodecs
+    )
+    set_target_properties(Dom3DThumbnailProvider PROPERTIES
+        OUTPUT_NAME "Dom3DThumbnailProvider"
+        VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:Dom3DThumbnailProvider>"
+    )
 endif()
 
 if(MSVC)

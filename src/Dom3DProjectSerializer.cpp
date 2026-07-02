@@ -8,7 +8,10 @@
 #include "solid/SurfaceSet.h"
 
 #include <QDomDocument>
+#include <QBuffer>
+#include <QByteArray>
 #include <QFile>
+#include <QImage>
 #include <QSaveFile>
 #include <QStringList>
 #include <QXmlStreamWriter>
@@ -595,6 +598,7 @@ bool Dom3DProjectSerializer::Save(const QString& path,
                                   const CAlfaDoc& document,
                                   const QString& active_room,
                                   const ProjectViewState& view_state,
+                                  const QImage& thumbnail,
                                   QString& error) const {
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
@@ -611,6 +615,21 @@ bool Dom3DProjectSerializer::Save(const QString& path,
     xml.writeStartElement("metadata");
     xml.writeTextElement("activeRoom", active_room);
     write_view_state(xml, view_state);
+    if (!thumbnail.isNull()) {
+        QByteArray thumbnail_data;
+        QBuffer thumbnail_buffer(&thumbnail_data);
+        thumbnail_buffer.open(QIODevice::WriteOnly);
+        if (!thumbnail.save(&thumbnail_buffer, "PNG")) {
+            error = "Could not encode project thumbnail.";
+            return false;
+        }
+        xml.writeStartElement("thumbnail");
+        xml.writeAttribute("format", "png");
+        xml.writeAttribute("width", QString::number(thumbnail.width()));
+        xml.writeAttribute("height", QString::number(thumbnail.height()));
+        xml.writeCharacters(QString::fromLatin1(thumbnail_data.toBase64()));
+        xml.writeEndElement();
+    }
     xml.writeEndElement();
 
     xml.writeStartElement("materials");
@@ -739,6 +758,43 @@ bool Dom3DProjectSerializer::Save(const QString& path,
     }
     if (!file.commit()) {
         error = file.errorString();
+        return false;
+    }
+    return true;
+}
+
+bool Dom3DProjectSerializer::LoadThumbnail(const QString& path, QImage& thumbnail, QString& error) const {
+    thumbnail = QImage();
+
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        error = file.errorString();
+        return false;
+    }
+
+    QDomDocument dom;
+    QString parse_error;
+    int error_line = 0;
+    int error_column = 0;
+    if (!dom.setContent(&file, &parse_error, &error_line, &error_column)) {
+        error = QString("XML parse error at line %1, column %2: %3").arg(error_line).arg(error_column).arg(parse_error);
+        return false;
+    }
+
+    const QDomElement root = dom.documentElement();
+    if (root.tagName() != "dom3dProject") {
+        error = "Unsupported XML root element.";
+        return false;
+    }
+
+    const QDomElement thumbnail_element = root.firstChildElement("metadata").firstChildElement("thumbnail");
+    if (thumbnail_element.isNull()) {
+        return true;
+    }
+
+    const QByteArray thumbnail_data = QByteArray::fromBase64(thumbnail_element.text().toLatin1());
+    if (thumbnail_data.isEmpty() || !thumbnail.loadFromData(thumbnail_data, "PNG")) {
+        error = "Could not decode project thumbnail.";
         return false;
     }
     return true;

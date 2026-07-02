@@ -18,9 +18,9 @@ public:
     bool DoParamOperation(CAlfaDoc& document, size_t object_index, const std::vector<ToolParameter>& parameters) const;
     bool RebuildShape(CSolid& solid, const std::vector<ToolParameter>& parameters) const;
 
-    float Width = 2.0f;
-    float Height = 2.0f;
-    float Depth = 3.0f;
+    float Width = 120.0f;
+    float Height = 60.0f;
+    float Depth = 30.0f;
 
 protected:
     std::unique_ptr<CAlfaObject> CreateObject(const std::vector<ToolParameter>& parameters) const override;

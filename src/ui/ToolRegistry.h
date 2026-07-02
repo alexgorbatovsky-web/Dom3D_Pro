@@ -12,6 +12,11 @@ enum class ToolParameterType {
     Combo
 };
 
+enum class ToolParameterUnit {
+    None,
+    Length
+};
+
 struct ToolParameter {
     std::string id;
     std::string label;
@@ -21,6 +26,7 @@ struct ToolParameter {
     double step = 0.1;
     ToolParameterType type = ToolParameterType::Number;
     std::vector<std::string> options;
+    ToolParameterUnit unit = ToolParameterUnit::None;
 };
 
 struct ToolDefinition {

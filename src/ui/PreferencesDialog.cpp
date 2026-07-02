@@ -1,7 +1,10 @@
 #include "PreferencesDialog.h"
 
+#include "MeasurementUnits.h"
+
 #include <QButtonGroup>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
@@ -23,11 +26,11 @@ PreferencesDialog::PreferencesDialog(QWidget* parent)
     setMinimumWidth(360);
 
     auto* tabs = new QTabWidget(this);
-    tabs->addTab(CreatePlaceholderPage("Project preferences will be added here."), "Project");
+    tabs->addTab(CreateProjectPage(), "Project");
     tabs->addTab(CreateModelingPage(), "Modeling");
     tabs->addTab(CreatePlaceholderPage("Draft options will be added here."), "Draft");
     tabs->addTab(CreatePlaceholderPage("Picture and viewport options will be added here."), "Picture");
-    tabs->setCurrentIndex(1);
+    tabs->setCurrentIndex(0);
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel | QDialogButtonBox::Apply, this);
     connect(buttons, &QDialogButtonBox::accepted, this, [this]() {
@@ -125,6 +128,24 @@ QWidget* PreferencesDialog::CreateModelingPage() {
     return page;
 }
 
+QWidget* PreferencesDialog::CreateProjectPage() {
+    auto* page = new QWidget(this);
+    auto* layout = new QVBoxLayout(page);
+    layout->setContentsMargins(12, 12, 12, 12);
+    layout->setSpacing(10);
+
+    auto* form = new QFormLayout();
+    length_unit_ = new QComboBox(page);
+    length_unit_->addItem(DisplayLengthUnitLabel(DisplayLengthUnit::Millimeters),
+                          DisplayLengthUnitKey(DisplayLengthUnit::Millimeters));
+    length_unit_->addItem(DisplayLengthUnitLabel(DisplayLengthUnit::Inches),
+                          DisplayLengthUnitKey(DisplayLengthUnit::Inches));
+    form->addRow("Units", length_unit_);
+    layout->addLayout(form);
+    layout->addStretch();
+    return page;
+}
+
 QWidget* PreferencesDialog::CreatePlaceholderPage(const QString& text) {
     auto* page = new QWidget(this);
     auto* layout = new QVBoxLayout(page);
@@ -136,6 +157,10 @@ QWidget* PreferencesDialog::CreatePlaceholderPage(const QString& text) {
 
 void PreferencesDialog::LoadSettings() {
     QSettings settings("Dom3D", "Dom3D_Pro");
+
+    const QString unit_key = DisplayLengthUnitKey(LoadDisplayLengthUnit());
+    const int unit_index = length_unit_->findData(unit_key);
+    length_unit_->setCurrentIndex(unit_index >= 0 ? unit_index : 0);
 
     tolerance_modeling_->setValue(settings.value("preferences/modeling/tolerance", 0.02).toDouble());
     delete_loop_->setChecked(settings.value("preferences/modeling/deleteLoop", true).toBool());
@@ -159,6 +184,8 @@ void PreferencesDialog::LoadSettings() {
 void PreferencesDialog::ApplySettings() {
     QSettings settings("Dom3D", "Dom3D_Pro");
 
+    SaveDisplayLengthUnit(DisplayLengthUnitFromKey(length_unit_->currentData().toString()));
+
     settings.setValue("preferences/modeling/tolerance", tolerance_modeling_->value());
     settings.setValue("preferences/modeling/deleteLoop", delete_loop_->isChecked());
     settings.setValue("preferences/modeling/offsetCornerMode", offset_corner_->isChecked() ? "corner" : "radius");
@@ -177,4 +204,5 @@ void PreferencesDialog::ApplySettings() {
     settings.setValue("preferences/modeling/2dDragAuto", two_d_drag_auto_->isChecked());
     settings.setValue("preferences/modeling/controlIntersections", control_intersections_->isChecked());
     settings.setValue("preferences/modeling/gizmo3dEnable", gizmo_3d_enable_->isChecked());
+    emit SettingsApplied();
 }

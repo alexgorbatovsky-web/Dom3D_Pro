@@ -1,5 +1,7 @@
 #include "PropertyPanel.h"
 
+#include "MeasurementUnits.h"
+
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
@@ -10,6 +12,30 @@
 
 #include <algorithm>
 #include <cmath>
+
+namespace {
+bool IsLengthParameter(const ToolParameter& parameter) {
+    if (parameter.unit == ToolParameterUnit::Length) {
+        return true;
+    }
+
+    const std::string& id = parameter.id;
+    return id == "width"
+        || id == "height"
+        || id == "depth"
+        || id == "length"
+        || id == "radius"
+        || id == "diameter"
+        || id == "distance"
+        || id == "thick"
+        || id == "dx"
+        || id == "dy"
+        || id == "dz"
+        || id == "center.x"
+        || id == "center.y"
+        || id == "center.z";
+}
+}
 
 PropertyPanel::PropertyPanel(QWidget* parent)
     : QWidget(parent),
@@ -59,12 +85,16 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
 
         constexpr double radians_to_degrees = 180.0 / 3.14159265358979323846;
         const bool solid_transform_angle = active_object_.tool_id == "SolidTransform" && parameter.id == "angle";
-        const double display_factor = solid_transform_angle ? radians_to_degrees : 1.0;
+        const bool length_parameter = IsLengthParameter(parameter);
+        const DisplayLengthUnit display_unit = LoadDisplayLengthUnit();
+        const double display_factor = solid_transform_angle
+            ? radians_to_degrees
+            : (length_parameter ? MillimetersToDisplay(1.0, display_unit) : 1.0);
         auto* editor = new QDoubleSpinBox(this);
         editor->setRange(parameter.minimum * display_factor, parameter.maximum * display_factor);
         editor->setSingleStep(parameter.step * display_factor);
-        editor->setDecimals(solid_transform_angle ? 1 : (parameter.step < 0.1 ? 2 : 1));
-        editor->setSuffix(solid_transform_angle ? QString::fromUtf8("°") : QString());
+        editor->setDecimals(solid_transform_angle ? 1 : (length_parameter ? 3 : (parameter.step < 0.1 ? 2 : 1)));
+        editor->setSuffix(solid_transform_angle ? QString::fromUtf8("°") : (length_parameter ? DisplayLengthUnitSuffix(display_unit) : QString()));
         editor->setValue(parameter.value * display_factor);
         connect(editor, &QDoubleSpinBox::valueChanged, this, [this, i, display_factor](double value) {
             active_object_.parameters[static_cast<size_t>(i)].value = value / display_factor;

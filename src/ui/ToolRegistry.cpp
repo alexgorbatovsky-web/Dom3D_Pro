@@ -6,6 +6,8 @@
 #include "../solid/SolidBoxTool.h"
 #include "../solid/SolidCylinderTool.h"
 #include "../solid/SolidPrismTool.h"
+#include "../solid/SolidSphereTool.h"
+#include "../solid/SolidTorusTool.h"
 #include "../solid/SolidTool.h"
 
 #include <BRepAlgoAPI_Common.hxx>
@@ -1139,7 +1141,7 @@ bool rebuild_solid_operation_tree(const ToolRegistry& registry,
         if (operation.tool_id == "fillet_all_edges") {
             const std::vector<ToolParameter> parameters = parameters_for_operation(registry, operation);
             if (!apply_fillet_all_edges(*solid,
-                                        param(parameters, "radius", 0.20),
+                                        param(parameters, "radius", 2.0),
                                         &operation_created_faces[i],
                                         &operation_created_faces)) {
                 return false;
@@ -1149,7 +1151,7 @@ bool rebuild_solid_operation_tree(const ToolRegistry& registry,
             const std::vector<ToolParameter> parameters = parameters_for_operation(registry, operation);
             if (!apply_fillet_edges(*solid,
                                     edge_refs_from_saved_parameters(operation.saved_parameters),
-                                    param(parameters, "radius", 0.20),
+                                    param(parameters, "radius", 2.0),
                                     &operation_created_faces[i],
                                     &operation_created_faces)) {
                 return false;
@@ -1159,7 +1161,7 @@ bool rebuild_solid_operation_tree(const ToolRegistry& registry,
             const std::vector<ToolParameter> parameters = parameters_for_operation(registry, operation);
             if (!apply_chamfer_edges(*solid,
                                      edge_refs_from_saved_parameters(operation.saved_parameters),
-                                     param(parameters, "distance", 0.20),
+                                     param(parameters, "distance", 2.0),
                                      &operation_created_faces[i],
                                      &operation_created_faces)) {
                 return false;
@@ -1311,10 +1313,14 @@ ToolRegistry::ToolRegistry() {
     static const SolidBoxTool solid_box_tool;
     static const SolidCylinderTool solid_cylinder_tool;
     static const SolidPrismTool solid_prism_tool;
+    static const SolidSphereTool solid_sphere_tool;
+    static const SolidTorusTool solid_torus_tool;
     static const SolidTransformTool solid_transform_tool;
     tools_.push_back(solid_box_tool.CreateToolDefinition());
     tools_.push_back(solid_cylinder_tool.CreateToolDefinition());
     tools_.push_back(solid_prism_tool.CreateToolDefinition());
+    tools_.push_back(solid_sphere_tool.CreateToolDefinition());
+    tools_.push_back(solid_torus_tool.CreateToolDefinition());
     tools_.push_back({
         solid_transform_tool.GetID(),
         solid_transform_tool.GetLabel(),
@@ -1375,7 +1381,7 @@ ToolRegistry::ToolRegistry() {
         "fillet_edge",
         "Fillet Edge",
         {
-            {"radius", "Radius", 0.20, 0.01, 10.0, 0.01}
+            {"radius", "Radius", 2.0, 0.01, 100.0, 0.1}
         },
         [](CAlfaDoc&, const std::vector<ToolParameter>&) {
         },
@@ -1387,7 +1393,7 @@ ToolRegistry::ToolRegistry() {
         "fillet_all_edges",
         "Fillet All Edges",
         {
-            {"radius", "Radius", 0.20, 0.01, 10.0, 0.01}
+            {"radius", "Radius", 2.0, 0.01, 100.0, 0.1}
         },
         [](CAlfaDoc&, const std::vector<ToolParameter>&) {
         },
@@ -1399,7 +1405,7 @@ ToolRegistry::ToolRegistry() {
         "ChamferSolid",
         "Chamfer",
         {
-            {"distance", "Distance", 0.20, 0.01, 10.0, 0.01}
+            {"distance", "Distance", 2.0, 0.01, 100.0, 0.1}
         },
         [](CAlfaDoc&, const std::vector<ToolParameter>&) {
         },
