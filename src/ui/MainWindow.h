@@ -66,6 +66,8 @@ private:
     void ShowSurfaceTextureEditor();
     void RequestObjectColor();
     void EditSelectedObjectColor();
+    void ShowLayerProperties();
+    void ChangeSelectedObjectLayer();
     void SaveMaterialToDocument(const Material& material);
     void ApplyMaterialToSelection(const Material& material);
     void BeginTransformTool(TransformOperation operation);
@@ -74,6 +76,7 @@ private:
     void ShowSketchPanel();
     void ActivateParametricTool(const std::string& tool_id);
     void ShowLowPolyTool();
+    void ShowTrimMeshTestTool();
     void EditSelectedParametricObject();
     bool TryStartLiveEdgeToolFromSelection();
     bool TryStartLivePolylineExtrudeFromSelection();

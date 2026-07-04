@@ -309,6 +309,58 @@ void write_material(QXmlStreamWriter& xml, const Material& material) {
     xml.writeEndElement();
 }
 
+void write_layers(QXmlStreamWriter& xml, const CAlfaDoc& document) {
+    xml.writeStartElement("layers");
+    xml.writeAttribute("workLayer", QString::number(document.GetWorkLayerID()));
+    for (const CLayer* layer : document.m_Layers) {
+        if (!layer) {
+            continue;
+        }
+        xml.writeEmptyElement("layer");
+        xml.writeAttribute("id", QString::number(layer->ID()));
+        xml.writeAttribute("name", QString::fromStdString(layer->Name));
+        xml.writeAttribute("visible", layer->Visible ? "true" : "false");
+        xml.writeAttribute("selectable", layer->Selectable ? "true" : "false");
+    }
+    xml.writeEndElement();
+}
+
+std::vector<CLayer*> read_layers(const QDomElement& root, int& work_layer) {
+    std::vector<CLayer*> layers;
+    const QDomElement layers_element = root.firstChildElement("layers");
+    if (layers_element.isNull()) {
+        layers.push_back(new CLayer(1, "Default"));
+        work_layer = 1;
+        return layers;
+    }
+
+    bool work_ok = false;
+    work_layer = layers_element.attribute("workLayer", "1").toInt(&work_ok);
+    if (!work_ok) {
+        work_layer = 1;
+    }
+
+    for (QDomElement layer_element = layers_element.firstChildElement("layer");
+         !layer_element.isNull();
+         layer_element = layer_element.nextSiblingElement("layer")) {
+        bool id_ok = false;
+        const int id = layer_element.attribute("id").toInt(&id_ok);
+        if (!id_ok || id <= 0) {
+            continue;
+        }
+        auto* layer = new CLayer(id, layer_element.attribute("name", QString("Layer %1").arg(id)).toStdString());
+        layer->Visible = layer_element.attribute("visible", "true") != "false";
+        layer->Selectable = layer_element.attribute("selectable", "true") != "false";
+        layers.push_back(layer);
+    }
+
+    if (layers.empty()) {
+        layers.push_back(new CLayer(1, "Default"));
+        work_layer = 1;
+    }
+    return layers;
+}
+
 bool read_material_element(const QDomElement& material_element, Material& material, QString& error) {
     if (material_element.hasAttribute("id")) {
         bool ok = false;
@@ -638,6 +690,8 @@ bool Dom3DProjectSerializer::Save(const QString& path,
     }
     xml.writeEndElement();
 
+    write_layers(xml, document);
+
     xml.writeStartElement("objects");
     const auto& objects = document.GetObjects();
     for (size_t i = 0; i < objects.size(); ++i) {
@@ -654,6 +708,7 @@ bool Dom3DProjectSerializer::Save(const QString& path,
         }
         xml.writeAttribute("materialId", QString::number(object.GetMaterialId()));
         xml.writeAttribute("visible", object.IsVisible() ? "true" : "false");
+        xml.writeAttribute("layerId", QString::number(object.m_LayerID));
 
         write_material(xml, object.GetMaterial());
         write_identity_transform(xml);
@@ -860,6 +915,9 @@ bool Dom3DProjectSerializer::Load(const QString& path,
             loaded_materials = Material::InitialDocumentMaterials();
         }
     }
+
+    int loaded_work_layer = 1;
+    std::vector<CLayer*> loaded_layers = read_layers(root, loaded_work_layer);
 
     const QDomElement objects_element = required_child(root, "objects", error);
     if (objects_element.isNull()) {
@@ -1096,6 +1154,15 @@ bool Dom3DProjectSerializer::Load(const QString& path,
                 }
             }
         }
+        if (object_element.hasAttribute("layerId")) {
+            bool ok = false;
+            const int layer_id = object_element.attribute("layerId").toInt(&ok);
+            if (ok) {
+                object->m_LayerID = layer_id;
+            }
+        } else if (!loaded_layers.empty() && loaded_layers.front()) {
+            object->m_LayerID = loaded_layers.front()->ID();
+        }
         upsert_loaded_material(loaded_materials, object->GetMaterial());
         read_parametric_definition(object_element, *object);
         object->SetGroupName(object_element.attribute("group").toStdString());
@@ -1104,6 +1171,12 @@ bool Dom3DProjectSerializer::Load(const QString& path,
     }
 
     document.Clear();
+    for (CLayer* layer : document.m_Layers) {
+        delete layer;
+    }
+    document.m_Layers = std::move(loaded_layers);
+    document.Work_layer = loaded_work_layer;
+    document.EnsureDefaultLayer();
     document.GetMaterials() = std::move(loaded_materials);
     document.GetObjects() = std::move(loaded_objects);
     document.EnsureObjectIds();

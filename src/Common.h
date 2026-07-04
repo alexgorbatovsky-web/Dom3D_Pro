@@ -54,6 +54,12 @@ struct Color {
     float b = 0.30f;
 };
 
+inline constexpr Color kDefaultCurveColor{
+    1.0f,
+    67.0f / 255.0f,
+    146.0f / 255.0f
+};
+
 struct Camera {
     Vec3 target{0.0f, 1.2f, 0.0f};
     Quaternion orientation{0.924396f, 0.198992f, -0.299310f, 0.064417f};

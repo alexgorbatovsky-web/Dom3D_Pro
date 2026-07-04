@@ -20,6 +20,7 @@
 #endif
 
 #include <iosfwd>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -57,6 +58,9 @@ public:
 
     bool ExportToObj(const std::string& name) const;
     bool printToFile(const std::string& name) const;
+    static bool LoadTextPolylines(std::istream& stream,
+                                  std::vector<std::unique_ptr<CPolyline>>& polylines,
+                                  std::string& error);
     bool RemovePoint(size_t index);
     void SetLockedPlane(Vec3 plane_point, Vec3 plane_normal);
     void ClearLockedPlane();

@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -15,6 +16,20 @@ class CSolid;
 class CAlfaDoc;
 
 CAlfaDoc* GetAlfaDoc();
+
+class CLayer {
+public:
+    CLayer(int id, std::string name);
+
+    int ID() const;
+
+    std::string Name;
+    bool Visible = true;
+    bool Selectable = true;
+
+private:
+    int m_ID = 0;
+};
 
 class CAlfaDoc {
 public:
@@ -130,6 +145,7 @@ public:
     bool ExpandSelectedGroups();
     bool HasSelectedPoint() const;
     bool HasSelectedSolidEdge() const;
+    size_t SelectAllVisibleObjects();
     size_t GetSelectedObjectIndex() const;
     size_t GetSelectedPointIndex() const;
     bool IsObjectSelected(size_t index) const;
@@ -208,6 +224,19 @@ public:
 
     ObjectList& GetObjects();
     const ObjectList& GetObjects() const;
+    std::vector<CLayer*> m_Layers;
+    int Work_layer = 0;
+    void EnsureDefaultLayer();
+    CLayer* AddLayer(const std::string& name);
+    CLayer* GetLayerByID(int layer_id);
+    const CLayer* GetLayerByID(int layer_id) const;
+    int GetWorkLayerID() const;
+    bool SetWorkLayer(int layer_id);
+    bool IsLayerVisible(int layer_id) const;
+    bool IsLayerSelectable(int layer_id) const;
+    bool IsObjectVisible(const CAlfaObject& object) const;
+    bool IsObjectSelectable(const CAlfaObject& object) const;
+    void AssignObjectToWorkLayer(CAlfaObject& object) const;
     std::vector<Material>& GetMaterials();
     const std::vector<Material>& GetMaterials() const;
     void ResetDefaultMaterials();

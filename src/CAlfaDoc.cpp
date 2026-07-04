@@ -82,6 +82,7 @@ bool rebuild_solid_from_shape(CAlfaDoc::ObjectList& objects, size_t solid_index,
     result->SetMaterialId(source_solid->GetMaterialId());
     result->SetGroupName(source_solid->GetGroupName());
     result->SetVisible(source_solid->IsVisible());
+    result->m_LayerID = source_solid->m_LayerID;
     if (source_solid->GetNumOperations() > 0) {
         result->CopyOperationTreeFrom(*source_solid);
     }
@@ -784,8 +785,18 @@ CAlfaDoc* GetAlfaDoc()
     return g_current_alfa_doc;
 }
 
+CLayer::CLayer(int id, std::string name)
+    : Name(std::move(name)),
+      m_ID(id) {
+}
+
+int CLayer::ID() const {
+    return m_ID;
+}
+
 CAlfaDoc::CAlfaDoc() {
     g_current_alfa_doc = this;
+    EnsureDefaultLayer();
     ResetDefaultMaterials();
     EnsureActivePolyline();
 }
@@ -871,11 +882,21 @@ CAlfaDoc::~CAlfaDoc() {
     if (g_current_alfa_doc == this) {
         g_current_alfa_doc = nullptr;
     }
+    for (CLayer* layer : m_Layers) {
+        delete layer;
+    }
+    m_Layers.clear();
 }
 
 void CAlfaDoc::Clear() {
     objects_.clear();
     ResetDefaultMaterials();
+    for (CLayer* layer : m_Layers) {
+        delete layer;
+    }
+    m_Layers.clear();
+    Work_layer = 0;
+    EnsureDefaultLayer();
     next_object_id_ = 1;
     active_object_index_ = 0;
     ClearSelection();
@@ -889,9 +910,9 @@ void CAlfaDoc::ClearActivePolyline() {
 void CAlfaDoc::CreatePolyline() {
     const size_t next_number = objects_.size() + 1;
     auto polyline = std::make_unique<CPolyline>("Curve " + std::to_string(next_number));
-    polyline->SetColor({0.98f, 0.77f, 0.30f});
     EnsureObjectId(*polyline);
     AssignDefaultMaterial(*polyline);
+    AssignObjectToWorkLayer(*polyline);
     objects_.push_back(std::move(polyline));
     active_object_index_ = objects_.size() - 1;
     ClearSelection();
@@ -900,9 +921,9 @@ void CAlfaDoc::CreatePolyline() {
 void CAlfaDoc::CreateBSpline() {
     const size_t next_number = objects_.size() + 1;
     auto spline = std::make_unique<CBSpline>("B-Spline " + std::to_string(next_number));
-    spline->SetColor({1.0f, 0.08f, 0.10f});
     EnsureObjectId(*spline);
     AssignDefaultMaterial(*spline);
+    AssignObjectToWorkLayer(*spline);
     objects_.push_back(std::move(spline));
     active_object_index_ = objects_.size() - 1;
     ClearSelection();
@@ -940,7 +961,6 @@ void CAlfaDoc::CreateSketchRectangle(const std::vector<CPoint3d>& points, const 
     }
 
     auto polyline = std::make_unique<CPolyline>(sketch_name.empty() ? "Sketch Rectangle" : sketch_name + " Rectangle");
-    polyline->SetColor({0.98f, 0.77f, 0.30f});
     for (const CPoint3d& point : points) {
         polyline->AddPoint(point);
     }
@@ -951,6 +971,7 @@ void CAlfaDoc::CreateSketchRectangle(const std::vector<CPoint3d>& points, const 
     polyline->SetLockedPlane(p0, cross(p1 - p0, p2 - p0));
     EnsureObjectId(*polyline);
     AssignDefaultMaterial(*polyline);
+    AssignObjectToWorkLayer(*polyline);
     objects_.push_back(std::move(polyline));
     active_object_index_ = objects_.size() - 1;
     selected_object_index_ = active_object_index_;
@@ -999,6 +1020,8 @@ bool CAlfaDoc::CreateMeshFromSelectedPolyline(CVector3d dir, float dist) {
     }
 
     EnsureObjectId(*mesh);
+    AssignDefaultMaterial(*mesh);
+    AssignObjectToWorkLayer(*mesh);
     objects_.push_back(std::move(mesh));
     selected_object_index_ = objects_.size() - 1;
     selected_object_indices_ = {selected_object_index_};
@@ -1076,6 +1099,13 @@ bool CAlfaDoc::UpdateLiveExtrudeSelectedPolyline(double distance, bool reverse, 
         }
         EnsureObjectId(*solid);
         AssignDefaultMaterial(*solid);
+        if (live_polyline_extrude_->has_solid
+            && live_polyline_extrude_->solid_index < objects_.size()
+            && objects_[live_polyline_extrude_->solid_index]) {
+            solid->m_LayerID = objects_[live_polyline_extrude_->solid_index]->m_LayerID;
+        } else {
+            AssignObjectToWorkLayer(*solid);
+        }
         if (!solid->ReBuldMesh()) {
             return false;
         }
@@ -1235,6 +1265,13 @@ bool CAlfaDoc::UpdateLiveRevolveSelectedPolyline(double angle_degrees, int axis_
         }
         EnsureObjectId(*solid);
         AssignDefaultMaterial(*solid);
+        if (live_polyline_revolve_->has_solid
+            && live_polyline_revolve_->solid_index < objects_.size()
+            && objects_[live_polyline_revolve_->solid_index]) {
+            solid->m_LayerID = objects_[live_polyline_revolve_->solid_index]->m_LayerID;
+        } else {
+            AssignObjectToWorkLayer(*solid);
+        }
         if (!solid->ReBuldMesh()) {
             return false;
         }
@@ -1314,7 +1351,7 @@ bool CAlfaDoc::SelectObjectAt(CurvePoint point, float tolerance, bool include_me
         if (!include_mesh && dynamic_cast<CMesh3D*>(objects_[index].get())) {
             continue;
         }
-        if (objects_[index]->IsVisible() && objects_[index]->HitTest(point, tolerance)) {
+        if (IsObjectSelectable(*objects_[index]) && objects_[index]->HitTest(point, tolerance)) {
             for (ObjectPtr& object : objects_) {
                 if (auto* solid = dynamic_cast<CSolid*>(object.get())) {
                     solid->ClearSelectedEdge();
@@ -1340,7 +1377,7 @@ bool CAlfaDoc::AddObjectToSelectionAt(CurvePoint point, float tolerance, bool in
         if (!include_mesh && dynamic_cast<CMesh3D*>(objects_[index].get())) {
             continue;
         }
-        if (objects_[index]->IsVisible() && objects_[index]->HitTest(point, tolerance)) {
+        if (IsObjectSelectable(*objects_[index]) && objects_[index]->HitTest(point, tolerance)) {
             selected_object_index_ = index;
             active_object_index_ = index;
             has_selected_object_ = true;
@@ -1361,7 +1398,7 @@ bool CAlfaDoc::RemoveObjectFromSelectionAt(CurvePoint point, float tolerance, bo
         if (!include_mesh && dynamic_cast<CMesh3D*>(objects_[index].get())) {
             continue;
         }
-        if (!objects_[index]->IsVisible() || !objects_[index]->HitTest(point, tolerance)) {
+        if (!IsObjectSelectable(*objects_[index]) || !objects_[index]->HitTest(point, tolerance)) {
             continue;
         }
 
@@ -1391,7 +1428,7 @@ bool CAlfaDoc::ToggleObjectSelectionAt(CurvePoint point, float tolerance, bool i
         if (!include_mesh && dynamic_cast<CMesh3D*>(objects_[index].get())) {
             continue;
         }
-        if (!objects_[index]->IsVisible() || !objects_[index]->HitTest(point, tolerance)) {
+        if (!IsObjectSelectable(*objects_[index]) || !objects_[index]->HitTest(point, tolerance)) {
             continue;
         }
 
@@ -1427,7 +1464,7 @@ bool CAlfaDoc::SelectSolidEdgeAtScreen(DomPoint point,
     for (size_t i = objects_.size(); i > 0; --i) {
         const size_t index = i - 1;
         CSolid* solid = dynamic_cast<CSolid*>(objects_[index].get());
-        if (!solid || !solid->IsVisible()) {
+        if (!solid || !IsObjectSelectable(*solid)) {
             continue;
         }
 
@@ -1471,7 +1508,7 @@ bool CAlfaDoc::SelectSolidMeshAtScreen(DomPoint point,
 
     for (size_t index = 0; index < objects_.size(); ++index) {
         CSolid* solid = dynamic_cast<CSolid*>(objects_[index].get());
-        if (!solid || !solid->IsVisible()) {
+        if (!solid || !IsObjectSelectable(*solid)) {
             continue;
         }
 
@@ -1527,7 +1564,7 @@ bool CAlfaDoc::SelectMeshAtScreen(DomPoint point,
 
     for (size_t index = 0; index < objects_.size(); ++index) {
         CMesh3D* mesh = dynamic_cast<CMesh3D*>(objects_[index].get());
-        if (!mesh || !mesh->IsVisible()) {
+        if (!mesh || !IsObjectSelectable(*mesh)) {
             continue;
         }
 
@@ -1591,7 +1628,7 @@ bool CAlfaDoc::SelectSolidFaceAtScreen(DomPoint point,
 
     for (size_t index = 0; index < objects_.size(); ++index) {
         CSolid* solid = dynamic_cast<CSolid*>(objects_[index].get());
-        if (!solid || !solid->IsVisible()) {
+        if (!solid || !IsObjectSelectable(*solid)) {
             continue;
         }
 
@@ -1987,7 +2024,7 @@ bool CAlfaDoc::SelectDraftFaceAxisEdgeAtScreen(DomPoint point,
     }
 
     CSolid* solid = dynamic_cast<CSolid*>(objects_[draft_face_->object_index].get());
-    if (!solid || !solid->IsVisible()) {
+    if (!solid || !IsObjectSelectable(*solid)) {
         return false;
     }
 
@@ -2215,7 +2252,7 @@ bool CAlfaDoc::SelectLiveThickSolidFaceAtScreen(DomPoint point,
     }
 
     auto* solid = dynamic_cast<CSolid*>(objects_[live_thick_solid_->object_index].get());
-    if (!solid || !solid->IsVisible()) {
+    if (!solid || !IsObjectSelectable(*solid)) {
         return false;
     }
 
@@ -2365,7 +2402,7 @@ bool CAlfaDoc::SelectPolylineAt(CurvePoint point, float tolerance) {
     for (size_t i = objects_.size(); i > 0; --i) {
         const size_t index = i - 1;
         CPolyline* polyline = dynamic_cast<CPolyline*>(objects_[index].get());
-        if (polyline && polyline->IsVisible() && polyline->HitTest(point, tolerance)) {
+        if (polyline && IsObjectSelectable(*polyline) && polyline->HitTest(point, tolerance)) {
             selected_object_index_ = index;
             active_object_index_ = index;
             selected_object_indices_ = {index};
@@ -2386,7 +2423,7 @@ bool CAlfaDoc::SelectPolylineAtScreen(DomPoint point,
     for (size_t i = objects_.size(); i > 0; --i) {
         const size_t index = i - 1;
         CAlfaObject* object = objects_[index].get();
-        if (!object || !object->IsVisible()) {
+        if (!object || !IsObjectSelectable(*object)) {
             continue;
         }
 
@@ -2538,7 +2575,7 @@ bool CAlfaDoc::SelectCurvePointAtScreen(DomPoint point,
 
     for (size_t i = objects_.size(); i > 0; --i) {
         const size_t object_index = i - 1;
-        if (!objects_[object_index] || !objects_[object_index]->IsVisible()) {
+        if (!objects_[object_index] || !IsObjectSelectable(*objects_[object_index])) {
             continue;
         }
         if (const auto* polyline = dynamic_cast<const CPolyline*>(objects_[object_index].get())) {
@@ -2575,7 +2612,7 @@ bool CAlfaDoc::PickSelectedCurvePointAtScreen(DomPoint point,
     for (const auto& selected : selected_curve_points_) {
         const size_t object_index = selected.first;
         const size_t point_index = selected.second;
-        if (object_index >= objects_.size() || !objects_[object_index] || !objects_[object_index]->IsVisible()) {
+        if (object_index >= objects_.size() || !objects_[object_index] || !IsObjectSelectable(*objects_[object_index])) {
             continue;
         }
 
@@ -2630,7 +2667,7 @@ bool CAlfaDoc::SelectCurvePointsInScreenRect(DomRect rect,
     };
 
     for (size_t object_index = 0; object_index < objects_.size(); ++object_index) {
-        if (!objects_[object_index] || !objects_[object_index]->IsVisible()) {
+        if (!objects_[object_index] || !IsObjectSelectable(*objects_[object_index])) {
             continue;
         }
         if (const auto* polyline = dynamic_cast<const CPolyline*>(objects_[object_index].get())) {
@@ -2707,7 +2744,7 @@ bool CAlfaDoc::FindPolylinePointAtScreen(DomPoint point,
     if (!found) {
         for (size_t i = objects_.size(); i > 0; --i) {
             const size_t current_object_index = i - 1;
-            if (!objects_[current_object_index] || !objects_[current_object_index]->IsVisible()) {
+            if (!objects_[current_object_index] || !IsObjectSelectable(*objects_[current_object_index])) {
                 continue;
             }
             if (const auto* polyline = dynamic_cast<const CPolyline*>(objects_[current_object_index].get())) {
@@ -2788,6 +2825,37 @@ bool CAlfaDoc::HasSelectedPoint() const {
 bool CAlfaDoc::HasSelectedSolidEdge() const {
     const CSolid* solid = GetSelectedSolid();
     return solid && solid->HasSelectedEdge();
+}
+
+size_t CAlfaDoc::SelectAllVisibleObjects() {
+    selected_object_indices_.clear();
+    selected_solid_face_indices_.clear();
+    ClearPointSelection();
+
+    for (ObjectPtr& object : objects_) {
+        if (auto* solid = dynamic_cast<CSolid*>(object.get())) {
+            solid->ClearSelectedEdge();
+            solid->ClearSelectedFace();
+        }
+    }
+
+    for (size_t index = 0; index < objects_.size(); ++index) {
+        if (objects_[index] && IsObjectVisible(*objects_[index])) {
+            selected_object_indices_.push_back(index);
+        }
+    }
+
+    if (selected_object_indices_.empty()) {
+        has_selected_object_ = false;
+        selected_object_index_ = 0;
+        active_object_index_ = 0;
+        return 0;
+    }
+
+    selected_object_index_ = selected_object_indices_.back();
+    active_object_index_ = selected_object_index_;
+    has_selected_object_ = true;
+    return selected_object_indices_.size();
 }
 
 size_t CAlfaDoc::GetSelectedObjectIndex() const {
@@ -2929,6 +2997,7 @@ void CAlfaDoc::AddObject(std::unique_ptr<CAlfaObject> object) {
 
     EnsureObjectId(*object);
     AssignDefaultMaterial(*object);
+    AssignObjectToWorkLayer(*object);
     objects_.push_back(std::move(object));
     selected_object_index_ = objects_.size() - 1;
     selected_object_indices_ = {selected_object_index_};
@@ -3034,7 +3103,7 @@ bool CAlfaDoc::CreateLoftSurfaceFromSelectedBSplines() {
     std::vector<const CBSpline*> splines;
     splines.reserve(selected_object_indices_.size());
     for (size_t index : selected_object_indices_) {
-        if (index >= objects_.size() || !objects_[index] || !objects_[index]->IsVisible()) {
+        if (index >= objects_.size() || !objects_[index] || !IsObjectVisible(*objects_[index])) {
             continue;
         }
         if (const auto* spline = dynamic_cast<const CBSpline*>(objects_[index].get())) {
@@ -3453,6 +3522,7 @@ bool CAlfaDoc::ApplyBooleanToSolids(size_t body_index, size_t tool_index, Boolea
     result->SetMaterialId(body->GetMaterialId());
     result->SetGroupName(body->GetGroupName());
     result->SetVisible(body->IsVisible());
+    result->m_LayerID = body->m_LayerID;
     result->CopyOperationTreeFrom(*body);
     const size_t boolean_tool_index = result->AddBooleanToolCopy(*tool);
     if (result->GetNumOperations() > 0) {
@@ -3801,7 +3871,7 @@ bool CAlfaDoc::GetSelectionBounds(Vec3& min_point, Vec3& max_point) const {
 
     bool has_bounds = false;
     for (size_t index : selected_object_indices_) {
-        if (index >= objects_.size() || !objects_[index]->IsVisible()) {
+        if (index >= objects_.size() || !objects_[index] || !IsObjectVisible(*objects_[index])) {
             continue;
         }
 
@@ -3863,6 +3933,87 @@ CAlfaDoc::ObjectList& CAlfaDoc::GetObjects() {
 
 const CAlfaDoc::ObjectList& CAlfaDoc::GetObjects() const {
     return objects_;
+}
+
+void CAlfaDoc::EnsureDefaultLayer() {
+    if (!m_Layers.empty()) {
+        if (!GetLayerByID(Work_layer)) {
+            Work_layer = m_Layers.front()->ID();
+        }
+        return;
+    }
+    m_Layers.push_back(new CLayer(1, "Default"));
+    Work_layer = 1;
+}
+
+CLayer* CAlfaDoc::AddLayer(const std::string& name) {
+    int next_id = 1;
+    for (const CLayer* layer : m_Layers) {
+        if (layer) {
+            next_id = std::max(next_id, layer->ID() + 1);
+        }
+    }
+
+    std::string layer_name = name.empty() ? "Layer " + std::to_string(next_id) : name;
+    auto* layer = new CLayer(next_id, layer_name);
+    m_Layers.push_back(layer);
+    Work_layer = next_id;
+    return layer;
+}
+
+CLayer* CAlfaDoc::GetLayerByID(int layer_id) {
+    for (CLayer* layer : m_Layers) {
+        if (layer && layer->ID() == layer_id) {
+            return layer;
+        }
+    }
+    return nullptr;
+}
+
+const CLayer* CAlfaDoc::GetLayerByID(int layer_id) const {
+    for (const CLayer* layer : m_Layers) {
+        if (layer && layer->ID() == layer_id) {
+            return layer;
+        }
+    }
+    return nullptr;
+}
+
+int CAlfaDoc::GetWorkLayerID() const {
+    if (GetLayerByID(Work_layer)) {
+        return Work_layer;
+    }
+    return m_Layers.empty() || !m_Layers.front() ? 0 : m_Layers.front()->ID();
+}
+
+bool CAlfaDoc::SetWorkLayer(int layer_id) {
+    if (!GetLayerByID(layer_id)) {
+        return false;
+    }
+    Work_layer = layer_id;
+    return true;
+}
+
+bool CAlfaDoc::IsLayerVisible(int layer_id) const {
+    const CLayer* layer = GetLayerByID(layer_id);
+    return !layer || layer->Visible;
+}
+
+bool CAlfaDoc::IsLayerSelectable(int layer_id) const {
+    const CLayer* layer = GetLayerByID(layer_id);
+    return !layer || layer->Selectable;
+}
+
+bool CAlfaDoc::IsObjectVisible(const CAlfaObject& object) const {
+    return object.IsVisible() && IsLayerVisible(object.m_LayerID);
+}
+
+bool CAlfaDoc::IsObjectSelectable(const CAlfaObject& object) const {
+    return IsObjectVisible(object) && IsLayerSelectable(object.m_LayerID);
+}
+
+void CAlfaDoc::AssignObjectToWorkLayer(CAlfaObject& object) const {
+    object.m_LayerID = GetWorkLayerID();
 }
 
 std::vector<Material>& CAlfaDoc::GetMaterials() {
@@ -3949,9 +4100,9 @@ size_t CAlfaDoc::GetTotalPointCount() const {
 void CAlfaDoc::EnsureActivePolyline() {
     if (objects_.empty()) {
         auto polyline = std::make_unique<CPolyline>("Curve 1");
-        polyline->SetColor({0.98f, 0.77f, 0.30f});
         EnsureObjectId(*polyline);
         AssignDefaultMaterial(*polyline);
+        AssignObjectToWorkLayer(*polyline);
         objects_.push_back(std::move(polyline));
         active_object_index_ = 0;
     }
@@ -3967,9 +4118,9 @@ void CAlfaDoc::EnsureActivePolyline() {
 
     if (dynamic_cast<CPolyline*>(objects_[active_object_index_].get()) == nullptr) {
         auto polyline = std::make_unique<CPolyline>("Curve " + std::to_string(objects_.size() + 1));
-        polyline->SetColor({0.98f, 0.77f, 0.30f});
         EnsureObjectId(*polyline);
         AssignDefaultMaterial(*polyline);
+        AssignObjectToWorkLayer(*polyline);
         objects_.push_back(std::move(polyline));
         active_object_index_ = objects_.size() - 1;
     }
@@ -3984,9 +4135,9 @@ void CAlfaDoc::EnsureActivePolyline() {
 void CAlfaDoc::EnsureActiveBSpline() {
     if (objects_.empty()) {
         auto spline = std::make_unique<CBSpline>("B-Spline 1");
-        spline->SetColor({1.0f, 0.08f, 0.10f});
         EnsureObjectId(*spline);
         AssignDefaultMaterial(*spline);
+        AssignObjectToWorkLayer(*spline);
         objects_.push_back(std::move(spline));
         active_object_index_ = 0;
         return;
@@ -4003,9 +4154,9 @@ void CAlfaDoc::EnsureActiveBSpline() {
 
     if (dynamic_cast<CBSpline*>(objects_[active_object_index_].get()) == nullptr) {
         auto spline = std::make_unique<CBSpline>("B-Spline " + std::to_string(objects_.size() + 1));
-        spline->SetColor({1.0f, 0.08f, 0.10f});
         EnsureObjectId(*spline);
         AssignDefaultMaterial(*spline);
+        AssignObjectToWorkLayer(*spline);
         objects_.push_back(std::move(spline));
         active_object_index_ = objects_.size() - 1;
     }
@@ -4020,6 +4171,8 @@ void CAlfaDoc::AssignDefaultMaterial(CAlfaObject& object) {
     }
 
     if (!materials_.empty()) {
+        const Color object_color = object.GetColor();
         object.SetMaterial(materials_.front());
+        object.SetColor(object_color);
     }
 }

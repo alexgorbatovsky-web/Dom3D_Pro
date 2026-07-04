@@ -71,6 +71,7 @@ void SolidTool::RebuildSolid(CAlfaDoc& document, size_t object_index, const std:
         object->SetMaterialId(objects[object_index]->GetMaterialId());
         object->SetGroupName(objects[object_index]->GetGroupName());
         object->SetVisible(objects[object_index]->IsVisible());
+        object->m_LayerID = objects[object_index]->m_LayerID;
         if (auto* new_solid = dynamic_cast<CSolid*>(object.get())) {
             if (const auto* old_solid = dynamic_cast<const CSolid*>(objects[object_index].get())) {
                 new_solid->CopyOperationTreeFrom(*old_solid);

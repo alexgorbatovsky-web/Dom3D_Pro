@@ -42,6 +42,7 @@ public:
     void SetOrthographicProjection(bool enabled);
     Camera GetCamera() const;
     void SetCamera(const Camera& camera);
+    void SetXYView();
     OrbitMode GetOrbitMode() const;
     void SetOrbitMode(OrbitMode mode);
     bool IsXYPlaneViewEnabled() const;
@@ -56,6 +57,7 @@ public:
     void BeginSketch(const QString& name, SketchPlane plane);
     void SetSketchRectangleTool();
     void BeginSketchFillet(double radius);
+    void BeginPickXYPoint();
     void EndSketch();
     void DrawFPS();
     void UpdateFPS();
@@ -67,6 +69,7 @@ signals:
     void BooleanFinished();
     void MaterialPicked(const Material& material);
     void ToolModeChanged(ToolMode tool);
+    void XYPointPicked(CPoint3d point);
     void ObjectDoubleClicked();
     void FilesDropped(const QStringList& paths);
 
@@ -159,6 +162,7 @@ private:
     CPoint3d curve_point_drag_last_{};
     bool curve_point_drag_has_plane_ = false;
     bool selecting_edit_points_ = false;
+    bool picking_xy_point_ = false;
     SelectionAction edit_point_selection_action_ = SelectionAction::Replace;
     QPoint edit_point_selection_start_;
     QPoint edit_point_selection_current_;

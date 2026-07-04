@@ -15,6 +15,7 @@
 
 #include <QAction>
 #include <QActionGroup>
+#include <QAbstractItemView>
 #include <QApplication>
 #include <QButtonGroup>
 #include <QCheckBox>
@@ -38,9 +39,11 @@
 #include <QFrame>
 #include <QGridLayout>
 #include <QGuiApplication>
+#include <QGroupBox>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QImage>
+#include <QInputDialog>
 #include <QKeySequence>
 #include <QLabel>
 #include <QLayoutItem>
@@ -58,6 +61,7 @@
 #include <QPixmap>
 #include <QPushButton>
 #include <QRadialGradient>
+#include <QRadioButton>
 #include <QScreen>
 #include <QSettings>
 #include <QSize>
@@ -75,6 +79,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 #include <functional>
 #include <map>
 #include <memory>
@@ -187,7 +192,7 @@ public:
 
         auto* form = new QFormLayout();
         density_ = new QDoubleSpinBox(this);
-        density_->setRange(0.05, 100.0);
+        density_->setRange(0.1, 100.0);
         density_->setSingleStep(0.05);
         density_->setDecimals(2);
         density_->setValue(1.0);
@@ -1161,6 +1166,10 @@ void MainWindow::CreateActions() {
     orthographic_projection_action_->setCheckable(true);
     orthographic_projection_action_->setChecked(viewport_->IsOrthographicProjection());
     view_menu->addAction(orthographic_projection_action_);
+    auto* xy_view_action = add_action("View XY", QKeySequence(Qt::Key_2 | Qt::KeypadModifier), [this]() {
+        viewport_->SetXYView();
+    });
+    view_menu->addAction(xy_view_action);
     projection_status_label_ = new QLabel(this);
     projection_status_label_->setMinimumWidth(108);
     projection_status_label_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
@@ -1194,13 +1203,21 @@ void MainWindow::CreateActions() {
     auto* mirror_action = add_action("Mirror Object by Plane...", {}, [this]() { MirrorSelectedObject(); });
     mirror_action->setToolTip("Create a mirrored copy of the selected object or group");
     mirror_action->setIcon(MirrorObjectIcon());
-    auto* all_scene_action = add_action("All Scene", {}, [this]() {
+    auto* all_scene_action = add_action("All Scene", QKeySequence(Qt::Key_F4), [this]() {
         viewport_->FitToDocument();
         statusBar()->showMessage("All scene fitted", 1400);
     });
     auto* material_editor_action = add_action("Material Editor...", {}, [this]() {
         ShowMaterialEditor();
     });
+    auto* layer_properties_action = add_action("Layer Properties...", {}, [this]() {
+        ShowLayerProperties();
+    });
+    layer_properties_action->setToolTip("Layer visibility and selectability");
+    auto* change_layer_action = add_action("Change Layer...", {}, [this]() {
+        ChangeSelectedObjectLayer();
+    });
+    change_layer_action->setToolTip("Move selected objects to another layer");
     RegisterToolAction(orbit_action, "orbit");
     RegisterToolAction(select_action, "select");
     RegisterToolAction(curve_action, "PolylineCurve");
@@ -1211,6 +1228,8 @@ void MainWindow::CreateActions() {
     RegisterToolAction(new_sketch_action, "NewSketch");
 
     tools_menu->addAction(material_editor_action);
+    tools_menu->addAction(layer_properties_action);
+    tools_menu->addAction(change_layer_action);
     tools_menu->addSeparator();
     tools_menu->addAction(orbit_action);
     tools_menu->addAction(select_action);
@@ -1240,6 +1259,12 @@ void MainWindow::CreateActions() {
         }
     }));
     edit_menu->addAction(add_action("&Delete Selected", QKeySequence::Delete, [this]() { DeleteSelected(); }));
+    edit_menu->addAction(add_action("Select All Visible", QKeySequence::SelectAll, [this]() {
+        const size_t count = document_.SelectAllVisibleObjects();
+        RefreshSceneTree();
+        viewport_->update();
+        statusBar()->showMessage(QString("Selected %1 visible object(s)").arg(count), 1200);
+    }));
 
     help_menu->addAction(add_action("Help &Topics", QKeySequence::HelpContents, [this]() {
         QMessageBox::information(this, "Help Topics", "Help system will be added here.");
@@ -1273,6 +1298,8 @@ void MainWindow::CreateActions() {
     main_toolbar_->addAction(rotate_action);
     main_toolbar_->addAction(scale_action);
     main_toolbar_->addAction(new_sketch_action);
+    main_toolbar_->addAction(layer_properties_action);
+    main_toolbar_->addAction(change_layer_action);
     main_toolbar_->addSeparator();
 
     auto* selection_mode_group = new QActionGroup(main_toolbar_);
@@ -1823,6 +1850,10 @@ void MainWindow::AddToolButton(QGridLayout* layout, QWidget* parent, const std::
     button->setToolTip(QString::fromStdString(tool->label));
     button->setFixedSize(42, 36);
     RegisterToolButton(button, key);
+    if (key == "TrimMeshTest") {
+        button->setIcon(QIcon());
+        button->setText("Trim M");
+    }
     connect(button, &QPushButton::clicked, this, [this, key]() { ActivateParametricTool(key); });
     layout->addWidget(button, row, column);
 }
@@ -1901,8 +1932,8 @@ void MainWindow::RefreshSceneTree() {
         }
 
         auto* item = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(scene_tree_);
-        item->setIcon(0, SceneVisibilityIcon(object->IsVisible()));
-        item->setToolTip(0, object->IsVisible() ? "Hide object" : "Show object");
+        item->setIcon(0, SceneVisibilityIcon(document_.IsObjectVisible(*object)));
+        item->setToolTip(0, document_.IsObjectVisible(*object) ? "Hide object" : "Show object");
         item->setText(1, QString::fromStdString(object->GetName()));
         item->setText(2, type);
         item->setData(0, kSceneTreeObjectIndexRole, static_cast<qulonglong>(i));
@@ -1917,7 +1948,7 @@ void MainWindow::RefreshSceneTree() {
         for (int i = 0; i < group_item->childCount(); ++i) {
             const QVariant object_index = group_item->child(i)->data(0, kSceneTreeObjectIndexRole);
             const size_t index = static_cast<size_t>(object_index.toULongLong());
-            const bool child_visible = index < objects.size() && objects[index] && objects[index]->IsVisible();
+            const bool child_visible = index < objects.size() && objects[index] && document_.IsObjectVisible(*objects[index]);
             any_visible = any_visible || child_visible;
         }
         group_item->setIcon(0, SceneVisibilityIcon(any_visible));
@@ -2184,6 +2215,297 @@ void MainWindow::EditSelectedObjectColor() {
     RefreshSceneTree();
     viewport_->update();
     statusBar()->showMessage(QString("Color applied to %1 object(s)").arg(changed), 1200);
+}
+
+void MainWindow::ShowLayerProperties() {
+    document_.EnsureDefaultLayer();
+
+    auto* dialog = new QDialog(this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose, true);
+    dialog->setWindowTitle("A Property of Layers");
+    auto* root = new QVBoxLayout(dialog);
+
+    auto* title = new QLabel("The List of Layers", dialog);
+    root->addWidget(title);
+
+    auto* list = new QListWidget(dialog);
+    list->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    list->setMinimumSize(260, 300);
+    list->setStyleSheet(
+        "QListWidget::item {"
+        "  padding: 4px 6px;"
+        "}"
+        "QListWidget::item:selected,"
+        "QListWidget::item:selected:!active {"
+        "  background: #0a84ff;"
+        "  color: #ffffff;"
+        "}"
+    );
+    root->addWidget(list);
+
+    auto refresh = std::make_shared<std::function<void()>>();
+    *refresh = [this, list]() {
+        const QList<int> selected_ids = [list]() {
+            QList<int> ids;
+            for (QListWidgetItem* item : list->selectedItems()) {
+                ids.push_back(item->data(Qt::UserRole).toInt());
+            }
+            return ids;
+        }();
+        list->clear();
+        for (const CLayer* layer : document_.m_Layers) {
+            if (!layer) {
+                continue;
+            }
+            const QString flags = QString("%1 %2 ")
+                .arg(layer->Visible ? "[V]" : "[-]")
+                .arg(layer->Selectable ? "[S]" : "[X]");
+            auto* item = new QListWidgetItem(flags + QString::fromStdString(layer->Name), list);
+            item->setData(Qt::UserRole, layer->ID());
+            if (layer->ID() == document_.GetWorkLayerID()) {
+                QFont font = item->font();
+                font.setBold(true);
+                item->setFont(font);
+            }
+            if (selected_ids.contains(layer->ID())) {
+                item->setSelected(true);
+            }
+        }
+        if (list->selectedItems().empty() && list->count() > 0) {
+            list->item(0)->setSelected(true);
+            list->setCurrentRow(0);
+        }
+    };
+
+    (*refresh)();
+
+    auto* visibility_box = new QGroupBox("Visibility of a Layer", dialog);
+    auto* visibility_layout = new QHBoxLayout(visibility_box);
+    auto* visible_radio = new QRadioButton("Visible", visibility_box);
+    auto* invisible_radio = new QRadioButton("Invisible", visibility_box);
+    visibility_layout->addWidget(visible_radio);
+    visibility_layout->addWidget(invisible_radio);
+    root->addWidget(visibility_box);
+
+    auto* selectable_box = new QGroupBox("Selectability of a Layer", dialog);
+    auto* selectable_layout = new QHBoxLayout(selectable_box);
+    auto* selectable_radio = new QRadioButton("Selectable", selectable_box);
+    auto* unselectable_radio = new QRadioButton("Unselectable", selectable_box);
+    selectable_layout->addWidget(selectable_radio);
+    selectable_layout->addWidget(unselectable_radio);
+    root->addWidget(selectable_box);
+
+    auto sync_radios = std::make_shared<std::function<void()>>();
+    *sync_radios = [this, list, visible_radio, invisible_radio, selectable_radio, unselectable_radio]() {
+        const QListWidgetItem* item = list->currentItem();
+        const CLayer* layer = item ? document_.GetLayerByID(item->data(Qt::UserRole).toInt()) : nullptr;
+        if (!layer) {
+            return;
+        }
+        QSignalBlocker visible_blocker(visible_radio);
+        QSignalBlocker invisible_blocker(invisible_radio);
+        QSignalBlocker selectable_blocker(selectable_radio);
+        QSignalBlocker unselectable_blocker(unselectable_radio);
+        visible_radio->setChecked(layer->Visible);
+        invisible_radio->setChecked(!layer->Visible);
+        selectable_radio->setChecked(layer->Selectable);
+        unselectable_radio->setChecked(!layer->Selectable);
+    };
+    (*sync_radios)();
+    connect(list, &QListWidget::currentItemChanged, dialog, [sync_radios](QListWidgetItem*, QListWidgetItem*) {
+        (*sync_radios)();
+    });
+
+    auto selected_layers = std::make_shared<std::function<std::vector<CLayer*>()>>();
+    *selected_layers = [this, list]() {
+        std::vector<CLayer*> layers;
+        for (QListWidgetItem* item : list->selectedItems()) {
+            if (CLayer* layer = document_.GetLayerByID(item->data(Qt::UserRole).toInt())) {
+                layers.push_back(layer);
+            }
+        }
+        return layers;
+    };
+
+    auto apply_visibility = std::make_shared<std::function<void(bool)>>();
+    *apply_visibility = [this, selected_layers, refresh, sync_radios](bool visible) {
+        std::vector<CLayer*> layers = (*selected_layers)();
+        if (layers.empty()) {
+            return;
+        }
+        for (CLayer* layer : layers) {
+            layer->Visible = visible;
+        }
+        document_.ClearSelection();
+        (*refresh)();
+        (*sync_radios)();
+        RefreshSceneTree();
+        viewport_->update();
+    };
+
+    auto apply_selectability = std::make_shared<std::function<void(bool)>>();
+    *apply_selectability = [this, selected_layers, refresh, sync_radios](bool selectable) {
+        std::vector<CLayer*> layers = (*selected_layers)();
+        if (layers.empty()) {
+            return;
+        }
+        for (CLayer* layer : layers) {
+            layer->Selectable = selectable;
+        }
+        document_.ClearSelection();
+        (*refresh)();
+        (*sync_radios)();
+        RefreshSceneTree();
+        viewport_->update();
+    };
+
+    connect(visible_radio, &QRadioButton::toggled, dialog, [apply_visibility](bool checked) {
+        if (checked) {
+            (*apply_visibility)(true);
+        }
+    });
+    connect(invisible_radio, &QRadioButton::toggled, dialog, [apply_visibility](bool checked) {
+        if (checked) {
+            (*apply_visibility)(false);
+        }
+    });
+    connect(selectable_radio, &QRadioButton::toggled, dialog, [apply_selectability](bool checked) {
+        if (checked) {
+            (*apply_selectability)(true);
+        }
+    });
+    connect(unselectable_radio, &QRadioButton::toggled, dialog, [apply_selectability](bool checked) {
+        if (checked) {
+            (*apply_selectability)(false);
+        }
+    });
+
+    auto* buttons_row = new QHBoxLayout();
+    auto* work_button = new QPushButton("Set Work", dialog);
+    auto* new_button = new QPushButton("New Layer", dialog);
+    auto* ok_button = new QPushButton("OK", dialog);
+    buttons_row->addWidget(work_button);
+    buttons_row->addWidget(new_button);
+    buttons_row->addStretch();
+    buttons_row->addWidget(ok_button);
+    root->addLayout(buttons_row);
+
+    connect(work_button, &QPushButton::clicked, dialog, [this, list, refresh]() {
+        QListWidgetItem* item = list->currentItem();
+        if (!item) {
+            return;
+        }
+        document_.SetWorkLayer(item->data(Qt::UserRole).toInt());
+        (*refresh)();
+    });
+    connect(new_button, &QPushButton::clicked, dialog, [this, dialog, list, refresh]() {
+        bool ok = false;
+        const QString name = QInputDialog::getText(dialog, "Name Layer", "Name", QLineEdit::Normal, QString(), &ok);
+        if (!ok) {
+            return;
+        }
+        CLayer* layer = document_.AddLayer(name.trimmed().toStdString());
+        (*refresh)();
+        for (int row = 0; row < list->count(); ++row) {
+            if (list->item(row)->data(Qt::UserRole).toInt() == layer->ID()) {
+                list->setCurrentRow(row);
+                list->item(row)->setSelected(true);
+                break;
+            }
+        }
+    });
+    connect(ok_button, &QPushButton::clicked, dialog, &QDialog::accept);
+    connect(dialog, &QDialog::finished, this, [this]() {
+        RefreshSceneTree();
+        viewport_->update();
+        statusBar()->showMessage("Layer properties updated", 1200);
+    });
+
+    CenterDialogOnCursor(*dialog);
+    dialog->show();
+}
+
+void MainWindow::ChangeSelectedObjectLayer() {
+    document_.EnsureDefaultLayer();
+    if (!document_.HasSelection()) {
+        viewport_->SetTool(ToolMode::Select);
+        viewport_->SetSelectionMode(SelectionMode::Object);
+        UpdateActiveToolUi("select");
+        statusBar()->showMessage("Layer: выберите объект для смены слоя");
+        return;
+    }
+
+    QDialog dialog(this);
+    dialog.setWindowTitle("The list of Layers");
+    auto* root = new QHBoxLayout(&dialog);
+    auto* list = new QListWidget(&dialog);
+    list->setMinimumSize(260, 280);
+    root->addWidget(list);
+
+    int current_layer = document_.GetWorkLayerID();
+    if (const CAlfaObject* selected = document_.GetSelectedObject()) {
+        current_layer = selected->m_LayerID;
+    }
+    for (const CLayer* layer : document_.m_Layers) {
+        if (!layer) {
+            continue;
+        }
+        auto* item = new QListWidgetItem(QString::fromStdString(layer->Name), list);
+        item->setData(Qt::UserRole, layer->ID());
+        if (layer->ID() == current_layer) {
+            item->setSelected(true);
+            list->setCurrentItem(item);
+        }
+    }
+
+    auto* buttons = new QVBoxLayout();
+    auto* ok_button = new QPushButton("OK", &dialog);
+    auto* new_button = new QPushButton("To\nNew\nLayer", &dialog);
+    new_button->setStyleSheet("QPushButton { background: #fff200; color: black; font-weight: 700; }");
+    auto* cancel_button = new QPushButton("Cancel", &dialog);
+    buttons->addWidget(ok_button);
+    buttons->addStretch();
+    buttons->addWidget(new_button);
+    buttons->addStretch();
+    buttons->addWidget(cancel_button);
+    root->addLayout(buttons);
+
+    connect(ok_button, &QPushButton::clicked, &dialog, &QDialog::accept);
+    connect(cancel_button, &QPushButton::clicked, &dialog, &QDialog::reject);
+    connect(new_button, &QPushButton::clicked, &dialog, [&]() {
+        bool ok = false;
+        const QString name = QInputDialog::getText(&dialog, "Name Layer", "Name", QLineEdit::Normal, QString(), &ok);
+        if (!ok) {
+            return;
+        }
+        CLayer* layer = document_.AddLayer(name.trimmed().toStdString());
+        auto* item = new QListWidgetItem(QString::fromStdString(layer->Name), list);
+        item->setData(Qt::UserRole, layer->ID());
+        list->setCurrentItem(item);
+    });
+    connect(list, &QListWidget::itemDoubleClicked, &dialog, [&dialog](QListWidgetItem*) {
+        dialog.accept();
+    });
+
+    CenterDialogOnCursor(dialog);
+    if (dialog.exec() != QDialog::Accepted || !list->currentItem()) {
+        statusBar()->showMessage("Layer change canceled", 900);
+        return;
+    }
+
+    const int layer_id = list->currentItem()->data(Qt::UserRole).toInt();
+    document_.SetWorkLayer(layer_id);
+    auto& objects = document_.GetObjects();
+    int changed = 0;
+    for (size_t index : document_.GetSelectedObjectIndices()) {
+        if (index < objects.size() && objects[index]) {
+            objects[index]->m_LayerID = layer_id;
+            ++changed;
+        }
+    }
+    RefreshSceneTree();
+    viewport_->update();
+    statusBar()->showMessage(QString("Layer changed for %1 object(s)").arg(changed), 1200);
 }
 
 void MainWindow::SetFloorGridVisible(bool visible) {
@@ -2702,6 +3024,10 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         ShowLowPolyTool();
         return;
     }
+    if (tool_id == "TrimMeshTest") {
+        ShowTrimMeshTestTool();
+        return;
+    }
 
     if (tool_id == "PolylineCurve") {
         ClearActiveProperties();
@@ -3041,6 +3367,125 @@ void MainWindow::ShowLowPolyTool() {
     dialog->raise();
     dialog->activateWindow();
     statusBar()->showMessage("Low Poly: меняй параметры или Create Low Poly", 1600);
+}
+
+void MainWindow::ShowTrimMeshTestTool() {
+    ClearActiveProperties();
+    viewport_->SetTool(ToolMode::Select);
+    viewport_->SetSelectionMode(SelectionMode::Object);
+    UpdateActiveToolUi("TrimMeshTest");
+
+    auto* dialog = new QDialog(this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose, true);
+    dialog->setWindowTitle("Trim Mesh Test");
+
+    auto mesh_id = std::make_shared<unsigned long>(0);
+    auto line_id = std::make_shared<unsigned long>(0);
+
+    auto* root = new QVBoxLayout(dialog);
+    auto* selection_form = new QFormLayout();
+    auto* mesh_label = new QLabel("none", dialog);
+    auto* line_label = new QLabel("none", dialog);
+    selection_form->addRow("Mesh", mesh_label);
+    selection_form->addRow("Cut line", line_label);
+    root->addLayout(selection_form);
+
+    auto* select_mesh_button = new QPushButton("Use Selected Mesh", dialog);
+    auto* select_line_button = new QPushButton("Use Selected Line", dialog);
+    root->addWidget(select_mesh_button);
+    root->addWidget(select_line_button);
+
+    auto* pc_box = new QGroupBox("Pc", dialog);
+    auto* pc_form = new QFormLayout(pc_box);
+    const auto make_spin = [dialog]() {
+        auto* spin = new QDoubleSpinBox(dialog);
+        spin->setRange(-1000000.0, 1000000.0);
+        spin->setDecimals(6);
+        spin->setSingleStep(0.1);
+        spin->setKeyboardTracking(true);
+        return spin;
+    };
+    auto* pc_x = make_spin();
+    auto* pc_y = make_spin();
+    auto* pc_z = make_spin();
+    pc_form->addRow("X", pc_x);
+    pc_form->addRow("Y", pc_y);
+    pc_form->addRow("Z", pc_z);
+    root->addWidget(pc_box);
+
+    auto* buttons = new QHBoxLayout();
+    auto* pick_pc_button = new QPushButton("Pick Pc", dialog);
+    auto* run_button = new QPushButton("Run Trim Test", dialog);
+    auto* close_button = new QPushButton("Close", dialog);
+    buttons->addWidget(pick_pc_button);
+    buttons->addWidget(run_button);
+    buttons->addStretch();
+    buttons->addWidget(close_button);
+    root->addLayout(buttons);
+
+    const auto describe_object = [](const CAlfaObject* object) {
+        if (!object) {
+            return QString("none");
+        }
+        const QString name = QString::fromStdString(object->GetName());
+        return name.isEmpty() ? QString("ID %1").arg(object->m_id) : QString("%1 (ID %2)").arg(name).arg(object->m_id);
+    };
+
+    connect(select_mesh_button, &QPushButton::clicked, dialog, [this, mesh_id, mesh_label, describe_object]() {
+        CMesh3D* mesh = document_.GetSelectedMesh();
+        if (!mesh) {
+            statusBar()->showMessage("Trim Mesh Test: выбери Mesh", 1400);
+            return;
+        }
+        document_.EnsureObjectId(*mesh);
+        *mesh_id = mesh->m_id;
+        mesh_label->setText(describe_object(mesh));
+        statusBar()->showMessage("Trim Mesh Test: mesh выбран, теперь выбери линию выреза", 1600);
+    });
+
+    connect(select_line_button, &QPushButton::clicked, dialog, [this, line_id, line_label, describe_object]() {
+        CPolyline* line = document_.GetSelectedPolyline();
+        if (!line) {
+            statusBar()->showMessage("Trim Mesh Test: выбери Polyline как линию выреза", 1400);
+            return;
+        }
+        document_.EnsureObjectId(*line);
+        *line_id = line->m_id;
+        line_label->setText(describe_object(line));
+        statusBar()->showMessage("Trim Mesh Test: line выбрана, введи Pc и запускай", 1600);
+    });
+
+    connect(pick_pc_button, &QPushButton::clicked, dialog, [this]() {
+        viewport_->BeginPickXYPoint();
+        viewport_->setFocus();
+    });
+    connect(viewport_, &OpenGLViewport::XYPointPicked, dialog, [pc_x, pc_y, pc_z](CPoint3d point) {
+        pc_x->setValue(point.x);
+        pc_y->setValue(point.y);
+        pc_z->setValue(point.z);
+    });
+
+    connect(run_button, &QPushButton::clicked, dialog, [this, mesh_id, line_id, pc_x, pc_y, pc_z]() {
+        auto* mesh = dynamic_cast<CMesh3D*>(document_.FindObjectById(*mesh_id));
+        auto* line = dynamic_cast<CPolyline*>(document_.FindObjectById(*line_id));
+        if (!mesh || !line) {
+            statusBar()->showMessage("Trim Mesh Test: сначала выбери Mesh и Line", 1600);
+            return;
+        }
+
+        CPoint3d pc(pc_x->value(), pc_y->value(), pc_z->value());
+        const bool changed = mesh->TrimByPlineTest(line, pc);
+        RefreshSceneTree();
+        viewport_->update();
+        statusBar()->showMessage(changed ? "Trim Mesh Test: выполнено" : "Trim Mesh Test: не изменило mesh", 1800);
+    });
+    connect(close_button, &QPushButton::clicked, dialog, &QDialog::accept);
+
+    CenterDialogOnCursor(*dialog);
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
+    statusBar()->showMessage("Trim Mesh Test: выбери mesh в сцене и нажми Use Selected Mesh", 1800);
 }
 
 void MainWindow::EditSelectedParametricObject() {
@@ -3778,7 +4223,7 @@ void MainWindow::ShowPreferences() {
 }
 
 void MainWindow::ImportFile() {
-    const QString filter = "3D Studio (*.3ds);;Wavefront OBJ (*.obj);;STEP (*.step *.stp);;IGES (*.iges *.igs);;All files (*.*)";
+    const QString filter = "Wavefront OBJ (*.obj);;3D Studio (*.3ds);;STEP (*.step *.stp);;IGES (*.iges *.igs);;TEXT (*.txt);;All files (*.*)";
     QString selected_filter;
     const QString path = QFileDialog::getOpenFileName(this, "Import", LastDialogDir(), filter, &selected_filter);
     if (path.isEmpty()) {
@@ -3858,6 +4303,26 @@ bool MainWindow::ImportFileFromPath(const QString& path) {
         for (auto& mesh : meshes) {
             register_imported_material(*mesh);
             document_.AddMesh(std::move(mesh));
+        }
+    } else if (lower_path.endsWith(".txt")) {
+        std::ifstream stream(path.toStdString());
+        if (!stream) {
+            QMessageBox::critical(this, "TEXT Import", QString("Cannot open file:\n%1").arg(path));
+            return false;
+        }
+
+        std::vector<std::unique_ptr<CPolyline>> polylines;
+        if (!CPolyline::LoadTextPolylines(stream, polylines, error)) {
+            QMessageBox::critical(this, "TEXT Import", QString::fromStdString(error));
+            return false;
+        }
+
+        const std::string group_name = polylines.size() > 1
+            ? (QFileInfo(path).completeBaseName() + " (TEXT)").toStdString()
+            : std::string{};
+        for (auto& polyline : polylines) {
+            polyline->SetGroupName(group_name);
+            document_.AddObject(std::move(polyline));
         }
     } else {
         QMessageBox::warning(this, "Dom3D Pro", QString("Unsupported dropped file:\n%1").arg(path));
@@ -4304,7 +4769,7 @@ void MainWindow::PopulateToolsPanelForTab(int tab_index) {
     } else if (tab == "Furniture") {
         tool_ids = {"cabinet"};
     } else if (tab == "Curves") {
-        tool_ids = {"PolylineCurve", "BSplineCurve", "EditPoint"};
+        tool_ids = {"PolylineCurve", "BSplineCurve", "EditPoint", "TrimMeshTest"};
     } else if (tab == "Surfaces") {
         tool_ids = {"SurfaceLoft", "SurfaceReverseNormals", "SurfaceOfRevolution"};
     } else if (tab == "Solid") {

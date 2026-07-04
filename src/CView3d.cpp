@@ -85,7 +85,7 @@ void CView3d::DrawRoom() const {
 void CView3d::DrawObjects(const CAlfaDoc& document) const {
     const auto& objects = document.GetObjects();
     for (size_t index = 0; index < objects.size(); ++index) {
-        if (!objects[index] || !objects[index]->IsVisible()) {
+        if (!objects[index] || !document.IsObjectVisible(*objects[index])) {
             continue;
         }
         const bool selected = document.IsObjectSelected(index);

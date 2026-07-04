@@ -140,6 +140,21 @@ Quaternion orientation_from_forward_up(Vec3 forward, Vec3 desired_up) {
     return quaternion_from_basis(right, up, back);
 }
 
+Quaternion orientation_from_forward_right(Vec3 forward, Vec3 desired_right) {
+    forward = normalize(forward);
+    const Vec3 back = forward * -1.0f;
+    Vec3 right = normalize(desired_right - back * dot(desired_right, back));
+    if (dot(right, right) <= 0.00001f) {
+        right = {1.0f, 0.0f, 0.0f};
+    }
+    Vec3 up = normalize(cross(back, right));
+    if (dot(up, up) <= 0.00001f) {
+        up = {0.0f, 1.0f, 0.0f};
+    }
+    right = normalize(cross(up, back));
+    return quaternion_from_basis(right, up, back);
+}
+
 void cad_orbit_camera(Camera& camera, float yaw_delta_degrees, float pitch_delta_degrees) {
     const Vec3 right = normalize(rotate(camera.orientation, {1.0f, 0.0f, 0.0f}));
     const Vec3 up = normalize(rotate(camera.orientation, {0.0f, 1.0f, 0.0f}));
@@ -174,6 +189,7 @@ void architectural_orbit_camera(Camera& camera, float yaw_delta_degrees, float p
 
 void set_view_by_camera_ray(Camera& camera) {
     const Vec3 forward = normalize(rotate(camera.orientation, {0.0f, 0.0f, -1.0f}));
+    const Vec3 current_right = normalize(rotate(camera.orientation, {1.0f, 0.0f, 0.0f}));
     const Vec3 axes[] = {
         {1.0f, 0.0f, 0.0f},
         {0.0f, 1.0f, 0.0f},
@@ -193,10 +209,32 @@ void set_view_by_camera_ray(Camera& camera) {
         }
     }
 
-    const Vec3 desired_up = std::fabs(best_axis.z) > 0.5f
-        ? Vec3{0.0f, 1.0f, 0.0f}
-        : Vec3{0.0f, 0.0f, 1.0f};
-    camera.orientation = orientation_from_forward_up(best_axis, desired_up);
+    const Vec3 base_axes[] = {
+        {1.0f, 0.0f, 0.0f},
+        {0.0f, 1.0f, 0.0f},
+        {0.0f, 0.0f, 1.0f}
+    };
+    Vec3 horizontal_axis{};
+    float best_horizontal = -1.0f;
+    for (const Vec3 axis : base_axes) {
+        if (std::fabs(dot(axis, best_axis)) > 0.5f) {
+            continue;
+        }
+        const float alignment = std::fabs(dot(axis, current_right));
+        if (alignment > best_horizontal) {
+            best_horizontal = alignment;
+            horizontal_axis = dot(axis, current_right) < 0.0f ? axis * -1.0f : axis;
+        }
+    }
+
+    if (dot(horizontal_axis, horizontal_axis) <= 0.00001f) {
+        const Vec3 desired_up = std::fabs(best_axis.z) > 0.5f
+            ? Vec3{0.0f, 1.0f, 0.0f}
+            : Vec3{0.0f, 0.0f, 1.0f};
+        camera.orientation = orientation_from_forward_up(best_axis, desired_up);
+    } else {
+        camera.orientation = orientation_from_forward_right(best_axis, horizontal_axis);
+    }
 }
 }
 
@@ -346,7 +384,7 @@ void OpenGLViewport::FitToDocument() {
     Vec3 max_point{};
     bool has_bounds = false;
     for (const auto& object : document_->GetObjects()) {
-        if (!object || !object->IsVisible()) {
+        if (!object || !document_->IsObjectVisible(*object)) {
             continue;
         }
 
@@ -378,7 +416,7 @@ void OpenGLViewport::FitToDocument() {
     const Vec3 size = max_point - min_point;
     const float radius = std::max(1.0f, std::sqrt(dot(size, size)) * 0.5f);
     camera_.target = center;
-    camera_.distance = std::clamp(radius * 9.0f, 2.0f, 100000.0f);
+    camera_.distance = std::clamp(radius * 1.5f, 2.0f, 100000.0f);
     update();
 }
 
@@ -396,6 +434,12 @@ Camera OpenGLViewport::GetCamera() const {
 
 void OpenGLViewport::SetCamera(const Camera& camera) {
     camera_ = camera;
+    update();
+}
+
+void OpenGLViewport::SetXYView() {
+    camera_.orientation = camera_orientation_from_yaw_pitch(0.0f, 0.0f);
+    camera_.target = {kGridHalfSize * 0.5f, kGridHalfSize * 0.5f, 0.0f};
     update();
 }
 
@@ -546,6 +590,16 @@ void OpenGLViewport::BeginSketchFillet(double radius) {
     emit StatusTextChanged(QString("%1: Fillet R=%2. Укажите вершину полилинии").arg(sketch_name_).arg(sketch_fillet_radius_, 0, 'f', 2));
 }
 
+void OpenGLViewport::BeginPickXYPoint() {
+    picking_xy_point_ = true;
+    orbiting_ = false;
+    alt_orbiting_ = false;
+    panning_ = false;
+    zooming_ = false;
+    setCursor(Qt::CrossCursor);
+    emit StatusTextChanged("Pick Pc: click point on XY plane");
+}
+
 void OpenGLViewport::EndSketch() {
     sketch_active_ = false;
     sketch_rectangle_has_first_point_ = false;
@@ -613,6 +667,24 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
     }
 
     if (event->button() != Qt::LeftButton || !document_) {
+        return;
+    }
+
+    if (picking_xy_point_) {
+        CPoint3d point{};
+        if (ScreenToWorldPlane(event->pos(), {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, point)) {
+            picking_xy_point_ = false;
+            unsetCursor();
+            emit XYPointPicked(point);
+            emit StatusTextChanged(QString("Pc picked: X %1, Y %2, Z %3")
+                .arg(point.x, 0, 'f', 6)
+                .arg(point.y, 0, 'f', 6)
+                .arg(point.z, 0, 'f', 6));
+            event->accept();
+            return;
+        }
+        emit StatusTextChanged("Pick Pc: point is outside XY plane view");
+        event->accept();
         return;
     }
 
@@ -1373,7 +1445,7 @@ CAlfaObject* OpenGLViewport::FindObjectForMaterialAt(const QPoint& point) {
     auto& objects = document_->GetObjects();
     for (size_t i = objects.size(); i > 0; --i) {
         CAlfaObject* object = objects[i - 1].get();
-        if (!object || !object->IsVisible()) {
+        if (!object || !document_->IsObjectSelectable(*object)) {
             continue;
         }
 

@@ -921,6 +921,7 @@ bool rebuild_extrude_base(CAlfaDoc& document, size_t object_index, const std::ve
     solid->SetMaterialId(old_solid->GetMaterialId());
     solid->SetGroupName(old_solid->GetGroupName());
     solid->SetVisible(old_solid->IsVisible());
+    solid->m_LayerID = old_solid->m_LayerID;
     solid->CopyOperationTreeFrom(*old_solid);
     if (!solid->ReBuldMesh()) {
         return false;
@@ -1054,6 +1055,7 @@ bool rebuild_revolve_base(CAlfaDoc& document,
     solid->SetMaterialId(old_solid->GetMaterialId());
     solid->SetGroupName(old_solid->GetGroupName());
     solid->SetVisible(old_solid->IsVisible());
+    solid->m_LayerID = old_solid->m_LayerID;
     solid->CopyOperationTreeFrom(*old_solid);
     if (!solid->ReBuldMesh()) {
         return false;
@@ -1354,6 +1356,16 @@ ToolRegistry::ToolRegistry() {
     tools_.push_back({
         "EditPoint",
         "Edit Point",
+        {},
+        [](CAlfaDoc&, const std::vector<ToolParameter>&) {
+        },
+        [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {
+        }
+    });
+
+    tools_.push_back({
+        "TrimMeshTest",
+        "Trim Mesh Test",
         {},
         [](CAlfaDoc&, const std::vector<ToolParameter>&) {
         },

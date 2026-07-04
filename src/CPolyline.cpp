@@ -61,10 +61,13 @@ std::filesystem::path obj_output_path(const std::string& name) {
 CPolyline::CPolyline()
     : CAlfaObject("Polyline") {
     IsReversed = false;
+    SetColor(kDefaultCurveColor);
 }
 
 CPolyline::CPolyline(std::string name)
     : CAlfaObject(std::move(name)) {
+    IsReversed = false;
+    SetColor(kDefaultCurveColor);
 }
 
 const std::vector<CPoint3d>& CPolyline::GetPoints() const {
@@ -272,6 +275,53 @@ bool CPolyline::printToFile(const std::string& name) const {
     return static_cast<bool>(stream);
 }
 
+bool CPolyline::LoadTextPolylines(std::istream& stream,
+                                  std::vector<std::unique_ptr<CPolyline>>& polylines,
+                                  std::string& error) {
+    polylines.clear();
+    error.clear();
+
+    std::string keyword;
+    int polyline_number = 1;
+    while (stream >> keyword) {
+        if (keyword != "POLYLINE") {
+            error = "Expected POLYLINE keyword.";
+            return false;
+        }
+
+        size_t count = 0;
+        if (!(stream >> count)) {
+            error = "Expected point count after POLYLINE.";
+            return false;
+        }
+        if (count == 0) {
+            error = "POLYLINE must contain at least one point.";
+            return false;
+        }
+
+        auto polyline = std::make_unique<CPolyline>("Imported Polyline " + std::to_string(polyline_number));
+        for (size_t i = 0; i < count; ++i) {
+            double x = 0.0;
+            double y = 0.0;
+            double z = 0.0;
+            if (!(stream >> x >> y >> z)) {
+                error = "Expected X Y Z point coordinates.";
+                return false;
+            }
+            polyline->AddPoint(CPoint3d(x, y, z));
+        }
+
+        polylines.push_back(std::move(polyline));
+        ++polyline_number;
+    }
+
+    if (polylines.empty()) {
+        error = "No POLYLINE records found.";
+        return false;
+    }
+    return true;
+}
+
 bool CPolyline::RemovePoint(size_t index) {
     if (index >= points_.size()) {
         return false;
@@ -417,7 +467,7 @@ void CPolyline::Render3d(bool selected, bool has_selected_point, size_t selected
 
     const Color color = GetColor();
     glDisable(GL_DEPTH_TEST);
-    glLineWidth(selected ? 5.0f : 4.0f);
+    glLineWidth(selected ? 5.0f : 2.0f);
     glColor3f(selected ? 0.72f : color.r, selected ? 0.12f : color.g, selected ? 1.0f : color.b);
     glBegin(GL_LINE_STRIP);
     for (const CPoint3d& point : points_) {

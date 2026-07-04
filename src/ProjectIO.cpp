@@ -54,7 +54,6 @@ bool ProjectIO::Load(const std::string& path, CAlfaDoc& document, std::string& e
         }
 
         CPolyline polyline("Curve 1");
-        polyline.SetColor({0.98f, 0.77f, 0.30f});
         for (size_t i = 0; i < count; ++i) {
             CurvePoint point{};
             file >> point.x >> point.z;
@@ -108,6 +107,13 @@ bool ProjectIO::Load(const std::string& path, CAlfaDoc& document, std::string& e
         }
     }
 
+    document.EnsureDefaultLayer();
+    const int default_layer = document.GetWorkLayerID();
+    for (const auto& object : loaded) {
+        if (object) {
+            object->m_LayerID = default_layer;
+        }
+    }
     document.GetObjects() = std::move(loaded);
     document.ClearSelection();
     if (document.GetObjects().empty()) {

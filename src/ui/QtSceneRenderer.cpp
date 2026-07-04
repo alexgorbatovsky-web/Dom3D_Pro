@@ -352,7 +352,7 @@ void QtSceneRenderer::CalculateClipPlanes(const CAlfaDoc& document, const Camera
     bool has_scene_bounds = false;
 
     for (const auto& object : document.GetObjects()) {
-        if (!object || !object->IsVisible()) {
+        if (!object || !document.IsObjectVisible(*object)) {
             continue;
         }
 

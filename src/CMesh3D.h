@@ -28,6 +28,16 @@ struct MeshFace {
     MeshFace() = default;
     MeshFace(std::initializer_list<size_t> vertex_indices);
 };
+struct TrimFaceData
+{
+    int FaceID;
+    bool m_Trimmed;
+    int VariantCut;
+    int v1;
+    int v2;
+    CPoint3d pm;
+    int edgeIndex;
+};
 
 class CMesh3D : public CAlfaObject {
 public:
@@ -80,9 +90,11 @@ public:
     bool Load(std::istream& stream);
     bool Create(CPolyline* pline, CVector3d dir, float dist);
     bool TrimByPline(CPolyline* pLine, CPoint3d pc);
+    bool TrimByPlineTest(CPolyline* pLine, CPoint3d pc);
     bool SplitFaceByPoint(int face_index, int ind1, int ind2, const cVec2& pm);
     bool SplitFaceByPointVar4(int face_index, int ind1, int ind2, const cVec2& pm);
     bool SplitFaceByPointVar3(int face_index, int ind1, int ind2, const cVec2& pm);
+    int MakeFace(std::vector < int> indV);
 
 private:
     void Clear();

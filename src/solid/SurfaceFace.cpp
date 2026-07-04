@@ -1583,15 +1583,50 @@ bool CSurfaceFace::BuildTrimmingMesh(CSolid* psol, float Deflection){
 	IsTrimmed = false;
 //  ====== Trimming =====
 	pMesh3D->PutOnSurface(this);
-	if (m_ID == 1) {
-		pMesh3D->ExportToObj("c:\\temp\\Mesh3D_0.obj");
-		for (int i = 0; i < Polylines.size(); i++) {
-			Polylines[i]->printToFile("Polylines3D_ID_0");
-			Polylines[i]->PutOnSurface(this);
-			Polylines[i]->printToFile("Trim_Polylines_ID_0");
-			Polylines[i]->RestoreTo3DFromUVSurface(this);
+
+/*
+	if (m_ID == 0) {
+		CAlfaDoc* pDoc = GetAlfaDoc();
+		if (pDoc) {
+			pDoc->AddLayer("Mesh3D ID =0");
+			auto mcopy = pMesh3D->Clone();
+			pDoc->AddObject(std::move(mcopy));
+
+			std::vector<std::unique_ptr<CPolyline>> owned_trim_lines;
+			std::vector<CPolyline*> trim_lines;
+			for (CPolyline* polyline : Polylines) {
+				if (!polyline)
+					continue;
+
+				std::unique_ptr<CAlfaObject> line_copy_object = polyline->Clone();
+				CPolyline* line_copy = dynamic_cast<CPolyline*>(line_copy_object.get());
+				if (!line_copy)
+					continue;
+
+				line_copy->PutOnSurface(this);
+				trim_lines.push_back(line_copy);
+				owned_trim_lines.emplace_back(static_cast<CPolyline*>(line_copy_object.release()));
+			}
+
+			std::vector<CPolyline*> joined_lines;
+			double delta = 0.01;
+			CPolyline::JoinMultuLines(&trim_lines, &joined_lines, delta);
+			for (CPolyline* joined_line : joined_lines) {
+				if (!joined_line)
+					continue;
+
+				for (std::unique_ptr<CPolyline>& owned_line : owned_trim_lines) {
+					if (owned_line.get() == joined_line) {
+						joined_line->SetColor({ 1.0f, 0.12f, 0.05f });
+						pDoc->AddObject(std::move(owned_line));
+						break;
+					}
+				}
+			}
 		}
 	}
+*/
+
 
 
 	double delta = 0.01;

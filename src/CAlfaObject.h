@@ -22,6 +22,7 @@ public:
     unsigned long m_col = 0;
     bool m_selected = false;
 	unsigned long m_id = 0;
+    int m_LayerID = 0;
 
     virtual void Render3d(bool selected) const = 0;
     virtual void Render3d(bool selected, bool has_selected_point, size_t selected_point_index) const;

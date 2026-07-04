@@ -811,7 +811,24 @@ bool CMesh3D::SplitFaceByPointVar3(int face_index, int ind1, int ind2, const cVe
 
     return true;
 }
-
+int CMesh3D::MakeFace(std::vector < int> indV)
+{
+    if(indV.size() < 3)
+        return -1;
+    MeshFace face;
+    std::vector<MeshCorner> seq;
+    for (size_t index : indV) {
+        if(index >= vertices_.size())
+			return -1;
+        MeshCorner mc;
+		mc.v = index;
+        seq.push_back(mc);
+    }
+	face.corners = std::move(seq);
+    face.normal = FaceNormal(face);
+    faces_.push_back(std::move(face));
+	return static_cast<int>(faces_.size() - 1);
+}
 
 MeshFace::MeshFace(std::initializer_list<size_t> vertex_indices) {
     corners.reserve(vertex_indices.size());
@@ -1767,7 +1784,7 @@ bool CMesh3D::TrimByPline(CPolyline* pLine, CPoint3d pc) {
     PrepareAndMoveVertexToTrimLine(faces_, vertices_, affected_faces, cut,
                                    has_trim_polygon ? &trim_polygon : nullptr,
                                    keep_inside);
-
+    std::vector<TrimFaceData> FacesData;
     for (size_t face_index : affected_faces) {
         if (face_index >= faces_.size())
             continue;
@@ -1781,24 +1798,40 @@ bool CMesh3D::TrimByPline(CPolyline* pLine, CPoint3d pc) {
         if (!AnalyzeFaceCut(face_2d, cut, info, EPS2D))
             continue;
         ClassifyFaceCut(face_2d, cut, info, EPS2D);
+        TrimFaceData face_data;
 
-        if (info.touchedFaceVertices.size() < 2)
-            continue;
+        int pos_a = 0;
+        int pos_b = 0;
+        if(info.touchedFaceVertices.size())
+            pos_a =info.touchedFaceVertices[0];
+		if (info.touchedFaceVertices.size() > 1)
+            pos_b = info.touchedFaceVertices[1];
 
-        const int pos_a = info.touchedFaceVertices[0];
-        const int pos_b = info.touchedFaceVertices[1];
-
-        if (info.VariantCut == 2) {
-            SplitFaceByLine(faces_, face_index, pos_a, pos_b);
-        } else if (cut_is_closed(cut)) {
-            continue;
-        } else {
-            vertices_ = original_vertices;
-            faces_ = original_faces;
-            return false;
+        face_data.FaceID = static_cast<int>(face_index);
+        face_data.m_Trimmed = false;
+        face_data.VariantCut = info.VariantCut;
+        face_data.v1 = pos_a;
+        face_data.v2 = pos_b;
+        if (info.PntInFace.size() > 0) {
+            CPoint3d pm(cut[info.PntInFace[0]].x, cut[info.PntInFace[0]].y, 0);
+            face_data.pm = pm;
         }
+        face_data.edgeIndex = info.edgeIndex;
+        FacesData.push_back(face_data);
     }
 
+    for (int j = 0; j < FacesData.size(); j++) {
+        TrimFaceData& faceData = FacesData[j];
+        switch (faceData.VariantCut) {
+        case 2:
+            SplitFaceByLine(faces_, faceData.FaceID, faceData.v1, faceData.v2);
+            break;
+        case 3:
+            cVec2 point(faceData.pm.x, faceData.pm.y);
+            SplitFaceByPoint(faceData.FaceID, faceData.v1, faceData.v2, point);
+            break;
+        }
+    }
     if (cut_is_closed(cut)) {
         bool changed = false;
         for (Face& face : faces_) {
@@ -1908,6 +1941,12 @@ bool CMesh3D::TrimByPline(CPolyline* pLine, CPoint3d pc) {
         }
     }
     return changed;
+}
+
+bool CMesh3D::TrimByPlineTest(CPolyline* pLine, CPoint3d pc) {
+
+    
+    return TrimByPline(pLine, pc);
 }
 
 void CMesh3D::Clear() {
