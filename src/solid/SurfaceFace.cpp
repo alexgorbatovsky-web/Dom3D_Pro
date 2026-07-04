@@ -341,9 +341,22 @@ bool build_regular_uv_mesh(CSurfaceFace* surface, float deflection)
 	surface->Vmax = v_max;
 	surface->m_QtyU = qty_u;
 	surface->m_QtyV = qty_v;
-	surface->IsTrimmed = true;
+	surface->IsTrimmed = false;
 	surface->IsInitMesh = true;
 	return true;
+}
+
+size_t active_face_count(const CMesh3D* mesh)
+{
+	if (!mesh)
+		return 0;
+
+	size_t count = 0;
+	for (const CMesh3D::Face& face : mesh->GetFaces()) {
+		if (!face.deleted && face.corners.size() >= 3)
+			++count;
+	}
+	return count;
 }
 
 std::unique_ptr<CPolyline> copy_polyline_points(const CPolyline* source)
@@ -1542,12 +1555,26 @@ bool CSurfaceFace::BuildTrimmingMesh(CSolid* psol, float Deflection){
 		return false;
 	if (is_regular_uv_mesh_surface(F1) && build_regular_uv_mesh(this, Deflection)) {
 		const double delta = 0.01;
-		if (pMesh3D && !Polylines.empty() && pMesh3D->PutOnSurface(this)) {
-			if (regular_surface_needs_boundary_trim(this, Polylines, delta))
-				trim_mesh_by_surface_boundary(pMesh3D, this, Polylines, delta);
-			else
-				trim_mesh_by_independent_boundary_loops(pMesh3D, this, Polylines, delta);
-			pMesh3D->RestoreTo3DFromUVSurface(this);
+		if (!pMesh3D || Polylines.empty() || !regular_surface_needs_boundary_trim(this, Polylines, delta)) {
+			return true;
+		}
+		const GeomAbs_SurfaceType regular_type = surface_type_of(F1);
+		const std::vector<Vec3> regular_vertices = pMesh3D->GetVertices();
+		const std::vector<CMesh3D::Face> regular_faces = pMesh3D->GetFaces();
+		const std::vector<UV> regular_uvs = pMesh3D->GetUVs();
+		const std::vector<Vec3> regular_normals = pMesh3D->GetNormals();
+		const size_t regular_face_count = active_face_count(pMesh3D);
+		if (pMesh3D->PutOnSurface(this)) {
+			trim_mesh_by_surface_boundary(pMesh3D, this, Polylines, delta);
+			const size_t trimmed_face_count = active_face_count(pMesh3D);
+			if (regular_type == GeomAbs_Cylinder
+				&& regular_face_count > 0
+				&& trimmed_face_count * 20 < regular_face_count) {
+				pMesh3D->SetGeometry(regular_vertices, regular_faces, regular_uvs, regular_normals);
+				return true;
+			}
+			if (pMesh3D->RestoreTo3DFromUVSurface(this))
+				IsTrimmed = true;
 		}
 		return true;
 	}

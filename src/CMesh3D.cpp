@@ -817,11 +817,16 @@ int CMesh3D::MakeFace(std::vector < int> indV)
         return -1;
     MeshFace face;
     std::vector<MeshCorner> seq;
-    for (size_t index : indV) {
+    for (int vertex_index : indV) {
+        if(vertex_index < 0)
+            return -1;
+        const size_t index = static_cast<size_t>(vertex_index);
         if(index >= vertices_.size())
 			return -1;
         MeshCorner mc;
 		mc.v = index;
+        mc.uv = index;
+        mc.n = index;
         seq.push_back(mc);
     }
 	face.corners = std::move(seq);
@@ -889,15 +894,20 @@ bool CMesh3D::RestoreTo3DFromUVSurface(CSurfaceFace* surface)
         return false;
     }
 
+    if (uvs_.size() != vertices_.size()) {
+        uvs_.assign(vertices_.size(), {});
+    }
     if (normals_.size() != vertices_.size()) {
         normals_.assign(vertices_.size(), {});
     }
 
     for (size_t i = 0; i < vertices_.size(); ++i) {
+        const UV surface_uv{vertices_[i].x, vertices_[i].y};
         CPoint8d point;
-        if (!surface->GetPoint(vertices_[i].x, vertices_[i].y, &point)) {
+        if (!surface->GetPoint(surface_uv.u, surface_uv.v, &point)) {
             return false;
         }
+        uvs_[i] = surface_uv;
         vertices_[i] = {
             static_cast<float>(point.x),
             static_cast<float>(point.y),
@@ -911,6 +921,7 @@ bool CMesh3D::RestoreTo3DFromUVSurface(CSurfaceFace* surface)
     }
     for (Face& face : faces_) {
         for (MeshCorner& corner : face.corners) {
+            corner.uv = corner.v;
             corner.n = corner.v;
         }
         face.normal = FaceNormal(face);

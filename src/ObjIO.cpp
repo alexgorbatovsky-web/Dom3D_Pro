@@ -1,5 +1,7 @@
 #include "ObjIO.h"
 
+#include "Point3d.h"
+#include "SurfaceUVMapping.h"
 #include "solid/Solid.h"
 #include "solid/SurfaceFace.h"
 
@@ -218,6 +220,96 @@ UV transformed_uv(UV uv, const Material& material) {
         u * cosine - v * sine + material.texture_offset_u,
         u * sine + v * cosine + material.texture_offset_v
     };
+}
+
+std::vector<Vec3> averaged_vertex_normals(const CMesh3D& mesh) {
+    std::vector<Vec3> normals(mesh.GetVertices().size(), {});
+    for (const CMesh3D::Face& face : mesh.GetFaces()) {
+        if (face.deleted || face.corners.size() < 3) {
+            continue;
+        }
+        const size_t first = face.corners[0].v;
+        if (first >= mesh.GetVertices().size()) {
+            continue;
+        }
+
+        const Vec3& origin = mesh.GetVertices()[first];
+        Vec3 face_normal{};
+        for (size_t i = 1; i + 1 < face.corners.size(); ++i) {
+            const size_t second = face.corners[i].v;
+            const size_t third = face.corners[i + 1].v;
+            if (second >= mesh.GetVertices().size() || third >= mesh.GetVertices().size()) {
+                continue;
+            }
+            face_normal = normalize(cross(mesh.GetVertices()[second] - origin,
+                                          mesh.GetVertices()[third] - origin));
+            if (std::fabs(face_normal.x) > 0.00001f
+                || std::fabs(face_normal.y) > 0.00001f
+                || std::fabs(face_normal.z) > 0.00001f) {
+                break;
+            }
+        }
+        if (std::fabs(face_normal.x) <= 0.00001f
+            && std::fabs(face_normal.y) <= 0.00001f
+            && std::fabs(face_normal.z) <= 0.00001f) {
+            continue;
+        }
+        for (const MeshCorner& corner : face.corners) {
+            if (corner.v < normals.size()) {
+                normals[corner.v] = normals[corner.v] + face_normal;
+            }
+        }
+    }
+
+    for (Vec3& normal : normals) {
+        normal = normalize(normal);
+        if (std::fabs(normal.x) <= 0.00001f
+            && std::fabs(normal.y) <= 0.00001f
+            && std::fabs(normal.z) <= 0.00001f) {
+            normal = {0.0f, 1.0f, 0.0f};
+        }
+    }
+    return normals;
+}
+
+std::vector<Vec3> surface_vertex_normals(const CMesh3D& mesh, const CSurfaceFace* surface) {
+    if (!surface) {
+        return {};
+    }
+
+    SurfaceUVMapping mapping(surface);
+    if (!mapping.IsValid()) {
+        return {};
+    }
+
+    std::vector<Vec3> normals;
+    normals.reserve(mesh.GetVertices().size());
+    for (const Vec3& vertex : mesh.GetVertices()) {
+        SurfaceUVPoint uv{};
+        CPoint8d point{};
+        if (!mapping.Project(vertex, uv) || !const_cast<CSurfaceFace*>(surface)->GetPoint(uv.u, uv.v, &point)) {
+            return {};
+        }
+        normals.push_back(normalize({
+            static_cast<float>(point.l),
+            static_cast<float>(point.m),
+            static_cast<float>(point.n)
+        }));
+    }
+    return normals;
+}
+
+std::vector<Vec3> export_normals_for_mesh(const CMesh3D& mesh, const CSurfaceFace* surface) {
+    if (!mesh.GetNormals().empty()) {
+        return mesh.GetNormals();
+    }
+
+    std::vector<Vec3> normals = surface_vertex_normals(mesh, surface);
+    if (!normals.empty()) {
+        return normals;
+    }
+
+    return averaged_vertex_normals(mesh);
 }
 
 bool load_mtl(const std::filesystem::path& path,
@@ -449,6 +541,7 @@ bool ObjIO::Export(const std::string& path, const CAlfaDoc& document, std::strin
     material_file << "# Dom3D Pro material library\n\n";
     size_t vertex_offset = 0;
     size_t uv_offset = 0;
+    size_t normal_offset = 0;
     size_t mesh_count = 0;
     std::set<std::string> used_material_names;
     std::map<std::string, std::string> exported_materials;
@@ -471,7 +564,14 @@ bool ObjIO::Export(const std::string& path, const CAlfaDoc& document, std::strin
         if (mesh && mesh->IsVisible()) {
             const Material material = mesh->GetMaterial();
             const std::string material_name = export_material(material, mesh->GetName());
-            if (!ExportMesh(file, *mesh, material, material_name, vertex_offset, uv_offset, mesh->GetName())) {
+            if (!ExportMesh(file,
+                            *mesh,
+                            material,
+                            material_name,
+                            vertex_offset,
+                            uv_offset,
+                            normal_offset,
+                            mesh->GetName())) {
                 error = "Could not write mesh data.";
                 return false;
             }
@@ -505,7 +605,9 @@ bool ObjIO::Export(const std::string& path, const CAlfaDoc& document, std::strin
                             solid_material_name,
                             vertex_offset,
                             uv_offset,
-                            surface_name)) {
+                            normal_offset,
+                            surface_name,
+                            surface)) {
                 error = "Could not write surface mesh data.";
                 return false;
             }
@@ -531,7 +633,9 @@ bool ObjIO::ExportMesh(std::ostream& stream,
                        const std::string& material_name,
                        size_t& vertex_offset,
                        size_t& uv_offset,
-                       const std::string& object_name) const {
+                       size_t& normal_offset,
+                       const std::string& object_name,
+                       const CSurfaceFace* surface) const {
     stream << "o " << obj_identifier(object_name, "Object") << "\n";
     stream << "usemtl " << material_name << "\n";
 
@@ -547,6 +651,16 @@ bool ObjIO::ExportMesh(std::ostream& stream,
         }
     }
 
+    const std::vector<Vec3> export_normals = export_normals_for_mesh(mesh, surface);
+    const bool has_mesh_normals = !mesh.GetNormals().empty();
+    const bool has_normals = !export_normals.empty();
+    if (has_normals) {
+        for (Vec3 normal : export_normals) {
+            normal = normalize(normal);
+            stream << "vn " << normal.x << " " << normal.y << " " << normal.z << "\n";
+        }
+    }
+
     for (const CMesh3D::Face& face : mesh.GetFaces()) {
         if (face.deleted || face.corners.size() < 3) {
             continue;
@@ -559,11 +673,21 @@ bool ObjIO::ExportMesh(std::ostream& stream,
                 return false;
             }
             stream << " " << (index + vertex_offset + 1);
-            if (has_uvs) {
-                if (corner.uv >= mesh.GetUVs().size()) {
-                    return false;
+            if (has_uvs || has_normals) {
+                stream << "/";
+                if (has_uvs) {
+                    if (corner.uv >= mesh.GetUVs().size()) {
+                        return false;
+                    }
+                    stream << (corner.uv + uv_offset + 1);
                 }
-                stream << "/" << (corner.uv + uv_offset + 1);
+                if (has_normals) {
+                    const size_t normal_index = has_mesh_normals ? corner.n : corner.v;
+                    if (normal_index >= export_normals.size()) {
+                        return false;
+                    }
+                    stream << "/" << (normal_index + normal_offset + 1);
+                }
             }
         }
         stream << "\n";
@@ -572,6 +696,9 @@ bool ObjIO::ExportMesh(std::ostream& stream,
     vertex_offset += mesh.GetVertices().size();
     if (has_uvs) {
         uv_offset += mesh.GetUVs().size();
+    }
+    if (has_normals) {
+        normal_offset += export_normals.size();
     }
     stream << "\n";
     return static_cast<bool>(stream);

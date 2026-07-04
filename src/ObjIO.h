@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+class CSurfaceFace;
+
 class ObjIO {
 public:
     bool Import(const std::string& path, std::vector<std::unique_ptr<CMesh3D>>& meshes, std::string& error) const;
@@ -19,6 +21,8 @@ private:
                     const std::string& material_name,
                     size_t& vertex_offset,
                     size_t& uv_offset,
-                    const std::string& object_name) const;
+                    size_t& normal_offset,
+                    const std::string& object_name,
+                    const CSurfaceFace* surface = nullptr) const;
     bool ParseFaceIndex(const std::string& token, size_t vertex_count, size_t& index) const;
 };
