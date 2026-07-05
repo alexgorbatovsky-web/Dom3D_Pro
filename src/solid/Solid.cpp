@@ -66,6 +66,8 @@
 #include <tuple>
 #include <unordered_map>
 
+void Step(const char* text);
+
 namespace {
 struct MeshVertexRef {
 	CMesh3D* mesh = nullptr;
@@ -79,6 +81,14 @@ struct PreparedEdgeRef {
 	Vec3 start{};
 	Vec3 end{};
 };
+
+Color diagnostic_surface_wire_color(const CSurfaceFace& surface, Color default_color)
+{
+	if (surface.IsTrimmed) {
+		return Color{1.0f, 0.0f, 0.0f};
+	}
+	return default_color;
+}
 
 #if defined(_WIN32)
 GLuint surface_index_font_base()
@@ -715,9 +725,6 @@ std::unique_ptr<CSolid> load_solid_step(const QByteArray& step_data, QString& er
 }
 }
 
-//cList<TopoDS_Shape> m_shapes;
-//void Step(char* text);
-
 bool IsEqual(double val1, double val2, float delta)
 {
 	if (fabs(val1 - val2) < delta)
@@ -775,11 +782,13 @@ bool CSolid::s_SurfaceTransparencyEnabled = false;
 CSolid::CSolid()
 {
 	Alloc();
+	SetColor(kDefaultSolidObjectColor);
 }
 
 CSolid::CSolid(TopoDS_Shape& shape)
 {
 	Alloc();
+	SetColor(kDefaultSolidObjectColor);
 	m_Shape = shape;
 }
 
@@ -1403,8 +1412,10 @@ bool CSolid::BuldMesh(float Deflection)
 				surface->DumpPreparedPolylinesToScene();
 		}
 	}
-	for (int i = 0; i < m_Surfaces.size(); i++)
+	for (int i = 0; i < m_Surfaces.size(); i++) {
 		m_Surfaces[i]->BuildTrimmingMesh(this, Deflection);
+	}
+
 	snap_surface_mesh_seams(m_Surfaces);
 	
 	return true;
@@ -1441,7 +1452,8 @@ void CSolid::Render3d(bool selected) const
 	if (IsSurfaceTransparencyEnabled()) {
 		surface_material.alpha = std::min(surface_material.alpha, 0.62f);
 	}
-	const Color solid_color = surface_material.diffuse;
+//	const Color solid_color = surface_material.diffuse;
+	const Color solid_color = GetColor();
 	const auto material_for_surface = [&surface_material](const CSurfaceFace& surface) {
 		Material material = surface_material;
 		material.texture_offset_u += surface.TextureTransform.offset_u;
@@ -1494,7 +1506,8 @@ void CSolid::Render3d(bool selected) const
 	if (mesh_mode == MeshDisplayMode::Wire) {
 		for (CSurfaceFace* surface : m_Surfaces) {
 			if (surface && surface->pMesh3D) {
-				surface->pMesh3D->RenderWire(selected, true, &solid_color);
+				const Color surface_color = diagnostic_surface_wire_color(*surface, solid_color);
+				surface->pMesh3D->RenderWire(selected, true, &surface_color);
 			}
 		}
 		draw_surface_indices();
@@ -1539,7 +1552,8 @@ void CSolid::Render3d(bool selected) const
 	if (draw_mesh) {
 		for (CSurfaceFace* surface : m_Surfaces) {
 			if (surface && surface->pMesh3D) {
-				surface->pMesh3D->RenderWire(selected, mode == SolidDisplayMode::SurfacesAndRaisedMesh, &solid_color);
+				const Color surface_color = diagnostic_surface_wire_color(*surface, solid_color);
+				surface->pMesh3D->RenderWire(selected, mode == SolidDisplayMode::SurfacesAndRaisedMesh, &surface_color);
 			}
 		}
 	}
@@ -1631,6 +1645,7 @@ std::unique_ptr<CAlfaObject> CSolid::Clone() const
 	copy->SetName(GetName() + " Copy");
 	copy->SetGroupName(GetGroupName());
 	copy->SetVisible(IsVisible());
+	copy->SetColor(GetColor());
 	copy->SetMaterial(GetMaterial());
 	copy->SetMaterialId(GetMaterialId());
 	copy->SetParametricDefinition(GetParametricToolId(), GetParametricParameters());

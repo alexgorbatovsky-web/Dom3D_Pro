@@ -60,6 +60,18 @@ inline constexpr Color kDefaultCurveColor{
     146.0f / 255.0f
 };
 
+inline constexpr Color kDefaultSolidObjectColor{
+    0.22f,
+    0.22f,
+    0.22f
+};
+
+inline constexpr Color kDefaultMeshObjectColor{
+    0.06f,
+    0.32f,
+    0.10f
+};
+
 struct Camera {
     Vec3 target{0.0f, 1.2f, 0.0f};
     Quaternion orientation{0.924396f, 0.198992f, -0.299310f, 0.064417f};

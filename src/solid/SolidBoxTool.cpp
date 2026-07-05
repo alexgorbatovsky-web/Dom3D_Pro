@@ -33,7 +33,7 @@ std::vector<ToolParameter> SolidBoxTool::GetDefaultParameters() const {
 }
 
 Color SolidBoxTool::GetColor() const {
-    return {0.64f, 0.70f, 0.58f};
+    return kDefaultSolidObjectColor;
 }
 
 std::string SolidBoxTool::GetObjectName() const {

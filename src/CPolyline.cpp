@@ -16,6 +16,8 @@
 #include <sstream>
 #include <utility>
 
+void Step(const char* text);
+
 namespace {
 Vec3 to_vec3(const CPoint3d& point) {
     return {static_cast<float>(point.x), static_cast<float>(point.y), static_cast<float>(point.z)};
@@ -158,29 +160,61 @@ bool CPolyline::PutOnSurface(CSurfaceFace* surface) {
     if (!surface || points_.empty()) {
         return false;
     }
-
     SurfaceUVMapping mapping(surface);
     if (!mapping.IsValid()) {
         return false;
     }
-
-    std::vector<CPoint3d> uv_points;
-    uv_points.reserve(points_.size());
-    SurfaceUVPoint previous{};
-    bool has_previous = false;
+    std::vector<SurfaceUVPoint> projected;
+    projected.reserve(points_.size());
     for (const CPoint3d& point : points_) {
         SurfaceUVPoint uv{};
         if (!mapping.Project(to_vec3(point), uv)) {
             return false;
         }
-        if (has_previous) {
-            uv = mapping.UnwrapNear(uv, previous);
-        }
-        uv_points.emplace_back(uv.u, uv.v, 0.0);
-        previous = uv;
-        has_previous = true;
+        projected.push_back(uv);
     }
+    std::vector<SurfaceUVPoint> unwrapped(projected.size());
+    if (IsClosed() && projected.size() > 2 && (mapping.IsUPeriodic() || mapping.IsVPeriodic())) {
+        double best_closure = std::numeric_limits<double>::max();
+        std::vector<SurfaceUVPoint> best_unwrapped(projected.size());
+        for (size_t start = 0; start < projected.size(); ++start) {
+            std::vector<SurfaceUVPoint> candidate(projected.size());
+            candidate[start] = projected[start];
+            SurfaceUVPoint previous = candidate[start];
+            for (size_t step = 1; step < projected.size(); ++step) {
+                const size_t index = (start + step) % projected.size();
+                candidate[index] = mapping.UnwrapNear(projected[index], previous);
+                previous = candidate[index];
+            }
 
+            const SurfaceUVPoint closed_start = mapping.UnwrapNear(candidate[start], previous);
+            const double du = closed_start.u - previous.u;
+            const double dv = closed_start.v - previous.v;
+            const double closure = du * du + dv * dv;
+            if (closure < best_closure) {
+                best_closure = closure;
+                best_unwrapped = std::move(candidate);
+            }
+        }
+        unwrapped = std::move(best_unwrapped);
+    } else {
+        SurfaceUVPoint previous{};
+        bool has_previous = false;
+        for (size_t i = 0; i < projected.size(); ++i) {
+            SurfaceUVPoint uv = projected[i];
+            if (has_previous) {
+                uv = mapping.UnwrapNear(uv, previous);
+            }
+            unwrapped[i] = uv;
+            previous = uv;
+            has_previous = true;
+        }
+    }
+    std::vector<CPoint3d> uv_points;
+    uv_points.reserve(unwrapped.size());
+    for (SurfaceUVPoint uv : unwrapped) {
+        uv_points.emplace_back(uv.u, uv.v, 0.0);
+    }
     points_ = std::move(uv_points);
     SetLockedPlane({0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
     return true;
@@ -536,6 +570,7 @@ std::unique_ptr<CAlfaObject> CPolyline::Clone() const {
     copy->locked_plane_normal_ = locked_plane_normal_;
     copy->SetGroupName(GetGroupName());
     copy->SetVisible(IsVisible());
+    copy->SetColor(GetColor());
     copy->SetMaterial(GetMaterial());
     copy->SetMaterialId(GetMaterialId());
     return copy;

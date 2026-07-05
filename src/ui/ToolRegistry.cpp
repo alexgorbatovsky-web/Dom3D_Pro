@@ -917,6 +917,7 @@ bool rebuild_extrude_base(CAlfaDoc& document, size_t object_index, const std::ve
     auto solid = std::make_unique<CSolid>(shape);
     solid->m_id = old_solid->m_id;
     solid->SetName(old_solid->GetName());
+    solid->SetColor(old_solid->GetColor());
     solid->SetMaterial(old_solid->GetMaterial());
     solid->SetMaterialId(old_solid->GetMaterialId());
     solid->SetGroupName(old_solid->GetGroupName());
@@ -1051,6 +1052,7 @@ bool rebuild_revolve_base(CAlfaDoc& document,
     auto solid = std::make_unique<CSolid>(shape);
     solid->m_id = old_solid->m_id;
     solid->SetName(old_solid->GetName());
+    solid->SetColor(old_solid->GetColor());
     solid->SetMaterial(old_solid->GetMaterial());
     solid->SetMaterialId(old_solid->GetMaterialId());
     solid->SetGroupName(old_solid->GetGroupName());
@@ -1226,8 +1228,9 @@ bool rebuild_solid_operation_tree(const ToolRegistry& registry,
 }
 
 std::unique_ptr<CMesh3D> make_box(const std::string& name, float width, float height, float depth, float x, float y, float z, Color color) {
+    (void)color;
     auto mesh = std::make_unique<CMesh3D>(name);
-    mesh->SetColor(color);
+    mesh->SetColor(kDefaultMeshObjectColor);
 
     const float x2 = x + width;
     const float y2 = y + height;
@@ -1254,6 +1257,14 @@ void replace_selected_mesh(CAlfaDoc& document, size_t index, std::unique_ptr<CMe
         return;
     }
 
+    if (objects[index]) {
+        mesh->SetColor(objects[index]->GetColor());
+        mesh->SetMaterial(objects[index]->GetMaterial());
+        mesh->SetMaterialId(objects[index]->GetMaterialId());
+        mesh->SetGroupName(objects[index]->GetGroupName());
+        mesh->SetVisible(objects[index]->IsVisible());
+        mesh->m_LayerID = objects[index]->m_LayerID;
+    }
     objects[index] = std::move(mesh);
 }
 
@@ -1270,6 +1281,7 @@ void rebuild_box(CAlfaDoc& document,
 }
 
 void apply_boolean_to_selected_solids(CAlfaDoc& document, BooleanKind kind, const char* result_name, Color color) {
+    (void)color;
     const std::vector<size_t> selected = document.GetSelectedObjectIndices();
     if (selected.size() < 2) {
         return;
@@ -1295,7 +1307,7 @@ void apply_boolean_to_selected_solids(CAlfaDoc& document, BooleanKind kind, cons
 
     auto result = std::make_unique<CSolid>(result_shape);
     result->SetName(result_name);
-    result->SetColor(color);
+    result->SetColor(kDefaultSolidObjectColor);
     result->ReBuldMesh();
 
     std::vector<size_t> erase_indices = {first_index, second_index};

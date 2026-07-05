@@ -78,6 +78,7 @@ bool rebuild_solid_from_shape(CAlfaDoc::ObjectList& objects, size_t solid_index,
     auto result = std::make_unique<CSolid>(shape_copy);
     result->m_id = source_solid->m_id;
     result->SetName(source_solid->GetName());
+    result->SetColor(source_solid->GetColor());
     result->SetMaterial(source_solid->GetMaterial());
     result->SetMaterialId(source_solid->GetMaterialId());
     result->SetGroupName(source_solid->GetGroupName());
@@ -1093,7 +1094,6 @@ bool CAlfaDoc::UpdateLiveExtrudeSelectedPolyline(double distance, bool reverse, 
 
         auto solid = std::make_unique<CSolid>(shape);
         solid->SetName("Extrude Solid");
-        solid->SetColor({0.64f, 0.70f, 0.58f});
         if (live_polyline_extrude_->has_solid && live_polyline_extrude_->solid_index < objects_.size() && objects_[live_polyline_extrude_->solid_index]) {
             solid->m_id = objects_[live_polyline_extrude_->solid_index]->m_id;
         }
@@ -1257,7 +1257,6 @@ bool CAlfaDoc::UpdateLiveRevolveSelectedPolyline(double angle_degrees, int axis_
 
         auto solid = std::make_unique<CSolid>(shape);
         solid->SetName("Revolve Solid");
-        solid->SetColor({0.64f, 0.70f, 0.58f});
         if (live_polyline_revolve_->has_solid
             && live_polyline_revolve_->solid_index < objects_.size()
             && objects_[live_polyline_revolve_->solid_index]) {

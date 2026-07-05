@@ -28,6 +28,8 @@
 #include <unordered_set>
 #include <utility>
 
+void Step(const char* text);
+
 namespace {
 QString resolve_texture_path(const std::string& texture_path) {
     const QString path = QString::fromStdString(texture_path).trimmed();
@@ -272,6 +274,62 @@ cVec2 face_center_2d(const CMesh3D::Face& face, const std::vector<Vec3>& vertice
         center.y /= static_cast<double>(count);
     }
     return center;
+}
+
+bool should_delete_closed_trim_face(const CMesh3D::Face& face,
+                                    const std::vector<Vec3>& vertices,
+                                    const Face2D& trim_polygon,
+                                    bool keep_inside)
+{
+    const PointFacePos center_pos = ClassifyPointInFace2(trim_polygon, face_center_2d(face, vertices), EPS2D);
+    if (center_pos != PFP_BOUNDARY) {
+        const bool center_inside = center_pos != PFP_OUTSIDE;
+        return center_inside != keep_inside;
+    }
+
+    bool has_delete_sample = false;
+    int delete_samples = 0;
+    int keep_samples = 0;
+    for (const MeshCorner& corner : face.corners) {
+        if (corner.v >= vertices.size())
+            continue;
+
+        const PointFacePos pos = ClassifyPointInFace2(trim_polygon, mesh_vertex_2d(vertices, corner.v), EPS2D);
+        if (pos == PFP_BOUNDARY)
+            continue;
+
+        const bool sample_inside = pos != PFP_OUTSIDE;
+        if (sample_inside == keep_inside) {
+            ++keep_samples;
+        } else {
+            has_delete_sample = true;
+            ++delete_samples;
+        }
+    }
+
+    return has_delete_sample && delete_samples >= keep_samples;
+}
+
+bool face_has_closed_trim_delete_sample(const CMesh3D::Face& face,
+                                        const std::vector<Vec3>& vertices,
+                                        const Face2D& trim_polygon,
+                                        bool keep_inside)
+{
+    const PointFacePos center_pos = ClassifyPointInFace2(trim_polygon, face_center_2d(face, vertices), EPS2D);
+    if (center_pos != PFP_BOUNDARY && ((center_pos != PFP_OUTSIDE) != keep_inside))
+        return true;
+
+    for (const MeshCorner& corner : face.corners) {
+        if (corner.v >= vertices.size())
+            continue;
+
+        const PointFacePos pos = ClassifyPointInFace2(trim_polygon, mesh_vertex_2d(vertices, corner.v), EPS2D);
+        if (pos == PFP_BOUNDARY)
+            continue;
+        if ((pos != PFP_OUTSIDE) != keep_inside)
+            return true;
+    }
+    return false;
 }
 
 double distance2(const cVec2& a, const cVec2& b)
@@ -845,6 +903,7 @@ MeshFace::MeshFace(std::initializer_list<size_t> vertex_indices) {
 CMesh3D::CMesh3D()
     : CAlfaObject("Mesh3D") {
     SetMaterial(colored_mesh_material());
+    SetColor(kDefaultMeshObjectColor);
 }
 
 Material CMesh3D::material_Defailt = Material::DefaultMesh();
@@ -854,6 +913,7 @@ MeshDisplayMode CMesh3D::s_DisplayMode = MeshDisplayMode::SurfaceGray;
 CMesh3D::CMesh3D(std::string name)
     : CAlfaObject(std::move(name)) {
     SetMaterial(colored_mesh_material());
+    SetColor(kDefaultMeshObjectColor);
 }
 
 const std::vector<Vec3>& CMesh3D::GetVertices() const {
@@ -865,6 +925,10 @@ std::vector<Vec3>& CMesh3D::GetVertices() {
 }
 
 const std::vector<CMesh3D::Face>& CMesh3D::GetFaces() const {
+    return faces_;
+}
+
+std::vector<CMesh3D::Face>& CMesh3D::GetFaces() {
     return faces_;
 }
 
@@ -1176,7 +1240,8 @@ void CMesh3D::Render3d(bool selected) const {
     const bool draw_edges = mode != MeshDisplayMode::SurfaceMaterial;
     RenderFaces(selected, draw_edges, &material);
     if (draw_edges) {
-        RenderWire(selected, true, &material.diffuse);
+        const Color wire_color = GetColor();
+        RenderWire(selected, true, &wire_color);
     }
 }
 
@@ -1297,7 +1362,7 @@ void CMesh3D::RenderWire(bool selected, bool draw_on_top, const Color* color_ove
     glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
     glLineWidth(draw_on_top ? (selected ? 1.16f : 1.02f) : (selected ? 1.02f : 0.92f));
     const float opacity = std::clamp(s_WireOpacity, 0.05f, 1.0f);
-    const Color wire = wire_color(base_color, mode, selected);
+    const Color wire = color_override ? base_color : wire_color(base_color, mode, selected);
     const float alpha = opacity * (draw_on_top ? (selected ? 0.98f : 0.92f) : (selected ? 0.88f : 0.82f));
     glColor4f(wire.r, wire.g, wire.b, alpha);
 
@@ -1495,6 +1560,7 @@ std::unique_ptr<CAlfaObject> CMesh3D::Clone() const {
     copy->faces_ = faces_;
     copy->SetGroupName(GetGroupName());
     copy->SetVisible(IsVisible());
+    copy->SetColor(GetColor());
     copy->SetMaterial(GetMaterial());
     copy->SetMaterialId(GetMaterialId());
     return copy;
@@ -1849,9 +1915,15 @@ bool CMesh3D::TrimByPline(CPolyline* pLine, CPoint3d pc) {
             if (face.deleted || face.corners.size() < 3)
                 continue;
 
-            const cVec2 center = face_center_2d(face, vertices_);
-            const bool face_inside = ClassifyPointInFace2(trim_polygon, center, EPS2D) != PFP_OUTSIDE;
-            if (face_inside != keep_inside) {
+            const Face2D face_2d = make_face_2d(face, vertices_);
+            CellCutInfo info;
+            const bool face_touches_cut = AnalyzeFaceCut(face_2d, cut, info, EPS2D);
+            const PointFacePos center_pos = ClassifyPointInFace2(trim_polygon, face_center_2d(face, vertices_), EPS2D);
+            const bool center_delete_side = center_pos != PFP_BOUNDARY
+                && ((center_pos != PFP_OUTSIDE) != keep_inside);
+            if (should_delete_closed_trim_face(face, vertices_, trim_polygon, keep_inside)
+                || (face_touches_cut && (center_delete_side
+                    || face_has_closed_trim_delete_sample(face, vertices_, trim_polygon, keep_inside)))) {
                 face.deleted = true;
                 changed = true;
             }
@@ -1919,6 +1991,90 @@ bool CMesh3D::TrimByPline(CPolyline* pLine, CPoint3d pc) {
             best_distance = dist;
             if (best_inside_distance == std::numeric_limits<double>::max())
                 start_face = face_index;
+        }
+    }
+
+    if (start_face >= faces_.size()) {
+        return false;
+    }
+
+    std::vector<bool> keep(faces_.size(), false);
+    std::deque<size_t> queue;
+    keep[start_face] = true;
+    queue.push_back(start_face);
+    while (!queue.empty()) {
+        const size_t current = queue.front();
+        queue.pop_front();
+        for (size_t next : neighbors[current]) {
+            if (keep[next] || faces_[next].deleted)
+                continue;
+            keep[next] = true;
+            queue.push_back(next);
+        }
+    }
+
+    bool changed = false;
+    for (size_t face_index = 0; face_index < faces_.size(); ++face_index) {
+        Face& face = faces_[face_index];
+        if (face.deleted)
+            continue;
+        if (!keep[face_index]) {
+            face.deleted = true;
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+bool CMesh3D::KeepConnectedComponentAt(CPoint3d pc) {
+    if (faces_.empty() || vertices_.empty()) {
+        return false;
+    }
+
+    std::map<EdgeCoordKey, std::vector<size_t>> edge_faces;
+    for (size_t face_index = 0; face_index < faces_.size(); ++face_index) {
+        const Face& face = faces_[face_index];
+        if (face.deleted || face.corners.size() < 3)
+            continue;
+        for (size_t i = 0; i < face.corners.size(); ++i) {
+            const size_t a_index = face.corners[i].v;
+            const size_t b_index = face.corners[(i + 1) % face.corners.size()].v;
+            if (a_index >= vertices_.size() || b_index >= vertices_.size())
+                continue;
+            edge_faces[edge_coord_key(mesh_vertex_2d(vertices_, a_index),
+                                      mesh_vertex_2d(vertices_, b_index),
+                                      EPS2D)].push_back(face_index);
+        }
+    }
+
+    std::vector<std::vector<size_t>> neighbors(faces_.size());
+    for (const auto& entry : edge_faces) {
+        const std::vector<size_t>& adjacent = entry.second;
+        if (adjacent.size() != 2)
+            continue;
+        neighbors[adjacent[0]].push_back(adjacent[1]);
+        neighbors[adjacent[1]].push_back(adjacent[0]);
+    }
+
+    const cVec2 keep_point(pc.x, pc.y);
+    size_t start_face = faces_.size();
+    double best_inside_distance = std::numeric_limits<double>::max();
+    double best_distance = std::numeric_limits<double>::max();
+    for (size_t face_index = 0; face_index < faces_.size(); ++face_index) {
+        const Face& face = faces_[face_index];
+        if (face.deleted || face.corners.size() < 3)
+            continue;
+
+        const cVec2 center = face_center_2d(face, vertices_);
+        const double dist = distance2(center, keep_point);
+        const Face2D face_2d = make_face_2d(face, vertices_);
+        const PointFacePos pos = ClassifyPointInFace2(face_2d, keep_point, EPS2D);
+        if (pos == PFP_INSIDE && dist < best_inside_distance) {
+            best_inside_distance = dist;
+            start_face = face_index;
+        } else if (best_inside_distance == std::numeric_limits<double>::max() && dist < best_distance) {
+            best_distance = dist;
+            start_face = face_index;
         }
     }
 

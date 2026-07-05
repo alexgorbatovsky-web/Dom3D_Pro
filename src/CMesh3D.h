@@ -49,6 +49,7 @@ public:
     const std::vector<Vec3>& GetVertices() const;
     std::vector<Vec3>& GetVertices();
     const std::vector<Face>& GetFaces() const;
+    std::vector<Face>& GetFaces();
     const std::vector<UV>& GetUVs() const;
     const std::vector<Vec3>& GetNormals() const;
     static size_t GetFaceVertexIndex(const Face& face, size_t i);
@@ -91,6 +92,7 @@ public:
     bool Create(CPolyline* pline, CVector3d dir, float dist);
     bool TrimByPline(CPolyline* pLine, CPoint3d pc);
     bool TrimByPlineTest(CPolyline* pLine, CPoint3d pc);
+    bool KeepConnectedComponentAt(CPoint3d pc);
     bool SplitFaceByPoint(int face_index, int ind1, int ind2, const cVec2& pm);
     bool SplitFaceByPointVar4(int face_index, int ind1, int ind2, const cVec2& pm);
     bool SplitFaceByPointVar3(int face_index, int ind1, int ind2, const cVec2& pm);

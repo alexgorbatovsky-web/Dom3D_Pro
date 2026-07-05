@@ -94,7 +94,7 @@ std::unique_ptr<CSolid> make_imported_solid(
         loaded->SetGroupName(count > 1 ? "Surfaces from STEP" : "");
     }
 
-    loaded->SetColor({ 0.58f, 0.68f, 0.76f });
+    loaded->SetColor(kDefaultSolidObjectColor);
 
   
     loaded->ReBuldMesh();
@@ -173,7 +173,7 @@ bool StepIO::Import(
     STEPControl_Reader reader;
 
     char buffer[100];
-    void Step(char* text);
+    void Step(const char* text);
     SYSTEMTIME st;
 
     auto LogTime = [&](const char* text)

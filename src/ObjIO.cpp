@@ -499,7 +499,7 @@ bool ObjIO::Import(const std::string& path, std::vector<std::unique_ptr<CMesh3D>
                 loaded->SetName(loaded->GetName() + " [" + part.material_name + "]");
             }
         } else {
-            loaded->SetColor({0.42f, 0.57f, 0.36f});
+            loaded->SetColor(kDefaultMeshObjectColor);
         }
         if (!loaded->SetGeometry(std::move(local_vertices),
                                  std::move(local_faces),

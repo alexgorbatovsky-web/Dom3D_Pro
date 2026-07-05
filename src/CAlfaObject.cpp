@@ -251,20 +251,16 @@ Color CAlfaObject::GetColor() const {
 }
 
 void CAlfaObject::SetColor(Color color) {
-    material_.diffuse = color;
     m_col = pack_color(color);
 }
 
 Material CAlfaObject::GetMaterial() const {
-    Material material = material_;
-    material.diffuse = GetColor();
-    return material;
+    return material_;
 }
 
 void CAlfaObject::SetMaterial(Material material) {
     material_ = material;
     material_id_ = material.id;
-    m_col = pack_color(material_.diffuse);
 }
 
 unsigned long CAlfaObject::GetMaterialId() const {

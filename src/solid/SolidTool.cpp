@@ -12,7 +12,7 @@ bool SolidTool::PickEmptySpace() const {
 }
 
 Color SolidTool::GetColor() const {
-    return {0.58f, 0.68f, 0.76f};
+    return kDefaultSolidObjectColor;
 }
 
 std::string SolidTool::GetObjectName() const {
@@ -67,6 +67,7 @@ void SolidTool::RebuildSolid(CAlfaDoc& document, size_t object_index, const std:
     if (objects[object_index]) {
         object->m_id = objects[object_index]->m_id;
         object->SetName(objects[object_index]->GetName());
+        object->SetColor(objects[object_index]->GetColor());
         object->SetMaterial(objects[object_index]->GetMaterial());
         object->SetMaterialId(objects[object_index]->GetMaterialId());
         object->SetGroupName(objects[object_index]->GetGroupName());
@@ -133,7 +134,7 @@ std::vector<ToolParameter> SolidTransformTool::GetDefaultParameters() const {
 }
 
 Color SolidTransformTool::GetColor() const {
-    return { 0.64f, 0.70f, 0.58f };
+    return kDefaultSolidObjectColor;
 }
 
 std::string SolidTransformTool::GetObjectName() const {

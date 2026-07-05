@@ -3363,6 +3363,14 @@ void MainWindow::ShowLowPolyTool() {
     viewport_->SetTool(ToolMode::Select);
     viewport_->SetSelectionMode(SelectionMode::Object);
     UpdateActiveToolUi("SolidLowPoly");
+    connect(dialog, &QDialog::finished, this, [this]() {
+        low_poly_pick_pending_ = false;
+        ClearActiveProperties();
+        viewport_->SetTool(ToolMode::Orbit);
+        UpdateActiveToolUi("orbit");
+        viewport_->update();
+        statusBar()->showMessage("Orbit camera", 900);
+    });
     dialog->show();
     dialog->raise();
     dialog->activateWindow();

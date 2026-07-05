@@ -707,6 +707,10 @@ bool Dom3DProjectSerializer::Save(const QString& path,
             xml.writeAttribute("group", QString::fromStdString(object.GetGroupName()));
         }
         xml.writeAttribute("materialId", QString::number(object.GetMaterialId()));
+        const Color object_color = object.GetColor();
+        xml.writeAttribute("objectColorR", QString::number(object_color.r, 'g', 9));
+        xml.writeAttribute("objectColorG", QString::number(object_color.g, 'g', 9));
+        xml.writeAttribute("objectColorB", QString::number(object_color.b, 'g', 9));
         xml.writeAttribute("visible", object.IsVisible() ? "true" : "false");
         xml.writeAttribute("layerId", QString::number(object.m_LayerID));
 
@@ -1153,6 +1157,17 @@ bool Dom3DProjectSerializer::Load(const QString& path,
                     object->SetMaterial(*material);
                 }
             }
+        }
+        if (object_element.hasAttribute("objectColorR")
+            || object_element.hasAttribute("objectColorG")
+            || object_element.hasAttribute("objectColorB")) {
+            Color object_color = object->GetColor();
+            if (!read_float_attr(object_element, "objectColorR", object_color.r, error, false)
+                || !read_float_attr(object_element, "objectColorG", object_color.g, error, false)
+                || !read_float_attr(object_element, "objectColorB", object_color.b, error, false)) {
+                return false;
+            }
+            object->SetColor(object_color);
         }
         if (object_element.hasAttribute("layerId")) {
             bool ok = false;

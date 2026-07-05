@@ -13,14 +13,12 @@ void message_to_file(const char* text)
     }
 }
 
-void Step(char* text)
+void Step(const char* text)
 {
 	if (!text)
 		return;
 	std::string text2(text);
-	std::ofstream file;
-	const char* namefile = "c:\\temp\\stdout.txt";
-	file.open(namefile, std::ofstream::out | std::ofstream::app);
-	file << text2 << std::endl;
-	file.close();
+	static std::ofstream file("c:\\temp\\stdout.txt");
+	if(file)
+		file << text2 << std::endl;
 }
