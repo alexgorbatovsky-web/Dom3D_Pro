@@ -3,6 +3,8 @@
 #include "SolidTool.h"
 
 class CSolid;
+class gp_Dir;
+class gp_Pnt;
 
 class SolidBoxTool : public SolidTool {
 public:
@@ -26,5 +28,12 @@ protected:
     std::unique_ptr<CAlfaObject> CreateObject(const std::vector<ToolParameter>& parameters) const override;
 
 private:
-    bool CreateBox(CSolid& solid, float width, float height, float depth) const;
+    bool CreateBox(CSolid& solid,
+                   float width,
+                   float height,
+                   float depth,
+                   const gp_Pnt& origin,
+                   const gp_Dir& normal,
+                   const gp_Dir& u_direction,
+                   const gp_Dir& v_direction) const;
 };

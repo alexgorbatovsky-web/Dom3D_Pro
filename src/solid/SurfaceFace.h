@@ -80,6 +80,7 @@ public:
 	bool SetPreparedPolylinePoints(int edge_index, const std::vector<CPoint3d>& points);
 	void DumpPreparedPolylinesToScene() const;
 	bool BuildTrimmingMesh(CSolid* psol, float Deflection);
+	void MakeFilledContour(const std::vector<Vec3>& contour, Vec3 normal, CMesh3D* quad_mesh);
 	void GetEdges(std::vector<CPolyline*>& plines);
 	bool IsBoundLine(CPolyline* line);
 

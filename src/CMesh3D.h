@@ -10,6 +10,7 @@
 #include <vector>
 
 class CSurfaceFace;
+class CPolyline;
 
 struct MeshCorner {
     size_t v = 0;
@@ -38,6 +39,17 @@ struct TrimFaceData
     CPoint3d pm;
     int edgeIndex;
 };
+struct IndAndDist {
+    int ind;// indx  pLine
+    double dist;
+    int vertInd; // indx  vertex in mesh
+    bool needMove = true; // need to move vertex
+    MeshFace* pf;
+};
+struct DataToMoveVerts {
+    IndAndDist IndAndDistArr[2];
+    MeshFace* pf;
+};
 
 class CMesh3D : public CAlfaObject {
 public:
@@ -59,6 +71,8 @@ public:
     bool RestoreTo3DFromUVSurface(CSurfaceFace* surface);
 
     bool ExportToObj(const std::string& name) const;
+    void Clear();
+    bool CreateFromBoundary(CPolyline* bond, float Density);
     bool SetGeometry(std::vector<Vec3> vertices, std::vector<Face> faces);
     bool SetGeometry(std::vector<Vec3> vertices, std::vector<Face> faces, std::vector<UV> uvs);
     bool SetGeometry(std::vector<Vec3> vertices,
@@ -97,9 +111,10 @@ public:
     bool SplitFaceByPointVar4(int face_index, int ind1, int ind2, const cVec2& pm);
     bool SplitFaceByPointVar3(int face_index, int ind1, int ind2, const cVec2& pm);
     int MakeFace(std::vector < int> indV);
+    bool PrepareAndMoveVertexToTrimLine(CPolyline* pLine, std::vector<DataToMoveVerts*>& Data);
+    bool FindVertexToMove(CPolyline* pLine, DataToMoveVerts* data);
 
 private:
-    void Clear();
     bool IsValidFace(const Face& face, size_t vertex_count) const;
     Vec3 FaceNormal(const Face& face) const;
     bool PointInFace2d(CurvePoint point, const Face& face) const;

@@ -111,7 +111,8 @@ enum class ToolMode {
     DrawBSpline,
     EditPoint,
     SketchRectangle,
-    SketchFillet
+    SketchFillet,
+    SolidBoxRectangle
 };
 
 enum class BooleanOperation {

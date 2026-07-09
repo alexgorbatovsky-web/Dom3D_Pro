@@ -51,6 +51,9 @@ public:
     const std::vector<ToolDefinition>& Tools() const;
     const ToolDefinition* Find(const std::string& id) const;
     ActiveParametricObject Activate(const std::string& id, CAlfaDoc& document) const;
+    ActiveParametricObject CreateParametricObject(const std::string& id,
+                                                  CAlfaDoc& document,
+                                                  const std::vector<ToolParameter>& parameters) const;
     void Rebuild(const ActiveParametricObject& active_object, CAlfaDoc& document) const;
     bool ReplayOperations(size_t object_index, CAlfaDoc& document) const;
     bool ReplayProfileDependents(unsigned long profile_id, CAlfaDoc& document) const;

@@ -15,6 +15,7 @@
 
 #include <QAction>
 #include <QActionGroup>
+#include <QAbstractButton>
 #include <QAbstractItemView>
 #include <QApplication>
 #include <QButtonGroup>
@@ -71,11 +72,13 @@
 #include <QTabBar>
 #include <QTimer>
 #include <QToolBar>
+#include <QToolButton>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 #include <QUrl>
 #include <QVariant>
 #include <QVBoxLayout>
+#include <QWidgetAction>
 
 #include <algorithm>
 #include <cmath>
@@ -333,6 +336,141 @@ private:
     QListWidget* bodies_list_ = nullptr;
     QDoubleSpinBox* density_ = nullptr;
     QCheckBox* mesh_quadro_ = nullptr;
+};
+
+class MeshFillContourDialog : public QDialog {
+public:
+    MeshFillContourDialog(CAlfaDoc& document,
+                          std::function<void()> refresh_scene,
+                          std::function<void(const QString&)> set_status,
+                          QWidget* parent)
+        : QDialog(parent),
+          document_(document),
+          refresh_scene_(std::move(refresh_scene)),
+          set_status_(std::move(set_status)) {
+        setWindowTitle("Mesh 3D - Fiill Contour");
+        setAttribute(Qt::WA_DeleteOnClose, true);
+
+        auto* root = new QVBoxLayout(this);
+        auto* contour_label = new QLabel("Contour CPolyline", this);
+        contours_list_ = new QListWidget(this);
+        contours_list_->setMinimumSize(280, 120);
+        root->addWidget(contour_label);
+        root->addWidget(contours_list_);
+
+        auto* use_selected = new QPushButton("Use Selected Contour", this);
+        root->addWidget(use_selected);
+
+        auto* form = new QFormLayout();
+        density_ = new QDoubleSpinBox(this);
+        density_->setRange(0.001, 100000.0);
+        density_->setDecimals(3);
+        density_->setSingleStep(0.1);
+        density_->setValue(1.0);
+        form->addRow("Density", density_);
+        root->addLayout(form);
+
+        auto* buttons = new QHBoxLayout();
+        auto* create = new QPushButton("Create Mesh", this);
+        auto* close = new QPushButton("Close", this);
+        buttons->addWidget(create);
+        buttons->addStretch();
+        buttons->addWidget(close);
+        root->addLayout(buttons);
+
+        RebuildContoursList();
+        SelectDocumentPolyline();
+
+        connect(use_selected, &QPushButton::clicked, this, [this]() {
+            SelectDocumentPolyline();
+        });
+        connect(create, &QPushButton::clicked, this, [this]() {
+            CreateMesh();
+        });
+        connect(close, &QPushButton::clicked, this, &QDialog::close);
+    }
+
+    bool HasContours() const
+    {
+        return contours_list_ && contours_list_->count() > 0;
+    }
+
+private:
+    void RebuildContoursList()
+    {
+        contours_list_->clear();
+        for (const CAlfaDoc::ObjectPtr& object : document_.GetObjects()) {
+            const auto* polyline = dynamic_cast<const CPolyline*>(object.get());
+            if (!polyline || polyline->GetPointCount() < 3) {
+                continue;
+            }
+            auto* item = new QListWidgetItem(QString::fromStdString(polyline->GetName()), contours_list_);
+            item->setData(Qt::UserRole, static_cast<qulonglong>(polyline->m_id));
+            item->setToolTip(polyline->IsClosed() ? "Closed CPolyline" : "Open CPolyline will be closed for fill");
+        }
+        if (contours_list_->count() > 0 && !contours_list_->currentItem()) {
+            contours_list_->setCurrentRow(0);
+        }
+    }
+
+    void SelectDocumentPolyline()
+    {
+        const CPolyline* selected = document_.GetSelectedPolyline();
+        if (!selected) {
+            if (set_status_) {
+                set_status_("Fiill Contour: выберите CPolyline или укажите контур в списке");
+            }
+            return;
+        }
+        for (int i = 0; i < contours_list_->count(); ++i) {
+            QListWidgetItem* item = contours_list_->item(i);
+            if (item && item->data(Qt::UserRole).toULongLong() == selected->m_id) {
+                contours_list_->setCurrentItem(item);
+                if (set_status_) {
+                    set_status_(QString("Fiill Contour: contour %1 selected").arg(QString::fromStdString(selected->GetName())));
+                }
+                return;
+            }
+        }
+    }
+
+    CPolyline* CurrentPolyline()
+    {
+        QListWidgetItem* item = contours_list_->currentItem();
+        if (!item) {
+            return nullptr;
+        }
+        const unsigned long id = static_cast<unsigned long>(item->data(Qt::UserRole).toULongLong());
+        return dynamic_cast<CPolyline*>(document_.FindObjectById(id));
+    }
+
+    void CreateMesh()
+    {
+        CPolyline* contour = CurrentPolyline();
+        if (!contour) {
+            QMessageBox::warning(this, "Fiill Contour", "Select a CPolyline contour.");
+            return;
+        }
+        auto mesh = std::make_unique<CMesh3D>(contour->GetName() + " Fill Mesh");
+        if (!mesh->CreateFromBoundary(contour, static_cast<float>(density_->value()))) {
+            QMessageBox::warning(this, "Fiill Contour", "Mesh was not created. Check contour points.");
+            return;
+        }
+        mesh->SetColor({0.16f, 0.52f, 0.82f});
+        document_.AddMesh(std::move(mesh));
+        if (refresh_scene_) {
+            refresh_scene_();
+        }
+        if (set_status_) {
+            set_status_(QString("Fiill Contour: mesh created, Density %1").arg(density_->value(), 0, 'f', 3));
+        }
+    }
+
+    CAlfaDoc& document_;
+    std::function<void()> refresh_scene_;
+    std::function<void(const QString&)> set_status_;
+    QListWidget* contours_list_ = nullptr;
+    QDoubleSpinBox* density_ = nullptr;
 };
 constexpr int kMaterialLibraryEntryRole = Qt::UserRole + 20;
 constexpr int kMaterialDocumentIndexRole = Qt::UserRole + 21;
@@ -891,7 +1029,24 @@ MainWindow::MainWindow(QWidget* parent)
             UpdateActiveToolUi("EditPoint");
         } else if (tool == ToolMode::SketchRectangle) {
             UpdateActiveToolUi("NewSketch");
+        } else if (tool == ToolMode::SolidBoxRectangle) {
+            UpdateActiveToolUi("SolidBox");
         }
+    });
+    connect(viewport_, &OpenGLViewport::SolidBoxRectangleFinished, this, [this](std::vector<ToolParameter> parameters) {
+        active_parametric_edit_existing_ = false;
+        active_parametric_object_ = tool_registry_.CreateParametricObject("SolidBox", document_, parameters);
+        if (active_parametric_object_.tool_id.empty()) {
+            ClearActiveProperties();
+            statusBar()->showMessage("BOX: could not create solid", 1600);
+            return;
+        }
+        property_panel_->SetActiveObject(active_parametric_object_);
+        ShowPropertyPanelAtCursor("BOX");
+        UpdateActiveToolUi("SolidBox");
+        RefreshSceneTree();
+        viewport_->update();
+        statusBar()->showMessage("BOX: set Height or press OK");
     });
     connect(viewport_, &OpenGLViewport::BooleanFinished, this, [this]() {
         UpdateActiveToolUi("select");
@@ -1051,6 +1206,7 @@ void MainWindow::CreateActions() {
     tool_tabs_->addTab("Surfaces");
     tool_tabs_->addTab("Solid");
     tool_tabs_->addTab("Curves");
+    tool_tabs_->addTab("Mesh 3D");
     tool_tabs_->addTab("Sketch");
     tool_tabs_->addTab("Assemblies");
     tool_tabs_->setCurrentIndex(0);
@@ -1287,21 +1443,6 @@ void MainWindow::CreateActions() {
         ShowGreetingDialog(true);
     }));
 
-    main_toolbar_->addAction(orbit_action);
-    main_toolbar_->addAction(select_action);
-    main_toolbar_->addAction(curve_action);
-    main_toolbar_->addAction(transform_action);
-    main_toolbar_->addAction(duplicate_action);
-    main_toolbar_->addAction(mirror_action);
-    main_toolbar_->addSeparator();
-    main_toolbar_->addAction(move_action);
-    main_toolbar_->addAction(rotate_action);
-    main_toolbar_->addAction(scale_action);
-    main_toolbar_->addAction(new_sketch_action);
-    main_toolbar_->addAction(layer_properties_action);
-    main_toolbar_->addAction(change_layer_action);
-    main_toolbar_->addSeparator();
-
     auto* selection_mode_group = new QActionGroup(main_toolbar_);
     selection_mode_group->setExclusive(true);
     const auto add_selection_mode_action = [this, selection_mode_group](const QString& text, const QString& tooltip, SelectionMode mode) {
@@ -1418,11 +1559,187 @@ void MainWindow::CreateActions() {
     UpdateRecentFilesMenu();
 }
 
+void MainWindow::CreateVerticalToolBar() {
+    vertical_tools_dock_ = new QDockWidget(this);
+    vertical_tools_dock_->setObjectName("VerticalToolsDock");
+    vertical_tools_dock_->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
+    vertical_tools_dock_->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
+    vertical_tools_dock_->setMinimumWidth(36);
+    vertical_tools_dock_->setMaximumWidth(46);
+    vertical_tools_dock_->setTitleBarWidget(new QWidget(vertical_tools_dock_));
+
+    vertical_toolbar_ = new QToolBar("Vertical Tools", vertical_tools_dock_);
+    vertical_toolbar_->setObjectName("VerticalTools");
+    vertical_toolbar_->setOrientation(Qt::Vertical);
+    vertical_toolbar_->setMovable(false);
+    vertical_toolbar_->setFloatable(false);
+    vertical_toolbar_->setIconSize(QSize(22, 22));
+    vertical_toolbar_->setStyleSheet(
+        "QToolBar#VerticalTools {"
+        "  background: #d7d7d7;"
+        "  border: 1px solid #9a9a9a;"
+        "  spacing: 2px;"
+        "  padding: 2px;"
+        "}"
+        "QToolButton {"
+        "  background: #eeeeee;"
+        "  border: 1px solid #8f8f8f;"
+        "  border-radius: 2px;"
+        "  padding: 2px;"
+        "}"
+        "QToolButton:hover {"
+        "  background: #ffffff;"
+        "  border-color: #3f84d8;"
+        "}"
+        "QToolButton:checked {"
+        "  background: #1f7ae0;"
+        "  border-color: #0f4f9a;"
+        "}"
+    );
+
+    const auto add_flyout = [this](const QString& title,
+                                  const QIcon& icon,
+                                  const std::vector<std::pair<std::string, QString>>& tools) {
+        auto* button = new QToolButton(vertical_toolbar_);
+        button->setToolTip(title);
+        button->setIcon(icon);
+        button->setIconSize(QSize(22, 22));
+        button->setFixedSize(30, 28);
+        button->setPopupMode(QToolButton::InstantPopup);
+        button->setCheckable(true);
+        button->setProperty("persistentToolButton", true);
+        QStringList group_keys;
+        for (const auto& tool : tools) {
+            group_keys.push_back(QString::fromStdString(tool.first));
+        }
+        button->setProperty("toolGroupKeys", group_keys);
+        tool_buttons_.push_back(button);
+
+        auto* menu = new QMenu(button);
+        menu->setStyleSheet(
+            "QMenu {"
+            "  background: #ffffff;"
+            "  border: 1px solid #b6b6b6;"
+            "  border-radius: 6px;"
+            "  padding: 4px;"
+            "}"
+        );
+
+        auto* action = new QWidgetAction(menu);
+        auto* panel = new QWidget(menu);
+        auto* row = new QHBoxLayout(panel);
+        row->setContentsMargins(4, 3, 4, 3);
+        row->setSpacing(4);
+
+        for (const auto& tool : tools) {
+            auto* child = new QToolButton(panel);
+            child->setToolTip(tool.second);
+            child->setIcon(ToolIcon(tool.first));
+            child->setIconSize(QSize(22, 22));
+            child->setFixedSize(30, 28);
+            RegisterToolButton(child, tool.first);
+            child->setProperty("persistentToolButton", true);
+            if (child->icon().isNull()) {
+                child->setText(tool.second.left(4));
+            }
+            connect(child, &QToolButton::clicked, this, [this, menu, id = tool.first]() {
+                menu->close();
+                ActivateParametricTool(id);
+            });
+            row->addWidget(child);
+        }
+
+        action->setDefaultWidget(panel);
+        menu->addAction(action);
+        button->setMenu(menu);
+        vertical_toolbar_->addWidget(button);
+    };
+
+    const auto add_direct_button = [this](const QString& title,
+                                          const std::string& key,
+                                          const QIcon& icon,
+                                          const QString& fallback_text,
+                                          const std::function<void()>& handler) {
+        auto* button = new QToolButton(vertical_toolbar_);
+        button->setToolTip(title);
+        button->setIcon(icon);
+        button->setIconSize(QSize(22, 22));
+        button->setFixedSize(30, 28);
+        RegisterToolButton(button, key);
+        button->setProperty("persistentToolButton", true);
+        if (button->icon().isNull()) {
+            button->setText(fallback_text);
+        }
+        connect(button, &QToolButton::clicked, this, [handler]() {
+            handler();
+        });
+        vertical_toolbar_->addWidget(button);
+    };
+
+    add_direct_button("Orbit camera", "orbit", ToolIcon("orbit"), "Or", [this]() {
+        SetTool(ToolMode::Orbit, "Orbit camera");
+    });
+    add_direct_button("Select objects", "select", ToolIcon("select"), "Sel", [this]() {
+        SetTool(ToolMode::Select, "Select objects");
+    });
+    add_direct_button("Polyline", "PolylineCurve", ToolIcon("PolylineCurve"), "Pl", [this]() {
+        ActivateParametricTool("PolylineCurve");
+    });
+    add_direct_button("Transform", "move", ToolIcon("transform"), "Tr", [this]() {
+        BeginTransformTool(TransformOperation::Move);
+    });
+    add_direct_button("Make Object/Group Copy", "duplicate", DuplicateObjectIcon(), "Cp", [this]() {
+        DuplicateSelectedObject();
+    });
+    add_direct_button("Mirror Object by Plane", "mirror", MirrorObjectIcon(), "Mr", [this]() {
+        MirrorSelectedObject();
+    });
+
+    vertical_toolbar_->addSeparator();
+
+    add_direct_button("Move", "move", ToolIcon("move"), "Mv", [this]() {
+        BeginTransformTool(TransformOperation::Move);
+    });
+    add_direct_button("Rotate", "rotate", ToolIcon("rotate"), "Rt", [this]() {
+        BeginTransformTool(TransformOperation::Rotate);
+    });
+    add_direct_button("Scale", "scale", ToolIcon("scale"), "Sc", [this]() {
+        BeginTransformTool(TransformOperation::Scale);
+    });
+    add_direct_button("New Sketch", "NewSketch", NewSketchIcon(), "Sk", [this]() {
+        BeginNewSketch();
+    });
+    add_direct_button("Layer Properties", "LayerProperties", QIcon(), "Ly", [this]() {
+        ShowLayerProperties();
+    });
+    add_direct_button("Change Layer", "ChangeLayer", QIcon(), "CL", [this]() {
+        ChangeSelectedObjectLayer();
+    });
+
+    vertical_toolbar_->addSeparator();
+
+    add_flyout(
+        "Mesh 3D",
+        ToolIcon("SolidLowPoly"),
+        {
+            {"MeshFillContour", "Fiill Contour"},
+            {"SolidLowPoly", "Low Poly"}
+        });
+
+    vertical_tools_dock_->setWidget(vertical_toolbar_);
+    addDockWidget(Qt::LeftDockWidgetArea, vertical_tools_dock_);
+    if (tools_dock_) {
+        splitDockWidget(tools_dock_, vertical_tools_dock_, Qt::Horizontal);
+        resizeDocks({tools_dock_, vertical_tools_dock_}, {104, 40}, Qt::Horizontal);
+    }
+}
+
 void MainWindow::CreateDocks() {
     tools_dock_ = new QDockWidget("Architecture", this);
     tools_dock_->setMinimumWidth(104);
     CreateToolsPanel(tools_dock_);
     addDockWidget(Qt::LeftDockWidgetArea, tools_dock_);
+    CreateVerticalToolBar();
 
     scene_tree_dock_ = new QDockWidget("Scene Tree", this);
     scene_tree_dock_->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
@@ -1853,6 +2170,9 @@ void MainWindow::AddToolButton(QGridLayout* layout, QWidget* parent, const std::
     if (key == "TrimMeshTest") {
         button->setIcon(QIcon());
         button->setText("Trim M");
+    } else if (key == "MeshFillContour") {
+        button->setIcon(QIcon());
+        button->setText("Fill");
     }
     connect(button, &QPushButton::clicked, this, [this, key]() { ActivateParametricTool(key); });
     layout->addWidget(button, row, column);
@@ -2014,6 +2334,8 @@ void MainWindow::SetTool(ToolMode tool, const QString& status_text) {
         UpdateActiveToolUi("EditPoint");
     } else if (tool == ToolMode::SketchRectangle) {
         UpdateActiveToolUi("NewSketch");
+    } else if (tool == ToolMode::SolidBoxRectangle) {
+        UpdateActiveToolUi("SolidBox");
     }
     statusBar()->showMessage(status_text);
 }
@@ -2821,6 +3143,45 @@ void MainWindow::BeginTransformTool(TransformOperation operation) {
     }
 }
 
+void MainWindow::BeginSolidBox() {
+    ClearActiveProperties();
+
+    QDialog dlg(this);
+    dlg.setWindowTitle("BOX");
+    dlg.setModal(true);
+
+    auto* layout = new QGridLayout(&dlg);
+    layout->setContentsMargins(12, 10, 12, 12);
+    layout->setHorizontalSpacing(12);
+    layout->setVerticalSpacing(10);
+
+    auto* coordinate_label = new QLabel("Placement", &dlg);
+    auto* plane_combo = new QComboBox(&dlg);
+    plane_combo->addItem(QString::fromUtf8("Плоскость XY"), static_cast<int>(OpenGLViewport::SketchPlane::XY));
+    plane_combo->addItem(QString::fromUtf8("Плоскость XZ"), static_cast<int>(OpenGLViewport::SketchPlane::XZ));
+    plane_combo->addItem(QString::fromUtf8("Плоскость YZ"), static_cast<int>(OpenGLViewport::SketchPlane::YZ));
+
+    layout->addWidget(coordinate_label, 0, 0, 1, 2);
+    layout->addWidget(plane_combo, 1, 0, 1, 2);
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    layout->addWidget(buttons, 2, 0, 1, 2);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+    if (dlg.exec() != QDialog::Accepted) {
+        UpdateActiveToolUi("select");
+        statusBar()->showMessage("BOX canceled", 800);
+        return;
+    }
+
+    const OpenGLViewport::SketchPlane plane = static_cast<OpenGLViewport::SketchPlane>(plane_combo->currentData().toInt());
+    active_parametric_edit_existing_ = false;
+    viewport_->BeginSolidBoxRectangle(plane);
+    UpdateActiveToolUi("SolidBox");
+    statusBar()->showMessage("BOX: click first rectangle corner");
+}
+
 void MainWindow::BeginNewSketch() {
     ClearActiveProperties();
 
@@ -3020,8 +3381,16 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
     if (tool_id != "SolidLowPoly") {
         low_poly_pick_pending_ = false;
     }
+    if (tool_id == "SolidBox") {
+        BeginSolidBox();
+        return;
+    }
     if (tool_id == "SolidLowPoly") {
         ShowLowPolyTool();
+        return;
+    }
+    if (tool_id == "MeshFillContour") {
+        ShowMeshFillContourTool();
         return;
     }
     if (tool_id == "TrimMeshTest") {
@@ -3323,7 +3692,6 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         if (tool_id == "SolidBox" || tool_id == "SolidCylinder" || tool_id == "SolidSphereTool"
             || tool_id == "SolidTorusTool" || tool_id == "SolidPrismTool") {
             document_.ClearSelection();
-            viewport_->FitToDocument();
         }
     } else {
         ClearActiveProperties();
@@ -3375,6 +3743,41 @@ void MainWindow::ShowLowPolyTool() {
     dialog->raise();
     dialog->activateWindow();
     statusBar()->showMessage("Low Poly: меняй параметры или Create Low Poly", 1600);
+}
+
+void MainWindow::ShowMeshFillContourTool() {
+    ClearActiveProperties();
+    viewport_->SetTool(ToolMode::Select);
+    viewport_->SetSelectionMode(SelectionMode::Object);
+    UpdateActiveToolUi("MeshFillContour");
+
+    auto* dialog = new MeshFillContourDialog(
+        document_,
+        [this]() {
+            RefreshSceneTree();
+            viewport_->update();
+        },
+        [this](const QString& text) {
+            statusBar()->showMessage(text, 1800);
+        },
+        this);
+
+    if (!dialog->HasContours()) {
+        dialog->deleteLater();
+        statusBar()->showMessage("Fiill Contour: сначала создайте CPolyline с 3+ точками", 2000);
+        return;
+    }
+
+    connect(dialog, &QDialog::finished, this, [this]() {
+        UpdateActiveToolUi("select");
+        viewport_->SetTool(ToolMode::Select);
+        viewport_->update();
+        statusBar()->showMessage("Select objects", 900);
+    });
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
+    statusBar()->showMessage("Fiill Contour: выберите CPolyline и Density", 1800);
 }
 
 void MainWindow::ShowTrimMeshTestTool() {
@@ -3950,14 +4353,16 @@ void MainWindow::RegisterToolAction(QAction* action, const std::string& key) {
     tool_actions_.push_back(action);
 }
 
-void MainWindow::RegisterToolButton(QPushButton* button, const std::string& key) {
+void MainWindow::RegisterToolButton(QAbstractButton* button, const std::string& key) {
     if (!button) {
         return;
     }
 
     button->setCheckable(true);
     button->setProperty("toolKey", QString::fromStdString(key));
-    button->setIcon(ToolIcon(key));
+    if (button->icon().isNull()) {
+        button->setIcon(ToolIcon(key));
+    }
     button->setIconSize(QSize(22, 22));
     tool_buttons_.push_back(button);
 }
@@ -3970,8 +4375,13 @@ void MainWindow::UpdateActiveToolUi(const std::string& key) {
         action->setChecked(action->property("toolKey").toString() == active_key);
     }
 
-    for (QPushButton* button : tool_buttons_) {
-        button->setChecked(button->property("toolKey").toString() == active_key);
+    for (QAbstractButton* button : tool_buttons_) {
+        bool checked = button->property("toolKey").toString() == active_key;
+        const QVariant group_keys = button->property("toolGroupKeys");
+        if (!checked && group_keys.isValid()) {
+            checked = group_keys.toStringList().contains(active_key);
+        }
+        button->setChecked(checked);
     }
 
     UpdateToolAvailability();
@@ -3996,7 +4406,7 @@ void MainWindow::UpdateToolAvailability() {
         }
     }
 
-    for (QPushButton* button : tool_buttons_) {
+    for (QAbstractButton* button : tool_buttons_) {
         if (button) {
             button->setEnabled(is_enabled(button->property("toolKey").toString()));
         }
@@ -4759,7 +5169,11 @@ void MainWindow::PopulateToolsPanelForTab(int tab_index) {
     }
 
     ClearActiveProperties();
-    tool_buttons_.clear();
+    tool_buttons_.erase(
+        std::remove_if(tool_buttons_.begin(), tool_buttons_.end(), [](QAbstractButton* button) {
+            return !button || !button->property("persistentToolButton").toBool();
+        }),
+        tool_buttons_.end());
     while (QLayoutItem* item = tools_layout_->takeAt(0)) {
         if (QWidget* widget = item->widget()) {
             widget->deleteLater();
@@ -4769,7 +5183,7 @@ void MainWindow::PopulateToolsPanelForTab(int tab_index) {
 
     const QString tab = tool_tabs_->tabText(tab_index);
     tools_dock_->setWindowTitle(tab);
-    tools_dock_->setVisible(tab == "Architecture" || tab == "Furniture" || tab == "Surfaces" || tab == "Solid" || tab == "Curves");
+    tools_dock_->setVisible(tab == "Architecture" || tab == "Furniture" || tab == "Surfaces" || tab == "Solid" || tab == "Curves" || tab == "Mesh 3D");
 
     std::vector<std::string> tool_ids;
     if (tab == "Architecture") {
@@ -4777,12 +5191,14 @@ void MainWindow::PopulateToolsPanelForTab(int tab_index) {
     } else if (tab == "Furniture") {
         tool_ids = {"cabinet"};
     } else if (tab == "Curves") {
-        tool_ids = {"PolylineCurve", "BSplineCurve", "EditPoint", "TrimMeshTest"};
+        tool_ids = {"PolylineCurve", "BSplineCurve", "EditPoint"};
+    } else if (tab == "Mesh 3D") {
+        tool_ids = {"MeshFillContour", "SolidLowPoly", "TrimMeshTest"};
     } else if (tab == "Surfaces") {
         tool_ids = {"SurfaceLoft", "SurfaceReverseNormals", "SurfaceOfRevolution"};
     } else if (tab == "Solid") {
         // единый boolean-инструмент вместо трёх отдельных
-        tool_ids = {"SolidBox", "SolidCylinder", "SolidSphereTool", "SolidTorusTool", "SolidPrismTool", "SolidExtrudeTool", "SurfaceOfRevolution", "boolean", "fillet_edge", "fillet_all_edges", "ChamferSolid", "SolidExtrudeFace", "SolidDraft", "ThickSolidTool", "SolidLowPoly"};
+        tool_ids = {"SolidBox", "SolidCylinder", "SolidSphereTool", "SolidTorusTool", "SolidPrismTool", "SolidExtrudeTool", "SurfaceOfRevolution", "boolean", "fillet_edge", "fillet_all_edges", "ChamferSolid", "SolidExtrudeFace", "SolidDraft", "ThickSolidTool"};
     }
 
     int index = 0;

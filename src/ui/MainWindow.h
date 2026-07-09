@@ -20,6 +20,7 @@
 #include <vector>
 
 class QAction;
+class QAbstractButton;
 class QCheckBox;
 class QDockWidget;
 class QDragEnterEvent;
@@ -34,6 +35,7 @@ class QTabBar;
 class QTreeWidget;
 class QTreeWidgetItem;
 class QToolBar;
+class QToolButton;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -44,6 +46,7 @@ public:
 private:
     void CreateActions();
     void CreateDocks();
+    void CreateVerticalToolBar();
     void CreateMaterialLibraryDock();
     void CreateToolsPanel(QDockWidget* dock);
     void PopulateToolsPanelForTab(int tab_index);
@@ -72,10 +75,12 @@ private:
     void ApplyMaterialToSelection(const Material& material);
     void BeginTransformTool(TransformOperation operation);
     void BeginNewSketch();
+    void BeginSolidBox();
     void BeginSketchFillet();
     void ShowSketchPanel();
     void ActivateParametricTool(const std::string& tool_id);
     void ShowLowPolyTool();
+    void ShowMeshFillContourTool();
     void ShowTrimMeshTestTool();
     void EditSelectedParametricObject();
     bool TryStartLiveEdgeToolFromSelection();
@@ -86,7 +91,7 @@ private:
     void CancelActiveProperties();
     void ShowPropertyPanelAtCursor(const QString& title);
     void RegisterToolAction(QAction* action, const std::string& key);
-    void RegisterToolButton(QPushButton* button, const std::string& key);
+    void RegisterToolButton(QAbstractButton* button, const std::string& key);
     void UpdateActiveToolUi(const std::string& key);
     void UpdateToolAvailability();
     QIcon ToolIcon(const std::string& key) const;
@@ -124,6 +129,7 @@ private:
     QTreeWidget* scene_tree_ = nullptr;
     PropertyPanel* property_panel_ = nullptr;
     QDockWidget* tools_dock_ = nullptr;
+    QDockWidget* vertical_tools_dock_ = nullptr;
     QDockWidget* scene_tree_dock_ = nullptr;
     QDockWidget* material_library_dock_ = nullptr;
     QDockWidget* sketch_dock_ = nullptr;
@@ -133,6 +139,7 @@ private:
     QTabBar* tool_tabs_ = nullptr;
     QToolBar* tab_toolbar_ = nullptr;
     QToolBar* main_toolbar_ = nullptr;
+    QToolBar* vertical_toolbar_ = nullptr;
     QMenu* recent_files_menu_ = nullptr;
     QAction* orthographic_projection_action_ = nullptr;
     QAction* cad_orbit_action_ = nullptr;
@@ -154,7 +161,7 @@ private:
     bool has_selected_library_material_ = false;
     std::function<void()> refresh_material_library_;
     std::vector<QAction*> tool_actions_;
-    std::vector<QPushButton*> tool_buttons_;
+    std::vector<QAbstractButton*> tool_buttons_;
     QStringList recent_project_files_;
     QString last_file_dialog_dir_;
     std::string active_tool_key_ = "orbit";

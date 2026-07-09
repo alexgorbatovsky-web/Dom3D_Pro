@@ -271,7 +271,7 @@ void OpenGLViewport::SetTool(ToolMode tool) {
         editing_polyline_ = false;
         highlighted_polyline_handle_ = false;
     }
-    if (tool_ != ToolMode::SketchRectangle) {
+    if (tool_ != ToolMode::SketchRectangle && tool_ != ToolMode::SolidBoxRectangle) {
         sketch_rectangle_has_first_point_ = false;
         sketch_rectangle_preview_valid_ = false;
     }
@@ -286,7 +286,7 @@ void OpenGLViewport::SetTool(ToolMode tool) {
     if (material_interaction_mode_ == MaterialInteractionMode::None) {
         if (tool_ == ToolMode::DrawCurve || tool_ == ToolMode::DrawBSpline || tool_ == ToolMode::EditPoint) {
             setCursor(Qt::CrossCursor);
-        } else if (tool_ == ToolMode::SketchRectangle) {
+        } else if (tool_ == ToolMode::SketchRectangle || tool_ == ToolMode::SolidBoxRectangle) {
             setCursor(Qt::CrossCursor);
         } else if (tool_ == ToolMode::SketchFillet) {
             setCursor(Qt::CrossCursor);
@@ -590,6 +590,33 @@ void OpenGLViewport::BeginSketchFillet(double radius) {
     emit StatusTextChanged(QString("%1: Fillet R=%2. Укажите вершину полилинии").arg(sketch_name_).arg(sketch_fillet_radius_, 0, 'f', 2));
 }
 
+void OpenGLViewport::BeginSolidBoxRectangle(SketchPlane plane) {
+    sketch_active_ = false;
+    sketch_name_ = "BOX";
+    sketch_rectangle_has_first_point_ = false;
+    sketch_rectangle_preview_valid_ = false;
+    highlighted_sketch_fillet_point_ = false;
+
+    sketch_origin_ = {};
+    if (plane == SketchPlane::XY) {
+        sketch_u_ = {1.0f, 0.0f, 0.0f};
+        sketch_v_ = {0.0f, 1.0f, 0.0f};
+        sketch_normal_ = {0.0f, 0.0f, 1.0f};
+    } else if (plane == SketchPlane::XZ) {
+        sketch_u_ = {1.0f, 0.0f, 0.0f};
+        sketch_v_ = {0.0f, 0.0f, 1.0f};
+        sketch_normal_ = {0.0f, 1.0f, 0.0f};
+    } else {
+        sketch_u_ = {0.0f, 1.0f, 0.0f};
+        sketch_v_ = {0.0f, 0.0f, 1.0f};
+        sketch_normal_ = {1.0f, 0.0f, 0.0f};
+    }
+
+    SetTool(ToolMode::SolidBoxRectangle);
+    setCursor(Qt::CrossCursor);
+    emit StatusTextChanged("BOX: click first rectangle corner");
+}
+
 void OpenGLViewport::BeginPickXYPoint() {
     picking_xy_point_ = true;
     orbiting_ = false;
@@ -604,7 +631,7 @@ void OpenGLViewport::EndSketch() {
     sketch_active_ = false;
     sketch_rectangle_has_first_point_ = false;
     sketch_rectangle_preview_valid_ = false;
-    if (tool_ == ToolMode::SketchRectangle || tool_ == ToolMode::SketchFillet) {
+    if (tool_ == ToolMode::SketchRectangle || tool_ == ToolMode::SketchFillet || tool_ == ToolMode::SolidBoxRectangle) {
         SetTool(ToolMode::Select);
     } else {
         update();
@@ -630,7 +657,9 @@ void OpenGLViewport::paintGL() {
     if ((tool_ == ToolMode::DrawCurve || tool_ == ToolMode::DrawBSpline) && curve_preview_valid_) {
         DrawCurveRubberBand();
     }
-    if (tool_ == ToolMode::SketchRectangle && sketch_rectangle_has_first_point_ && sketch_rectangle_preview_valid_) {
+    if ((tool_ == ToolMode::SketchRectangle || tool_ == ToolMode::SolidBoxRectangle)
+        && sketch_rectangle_has_first_point_
+        && sketch_rectangle_preview_valid_) {
         DrawSketchRectanglePreview();
     }
     if (tool_ == ToolMode::EditPoint && document_) {
@@ -743,6 +772,11 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
 
     if (tool_ == ToolMode::SketchRectangle) {
         HandleSketchRectangleClick(event->pos());
+        return;
+    }
+
+    if (tool_ == ToolMode::SolidBoxRectangle) {
+        HandleSolidBoxRectangleClick(event->pos());
         return;
     }
 
@@ -900,7 +934,9 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
         }
     }
 
-    if (tool_ == ToolMode::SketchRectangle && sketch_rectangle_has_first_point_ && document_) {
+    if ((tool_ == ToolMode::SketchRectangle || tool_ == ToolMode::SolidBoxRectangle)
+        && sketch_rectangle_has_first_point_
+        && document_) {
         CPoint3d preview_point{};
         const bool preview_valid = ScreenToSketchPlane(event->pos(), preview_point);
         if (preview_valid != sketch_rectangle_preview_valid_
@@ -1108,7 +1144,7 @@ void OpenGLViewport::mouseReleaseEvent(QMouseEvent* event) {
     if (material_interaction_mode_ == MaterialInteractionMode::None) {
         if (tool_ == ToolMode::DrawCurve || tool_ == ToolMode::DrawBSpline || tool_ == ToolMode::EditPoint) {
             setCursor(Qt::CrossCursor);
-        } else if (tool_ == ToolMode::SketchRectangle) {
+        } else if (tool_ == ToolMode::SketchRectangle || tool_ == ToolMode::SolidBoxRectangle) {
             setCursor(Qt::CrossCursor);
         } else {
             unsetCursor();
@@ -1127,6 +1163,21 @@ void OpenGLViewport::keyPressEvent(QKeyEvent* event) {
         } else {
             EndSketch();
             emit StatusTextChanged("Sketch closed");
+        }
+        event->accept();
+        return;
+    }
+
+    if (event->key() == Qt::Key_Escape && tool_ == ToolMode::SolidBoxRectangle) {
+        if (sketch_rectangle_has_first_point_) {
+            sketch_rectangle_has_first_point_ = false;
+            sketch_rectangle_preview_valid_ = false;
+            emit StatusTextChanged("BOX: first point canceled");
+            update();
+        } else {
+            SetTool(ToolMode::Select);
+            unsetCursor();
+            emit StatusTextChanged("BOX canceled");
         }
         event->accept();
         return;
@@ -2311,6 +2362,37 @@ void OpenGLViewport::HandleSketchRectangleClick(const QPoint& point) {
     update();
 }
 
+void OpenGLViewport::HandleSolidBoxRectangleClick(const QPoint& point) {
+    if (!document_) {
+        return;
+    }
+
+    CPoint3d sketch_point{};
+    if (!ScreenToSketchPlane(point, sketch_point)) {
+        emit StatusTextChanged("BOX: point is outside placement plane");
+        return;
+    }
+
+    if (!sketch_rectangle_has_first_point_) {
+        sketch_rectangle_first_point_ = sketch_point;
+        sketch_rectangle_preview_point_ = sketch_point;
+        sketch_rectangle_has_first_point_ = true;
+        sketch_rectangle_preview_valid_ = true;
+        emit StatusTextChanged("BOX: click opposite rectangle corner");
+        update();
+        return;
+    }
+
+    std::vector<ToolParameter> parameters = SolidBoxParametersFromRectangle(sketch_rectangle_first_point_, sketch_point);
+    sketch_rectangle_has_first_point_ = false;
+    sketch_rectangle_preview_valid_ = false;
+    unsetCursor();
+    SetTool(ToolMode::Select);
+    emit SolidBoxRectangleFinished(parameters);
+    emit StatusTextChanged("BOX: rectangle created");
+    update();
+}
+
 void OpenGLViewport::HandleSketchFilletClick(const QPoint& point) {
     if (!document_ || !sketch_active_) {
         return;
@@ -2397,6 +2479,43 @@ std::vector<CPoint3d> OpenGLViewport::SketchRectanglePoints(const CPoint3d& firs
         CPoint3d(p1.x, p1.y, p1.z),
         CPoint3d(p2.x, p2.y, p2.z),
         CPoint3d(p3.x, p3.y, p3.z)
+    };
+}
+
+std::vector<ToolParameter> OpenGLViewport::SolidBoxParametersFromRectangle(const CPoint3d& first, const CPoint3d& second) const {
+    const Vec3 a{static_cast<float>(first.x), static_cast<float>(first.y), static_cast<float>(first.z)};
+    const Vec3 b{static_cast<float>(second.x), static_cast<float>(second.y), static_cast<float>(second.z)};
+    const Vec3 delta = b - a;
+    const float length_signed = dot(delta, sketch_u_);
+    const float width_signed = dot(delta, sketch_v_);
+    const float length = std::max(std::fabs(length_signed), 0.001f);
+    const float width = std::max(std::fabs(width_signed), 0.001f);
+    Vec3 origin = a;
+    if (length_signed < 0.0f) {
+        origin = origin + sketch_u_ * length_signed;
+    }
+    if (width_signed < 0.0f) {
+        origin = origin + sketch_v_ * width_signed;
+    }
+    const Vec3 u = sketch_u_;
+    const Vec3 v = sketch_v_;
+    const Vec3 normal = sketch_normal_;
+    return {
+        {"width", "Length", length, 0.001, 900.0, 0.5},
+        {"height", "Width", width, 0.001, 900.0, 0.5},
+        {"depth", "Height", 5.0, 0.001, 900.0, 0.5},
+        {"origin.x", "Origin X", origin.x, -1000000.0, 1000000.0, 0.1},
+        {"origin.y", "Origin Y", origin.y, -1000000.0, 1000000.0, 0.1},
+        {"origin.z", "Origin Z", origin.z, -1000000.0, 1000000.0, 0.1},
+        {"axis.u.x", "U X", u.x, -1.0, 1.0, 0.01},
+        {"axis.u.y", "U Y", u.y, -1.0, 1.0, 0.01},
+        {"axis.u.z", "U Z", u.z, -1.0, 1.0, 0.01},
+        {"axis.v.x", "V X", v.x, -1.0, 1.0, 0.01},
+        {"axis.v.y", "V Y", v.y, -1.0, 1.0, 0.01},
+        {"axis.v.z", "V Z", v.z, -1.0, 1.0, 0.01},
+        {"axis.n.x", "Normal X", normal.x, -1.0, 1.0, 0.01},
+        {"axis.n.y", "Normal Y", normal.y, -1.0, 1.0, 0.01},
+        {"axis.n.z", "Normal Z", normal.z, -1.0, 1.0, 0.01}
     };
 }
 

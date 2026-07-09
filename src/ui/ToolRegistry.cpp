@@ -1536,6 +1536,16 @@ ToolRegistry::ToolRegistry() {
     });
 
     tools_.push_back({
+        "MeshFillContour",
+        "Fiill Contour",
+        {},
+        [](CAlfaDoc&, const std::vector<ToolParameter>&) {
+        },
+        [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {
+        }
+    });
+
+    tools_.push_back({
         "stair",
         "Stair",
         {
@@ -1626,6 +1636,20 @@ ActiveParametricObject ToolRegistry::Activate(const std::string& id, CAlfaDoc& d
     const size_t object_index = document.GetSelectedObjectIndex();
     store_parametric_definition(document, object_index, tool->id, tool->label, 0, tool->defaults);
     return {tool->id, object_index, 0, tool->defaults};
+}
+
+ActiveParametricObject ToolRegistry::CreateParametricObject(const std::string& id,
+                                                            CAlfaDoc& document,
+                                                            const std::vector<ToolParameter>& parameters) const {
+    const ToolDefinition* tool = Find(id);
+    if (!tool || !tool->create || parameters.empty()) {
+        return {};
+    }
+
+    tool->create(document, parameters);
+    const size_t object_index = document.GetSelectedObjectIndex();
+    store_parametric_definition(document, object_index, tool->id, tool->label, 0, parameters);
+    return {tool->id, object_index, 0, parameters};
 }
 
 void ToolRegistry::Rebuild(const ActiveParametricObject& active_object, CAlfaDoc& document) const {

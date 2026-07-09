@@ -1,6 +1,7 @@
 #pragma once
 
 #include "QtSceneRenderer.h"
+#include "ToolRegistry.h"
 
 #include "../Material.h"
 #include "../Point3d.h"
@@ -57,6 +58,7 @@ public:
     void BeginSketch(const QString& name, SketchPlane plane);
     void SetSketchRectangleTool();
     void BeginSketchFillet(double radius);
+    void BeginSolidBoxRectangle(SketchPlane plane);
     void BeginPickXYPoint();
     void EndSketch();
     void DrawFPS();
@@ -70,6 +72,7 @@ signals:
     void MaterialPicked(const Material& material);
     void ToolModeChanged(ToolMode tool);
     void XYPointPicked(CPoint3d point);
+    void SolidBoxRectangleFinished(std::vector<ToolParameter> parameters);
     void ObjectDoubleClicked();
     void FilesDropped(const QStringList& paths);
 
@@ -93,9 +96,11 @@ private:
     void DrawCurveAt(const QPoint& point);
     void DrawBSplineAt(const QPoint& point);
     void HandleSketchRectangleClick(const QPoint& point);
+    void HandleSolidBoxRectangleClick(const QPoint& point);
     void HandleSketchFilletClick(const QPoint& point);
     bool ScreenToSketchPlane(const QPoint& point, CPoint3d& result) const;
     std::vector<CPoint3d> SketchRectanglePoints(const CPoint3d& first, const CPoint3d& second) const;
+    std::vector<ToolParameter> SolidBoxParametersFromRectangle(const CPoint3d& first, const CPoint3d& second) const;
     void DrawSketchRectanglePreview();
     void HandleBooleanClick(const QPoint& point);
     void HandleFaceExtrudeClick(const QPoint& point);

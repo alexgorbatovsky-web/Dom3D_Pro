@@ -35,6 +35,11 @@ bool IsLengthParameter(const ToolParameter& parameter) {
         || id == "center.y"
         || id == "center.z";
 }
+
+bool IsInternalPlacementParameter(const ToolParameter& parameter) {
+    return parameter.id.rfind("origin.", 0) == 0
+        || parameter.id.rfind("axis.", 0) == 0;
+}
 }
 
 PropertyPanel::PropertyPanel(QWidget* parent)
@@ -57,6 +62,10 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
 
     for (int i = 0; i < static_cast<int>(active_object_.parameters.size()); ++i) {
         ToolParameter& parameter = active_object_.parameters[static_cast<size_t>(i)];
+        if (IsInternalPlacementParameter(parameter)) {
+            continue;
+        }
+
         if (parameter.type == ToolParameterType::Checkbox) {
             auto* editor = new QCheckBox(this);
             editor->setChecked(parameter.value >= 0.5);

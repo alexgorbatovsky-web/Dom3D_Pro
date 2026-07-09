@@ -1,4 +1,5 @@
 #include "SurfaceFace.h"
+#include "../FillContour.h"
 #include "Solid.h"
 #include "SolidTool.h"
 #include "../iges/SplineCurve.h"
@@ -1170,8 +1171,8 @@ bool trim_mesh_by_surface_boundary(CMesh3D* mesh,
 		closed_loops.push_back(trim_loop);
 		loop_faces.push_back(std::move(loop_face));
 	}
-/*
-	if (surface->m_ID == 0) {
+	bool NeedTest = false;
+	if (NeedTest && surface->m_ID == 3) {
 		CAlfaDoc* pDoc = GetAlfaDoc();
 		if (pDoc) {
 			pDoc->AddLayer("Mesh3D ID =0");
@@ -1186,7 +1187,7 @@ bool trim_mesh_by_surface_boundary(CMesh3D* mesh,
 				CPolyline* loop_copy = dynamic_cast<CPolyline*>(loop_copy_object.get());
 				if (!loop_copy)
 					return;
-
+				loop_copy->printToFile("loop.txt");
 				loop_copy->SetColor({ 1.0f, 0.12f, 0.05f });
 				pDoc->AddObject(std::move(loop_copy_object));
 			};
@@ -1197,7 +1198,7 @@ bool trim_mesh_by_surface_boundary(CMesh3D* mesh,
 				dump_loop(loop);
 		}
 	}
-*/
+
 	bool changed = false;
 	for (size_t i = 0; i < boundary_cut_loops.size(); ++i) {
 		const cVec2 keep = choose_point_outside_loop(mesh, boundary_cut_faces[i]);
@@ -1528,12 +1529,16 @@ bool CSurfaceFace::BuldMeshTriangle(float Deflection, float AngDeflection)
 
 bool CSurfaceFace::BuldMesh(float Deflection, bool MeshQuadro)
 {
-//	PrepareEdges(Deflection);
-	// Prepare edges of Surfaces
-	//Analiz of Surfaces
-//	DefineTypeMesh();
-
-	return BuldMeshTriangle(Deflection, 0.3);
+	if (MeshQuadro) {
+		if (!IsInitEdges)
+			InitEdges();
+		if (!Polylines.empty() || InitEdges()) {
+			PrepareEdges(Deflection);
+			if (BuildTrimmingMesh(nullptr, Deflection))
+				return true;
+		}
+	}
+	return BuldMeshTriangle(Deflection, 0.3f);
 }
 
 bool CSurfaceFace::IsPlanar() const
@@ -2245,6 +2250,24 @@ bool CSurfaceFace::BuildTrimmingMesh(CSolid* psol, float Deflection){
 	IsInitMesh = true;
 	return true;
 }
+
+void CSurfaceFace::MakeFilledContour(const std::vector<Vec3>& contour, Vec3 normal, CMesh3D* quad_mesh)
+{
+	if (!quad_mesh)
+		return;
+	if (contour.size() < 3) {
+		quad_mesh->Clear();
+		return;
+	}
+
+	CMesh3D triangle_mesh;
+	FillContorByTriangles(&triangle_mesh, contour, normal);
+
+	ContourQuadrangulator quadrangulator;
+	quadrangulator.CreateFromMesh(&triangle_mesh);
+	quadrangulator.Quadrangulate(quad_mesh);
+}
+
 void GetPointFromCurve(TopoDS_Edge& ed, int gtystep, CPolyline* pl)
 {
 	Standard_Real f, l, prm;

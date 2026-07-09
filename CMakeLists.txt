@@ -70,6 +70,7 @@ set(DOM3D_SOURCES
     src/CAlfaObject.cpp
     src/CAlfaDoc.cpp
     src/CMesh3D.cpp
+    src/FillContour.cpp
     src/Line2D.cpp
     src/Net.cpp
     src/SurfaceUVMapping.cpp
@@ -131,6 +132,7 @@ set(DOM3D_HEADERS
     src/CAlfaDoc.h
     src/Common.h
     src/CMesh3D.h
+    src/FillContour.h
     src/Line2D.h
     src/Net.h
     src/CBSpline.h

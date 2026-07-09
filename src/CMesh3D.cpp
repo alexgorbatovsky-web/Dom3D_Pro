@@ -1,5 +1,7 @@
 #include "CMesh3D.h"
 
+#include "CPolyline.h"
+#include "FillContour.h"
 #include "Line2D.h"
 #include "OpenGLCompat.h"
 #include "SurfaceUVMapping.h"
@@ -493,16 +495,13 @@ EdgeCoordKey edge_coord_key(const cVec2& a, const cVec2& b, double eps)
     return {first.first, first.second, second.first, second.second};
 }
 
-void PrepareAndMoveVertexToTrimLine(std::vector<CMesh3D::Face>& faces,
+void PrepareAndMoveVertexToTrimLinePro(std::vector<CMesh3D::Face>& faces,
                                     std::vector<Vec3>& vertices,
                                     const std::vector<size_t>& affected_faces,
                                     const std::vector<cVec2>& cut,
                                     const Face2D* trim_polygon,
                                     bool keep_inside)
 {
-    (void)trim_polygon;
-    (void)keep_inside;
-
     struct IndAndDist {
         size_t cut_index = 0;
         size_t face_index = 0;
@@ -521,6 +520,57 @@ void PrepareAndMoveVertexToTrimLine(std::vector<CMesh3D::Face>& faces,
         cut_nodes.pop_back();
     if (cut_nodes.empty())
         return;
+
+    if (trim_polygon && trim_polygon->verts.size() >= 3) {
+        struct VertexMove {
+            cVec2 point;
+            double dist2 = std::numeric_limits<double>::max();
+        };
+        std::unordered_map<size_t, VertexMove> moves;
+        moves.reserve(affected_faces.size() * 2);
+
+        for (size_t face_index : affected_faces) {
+            if (face_index >= faces.size())
+                continue;
+            const CMesh3D::Face& face = faces[face_index];
+            if (face.deleted || face.corners.size() < 3)
+                continue;
+
+            for (const MeshCorner& corner : face.corners) {
+                if (corner.v >= vertices.size())
+                    continue;
+
+                const cVec2 point = mesh_vertex_2d(vertices, corner.v);
+                const PointFacePos pos = ClassifyPointInFace2(*trim_polygon, point, EPS2D);
+                if (pos == PFP_BOUNDARY)
+                    continue;
+
+                const bool vertex_inside = pos != PFP_OUTSIDE;
+                if (vertex_inside == keep_inside)
+                    continue;
+
+                const CutProjection projection = project_point_to_cut(point, cut);
+                if (projection.segment < 0)
+                    continue;
+
+                VertexMove& move = moves[corner.v];
+                if (projection.dist2 < move.dist2) {
+                    move.point = projection.point;
+                    move.dist2 = projection.dist2;
+                }
+            }
+        }
+
+        for (const auto& entry : moves) {
+            const size_t vertex = entry.first;
+            if (vertex >= vertices.size())
+                continue;
+            vertices[vertex].x = static_cast<float>(entry.second.point.x);
+            vertices[vertex].y = static_cast<float>(entry.second.point.y);
+            vertices[vertex].z = 0.0f;
+        }
+        return;
+    }
 
     std::vector<IndAndDist> ind_and_dist_arr;
     ind_and_dist_arr.reserve(affected_faces.size() * 2);
@@ -577,6 +627,8 @@ void PrepareAndMoveVertexToTrimLine(std::vector<CMesh3D::Face>& faces,
     }
 
     for (const IndAndDist& ind_and_dist : ind_and_dist_arr) {
+        if (!ind_and_dist.need_move)
+            continue;
         if (ind_and_dist.face_index >= faces.size() || ind_and_dist.cut_index >= cut_nodes.size())
             continue;
         CMesh3D::Face& face = faces[ind_and_dist.face_index];
@@ -593,6 +645,116 @@ void PrepareAndMoveVertexToTrimLine(std::vector<CMesh3D::Face>& faces,
         vertices[vertex].z = 0.0f;
     }
 }
+
+} // namespace
+
+bool CMesh3D::PrepareAndMoveVertexToTrimLine(CPolyline* pLine, std::vector<DataToMoveVerts*>& Data)
+{
+    std::vector<DataToMoveVerts*> prepared_data;
+    prepared_data.reserve(Data.size());
+    for (int j = 0; j < static_cast<int>(Data.size()); j++) {
+        DataToMoveVerts* data = Data[j];
+        if (FindVertexToMove(pLine, data))
+            prepared_data.push_back(data);
+    }
+    std::vector<IndAndDist> indAndDistArr;
+    for (int j = 0; j < static_cast<int>(prepared_data.size()); j++) {
+        IndAndDist indAndDist1 = prepared_data[j]->IndAndDistArr[0];
+        indAndDistArr.push_back(indAndDist1);
+        IndAndDist indAndDist2 = prepared_data[j]->IndAndDistArr[1];
+        indAndDistArr.push_back(indAndDist2);
+    }
+    for (int j = 0; j < static_cast<int>(indAndDistArr.size()); j++) {
+        for (int i = 0; i < static_cast<int>(indAndDistArr.size()); i++) {
+            if (j == i)
+                continue;
+            if (indAndDistArr[j].ind == indAndDistArr[i].ind) {
+
+                IndAndDist indAndDist1 = indAndDistArr[j];
+                IndAndDist indAndDist2 = indAndDistArr[i];
+                if (indAndDist1.dist < indAndDist2.dist) {
+                    indAndDistArr[j].needMove = true;
+                    indAndDistArr[i].needMove = false;
+                }
+
+                else {
+                    indAndDistArr[j].needMove = false;
+                    indAndDistArr[i].needMove = true;
+                }
+            }
+        }
+    }
+
+    for (int j = 0; j < static_cast<int>(indAndDistArr.size()); j++) {
+        if (indAndDistArr[j].needMove) {
+            MeshFace* face = indAndDistArr[j].pf;
+            int ind_pLine = indAndDistArr[j].ind;
+            int vertInd = indAndDistArr[j].vertInd;
+            if (!face || ind_pLine < 0 || vertInd < 0 || vertInd >= static_cast<int>(face->corners.size()))
+                continue;
+
+            const size_t vertex_index = face->corners[static_cast<size_t>(vertInd)].v;
+            if (vertex_index >= vertices_.size())
+                continue;
+
+            vertices_[vertex_index].x = static_cast<float>(pLine->P(ind_pLine)->x);
+            vertices_[vertex_index].y = static_cast<float>(pLine->P(ind_pLine)->y);
+        }
+    }
+
+    return true;
+}
+
+
+bool CMesh3D::FindVertexToMove(CPolyline* pLine, DataToMoveVerts* data)
+{
+    if (!pLine || !data)
+        return false;
+    CMesh3D::Face* face = data->pf;
+    if (!face || face->corners.size() < 2)
+        return false;
+
+    std::vector<IndAndDist> indAndDist;
+    indAndDist.reserve(face->corners.size());
+
+    for (size_t vert_pos = 0; vert_pos < face->corners.size(); ++vert_pos) {
+        const size_t vertex_index = face->corners[vert_pos].v;
+        if (vertex_index >= vertices_.size())
+            continue;
+
+        IndAndDist candidate;
+        candidate.pf = face;
+        candidate.dist = 1e15;
+        candidate.ind = -1;
+        candidate.vertInd = static_cast<int>(vert_pos);
+
+        CPoint3d p(vertices_[vertex_index].x, vertices_[vertex_index].y, 0);
+        for (int j = 0; j < pLine->np(); j++) {
+            double dist = p.DistTo(pLine->P(j));
+            if (candidate.dist > dist) {
+                candidate.dist = dist;
+                candidate.ind = j;
+            }
+        }
+        indAndDist.push_back(candidate);
+    }
+
+    if (indAndDist.size() < 2)
+        return false;
+
+    std::sort(indAndDist.begin(), indAndDist.end(), [](const IndAndDist& a, const IndAndDist& b) {
+        return a.dist < b.dist;
+        });
+
+    data->IndAndDistArr[0] = indAndDist[0];
+    data->IndAndDistArr[1] = indAndDist[1];
+    data->IndAndDistArr[0].vertInd = indAndDist[0].vertInd;
+    data->IndAndDistArr[1].vertInd = indAndDist[1].vertInd;
+
+    return true;
+}
+
+namespace {
 
 bool SplitFaceByLine(std::vector<CMesh3D::Face>& faces, size_t face_index, int pos_a, int pos_b)
 {
@@ -991,6 +1153,268 @@ bool CMesh3D::RestoreTo3DFromUVSurface(CSurfaceFace* surface)
         face.normal = FaceNormal(face);
     }
     return true;
+}
+
+bool CMesh3D::CreateFromBoundary(CPolyline* bond, float Density)
+{
+    Clear();
+    if (!bond || bond->GetPointCount() < 3) {
+        return false;
+    }
+
+    const float grid_step = std::max(Density, 0.0001f);
+    const std::vector<CPoint3d>& source_points = bond->GetPoints();
+    std::vector<Vec3> contour;
+    contour.reserve(source_points.size());
+
+    const auto to_vec3 = [](const CPoint3d& point) {
+        return Vec3{
+            static_cast<float>(point.x),
+            static_cast<float>(point.y),
+            static_cast<float>(point.z)
+        };
+    };
+    const auto append_point = [&contour](Vec3 point) {
+        if (contour.empty() || dot(point - contour.back(), point - contour.back()) > 0.00000001f) {
+            contour.push_back(point);
+        }
+    };
+
+    const size_t point_count = source_points.size();
+    for (size_t i = 0; i < point_count; ++i) {
+        append_point(to_vec3(source_points[i]));
+    }
+
+    if (contour.size() < 3) {
+        Clear();
+        return false;
+    }
+
+    struct GridPoint {
+        double x = 0.0;
+        double y = 0.0;
+    };
+
+    double average_z = 0.0;
+    std::vector<GridPoint> polygon;
+    polygon.reserve(contour.size());
+    for (Vec3 point : contour) {
+        polygon.push_back({point.x, point.y});
+        average_z += point.z;
+    }
+    average_z /= static_cast<double>(contour.size());
+
+    double polygon_area = 0.0;
+    for (size_t i = 0; i < polygon.size(); ++i) {
+        const GridPoint& a = polygon[i];
+        const GridPoint& b = polygon[(i + 1) % polygon.size()];
+        polygon_area += a.x * b.y - b.x * a.y;
+    }
+    Vec3 normal = polygon_area >= 0.0 ? Vec3{0.0f, 0.0f, 1.0f} : Vec3{0.0f, 0.0f, -1.0f};
+    if (polygon_area < 0.0) {
+        std::reverse(polygon.begin(), polygon.end());
+        std::reverse(contour.begin(), contour.end());
+        normal = {0.0f, 0.0f, 1.0f};
+    }
+
+    double min_x = polygon.front().x;
+    double max_x = polygon.front().x;
+    double min_y = polygon.front().y;
+    double max_y = polygon.front().y;
+    for (const GridPoint& point : polygon) {
+        min_x = std::min(min_x, point.x);
+        max_x = std::max(max_x, point.x);
+        min_y = std::min(min_y, point.y);
+        max_y = std::max(max_y, point.y);
+    }
+    if (max_x - min_x <= 0.000001 || max_y - min_y <= 0.000001) {
+        Clear();
+        return false;
+    }
+
+    const double eps = std::max<double>(grid_step * 0.00001, 0.000001);
+    const auto add_sorted_unique = [](std::vector<double>& values, double value, double merge_eps) {
+        values.push_back(value);
+        std::sort(values.begin(), values.end());
+        values.erase(std::unique(values.begin(), values.end(), [merge_eps](double a, double b) {
+            return std::fabs(a - b) <= merge_eps;
+        }), values.end());
+    };
+
+    std::vector<double> x_lines;
+    std::vector<double> y_lines;
+    add_sorted_unique(x_lines, min_x, eps);
+    add_sorted_unique(x_lines, max_x, eps);
+    add_sorted_unique(y_lines, min_y, eps);
+    add_sorted_unique(y_lines, max_y, eps);
+    for (double x = std::ceil(min_x / grid_step) * grid_step; x < max_x; x += grid_step) {
+        if (x > min_x + eps)
+            add_sorted_unique(x_lines, x, eps);
+    }
+    for (double y = std::ceil(min_y / grid_step) * grid_step; y < max_y; y += grid_step) {
+        if (y > min_y + eps)
+            add_sorted_unique(y_lines, y, eps);
+    }
+
+    const auto add_unique_point = [&](std::vector<GridPoint>& points, GridPoint point) {
+        for (const GridPoint& existing : points) {
+            const double dx = existing.x - point.x;
+            const double dy = existing.y - point.y;
+            if (dx * dx + dy * dy <= eps * eps) {
+                return;
+            }
+        }
+        points.push_back(point);
+    };
+
+    const auto clipped_cell = [&](double x0, double y0, double x1, double y1) {
+        enum class ClipSide {
+            Left,
+            Right,
+            Bottom,
+            Top
+        };
+
+        const auto inside = [&](const GridPoint& point, ClipSide side) {
+            switch (side) {
+            case ClipSide::Left:
+                return point.x >= x0 - eps;
+            case ClipSide::Right:
+                return point.x <= x1 + eps;
+            case ClipSide::Bottom:
+                return point.y >= y0 - eps;
+            case ClipSide::Top:
+                return point.y <= y1 + eps;
+            }
+            return false;
+        };
+
+        const auto intersection = [&](const GridPoint& a, const GridPoint& b, ClipSide side) {
+            GridPoint result = a;
+            const double dx = b.x - a.x;
+            const double dy = b.y - a.y;
+            if (side == ClipSide::Left || side == ClipSide::Right) {
+                const double x = side == ClipSide::Left ? x0 : x1;
+                const double t = std::fabs(dx) <= eps ? 0.0 : (x - a.x) / dx;
+                result.x = x;
+                result.y = a.y + dy * std::clamp(t, 0.0, 1.0);
+            } else {
+                const double y = side == ClipSide::Bottom ? y0 : y1;
+                const double t = std::fabs(dy) <= eps ? 0.0 : (y - a.y) / dy;
+                result.x = a.x + dx * std::clamp(t, 0.0, 1.0);
+                result.y = y;
+            }
+            return result;
+        };
+
+        const auto clip_side = [&](const std::vector<GridPoint>& input, ClipSide side) {
+            std::vector<GridPoint> output;
+            if (input.empty()) {
+                return output;
+            }
+            GridPoint previous = input.back();
+            bool previous_inside = inside(previous, side);
+            for (const GridPoint& current : input) {
+                const bool current_inside = inside(current, side);
+                if (current_inside) {
+                    if (!previous_inside) {
+                        add_unique_point(output, intersection(previous, current, side));
+                    }
+                    add_unique_point(output, current);
+                } else if (previous_inside) {
+                    add_unique_point(output, intersection(previous, current, side));
+                }
+                previous = current;
+                previous_inside = current_inside;
+            }
+            return output;
+        };
+
+        std::vector<GridPoint> clipped = polygon;
+        clipped = clip_side(clipped, ClipSide::Left);
+        clipped = clip_side(clipped, ClipSide::Right);
+        clipped = clip_side(clipped, ClipSide::Bottom);
+        clipped = clip_side(clipped, ClipSide::Top);
+        return clipped;
+    };
+
+    std::vector<Vec3> vertices;
+    std::vector<Face> faces;
+    std::vector<Vec3> normals;
+    std::map<std::pair<long long, long long>, size_t> vertex_map;
+    const double key_scale = 1000000.0;
+    const auto add_vertex = [&](double x, double y) {
+        const auto key = std::make_pair(
+            static_cast<long long>(std::llround(x * key_scale)),
+            static_cast<long long>(std::llround(y * key_scale)));
+        const auto found = vertex_map.find(key);
+        if (found != vertex_map.end()) {
+            return found->second;
+        }
+        const Vec3 point{static_cast<float>(x), static_cast<float>(y), static_cast<float>(average_z)};
+        const size_t index = vertices.size();
+        vertices.push_back(point);
+        normals.push_back(normal);
+        vertex_map[key] = index;
+        return index;
+    };
+
+    const auto add_clipped_face = [&](std::vector<GridPoint> clipped) {
+        if (clipped.size() < 3) {
+            return;
+        }
+        double area = 0.0;
+        for (size_t i = 0; i < clipped.size(); ++i) {
+            const GridPoint& a = clipped[i];
+            const GridPoint& b = clipped[(i + 1) % clipped.size()];
+            area += a.x * b.y - b.x * a.y;
+        }
+        if (std::fabs(area) <= eps * eps) {
+            return;
+        }
+        if (area < 0.0) {
+            std::reverse(clipped.begin(), clipped.end());
+        }
+
+        Face face;
+        face.corners.reserve(clipped.size());
+        for (const GridPoint& point : clipped) {
+            const size_t vertex = add_vertex(point.x, point.y);
+            face.corners.push_back({vertex, vertex, vertex});
+        }
+        faces.push_back(std::move(face));
+    };
+
+    for (size_t row = 0; row + 1 < y_lines.size(); ++row) {
+        const double y0 = y_lines[row];
+        const double y1 = y_lines[row + 1];
+        if (y1 - y0 <= eps)
+            continue;
+        for (size_t column = 0; column + 1 < x_lines.size(); ++column) {
+            const double x0 = x_lines[column];
+            const double x1 = x_lines[column + 1];
+            if (x1 - x0 <= eps)
+                continue;
+            std::vector<GridPoint> clipped = clipped_cell(x0, y0, x1, y1);
+            if (clipped.size() < 3)
+                continue;
+            add_clipped_face(std::move(clipped));
+        }
+    }
+
+    if (!vertices.empty() && !faces.empty() && SetGeometry(std::move(vertices), std::move(faces), {}, std::move(normals))) {
+        return true;
+    }
+
+    CMesh3D triangle_mesh;
+    if (!FillContorByTriangles(&triangle_mesh, contour, normal)) {
+        Clear();
+        return false;
+    }
+    ContourQuadrangulator quadrangulator;
+    quadrangulator.CreateFromMesh(&triangle_mesh);
+    quadrangulator.Quadrangulate(this);
+    return !faces_.empty();
 }
 
 bool CMesh3D::PutOnSurface(CSurfaceFace* surface) {
@@ -1858,9 +2282,23 @@ bool CMesh3D::TrimByPline(CPolyline* pLine, CPoint3d pc) {
     const std::vector<Vec3> original_vertices = vertices_;
     const std::vector<Face> original_faces = faces_;
 
-    PrepareAndMoveVertexToTrimLine(faces_, vertices_, affected_faces, cut,
-                                   has_trim_polygon ? &trim_polygon : nullptr,
-                                   keep_inside);
+    std::vector<DataToMoveVerts> data_to_move_storage;
+    data_to_move_storage.reserve(affected_faces.size());
+    std::vector<DataToMoveVerts*> data_to_move;
+    data_to_move.reserve(affected_faces.size());
+    for (size_t face_index : affected_faces) {
+        if (face_index >= faces_.size())
+            continue;
+        Face& face = faces_[face_index];
+        if (face.deleted || face.corners.size() < 2)
+            continue;
+
+        DataToMoveVerts data;
+        data.pf = &face;
+        data_to_move_storage.push_back(data);
+        data_to_move.push_back(&data_to_move_storage.back());
+    }
+    PrepareAndMoveVertexToTrimLine(pLine, data_to_move);
     std::vector<TrimFaceData> FacesData;
     for (size_t face_index : affected_faces) {
         if (face_index >= faces_.size())
@@ -2111,9 +2549,64 @@ bool CMesh3D::KeepConnectedComponentAt(CPoint3d pc) {
 }
 
 bool CMesh3D::TrimByPlineTest(CPolyline* pLine, CPoint3d pc) {
+ 
+    const std::vector<cVec2> cut = make_cut_2d(pLine);
+    if (cut.size() < 2) {
+        return false;
+    }
+    const cVec2 keep_point(pc.x, pc.y);
+    Face2D trim_polygon;
+    bool has_trim_polygon = false;
+    bool keep_inside = false;
+    if (cut_is_closed(cut)) {
+        trim_polygon.verts = cut;
+        if (trim_polygon.verts.size() > 1 && EqualPoint2(trim_polygon.verts.front(), trim_polygon.verts.back(), EPS2D))
+            trim_polygon.verts.pop_back();
+        if (trim_polygon.verts.size() < 3)
+            return false;
+        keep_inside = ClassifyPointInFace2(trim_polygon, keep_point, EPS2D) != PFP_OUTSIDE;
+        has_trim_polygon = true;
+    }
+    std::vector<size_t> affected_faces;
+    for (size_t face_index = 0; face_index < faces_.size(); ++face_index) {
+        Face& face = faces_[face_index];
+        if (face.deleted || face.corners.size() < 3)
+            continue;
+        const Face2D face_2d = make_face_2d(face, vertices_);
+        CellCutInfo info;
+        if (!AnalyzeFaceCut(face_2d, cut, info, EPS2D))
+            continue;
+        ClassifyFaceCut(face_2d, cut, info, EPS2D);
+        if (info.hits.size() >= 2 || info.boundaryContactCount >= 2 || info.hasBorderOverlap) {
+            affected_faces.push_back(face_index);
+        }
+    }
+    if (affected_faces.empty()) {
+        return false;
+    }
+    const std::vector<Vec3> original_vertices = vertices_;
+    const std::vector<Face> original_faces = faces_;
+    std::vector<DataToMoveVerts> data_to_move_storage;
+    data_to_move_storage.reserve(affected_faces.size());
+    std::vector<DataToMoveVerts*> data_to_move;
+    data_to_move.reserve(affected_faces.size());
+    for (size_t face_index : affected_faces) {
+        if (face_index >= faces_.size())
+            continue;
+        Face& face = faces_[face_index];
+        if (face.deleted || face.corners.size() < 2)
+            continue;
 
-    
-    return TrimByPline(pLine, pc);
+        DataToMoveVerts data;
+        data.pf = &face;
+        data_to_move_storage.push_back(data);
+        data_to_move.push_back(&data_to_move_storage.back());
+    }
+    PrepareAndMoveVertexToTrimLine(pLine, data_to_move);
+   
+	return true;
+
+ //   return TrimByPline(pLine, pc);
 }
 
 void CMesh3D::Clear() {
