@@ -2138,6 +2138,80 @@ bool CSurfaceFace::GetPreparedPolylinePoints(int edge_index, std::vector<CPoint3
 	return points.size() >= 2;
 }
 
+bool CSurfaceFace::GetPreparedTopoEdge(int edge_index, TopoDS_Edge& edge) const
+{
+	if (edge_index < 0 || edge_index >= static_cast<int>(Polylines.size()))
+		return false;
+	const CPolyline* polyline = Polylines[static_cast<size_t>(edge_index)];
+	if (!polyline || polyline->GetPointCount() < 2 || m_TopoEdges.empty())
+		return false;
+
+	const std::vector<CPoint3d>& points = polyline->GetPoints();
+	const auto point_segment_distance_sq = [](const gp_Pnt& point,
+	                                          const CPoint3d& first,
+	                                          const CPoint3d& second) {
+		const double edge_x = second.x - first.x;
+		const double edge_y = second.y - first.y;
+		const double edge_z = second.z - first.z;
+		const double length_sq = edge_x * edge_x + edge_y * edge_y + edge_z * edge_z;
+		double alpha = 0.0;
+		if (length_sq > 1.0e-20) {
+			alpha = ((point.X() - first.x) * edge_x
+			       + (point.Y() - first.y) * edge_y
+			       + (point.Z() - first.z) * edge_z) / length_sq;
+			alpha = std::clamp(alpha, 0.0, 1.0);
+		}
+		const double dx = point.X() - (first.x + edge_x * alpha);
+		const double dy = point.Y() - (first.y + edge_y * alpha);
+		const double dz = point.Z() - (first.z + edge_z * alpha);
+		return dx * dx + dy * dy + dz * dz;
+	};
+
+	double best_score = std::numeric_limits<double>::max();
+	const TopoDS_Edge* best_edge = nullptr;
+	for (const TopoDS_Edge& candidate : m_TopoEdges) {
+		if (candidate.IsNull() || BRep_Tool::Degenerated(candidate))
+			continue;
+		try {
+			BRepAdaptor_Curve curve(candidate);
+			const double first_parameter = curve.FirstParameter();
+			const double last_parameter = curve.LastParameter();
+			if (!std::isfinite(first_parameter) || !std::isfinite(last_parameter)
+				|| last_parameter <= first_parameter) {
+				continue;
+			}
+
+			double score = 0.0;
+			constexpr int sample_count = 7;
+			for (int sample = 0; sample < sample_count; ++sample) {
+				const double alpha = static_cast<double>(sample)
+					/ static_cast<double>(sample_count - 1);
+				const gp_Pnt point = curve.Value(
+					first_parameter + (last_parameter - first_parameter) * alpha);
+				double nearest_sq = std::numeric_limits<double>::max();
+				for (size_t i = 1; i < points.size(); ++i) {
+					nearest_sq = std::min(
+						nearest_sq,
+						point_segment_distance_sq(point, points[i - 1], points[i]));
+				}
+				score += nearest_sq;
+			}
+			score /= static_cast<double>(sample_count);
+			if (score < best_score) {
+				best_score = score;
+				best_edge = &candidate;
+			}
+		} catch (const Standard_Failure&) {
+			continue;
+		}
+	}
+
+	if (!best_edge)
+		return false;
+	edge = *best_edge;
+	return true;
+}
+
 bool CSurfaceFace::SetPreparedPolylinePointCount(int edge_index, int point_count)
 {
 	if (point_count < 2 || edge_index < 0 || edge_index >= static_cast<int>(Polylines.size()))
@@ -2202,6 +2276,121 @@ bool CSurfaceFace::SetPreparedPolylinePoints(int edge_index, const std::vector<C
 	return true;
 }
 
+void CSurfaceFace::UpdateMeshTypeFromBoundary()
+{
+	m_TypeMesh = TRIMMED_MESH;
+	if (Polylines.empty())
+		return;
+
+	m_TypeMesh = REGULAR_MESH;
+	for (CPolyline* line : Polylines) {
+		if (!IsBoundLine(line)) {
+			m_TypeMesh = TRIMMED_MESH;
+			break;
+		}
+	}
+}
+
+bool CSurfaceFace::GetRegularMeshBoundaryPoints(int edge_index, std::vector<CPoint3d>& points) const
+{
+	points.clear();
+	if (m_TypeMesh != REGULAR_MESH || !pMesh3D
+		|| edge_index < 0 || edge_index >= static_cast<int>(Polylines.size())
+		|| !Polylines[static_cast<size_t>(edge_index)]
+		|| m_QtyU < 2 || m_QtyV < 2) {
+		return false;
+	}
+
+	const std::vector<Vec3>& vertices = pMesh3D->GetVertices();
+	const size_t expected_vertex_count = static_cast<size_t>(m_QtyU) * static_cast<size_t>(m_QtyV);
+	if (vertices.size() < expected_vertex_count)
+		return false;
+
+	CPolyline* target = Polylines[static_cast<size_t>(edge_index)];
+	const std::vector<CPoint3d>& target_points = target->GetPoints();
+	if (target_points.size() < 2)
+		return false;
+
+	std::vector<std::vector<size_t>> candidates(4);
+	candidates[0].reserve(static_cast<size_t>(m_QtyU));
+	candidates[1].reserve(static_cast<size_t>(m_QtyU));
+	candidates[2].reserve(static_cast<size_t>(m_QtyV));
+	candidates[3].reserve(static_cast<size_t>(m_QtyV));
+	for (int u = 0; u < m_QtyU; ++u) {
+		candidates[0].push_back(static_cast<size_t>(u));
+		candidates[1].push_back(static_cast<size_t>((m_QtyV - 1) * m_QtyU + u));
+	}
+	for (int v = 0; v < m_QtyV; ++v) {
+		candidates[2].push_back(static_cast<size_t>(v * m_QtyU));
+		candidates[3].push_back(static_cast<size_t>(v * m_QtyU + m_QtyU - 1));
+	}
+
+	const auto point_segment_distance_sq = [](const Vec3& point,
+	                                          const CPoint3d& first,
+	                                          const CPoint3d& second) {
+		const Vec3 a{static_cast<float>(first.x), static_cast<float>(first.y), static_cast<float>(first.z)};
+		const Vec3 b{static_cast<float>(second.x), static_cast<float>(second.y), static_cast<float>(second.z)};
+		const Vec3 ab = b - a;
+		const float length_sq = dot(ab, ab);
+		const float alpha = length_sq > 1.0e-20f
+			? std::clamp(dot(point - a, ab) / length_sq, 0.0f, 1.0f)
+			: 0.0f;
+		const Vec3 delta = point - (a + ab * alpha);
+		return dot(delta, delta);
+	};
+
+	double best_score = std::numeric_limits<double>::max();
+	size_t best_candidate = candidates.size();
+	for (size_t candidate_index = 0; candidate_index < candidates.size(); ++candidate_index) {
+		double score = 0.0;
+		for (size_t vertex_index : candidates[candidate_index]) {
+			double distance_sq = std::numeric_limits<double>::max();
+			for (size_t i = 1; i < target_points.size(); ++i) {
+				distance_sq = std::min(
+					distance_sq,
+					static_cast<double>(point_segment_distance_sq(
+						vertices[vertex_index],
+						target_points[i - 1],
+						target_points[i])));
+			}
+			score += distance_sq;
+		}
+		score /= static_cast<double>(candidates[candidate_index].size());
+		if (score < best_score) {
+			best_score = score;
+			best_candidate = candidate_index;
+		}
+	}
+	if (best_candidate >= candidates.size())
+		return false;
+
+	points.reserve(candidates[best_candidate].size());
+	for (size_t vertex_index : candidates[best_candidate]) {
+		const Vec3& vertex = vertices[vertex_index];
+		points.emplace_back(vertex.x, vertex.y, vertex.z);
+	}
+
+	const auto point_distance = [](const CPoint3d& first, const CPoint3d& second) {
+		const double dx = first.x - second.x;
+		const double dy = first.y - second.y;
+		const double dz = first.z - second.z;
+		return std::sqrt(dx * dx + dy * dy + dz * dz);
+	};
+	const bool target_closed = target->IsClosed()
+		|| point_distance(target_points.front(), target_points.back()) <= target->GetLength() * 1.0e-5;
+	if (!target_closed && points.size() >= 2) {
+		const double same_direction =
+			point_distance(points.front(), target_points.front())
+			+ point_distance(points.back(), target_points.back());
+		const double reverse_direction =
+			point_distance(points.front(), target_points.back())
+			+ point_distance(points.back(), target_points.front());
+		if (reverse_direction < same_direction)
+			std::reverse(points.begin(), points.end());
+	}
+	return points.size() >= 2;
+}
+
 void CSurfaceFace::DumpPreparedPolylinesToScene() const
 {
 	CAlfaDoc* pDoc = GetAlfaDoc();
@@ -2227,7 +2416,17 @@ bool CSurfaceFace::BuildTrimmingMesh(CSolid* psol, float Deflection){
 	TopoDS_Face F1 = TopoDS::Face(m_Face);
 	if (F1.IsNull())
 		return false;
+
+	// A face is not trimmed when every topological edge lies on one of the
+	// four natural UV boundaries built in InitEdges3DCoat().  In that case the
+	// complete rectangular UV net already represents the OCCT face and must
+	// not be passed through the contour trimming code.
+	UpdateMeshTypeFromBoundary();
+
 	if (is_regular_uv_mesh_surface(F1) && build_regular_uv_mesh(this, Deflection)) {
+		if (m_TypeMesh == REGULAR_MESH)
+			return true;
+
 		const double delta = 0.01;
 		if (!pMesh3D || Polylines.empty()) {
 			return true;
@@ -2293,6 +2492,10 @@ bool CSurfaceFace::BuildTrimmingMesh(CSolid* psol, float Deflection){
 //	pMesh3D->Clear();
 	m_Net->BuildMesh3D(pMesh3D);
 	IsTrimmed = false;
+	if (m_TypeMesh == REGULAR_MESH) {
+		IsInitMesh = true;
+		return true;
+	}
 //  ====== Trimming =====
 	const std::vector<Vec3> source_vertices = pMesh3D ? pMesh3D->GetVertices() : std::vector<Vec3>{};
 	const std::vector<CMesh3D::Face> source_faces = pMesh3D ? pMesh3D->GetFaces() : std::vector<CMesh3D::Face>{};
@@ -2401,6 +2604,9 @@ void CSurfaceFace::GetEdges(std::vector<CPolyline*>& plines)
 
 bool CSurfaceFace::IsBoundLine(CPolyline* line)
 {
+	if (!line || line->np() < 2 || BoundSpl.empty())
+		return false;
+
 	float deltaMax = line->GetLength() * 0.01;
 	int IndMidle = (int)line->np() / 2;
 	for (int i = 0; i < BoundSpl.size(); i++) {

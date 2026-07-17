@@ -76,8 +76,11 @@ public:
 	int GetPreparedPolylinePointCount(int edge_index) const;
 	bool GetPreparedPolylineEndpoints(int edge_index, Vec3& start, Vec3& end) const;
 	bool GetPreparedPolylinePoints(int edge_index, std::vector<CPoint3d>& points) const;
+	bool GetPreparedTopoEdge(int edge_index, TopoDS_Edge& edge) const;
 	bool SetPreparedPolylinePointCount(int edge_index, int point_count);
 	bool SetPreparedPolylinePoints(int edge_index, const std::vector<CPoint3d>& points);
+	void UpdateMeshTypeFromBoundary();
+	bool GetRegularMeshBoundaryPoints(int edge_index, std::vector<CPoint3d>& points) const;
 	void DumpPreparedPolylinesToScene() const;
 	bool BuildTrimmingMesh(CSolid* psol, float Deflection);
 	void MakeFilledContour(const std::vector<Vec3>& contour, Vec3 normal, CMesh3D* quad_mesh);

@@ -80,6 +80,8 @@ struct PreparedEdgeRef {
 	int point_count = 0;
 	Vec3 start{};
 	Vec3 end{};
+	TopoDS_Edge topo_edge;
+	bool has_topo_edge = false;
 };
 
 Color diagnostic_surface_wire_color(const CSurfaceFace& surface, Color default_color)
@@ -352,14 +354,22 @@ void sync_surface_edge_polyline_counts(const std::vector<CSurfaceFace*>& surface
 		if (!surface)
 			continue;
 		for (int edge_index = 0; edge_index < surface->GetPreparedPolylineCount(); ++edge_index) {
-			Vec3 start{};
-			Vec3 end{};
-			if (!surface->GetPreparedPolylineEndpoints(edge_index, start, end))
+			std::vector<CPoint3d> points;
+			if (!surface->GetPreparedPolylinePoints(edge_index, points) || points.size() < 2)
 				continue;
 			const int point_count = surface->GetPreparedPolylinePointCount(edge_index);
 			if (point_count < 2)
 				continue;
-			edges.push_back({ surface, edge_index, point_count, start, end });
+			const CPoint3d& first = points.front();
+			const CPoint3d& last = points.back();
+			PreparedEdgeRef ref;
+			ref.surface = surface;
+			ref.edge_index = edge_index;
+			ref.point_count = point_count;
+			ref.start = { static_cast<float>(first.x), static_cast<float>(first.y), static_cast<float>(first.z) };
+			ref.end = { static_cast<float>(last.x), static_cast<float>(last.y), static_cast<float>(last.z) };
+			ref.has_topo_edge = surface->GetPreparedTopoEdge(edge_index, ref.topo_edge);
+			edges.push_back(ref);
 		}
 	}
 
@@ -369,6 +379,16 @@ void sync_surface_edge_polyline_counts(const std::vector<CSurfaceFace*>& surface
 
 	const float tolerance_sq = tolerance * tolerance;
 	const auto same_edge = [&](const PreparedEdgeRef& first, const PreparedEdgeRef& second) {
+		if (first.has_topo_edge && second.has_topo_edge
+			&& first.topo_edge.IsSame(second.topo_edge)) {
+			return true;
+		}
+		const bool first_closed =
+			endpoint_distance_sq(first.start, first.end) <= tolerance_sq;
+		const bool second_closed =
+			endpoint_distance_sq(second.start, second.end) <= tolerance_sq;
+		if (first_closed || second_closed)
+			return false;
 		const bool same_direction =
 			endpoint_distance_sq(first.start, second.start) <= tolerance_sq
 			&& endpoint_distance_sq(first.end, second.end) <= tolerance_sq;
@@ -438,14 +458,22 @@ void sync_surface_edge_polyline_counts(const std::vector<CSurfaceFace*>& surface
 		if (!surface)
 			continue;
 		for (int edge_index = 0; edge_index < surface->GetPreparedPolylineCount(); ++edge_index) {
-			Vec3 start{};
-			Vec3 end{};
-			if (!surface->GetPreparedPolylineEndpoints(edge_index, start, end))
+			std::vector<CPoint3d> points;
+			if (!surface->GetPreparedPolylinePoints(edge_index, points) || points.size() < 2)
 				continue;
 			const int point_count = surface->GetPreparedPolylinePointCount(edge_index);
 			if (point_count < 2)
 				continue;
-			edges.push_back({ surface, edge_index, point_count, start, end });
+			const CPoint3d& first = points.front();
+			const CPoint3d& last = points.back();
+			PreparedEdgeRef ref;
+			ref.surface = surface;
+			ref.edge_index = edge_index;
+			ref.point_count = point_count;
+			ref.start = { static_cast<float>(first.x), static_cast<float>(first.y), static_cast<float>(first.z) };
+			ref.end = { static_cast<float>(last.x), static_cast<float>(last.y), static_cast<float>(last.z) };
+			ref.has_topo_edge = surface->GetPreparedTopoEdge(edge_index, ref.topo_edge);
+			edges.push_back(ref);
 		}
 	}
 
@@ -493,6 +521,161 @@ void sync_surface_edge_polyline_counts(const std::vector<CSurfaceFace*>& surface
 				std::reverse(target_points.begin(), target_points.end());
 			if (target.surface->SetPreparedPolylinePoints(target.edge_index, target_points))
 				target.point_count = static_cast<int>(target_points.size());
+		}
+	}
+}
+
+void sync_regular_surface_mesh_steps(const std::vector<CSurfaceFace*>& surfaces)
+{
+	bool has_regular_boundaries = false;
+	for (CSurfaceFace* surface : surfaces) {
+		if (!surface || surface->m_TypeMesh != REGULAR_MESH || !surface->IsInitMesh)
+			continue;
+
+		for (int edge_index = 0;
+		     edge_index < surface->GetPreparedPolylineCount();
+		     ++edge_index) {
+			std::vector<CPoint3d> boundary_points;
+			if (!surface->GetRegularMeshBoundaryPoints(edge_index, boundary_points))
+				continue;
+			if (surface->SetPreparedPolylinePoints(edge_index, boundary_points))
+				has_regular_boundaries = true;
+		}
+	}
+
+	if (has_regular_boundaries)
+		sync_surface_edge_polyline_counts(surfaces);
+}
+
+void sync_trim_lines_from_regular_mesh(const std::vector<CSurfaceFace*>& surfaces)
+{
+	const auto distance_sq = [](Vec3 first, Vec3 second) {
+		return dot(first - second, first - second);
+	};
+	const auto point_segment_distance_sq = [&distance_sq](Vec3 point, Vec3 first, Vec3 second) {
+		const Vec3 edge = second - first;
+		const float edge_length_sq = dot(edge, edge);
+		const float alpha = edge_length_sq > 1.0e-20f
+			? std::clamp(dot(point - first, edge) / edge_length_sq, 0.0f, 1.0f)
+			: 0.0f;
+		return distance_sq(point, first + edge * alpha);
+	};
+
+	for (CSurfaceFace* donor : surfaces) {
+		if (!donor || donor->m_TypeMesh != REGULAR_MESH || !donor->IsInitMesh)
+			continue;
+
+		for (int donor_edge_index = 0;
+		     donor_edge_index < donor->GetPreparedPolylineCount();
+		     ++donor_edge_index) {
+			std::vector<CPoint3d> boundary_points;
+			if (!donor->GetRegularMeshBoundaryPoints(donor_edge_index, boundary_points))
+				continue;
+
+			double boundary_length = 0.0;
+			for (size_t i = 1; i < boundary_points.size(); ++i) {
+				const Vec3 first{
+					static_cast<float>(boundary_points[i - 1].x),
+					static_cast<float>(boundary_points[i - 1].y),
+					static_cast<float>(boundary_points[i - 1].z)
+				};
+				const Vec3 second{
+					static_cast<float>(boundary_points[i].x),
+					static_cast<float>(boundary_points[i].y),
+					static_cast<float>(boundary_points[i].z)
+				};
+				boundary_length += std::sqrt(distance_sq(first, second));
+			}
+			const double match_tolerance = std::max(boundary_length * 0.01, 1.0e-5);
+			const double match_tolerance_sq = match_tolerance * match_tolerance;
+
+			for (CSurfaceFace* receiver : surfaces) {
+				if (!receiver || receiver == donor || receiver->m_TypeMesh == REGULAR_MESH)
+					continue;
+
+				int best_receiver_edge = -1;
+				double best_score = std::numeric_limits<double>::max();
+				for (int receiver_edge_index = 0;
+				     receiver_edge_index < receiver->GetPreparedPolylineCount();
+				     ++receiver_edge_index) {
+					std::vector<CPoint3d> prepared_points;
+					if (!receiver->GetPreparedPolylinePoints(receiver_edge_index, prepared_points)
+						|| prepared_points.size() < 2) {
+						continue;
+					}
+
+					double score = 0.0;
+					for (const CPoint3d& boundary_point : boundary_points) {
+						const Vec3 point{
+							static_cast<float>(boundary_point.x),
+							static_cast<float>(boundary_point.y),
+							static_cast<float>(boundary_point.z)
+						};
+						float nearest_sq = std::numeric_limits<float>::max();
+						for (size_t i = 1; i < prepared_points.size(); ++i) {
+							const Vec3 first{
+								static_cast<float>(prepared_points[i - 1].x),
+								static_cast<float>(prepared_points[i - 1].y),
+								static_cast<float>(prepared_points[i - 1].z)
+							};
+							const Vec3 second{
+								static_cast<float>(prepared_points[i].x),
+								static_cast<float>(prepared_points[i].y),
+								static_cast<float>(prepared_points[i].z)
+							};
+							nearest_sq = std::min(nearest_sq, point_segment_distance_sq(point, first, second));
+						}
+						score += nearest_sq;
+					}
+					score /= static_cast<double>(boundary_points.size());
+					if (score < best_score) {
+						best_score = score;
+						best_receiver_edge = receiver_edge_index;
+					}
+				}
+
+				if (best_receiver_edge < 0 || best_score > match_tolerance_sq)
+					continue;
+
+				std::vector<CPoint3d> receiver_points = boundary_points;
+				Vec3 receiver_start{};
+				Vec3 receiver_end{};
+				if (receiver->GetPreparedPolylineEndpoints(best_receiver_edge, receiver_start, receiver_end)) {
+					const Vec3 source_start{
+						static_cast<float>(receiver_points.front().x),
+						static_cast<float>(receiver_points.front().y),
+						static_cast<float>(receiver_points.front().z)
+					};
+					const Vec3 source_end{
+						static_cast<float>(receiver_points.back().x),
+						static_cast<float>(receiver_points.back().y),
+						static_cast<float>(receiver_points.back().z)
+					};
+					const float same_direction =
+						distance_sq(source_start, receiver_start)
+						+ distance_sq(source_end, receiver_end);
+					const float reverse_direction =
+						distance_sq(source_start, receiver_end)
+						+ distance_sq(source_end, receiver_start);
+					if (reverse_direction < same_direction)
+						std::reverse(receiver_points.begin(), receiver_points.end());
+				}
+				receiver->SetPreparedPolylinePoints(best_receiver_edge, receiver_points);
+				if (receiver->IsInitMesh && receiver->pMesh3D) {
+					std::vector<Vec3> master_vertices;
+					master_vertices.reserve(receiver_points.size());
+					for (const CPoint3d& point : receiver_points) {
+						master_vertices.push_back({
+							static_cast<float>(point.x),
+							static_cast<float>(point.y),
+							static_cast<float>(point.z)
+						});
+					}
+					receiver->pMesh3D->SynchronizeBoundaryVertices(
+						master_vertices,
+						static_cast<float>(match_tolerance));
+				}
+			}
 		}
 	}
 }
@@ -1405,6 +1588,10 @@ bool CSolid::BuldMesh(float Deflection)
 	for (int i = 0; i < m_Surfaces.size(); i++)
 		m_Surfaces[i]->PrepareEdges(Deflection);
 	sync_surface_edge_polyline_counts(m_Surfaces);
+	for (CSurfaceFace* surface : m_Surfaces) {
+		if (surface)
+			surface->UpdateMeshTypeFromBoundary();
+	}
 	const bool dump_prepared_polylines_to_scene = false;
 	if (dump_prepared_polylines_to_scene) {
 		for (CSurfaceFace* surface : m_Surfaces) {
@@ -1412,9 +1599,32 @@ bool CSolid::BuldMesh(float Deflection)
 				surface->DumpPreparedPolylinesToScene();
 		}
 	}
-	for (int i = 0; i < m_Surfaces.size(); i++) {
-		m_Surfaces[i]->BuildTrimmingMesh(this, Deflection);
+	for (CSurfaceFace* surface : m_Surfaces) {
+		if (surface && surface->m_TypeMesh == REGULAR_MESH)
+			surface->BuildTrimmingMesh(this, Deflection);
 	}
+
+	// Different analytic surface types can choose different base UV steps even
+	// along the same topological edge. Capture the actual boundary counts,
+	// propagate the densest one, and rebuild regular meshes with a common step.
+	sync_regular_surface_mesh_steps(m_Surfaces);
+	for (CSurfaceFace* surface : m_Surfaces) {
+		if (surface && surface->m_TypeMesh == REGULAR_MESH)
+			surface->BuildTrimmingMesh(this, Deflection);
+	}
+
+	// A trimmed face must use the exact boundary row of an already built
+	// regular neighbour (for example a cylinder cap uses the side-wall ring).
+	sync_trim_lines_from_regular_mesh(m_Surfaces);
+
+	for (CSurfaceFace* surface : m_Surfaces) {
+		if (surface && surface->m_TypeMesh != REGULAR_MESH)
+			surface->BuildTrimmingMesh(this, Deflection);
+	}
+
+	// Trimming creates its own boundary vertices. Insert/snap the master
+	// regular-surface nodes once more after all trimmed meshes exist.
+	sync_trim_lines_from_regular_mesh(m_Surfaces);
 
 	snap_surface_mesh_seams(m_Surfaces);
 	

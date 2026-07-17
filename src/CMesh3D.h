@@ -92,6 +92,7 @@ public:
     std::vector<Face>& GetFaces();
     const std::vector<UV>& GetUVs() const;
     const std::vector<Vec3>& GetNormals() const;
+    int SynchronizeBoundaryVertices(const std::vector<Vec3>& master_points, float tolerance);
     static size_t GetFaceVertexIndex(const Face& face, size_t i);
     static void SetFaceVertexIndex(Face& face, size_t i, size_t v);
     static size_t FaceVertexCount(const Face& face);
