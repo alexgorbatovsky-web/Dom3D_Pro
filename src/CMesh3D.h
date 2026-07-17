@@ -2,7 +2,7 @@
 
 #include "CAlfaObject.h"
 #include "CPolyline.h"
-
+#include "Line2D.h"
 #include <iosfwd>
 #include <functional>
 #include <initializer_list>
@@ -11,6 +11,30 @@
 
 class CSurfaceFace;
 class CPolyline;
+
+struct Edge {
+    int v1;
+    int v2;
+    Edge() { v1 = v2 = 0; }
+    Edge(int vi1, int vi2) { v1 = vi1; v2 = vi2; if (v1 > v2) std::swap(v1, v2); }
+    bool operator == (const Edge&) const;
+    Edge& operator =(const Edge& ed);
+};
+
+inline bool Edge::operator == (const Edge& e2) const {
+    if (v1 != e2.v1)
+        return false;
+    return v2 == e2.v2;
+}
+
+inline Edge& Edge::operator = (const Edge& src) {
+    if (&src == this)
+        return *this;
+    v1 = src.v1;
+    v2 = src.v2;
+    return *this;
+}
+
 
 struct MeshCorner {
     size_t v = 0;
@@ -25,7 +49,9 @@ struct MeshFace {
     int id = 0;
     bool deleted = false;
     int sourceFaceId = -1;
-
+	CPoint3d pm;
+	int edgeIndex = -1; 
+	bool m_Trimmed = false;
     MeshFace() = default;
     MeshFace(std::initializer_list<size_t> vertex_indices);
 };
@@ -38,6 +64,8 @@ struct TrimFaceData
     int v2;
     CPoint3d pm;
     int edgeIndex;
+    int vertexToMove;
+    cVec2 moveTarget;
 };
 struct IndAndDist {
     int ind;// indx  pLine
@@ -110,9 +138,15 @@ public:
     bool SplitFaceByPoint(int face_index, int ind1, int ind2, const cVec2& pm);
     bool SplitFaceByPointVar4(int face_index, int ind1, int ind2, const cVec2& pm);
     bool SplitFaceByPointVar3(int face_index, int ind1, int ind2, const cVec2& pm);
-    int MakeFace(std::vector < int> indV);
+    int MakeFace(std::vector < size_t> indV);
     bool PrepareAndMoveVertexToTrimLine(CPolyline* pLine, std::vector<DataToMoveVerts*>& Data);
     bool FindVertexToMove(CPolyline* pLine, DataToMoveVerts* data);
+    bool SplitFaceByVar5(int face_index, int v1, int edgeIndex, cVec2& pm);
+    bool SplitFaceByVar6(int face_index, int v1, int edgeIndex, cVec2& pm);
+    bool SplitFaceByVar7(int face_index, int v1, int edgeIndex);
+    bool SplitFaceByVar8(int face_index, int vertexToMove, cVec2 moveTarget);
+    int FindFirstFace3d(Edge ed);
+    int FindSecondCFace3d(int first_face_index, Edge ed);
 
 private:
     bool IsValidFace(const Face& face, size_t vertex_count) const;

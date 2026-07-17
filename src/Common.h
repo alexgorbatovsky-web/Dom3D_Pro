@@ -36,6 +36,13 @@ struct Quaternion {
     float z = 0.0f;
 };
 
+inline constexpr Quaternion kDefaultCameraOrientation{
+    0.820473f,
+    0.424708f,
+    -0.175920f,
+    -0.339851f
+};
+
 using CVector3d = Vec3;
 
 struct CurvePoint {
@@ -74,7 +81,7 @@ inline constexpr Color kDefaultMeshObjectColor{
 
 struct Camera {
     Vec3 target{0.0f, 1.2f, 0.0f};
-    Quaternion orientation{0.924396f, 0.198992f, -0.299310f, 0.064417f};
+    Quaternion orientation{kDefaultCameraOrientation};
     float distance = 15.0f;
 };
 

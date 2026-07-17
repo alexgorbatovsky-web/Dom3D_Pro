@@ -423,6 +423,26 @@ size_t active_face_count(const CMesh3D* mesh)
 	return count;
 }
 
+bool trim_removed_too_much(size_t source_count, size_t result_count, GeomAbs_SurfaceType surface_type)
+{
+	if (source_count == 0)
+		return false;
+	if (result_count == 0)
+		return true;
+
+	const bool fragile_periodic_surface = surface_type == GeomAbs_Cylinder
+		|| surface_type == GeomAbs_Cone
+		|| surface_type == GeomAbs_Sphere
+		|| surface_type == GeomAbs_Torus;
+	if (fragile_periodic_surface && result_count * 20 < source_count)
+		return true;
+
+	if (!fragile_periodic_surface && result_count * 4 < source_count)
+		return true;
+
+	return false;
+}
+
 std::unique_ptr<CPolyline> copy_polyline_points(const CPolyline* source)
 {
 	if (!source)
@@ -634,6 +654,34 @@ bool loop_is_single_inner_cut(CSurfaceFace* surface, const Face2D& loop)
 	const double bounds_area = (u_max - u_min) * (v_max - v_min);
 	const double loop_area = std::fabs(polygon_area_2d(loop));
 	return bounds_area > 1.0e-12 && loop_area > 1.0e-12 && loop_area < bounds_area * 0.95;
+}
+
+bool loop_contains_occt_out_faces(CSurfaceFace* surface, const CMesh3D* mesh, const Face2D& loop)
+{
+	if (!surface || !mesh || surface->m_Face.IsNull() || loop.verts.size() < 3)
+		return false;
+
+	const TopoDS_Face topo_face = TopoDS::Face(surface->m_Face);
+	const std::vector<Vec3>& vertices = mesh->GetVertices();
+	const std::vector<CMesh3D::Face>& faces = mesh->GetFaces();
+	size_t outside_count = 0;
+	size_t inside_count = 0;
+	for (const CMesh3D::Face& mesh_face : faces) {
+		if (mesh_face.deleted || mesh_face.corners.size() < 3)
+			continue;
+		const cVec2 center = mesh_face_center_uv(mesh_face, vertices);
+		if (ClassifyPointInFace2(loop, center, EPS2D) == PFP_OUTSIDE)
+			continue;
+		try {
+			BRepClass_FaceClassifier classifier(topo_face, gp_Pnt2d(center.x, center.y), EPS2D, Standard_False);
+			if (classifier.State() == TopAbs_OUT)
+				++outside_count;
+			else
+				++inside_count;
+		} catch (const Standard_Failure&) {
+		}
+	}
+	return outside_count > 0 && outside_count > inside_count;
 }
 
 bool loop_contains_loop(const Face2D& container, const Face2D& candidate)
@@ -878,6 +926,7 @@ std::vector<cVec2> uv_boundary_path(cVec2 from,
 }
 
 std::unique_ptr<CPolyline> make_closed_uv_boundary_trim_loop(CSurfaceFace* surface,
+                                                             const CMesh3D* mesh,
                                                              const CPolyline* open_loop,
                                                              double delta)
 {
@@ -901,6 +950,13 @@ std::unique_ptr<CPolyline> make_closed_uv_boundary_trim_loop(CSurfaceFace* surfa
 		return {};
 	}
 
+	struct BoundaryLoopCandidate {
+		std::vector<cVec2> points;
+		double area = 0.0;
+		size_t outside_count = 0;
+		size_t inside_count = 0;
+	};
+
 	auto build_candidate = [&](bool forward) {
 		std::vector<cVec2> points;
 		points.reserve(source.size() + 6);
@@ -918,25 +974,53 @@ std::unique_ptr<CPolyline> make_closed_uv_boundary_trim_loop(CSurfaceFace* surfa
 		face.verts = points;
 		if (face.verts.size() > 1 && EqualPoint2(face.verts.front(), face.verts.back(), eps))
 			face.verts.pop_back();
-		return std::make_pair(std::move(points), std::fabs(polygon_area_2d(face)));
+
+		BoundaryLoopCandidate candidate;
+		candidate.points = std::move(points);
+		candidate.area = std::fabs(polygon_area_2d(face));
+		if (mesh && candidate.area > 1.0e-12) {
+			const TopoDS_Face topo_face = TopoDS::Face(surface->m_Face);
+			const std::vector<Vec3>& vertices = mesh->GetVertices();
+			const std::vector<CMesh3D::Face>& faces = mesh->GetFaces();
+			for (const CMesh3D::Face& mesh_face : faces) {
+				if (mesh_face.deleted || mesh_face.corners.size() < 3)
+					continue;
+				const cVec2 center = mesh_face_center_uv(mesh_face, vertices);
+				if (ClassifyPointInFace2(face, center, EPS2D) == PFP_OUTSIDE)
+					continue;
+				try {
+					BRepClass_FaceClassifier classifier(topo_face, gp_Pnt2d(center.x, center.y), EPS2D, Standard_False);
+					if (classifier.State() == TopAbs_OUT)
+						++candidate.outside_count;
+					else
+						++candidate.inside_count;
+				} catch (const Standard_Failure&) {
+				}
+			}
+		}
+		return candidate;
 	};
 
 	auto candidate_a = build_candidate(true);
 	auto candidate_b = build_candidate(false);
-	const std::vector<cVec2>* best_points = &candidate_a.first;
-	double best_area = candidate_a.second;
-	if (candidate_b.second > 1.0e-12 && (best_area <= 1.0e-12 || candidate_b.second < best_area)) {
-		best_points = &candidate_b.first;
-		best_area = candidate_b.second;
+	const BoundaryLoopCandidate* best_candidate = &candidate_a;
+	const long long score_a = static_cast<long long>(candidate_a.outside_count) - static_cast<long long>(candidate_a.inside_count);
+	const long long score_b = static_cast<long long>(candidate_b.outside_count) - static_cast<long long>(candidate_b.inside_count);
+	const bool a_deletes_outside = candidate_a.outside_count > 0 && score_a > 0;
+	const bool b_deletes_outside = candidate_b.outside_count > 0 && score_b > 0;
+	if (b_deletes_outside && (!a_deletes_outside || score_b > score_a)) {
+		best_candidate = &candidate_b;
+	} else if (!a_deletes_outside && !b_deletes_outside) {
+		return {};
 	}
-	if (best_area <= 1.0e-12 || best_points->size() < 4)
+	if (best_candidate->area <= 1.0e-12 || best_candidate->points.size() < 4)
 		return {};
 
 	auto closed = std::make_unique<CPolyline>();
-	for (const cVec2& point : *best_points)
+	for (const cVec2& point : best_candidate->points)
 		closed->AddPoint(CPoint3d(point.x, point.y, 0.0));
-	if (!EqualPoint2(best_points->front(), best_points->back(), eps))
-		closed->AddPoint(CPoint3d(best_points->front().x, best_points->front().y, 0.0));
+	if (!EqualPoint2(best_candidate->points.front(), best_candidate->points.back(), eps))
+		closed->AddPoint(CPoint3d(best_candidate->points.front().x, best_candidate->points.front().y, 0.0));
 	closed->SetClosed(true);
 	return closed;
 }
@@ -1143,7 +1227,7 @@ bool trim_mesh_by_surface_boundary(CMesh3D* mesh,
 		bool boundary_cut_loop = false;
 		if (!trim_loop->IsClosed()) {
 			std::unique_ptr<CPolyline> closed_by_boundary =
-				make_closed_uv_boundary_trim_loop(surface, trim_loop, delta);
+				make_closed_uv_boundary_trim_loop(surface, mesh, trim_loop, delta);
 			if (!closed_by_boundary)
 				continue;
 			trim_loop = closed_by_boundary.get();
@@ -1200,12 +1284,11 @@ bool trim_mesh_by_surface_boundary(CMesh3D* mesh,
 	}
 
 	bool changed = false;
-	for (size_t i = 0; i < boundary_cut_loops.size(); ++i) {
-		const cVec2 keep = choose_point_outside_loop(mesh, boundary_cut_faces[i]);
-		CPoint3d pc(keep.x, keep.y, 0.0);
-		const bool trimmed = mesh->TrimByPline(boundary_cut_loops[i], pc);
-		changed = trimmed || changed;
-	}
+	// Boundary-cut loops are artificial UV closures around a face boundary. Trimming by
+	// those loops can pick the wrong side on rounded corner faces; OCCT classification
+	// below decides which mesh cells are actually outside the TopoDS_Face.
+	(void)boundary_cut_loops;
+	(void)boundary_cut_faces;
 	if (closed_loops.empty())
 		return changed;
 
@@ -1222,7 +1305,8 @@ bool trim_mesh_by_surface_boundary(CMesh3D* mesh,
 	const bool outer_matches_uv_bounds = loop_matches_uv_bounds(surface, loop_faces[outer_index]);
 	if (closed_loops.size() == 1
 		&& !outer_matches_uv_bounds
-		&& loop_is_single_inner_cut(surface, loop_faces[outer_index])) {
+		&& loop_is_single_inner_cut(surface, loop_faces[outer_index])
+		&& loop_contains_occt_out_faces(surface, mesh, loop_faces[outer_index])) {
 		const cVec2 keep = choose_point_outside_loop(mesh, loop_faces[outer_index]);
 		CPoint3d pc(keep.x, keep.y, 0.0);
 		return mesh->TrimByPline(closed_loops[outer_index], pc) || changed;
@@ -1290,9 +1374,13 @@ bool delete_mesh_faces_outside_occt_face(CMesh3D* mesh, CSurfaceFace* surface)
 	if (outside_faces.empty())
 		return false;
 
-	// On periodic fillet/cylinder UV domains the classifier can occasionally report every
-	// sample as OUT. Keep the mesh in that catastrophic case and let boundary trim decide.
-	if (outside_faces.size() >= active_count)
+	const size_t remaining_count = active_count > outside_faces.size()
+		? active_count - outside_faces.size()
+		: 0;
+	const GeomAbs_SurfaceType surface_type = surface_type_of(face);
+	// On periodic fillet/cylinder UV domains the classifier can occasionally report
+	// nearly every sample as OUT. Keep the mesh in that case and let boundary trim decide.
+	if (trim_removed_too_much(active_count, remaining_count, surface_type))
 		return false;
 
 	for (size_t face_index : outside_faces)
@@ -2155,11 +2243,7 @@ bool CSurfaceFace::BuildTrimmingMesh(CSolid* psol, float Deflection){
 				const bool trimmed = trim_mesh_by_surface_boundary(pMesh3D, this, Polylines, delta);
 				const bool classified = delete_mesh_faces_outside_occt_face(pMesh3D, this);
 				const size_t trimmed_face_count = active_face_count(pMesh3D);
-				const bool catastrophic_trim = regular_face_count > 0 && trimmed_face_count == 0;
-				const bool cylinder_overtrim = regular_type == GeomAbs_Cylinder
-					&& regular_face_count > 0
-					&& trimmed_face_count * 20 < regular_face_count;
-				if (catastrophic_trim || cylinder_overtrim) {
+				if (trim_removed_too_much(regular_face_count, trimmed_face_count, regular_type)) {
 					pMesh3D->SetGeometry(regular_vertices, regular_faces, regular_uvs, regular_normals);
 					return true;
 				}
@@ -2214,6 +2298,7 @@ bool CSurfaceFace::BuildTrimmingMesh(CSolid* psol, float Deflection){
 	const std::vector<CMesh3D::Face> source_faces = pMesh3D ? pMesh3D->GetFaces() : std::vector<CMesh3D::Face>{};
 	const std::vector<UV> source_uvs = pMesh3D ? pMesh3D->GetUVs() : std::vector<UV>{};
 	const std::vector<Vec3> source_normals = pMesh3D ? pMesh3D->GetNormals() : std::vector<Vec3>{};
+	const size_t source_face_count = active_face_count(pMesh3D);
 	bool trimmed = false;
 	bool classified = false;
 	try {
@@ -2221,6 +2306,13 @@ bool CSurfaceFace::BuildTrimmingMesh(CSolid* psol, float Deflection){
 			double delta = 0.01;
 			trimmed = trim_mesh_by_surface_boundary(pMesh3D, this, Polylines, delta);
 			classified = delete_mesh_faces_outside_occt_face(pMesh3D, this);
+			const size_t trimmed_face_count = active_face_count(pMesh3D);
+			if (trim_removed_too_much(source_face_count, trimmed_face_count, surface_type)
+				&& !source_vertices.empty() && !source_faces.empty()) {
+				pMesh3D->SetGeometry(source_vertices, source_faces, source_uvs, source_normals);
+				trimmed = false;
+				classified = false;
+			}
 		}
 	} catch (const Standard_Failure&) {
 		if (pMesh3D && !source_vertices.empty() && !source_faces.empty()) {

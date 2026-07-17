@@ -1595,25 +1595,51 @@ void MainWindow::CreateVerticalToolBar() {
         "  background: #1f7ae0;"
         "  border-color: #0f4f9a;"
         "}"
+        "QToolButton::menu-indicator {"
+        "  image: none;"
+        "  width: 0px;"
+        "}"
     );
 
-    const auto add_flyout = [this](const QString& title,
-                                  const QIcon& icon,
+    const auto add_flyout = [this](const std::string& initial_tool_key,
                                   const std::vector<std::pair<std::string, QString>>& tools) {
         auto* button = new QToolButton(vertical_toolbar_);
-        button->setToolTip(title);
-        button->setIcon(icon);
         button->setIconSize(QSize(22, 22));
         button->setFixedSize(30, 28);
-        button->setPopupMode(QToolButton::InstantPopup);
+        button->setPopupMode(QToolButton::DelayedPopup);
         button->setCheckable(true);
         button->setProperty("persistentToolButton", true);
+        button->setProperty("selectedToolKey", QString::fromStdString(initial_tool_key));
         QStringList group_keys;
         for (const auto& tool : tools) {
             group_keys.push_back(QString::fromStdString(tool.first));
         }
         button->setProperty("toolGroupKeys", group_keys);
         tool_buttons_.push_back(button);
+
+        const auto set_selected_tool = [this, button, tools](const std::string& key) {
+            const auto selected = std::find_if(
+                tools.begin(), tools.end(), [&key](const auto& tool) { return tool.first == key; });
+            if (selected == tools.end()) {
+                return;
+            }
+            button->setProperty("selectedToolKey", QString::fromStdString(selected->first));
+            button->setIcon(ToolIcon(selected->first));
+            button->setToolTip(selected->second);
+            if (button->icon().isNull()) {
+                button->setText(selected->second.left(4));
+            } else {
+                button->setText({});
+            }
+        };
+        set_selected_tool(initial_tool_key);
+
+        connect(button, &QToolButton::clicked, this, [this, button]() {
+            const std::string key = button->property("selectedToolKey").toString().toStdString();
+            if (!key.empty()) {
+                ActivateParametricTool(key);
+            }
+        });
 
         auto* menu = new QMenu(button);
         menu->setStyleSheet(
@@ -1642,7 +1668,12 @@ void MainWindow::CreateVerticalToolBar() {
             if (child->icon().isNull()) {
                 child->setText(tool.second.left(4));
             }
-            connect(child, &QToolButton::clicked, this, [this, menu, id = tool.first]() {
+            // QMenu grabs the mouse while a delayed popup is open. Handle the
+            // press, because in this configuration it may consume the release
+            // before the embedded tool button can emit clicked().
+            connect(child, &QToolButton::pressed, this, [this, button, menu, set_selected_tool,
+                                                         id = tool.first]() {
+                set_selected_tool(id);
                 menu->close();
                 ActivateParametricTool(id);
             });
@@ -1719,8 +1750,7 @@ void MainWindow::CreateVerticalToolBar() {
     vertical_toolbar_->addSeparator();
 
     add_flyout(
-        "Mesh 3D",
-        ToolIcon("SolidLowPoly"),
+        "SolidLowPoly",
         {
             {"MeshFillContour", "Fiill Contour"},
             {"SolidLowPoly", "Low Poly"}
