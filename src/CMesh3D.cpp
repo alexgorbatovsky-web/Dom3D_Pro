@@ -1099,16 +1099,13 @@ bool CMesh3D::SplitFaceByVar5(int face_index, int v1i, int edgeIndex, cVec2& pm)
     face5.normal = FaceNormal(face5);
     faces_.push_back(std::move(face5));
 
-  //  MakeTreeFace(face, edgeIndex, vm);
-   // MakeTreeFace(face2, face2->edgeIndex, vm2);
-//MakeFace(std::vector < int> indV)
+    
     std::vector < size_t> indV1;
     std::vector < size_t> indV2;
-    face = faces_[face_index];
-	size_t v0 = face.corners[0].v;
-	size_t v1 = face.corners[1].v;
-	size_t v2 = face.corners[2].v;
-    size_t v3 = face.corners[3].v;
+	size_t v0 = faces_[face_index].corners[0].v;
+	size_t v1 = faces_[face_index].corners[1].v;
+	size_t v2 = faces_[face_index].corners[2].v;
+    size_t v3 = faces_[face_index].corners[3].v;
 
     if (edgeIndex == 0) {
         indV1.push_back(v2);
@@ -1198,44 +1195,40 @@ bool CMesh3D::SplitFaceByVar5(int face_index, int v1i, int edgeIndex, cVec2& pm)
     MakeFace(F2indV1);
     MakeFace(F2indV2);
 
-    face = faces_[face_index];
     if (edgeIndex == 0) {
-        face.corners[1] = middle;
-        face.corners[2] = face.corners[3];
+        faces_[face_index].corners[1] = middle;
+        faces_[face_index].corners[2] = faces_[face_index].corners[3];
     }
     if (edgeIndex == 1) {
-       face.corners[2] = middle;
+       faces_[face_index].corners[2] = middle;
     }
     if (edgeIndex == 2)
-        face.corners[0] = middle;
+        faces_[face_index].corners[0] = middle;
 
     if (edgeIndex == 3) {
-        face.corners[0] = middle;
-        face.corners[1] = face.corners[2];
-        face.corners[2] = face.corners[3];
+        faces_[face_index].corners[0] = middle;
+        faces_[face_index].corners[1] = faces_[face_index].corners[2];
+        faces_[face_index].corners[2] = faces_[face_index].corners[3];
     }
+    faces_[face_index].corners.resize(3);
+    faces_[face_index].m_Trimmed = true;
 
-    face.corners.resize(3);
-    face.m_Trimmed = true;
-
-    face2 = faces_[f2];
-
-    if (face2.edgeIndex == 0)
-		face2.corners[0] = middle2;
-    if (face2.edgeIndex == 1) {
-        face2.corners[1] = middle2;
-        face2.corners[1] = face2.corners[2];
-        face2.corners[2] = face2.corners[3];
+    if (faces_[f2].edgeIndex == 0)
+		faces_[f2].corners[0] = middle2;
+    if (faces_[f2].edgeIndex == 1) {
+        faces_[f2].corners[1] = middle2;
+        faces_[f2].corners[1] = faces_[f2].corners[2];
+        faces_[f2].corners[2] = faces_[f2].corners[3];
     }
-    if (face2.edgeIndex == 2) {
-		face2.corners[1] = middle2;
-        face2.corners[2] = face2.corners[3];
+    if (faces_[f2].edgeIndex == 2) {
+		faces_[f2].corners[1] = middle2;
+        faces_[f2].corners[2] = faces_[f2].corners[3];
     }
-    if (face2.edgeIndex == 3)
-        face2.corners[2] = middle2;
+    if (faces_[f2].edgeIndex == 3)
+        faces_[f2].corners[2] = middle2;
 
-    face2.corners.resize(3);
-    face2.m_Trimmed = true;
+    faces_[f2].corners.resize(3);
+    faces_[f2].m_Trimmed = true;
 
     return true;
 }
@@ -1246,7 +1239,7 @@ bool CMesh3D::SplitFaceByVar6(int face_index, int v1, int edgeIndex, cVec2& pm)
 bool CMesh3D::SplitFaceByVar7(int face_index, int v1, int edgeIndex)
 {
  //   Step("SplitFaceByVar7");
- //   if (edgeIndex == -1)
+    if (edgeIndex == -1)
         return false;
     MeshFace& face = faces_[face_index];
     if (face.m_Trimmed)
@@ -1334,104 +1327,80 @@ bool CMesh3D::SplitFaceByVar7(int face_index, int v1, int edgeIndex)
     face4.corners = std::move(seq4);
     face4.normal = FaceNormal(face4);
     faces_.push_back(std::move(face4));
-    face = faces_[face_index];
+ //   face = faces_[face_index];
     std::vector<MeshCorner> seq3;
     if (MakeVar1) {
-        seq3.push_back(face.corners[ind6]);
-        seq3.push_back(face.corners[ind2]);
-        seq3.push_back(face.corners[ind3]);
+        seq3.push_back(faces_[face_index].corners[ind6]);
+        seq3.push_back(faces_[face_index].corners[ind2]);
+        seq3.push_back(faces_[face_index].corners[ind3]);
     }
     else {
-        seq3.push_back(face.corners[ind5]);
-        seq3.push_back(face.corners[ind2]);
-        seq3.push_back(face.corners[ind4]);
+        seq3.push_back(faces_[face_index].corners[ind5]);
+        seq3.push_back(faces_[face_index].corners[ind2]);
+        seq3.push_back(faces_[face_index].corners[ind4]);
 	}
-    MeshFace face3 = face;
+    MeshFace face3 = faces_[face_index];
     face3.corners = std::move(seq3);
     face3.normal = FaceNormal(face3);
     faces_.push_back(std::move(face3));
 
-    face = faces_[face_index];
+ //   face = faces_[face_index];
     if (MakeVar1) {
         if (edgeIndex == 0) {
-            face.corners[1] = face.corners[2];
-            face.corners[2] = face.corners[3];
+            faces_[face_index].corners[1] = faces_[face_index].corners[2];
+            faces_[face_index].corners[2] = faces_[face_index].corners[3];
         }
         if (edgeIndex == 3) {
-            face.corners[0] = face.corners[3];
+            faces_[face_index].corners[0] = faces_[face_index].corners[3];
 		}
         if (edgeIndex == 1) {
-            face.corners[2] = face.corners[3];
+            faces_[face_index].corners[2] = faces_[face_index].corners[3];
 		}
     }
     else
         {
         if (edgeIndex == 0) {
-            face.corners[0] = face.corners[3];
+            faces_[face_index].corners[0] = faces_[face_index].corners[3];
         }
         if (edgeIndex == 1) {
-            face.corners[1] = face.corners[2];
-            face.corners[2] = face.corners[3];
+            faces_[face_index].corners[1] = faces_[face_index].corners[2];
+            faces_[face_index].corners[2] = faces_[face_index].corners[3];
         }
         if (edgeIndex == 2) {
-            face.corners[2] = face.corners[3];
+            faces_[face_index].corners[2] = faces_[face_index].corners[3];
         }
 	}
 
-    face.corners.resize(3);
-	face.m_Trimmed = true;
- /*
- 	if (MakeVar1) {
-		if (edgeIndex2 == 0) {
-			face2->m_Vert[0].p = face2->m_Vert[3].p;
-		}
-		if (edgeIndex2 == 1) {
-			face2->m_Vert[1].p = face2->m_Vert[2].p;
-			face2->m_Vert[2].p = face2->m_Vert[3].p;
-		}
-		if (edgeIndex2 == 2)
-			face2->m_Vert[2].p = face2->m_Vert[3].p;
-	}
-	else {
-		if (edgeIndex2 == 0) {
-			face2->m_Vert[1].p = face2->m_Vert[2].p;
-			face2->m_Vert[2].p = face2->m_Vert[3].p;
-		}
-		if (edgeIndex2 == 1) {
-			face2->m_Vert[2].p = face2->m_Vert[3].p;
-		}
-		if (edgeIndex2 == 3)
-			face2->m_Vert[0].p = face2->m_Vert[3].p;
-	}
- */
-      face2 = faces_[f2];
+    faces_[face_index].corners.resize(3);
+	faces_[face_index].m_Trimmed = true;
 
+    
     if (MakeVar1) {
         if (edgeIndex == 0) {
-            face2.corners[1] = face2.corners[2];
-            face2.corners[2] = face2.corners[3];
+            faces_[f2].corners[1] = faces_[f2].corners[2];
+            faces_[f2].corners[2] = faces_[f2].corners[3];
         }
         if (edgeIndex == 1) {
-            face2.corners[1] = face2.corners[2];
-            face2.corners[2] = face2.corners[3];
+            faces_[f2].corners[1] = faces_[f2].corners[2];
+            faces_[f2].corners[2] = faces_[f2].corners[3];
 		}
         if (edgeIndex == 2) 
-			face2.corners[2] = face2.corners[3];
+			faces_[f2].corners[2] = faces_[f2].corners[3];
     }
     else {
          if (edgeIndex == 0) {
-            face2.corners[1] = face2.corners[2];
-            face2.corners[2] = face2.corners[3];
+            faces_[f2].corners[1] = faces_[f2].corners[2];
+            faces_[f2].corners[2] = faces_[f2].corners[3];
         }
         if (edgeIndex == 1) {
-            face2.corners[2] = face2.corners[3];
+            faces_[f2].corners[2] = faces_[f2].corners[3];
         }
         if (edgeIndex == 3) {
-            face2.corners[0] = face2.corners[3];
+            faces_[f2].corners[0] = faces_[f2].corners[3];
 		}
 	}
-    face2.corners.resize(3);
-    face2.m_Trimmed = true;
+    faces_[f2].corners.resize(3);
+    faces_[f2].m_Trimmed = true;
     return true;
 }
 bool CMesh3D::SplitFaceByVar8(int face_index, int vertexToMove, cVec2 moveTarget)
