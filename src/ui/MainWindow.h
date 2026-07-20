@@ -54,6 +54,7 @@ private:
     void AddPlaceholderButton(QGridLayout* layout, QWidget* parent, const QString& icon_key, const QString& title, int row, int column);
     void RefreshSceneTree();
     void OnSceneTreeItemClicked(QTreeWidgetItem* item, int column);
+    void OnSceneTreeItemDoubleClicked(QTreeWidgetItem* item, int column);
     void SetTool(ToolMode tool, const QString& status_text);
     void SetSolidDisplayMode(SolidDisplayMode mode);
     void SetMeshDisplayMode(MeshDisplayMode mode);
@@ -82,6 +83,7 @@ private:
     void ShowLowPolyTool();
     void ShowMeshFillContourTool();
     void ShowTrimMeshTestTool();
+    void ShowClassifyFaceCutTool();
     void EditSelectedParametricObject();
     bool TryStartLiveEdgeToolFromSelection();
     bool TryStartLivePolylineExtrudeFromSelection();

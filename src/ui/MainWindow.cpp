@@ -4,6 +4,7 @@
 #include "../CBSpline.h"
 #include "../CMesh3D.h"
 #include "../CPolyline.h"
+#include "../Line2D.h"
 #include "../MaterialLibrary.h"
 #include "../solid/Solid.h"
 #include "../solid/SurfaceSet.h"
@@ -90,10 +91,43 @@
 #include <functional>
 #include <vector>
 
+void message_to_file(const char* text);
+
 namespace {
 constexpr int kMaxRecentProjectFiles = 18;
 constexpr int kSceneTreeObjectIndexRole = Qt::UserRole + 1;
 constexpr int kSceneTreeGroupRole = Qt::UserRole + 2;
+
+void Message_err(const char* message)
+{
+    message_to_file(message);
+}
+
+void DoTest(CPolyline* Plface, CPolyline* PlCut)
+{
+    if (!Plface || !PlCut) {
+        Message_err("ClassifyFaceCut: Plface or PlCut is null\n");
+        return;
+    }
+
+    Face2D face;
+    for (int i = 0; i < static_cast<int>(Plface->np()); ++i) {
+        face.verts.push_back(cVec2(Plface->P(i)->x, Plface->P(i)->y));
+    }
+
+    std::vector<cVec2> cut;
+    for (int i = 0; i < static_cast<int>(PlCut->np()); ++i) {
+        cut.push_back(cVec2(PlCut->P(i)->x, PlCut->P(i)->y));
+    }
+
+    CellCutInfo info;
+    if (!AnalyzeFaceCut(face, cut, info)) {
+        Message_err("AnalyzeFaceCut failed\n");
+        return;
+    }
+
+    ClassifyFaceCut(face, cut, info);
+}
 
 BooleanDialog::Operation DialogOperationFromBoolean(BooleanOperation operation) {
     if (operation == BooleanOperation::Cut) {
@@ -1795,6 +1829,9 @@ void MainWindow::CreateDocks() {
     connect(scene_tree_, &QTreeWidget::itemClicked, this, [this](QTreeWidgetItem* item, int column) {
         OnSceneTreeItemClicked(item, column);
     });
+    connect(scene_tree_, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem* item, int column) {
+        OnSceneTreeItemDoubleClicked(item, column);
+    });
 
     properties_dock_ = new QDockWidget("Property Panel", this);
     properties_dock_->setWidget(property_panel_);
@@ -2200,6 +2237,9 @@ void MainWindow::AddToolButton(QGridLayout* layout, QWidget* parent, const std::
     if (key == "TrimMeshTest") {
         button->setIcon(QIcon());
         button->setText("Trim M");
+    } else if (key == "ClassifyFaceCut") {
+        button->setIcon(QIcon());
+        button->setText("Face Cut");
     } else if (key == "MeshFillContour") {
         button->setIcon(QIcon());
         button->setText("Fill");
@@ -2346,6 +2386,46 @@ void MainWindow::OnSceneTreeItemClicked(QTreeWidgetItem* item, int column) {
         RefreshSceneTree();
         viewport_->update();
     }
+}
+
+void MainWindow::OnSceneTreeItemDoubleClicked(QTreeWidgetItem* item, int column) {
+    (void)column;
+    if (!item) {
+        return;
+    }
+
+    const QVariant object_index = item->data(0, kSceneTreeObjectIndexRole);
+    if (!object_index.isValid()) {
+        return;
+    }
+
+    auto& objects = document_.GetObjects();
+    const size_t index = static_cast<size_t>(object_index.toULongLong());
+    if (index >= objects.size() || !objects[index]) {
+        return;
+    }
+
+    CAlfaObject& object = *objects[index];
+    bool accepted = false;
+    const QString name = QInputDialog::getText(
+        this,
+        "Rename Object",
+        "Object name",
+        QLineEdit::Normal,
+        QString::fromStdString(object.GetName()),
+        &accepted).trimmed();
+    if (!accepted) {
+        return;
+    }
+    if (name.isEmpty()) {
+        statusBar()->showMessage("Object name cannot be empty", 1400);
+        return;
+    }
+
+    object.SetName(name.toStdString());
+    RefreshSceneTree();
+    viewport_->update();
+    statusBar()->showMessage(QString("Object renamed: %1").arg(name), 1400);
 }
 
 void MainWindow::SetTool(ToolMode tool, const QString& status_text) {
@@ -3427,6 +3507,10 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         ShowTrimMeshTestTool();
         return;
     }
+    if (tool_id == "ClassifyFaceCut") {
+        ShowClassifyFaceCutTool();
+        return;
+    }
 
     if (tool_id == "PolylineCurve") {
         ClearActiveProperties();
@@ -3927,6 +4011,101 @@ void MainWindow::ShowTrimMeshTestTool() {
     dialog->raise();
     dialog->activateWindow();
     statusBar()->showMessage("Trim Mesh Test: выбери mesh в сцене и нажми Use Selected Mesh", 1800);
+}
+
+void MainWindow::ShowClassifyFaceCutTool() {
+    ClearActiveProperties();
+    viewport_->SetTool(ToolMode::Select);
+    viewport_->SetSelectionMode(SelectionMode::Object);
+    UpdateActiveToolUi("ClassifyFaceCut");
+
+    auto* dialog = new QDialog(this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose, true);
+    dialog->setWindowTitle("Classify Face Cut");
+
+    auto face_id = std::make_shared<unsigned long>(0);
+    auto cut_id = std::make_shared<unsigned long>(0);
+
+    auto* root = new QVBoxLayout(dialog);
+    auto* selection_form = new QFormLayout();
+    auto* face_label = new QLabel("none", dialog);
+    auto* cut_label = new QLabel("none", dialog);
+    selection_form->addRow("Plface", face_label);
+    selection_form->addRow("PlCut", cut_label);
+    root->addLayout(selection_form);
+
+    auto* select_face_button = new QPushButton("Use Selected Plface", dialog);
+    auto* select_cut_button = new QPushButton("Use Selected PlCut", dialog);
+    root->addWidget(select_face_button);
+    root->addWidget(select_cut_button);
+
+    auto* buttons = new QHBoxLayout();
+    auto* test_button = new QPushButton("DoTest", dialog);
+    auto* close_button = new QPushButton("Close", dialog);
+    buttons->addWidget(test_button);
+    buttons->addStretch();
+    buttons->addWidget(close_button);
+    root->addLayout(buttons);
+
+    const auto describe_object = [](const CAlfaObject* object) {
+        if (!object) {
+            return QString("none");
+        }
+        const QString name = QString::fromStdString(object->GetName());
+        return name.isEmpty() ? QString("ID %1").arg(object->m_id) : QString("%1 (ID %2)").arg(name).arg(object->m_id);
+    };
+
+    connect(select_face_button, &QPushButton::clicked, dialog, [this, face_id, face_label, describe_object]() {
+        CPolyline* face = document_.GetSelectedPolyline();
+        if (!face) {
+            statusBar()->showMessage("Classify Face Cut: выбери CPolyline для Plface", 1500);
+            return;
+        }
+        document_.EnsureObjectId(*face);
+        *face_id = face->m_id;
+        face_label->setText(describe_object(face));
+        statusBar()->showMessage("Classify Face Cut: Plface выбран, теперь выбери PlCut", 1600);
+    });
+
+    connect(select_cut_button, &QPushButton::clicked, dialog, [this, cut_id, cut_label, describe_object]() {
+        CPolyline* cut = document_.GetSelectedPolyline();
+        if (!cut) {
+            statusBar()->showMessage("Classify Face Cut: выбери CPolyline для PlCut", 1500);
+            return;
+        }
+        document_.EnsureObjectId(*cut);
+        *cut_id = cut->m_id;
+        cut_label->setText(describe_object(cut));
+        statusBar()->showMessage("Classify Face Cut: PlCut выбран, нажми DoTest", 1600);
+    });
+
+    connect(test_button, &QPushButton::clicked, dialog, [this, face_id, cut_id]() {
+        auto* face = dynamic_cast<CPolyline*>(document_.FindObjectById(*face_id));
+        auto* cut = dynamic_cast<CPolyline*>(document_.FindObjectById(*cut_id));
+        if (!face || !cut) {
+            statusBar()->showMessage("Classify Face Cut: сначала выбери Plface и PlCut", 1800);
+            return;
+        }
+        if (face == cut) {
+            statusBar()->showMessage("Classify Face Cut: Plface и PlCut должны быть разными линиями", 1800);
+            return;
+        }
+        if (face->np() < 3 || cut->np() < 2) {
+            statusBar()->showMessage("Classify Face Cut: Plface требует 3+ точек, PlCut — 2+", 2000);
+            return;
+        }
+
+        DoTest(face, cut);
+        viewport_->update();
+        statusBar()->showMessage("Classify Face Cut: DoTest выполнен", 1800);
+    });
+    connect(close_button, &QPushButton::clicked, dialog, &QDialog::accept);
+
+    CenterDialogOnCursor(*dialog);
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
+    statusBar()->showMessage("Classify Face Cut: выбери Plface и нажми Use Selected Plface", 1900);
 }
 
 void MainWindow::EditSelectedParametricObject() {
@@ -5223,7 +5402,7 @@ void MainWindow::PopulateToolsPanelForTab(int tab_index) {
     } else if (tab == "Curves") {
         tool_ids = {"PolylineCurve", "BSplineCurve", "EditPoint"};
     } else if (tab == "Mesh 3D") {
-        tool_ids = {"MeshFillContour", "SolidLowPoly", "TrimMeshTest"};
+        tool_ids = {"MeshFillContour", "SolidLowPoly", "TrimMeshTest", "ClassifyFaceCut"};
     } else if (tab == "Surfaces") {
         tool_ids = {"SurfaceLoft", "SurfaceReverseNormals", "SurfaceOfRevolution"};
     } else if (tab == "Solid") {

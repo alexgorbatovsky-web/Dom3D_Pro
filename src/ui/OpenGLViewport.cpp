@@ -1969,6 +1969,9 @@ void OpenGLViewport::HandleTransformClick(const QPoint& point, bool add_to_selec
     }
 
     const DomPoint screen_point{point.x(), point.y()};
+    auto world_to_screen = [this](Vec3 world, DomPoint& screen) {
+        return renderer_.WorldToScreen(world, camera_, orthographic_projection_, width(), height(), screen);
+    };
     auto project_world = [this](Vec3 world, DomPoint& screen, float& depth) {
         Vec3 forward{};
         Vec3 right{};
@@ -1979,6 +1982,14 @@ void OpenGLViewport::HandleTransformClick(const QPoint& point, bool add_to_selec
     };
 
     const SelectionAction solid_action = add_to_selection ? SelectionAction::Add : SelectionAction::Replace;
+    if (document_->SelectPolylineAtScreen(screen_point, world_to_screen, 8.0f, solid_action)) {
+        document_->ExpandSelectedGroups();
+        emit SelectionChanged();
+        emit DocumentChanged();
+        update();
+        return;
+    }
+
     if (document_->SelectSolidMeshAtScreen(screen_point, project_world, solid_action)) {
         document_->ExpandSelectedGroups();
         emit SelectionChanged();

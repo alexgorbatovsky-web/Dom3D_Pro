@@ -1385,6 +1385,16 @@ ToolRegistry::ToolRegistry() {
         }
     });
 
+    tools_.push_back({
+        "ClassifyFaceCut",
+        "Classify Face Cut",
+        {},
+        [](CAlfaDoc&, const std::vector<ToolParameter>&) {
+        },
+        [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {
+        }
+    });
+
     // ������ boolean-���������� � UI ������� ������ ������ �������� � �������� ������������� ������
     tools_.push_back({
         "boolean",

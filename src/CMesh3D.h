@@ -148,6 +148,7 @@ public:
     bool SplitFaceByVar8(int face_index, int vertexToMove, cVec2 moveTarget);
     int FindFirstFace3d(Edge ed);
     int FindSecondCFace3d(int first_face_index, Edge ed);
+    bool MakePolyline(int nf, CPolyline& pLine);
 
 private:
     bool IsValidFace(const Face& face, size_t vertex_count) const;
