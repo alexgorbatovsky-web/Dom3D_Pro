@@ -95,6 +95,11 @@ bool CPolyline::CanClose() const {
 void CPolyline::SetClosed(bool closed) {
     closed_ = closed && CanClose();
 }
+void CPolyline::MakeClosed()
+{
+    CPoint3d p0(P(0)->x, P(0)->y, P(0)->z);
+    AddPoint(p0);
+}
 
 bool CPolyline::Close() {
     if (!CanClose()) {

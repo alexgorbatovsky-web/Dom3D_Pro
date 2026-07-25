@@ -41,6 +41,8 @@ public:
     bool IsClosed() const;
     bool CanClose() const;
     void SetClosed(bool closed);
+    void MakeClosed();
+
     bool Close();
     void Open();
     size_t GetPointCount() const;

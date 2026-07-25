@@ -66,6 +66,8 @@ struct TrimFaceData
     int edgeIndex;
     int vertexToMove;
     cVec2 moveTarget;
+    std::vector<int> Pnt;
+    TrimFaceData() { Pnt.clear(); }
 };
 struct IndAndDist {
     int ind;// indx  pLine
@@ -140,6 +142,8 @@ public:
     bool SplitFaceByPointVar4(int face_index, int ind1, int ind2, const cVec2& pm);
     bool SplitFaceByPointVar3(int face_index, int ind1, int ind2, const cVec2& pm);
     int MakeFace(std::vector < size_t> indV);
+    int MakeFace(size_t ind1, size_t ind2, size_t ind3);
+
     bool PrepareAndMoveVertexToTrimLine(CPolyline* pLine, std::vector<DataToMoveVerts*>& Data);
     bool FindVertexToMove(CPolyline* pLine, DataToMoveVerts* data);
     bool SplitFaceByVar5(int face_index, int v1, int edgeIndex, cVec2& pm);
@@ -149,6 +153,7 @@ public:
     int FindFirstFace3d(Edge ed);
     int FindSecondCFace3d(int first_face_index, Edge ed);
     bool MakePolyline(int nf, CPolyline& pLine);
+    bool SplitFaceByVar11(int f, int v1, int v2, std::vector<int> Pnt, CPolyline* pLine);
 
 private:
     bool IsValidFace(const Face& face, size_t vertex_count) const;

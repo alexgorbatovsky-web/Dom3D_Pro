@@ -18,7 +18,9 @@ void Step(const char* text)
 	if (!text)
 		return;
 	std::string text2(text);
-	static std::ofstream file("c:\\temp\\stdout.txt");
-	if(file)
-		file << text2 << std::endl;
+	std::ofstream file;
+	const char* namefile = "c:\\temp\\stdout.txt";
+	file.open(namefile, std::ofstream::out | std::ofstream::app);
+	file << text2 << std::endl;
+	file.close();
 }

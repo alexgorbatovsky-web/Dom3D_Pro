@@ -978,6 +978,15 @@ bool CMesh3D::SplitFaceByPointVar3(int face_index, int ind1, int ind2, const cVe
     if (count < 4)
         return false;
 
+ /*   CAlfaDoc* pDoc = GetAlfaDoc();
+    pDoc->AddLayer("Faces");
+    auto pLine01 = std::make_unique<CPolyline>();
+    MakePolyline(face_index, *pLine01);
+    pLine01->printToFile("Face_f1.txt");
+    pLine01->SetName("Face_f1");
+    pDoc->AddObject(std::move(pLine01));*/
+
+
     const size_t middle_vertex = add_or_find_vertex_2d(vertices_, pm, 0.0001);
     const MeshCorner middle = { middle_vertex, 0, 0 };
 
@@ -990,9 +999,12 @@ bool CMesh3D::SplitFaceByPointVar3(int face_index, int ind1, int ind2, const cVe
     Vec3 pv = vertices_[face.corners[0].v];
     CPoint3d pv3d(pv.x, pv.y, 0);
     polygon.AddPoint(pv3d);
-    polygon.P(3)->x = pm.x;
-    polygon.P(3)->y = pm.y;
+    polygon.P(2)->x = pm.x;
+    polygon.P(2)->y = pm.y;
     bool Concave = polygon.IsConcavePolygonOnXY();
+ //   polygon.printToFile(" polygon");
+ //   if (Concave)
+ //       Step("Concave");
 
     std::vector<MeshCorner> seq1;
     std::vector<MeshCorner> seq2;
@@ -1279,7 +1291,7 @@ bool CMesh3D::SplitFaceByVar6(int face_index, int v1, int edgeIndex, cVec2& pm)
 }
 bool CMesh3D::SplitFaceByVar7(int f1, int v1, int edgeIndex)
 {
-    Step("SplitFaceByVar7");
+  //  Step("SplitFaceByVar7");
     if (edgeIndex == -1)
         return false;
     MeshFace& face = faces_[f1];
@@ -1289,10 +1301,10 @@ bool CMesh3D::SplitFaceByVar7(int f1, int v1, int edgeIndex)
         return false;
     CAlfaDoc* pDoc = GetAlfaDoc();
     pDoc->AddLayer("Faces");
-    auto pLine1 = std::make_unique<CPolyline>();
-    MakePolyline(f1, *pLine1);
-    pLine1->SetName("Face_f1");
-   pDoc->AddObject(std::move(pLine1));
+//    auto pLine1 = std::make_unique<CPolyline>();
+//    MakePolyline(f1, *pLine1);
+ //   pLine1->SetName("Face_f1");
+ //  pDoc->AddObject(std::move(pLine1));
 
     int ev1 = face.corners[edgeIndex].v;
     int VrtIndex2 = edgeIndex + 1;
@@ -1309,10 +1321,10 @@ bool CMesh3D::SplitFaceByVar7(int f1, int v1, int edgeIndex)
     if (face2.corners.size() != 4)
         return false;
  
-    auto pLine2 = std::make_unique<CPolyline>();
-    MakePolyline(f2, *pLine2);
-    pLine2->SetName("Face_f2");
-    pDoc->AddObject(std::move(pLine2));
+ //   auto pLine2 = std::make_unique<CPolyline>();
+ //   MakePolyline(f2, *pLine2);
+ //   pLine2->SetName("Face_f2");
+ //   pDoc->AddObject(std::move(pLine2));
     
     int ind1 = v1;
     int ind2 = 0;
@@ -1469,6 +1481,144 @@ bool CMesh3D::SplitFaceByVar8(int face_index, int vertexToMove, cVec2 moveTarget
     return true;
 }
 
+bool CMesh3D::SplitFaceByVar11(int f, int vi1, int vi2, std::vector<int> Pnt, CPolyline* pTrimLine)
+{
+  /* char bufer[120];
+    sprintf(bufer, "SplitFaceByVar11  vi1= %d,  vi2= %d", vi1, vi2);
+    Step(bufer);
+    for (int i = 0; i < Pnt.size(); i++) {
+        sprintf(bufer, "  p= %d,  ", Pnt[i]);
+        Step(bufer);
+    }*/ 
+    
+    if (Pnt.size() < 2)
+        return false;
+    CPolyline* pLine = new CPolyline;
+    for (int j = 0; j < Pnt.size(); j++) {
+        CPoint3d* p3d = pTrimLine->P(Pnt[j]);
+        bool NeedAdd = true;
+        for (int i = 0; i < pLine->np(); i++) {
+            double dist = p3d->DistTo(pLine->P(i));
+            if (dist < 0.00001) {
+                NeedAdd = false;
+                break;
+            }
+        }
+        if (NeedAdd)
+            pLine->AddPoint(p3d);
+    }
+
+    MeshFace& face = faces_[f];
+    std::sort(Pnt.begin(), Pnt.end());
+
+    std::vector<cVec2> P2ds;
+    for (int i = 0; i < pLine->np(); i++) {
+        cVec2 P2d;
+        CPoint3d* p3d = pLine->P(i);
+        if (p3d) {
+            P2d.x = p3d->x;
+            P2d.y = p3d->y;
+            P2ds.push_back(P2d);
+        }
+    }
+    if (P2ds.size() < 2) {
+        if (P2ds.size() == 1) {
+            cVec2 pm(P2ds[0].x, P2ds[0].y);
+            return SplitFaceByPoint(f, vi1, vi2, pm);
+        }
+        return false;
+    }
+
+
+    if (vi1 > vi2)
+        std::swap(vi1, vi2);
+    int vi3 = 0;
+    int vi4 = 0;
+    if (vi1 == 0 && vi2 == 2) {
+        vi3 = 1;
+        vi4 = 3;
+    }
+    if (vi1 == 1 && vi2 == 3) {
+        vi1 = 3;
+        vi2 = 1;
+        vi3 = 0;
+        vi4 = 2;
+    }
+    
+    size_t v1 = face.corners[vi1].v;
+    size_t v2 = face.corners[vi2].v;
+    size_t v3 = face.corners[vi3].v;
+    size_t v4 = face.corners[vi4].v;
+
+    CPoint3d* p1l = pLine->P(0);
+    CPoint3d* p2l = pLine->P(1);
+
+
+ //   CPoint3d p1f1(vertices_[face.corners[v1].v].x, vertices_[face.corners[v1].v].y, vertices_[face.corners[v1].v].z);
+    CPoint3d p1f(vertices_[face.corners[vi1].v].x, vertices_[face.corners[vi1].v].y, vertices_[face.corners[vi1].v].z);
+
+    double dist1 = p1f.DistTo(p1l);
+    double dist2 = p1f.DistTo(p2l);
+    if (dist1 > dist2)
+        std::reverse(P2ds.begin(), P2ds.end());
+
+
+    std::vector<size_t> vms;
+    for (int i = 0; i < P2ds.size(); i++) {
+        const cVec2 pm(P2ds[i].x, P2ds[i].y);
+        const size_t vm = add_or_find_vertex_2d(vertices_, pm, 0.0001);
+        vms.push_back(vm);
+    }
+
+    if (vi1 == 0 && vi2 == 2)
+        face.corners[vi2].v = vms[0];
+    else {
+        face.corners[vi2].v = vms[0];
+        face.corners[vi4].v = face.corners[vi1].v;
+    }
+
+    int f2 = MakeFace(v3, v2, vms[P2ds.size() - 1]);
+    int f3 = MakeFace(v1, vms[0], v4);
+    int f5 = MakeFace(v4, vms[P2ds.size() - 1], v2);
+
+ /*   CAlfaDoc* pDoc = GetAlfaDoc();
+    pDoc->AddLayer("Faces");
+    auto pLine2 = std::make_unique<CPolyline>();
+    MakePolyline(f2, *pLine2);
+    pLine2->SetName("Face_f2");
+    pDoc->AddObject(std::move(pLine2));
+    auto pLine3 = std::make_unique<CPolyline>();
+    MakePolyline(f3, *pLine3);
+    pLine3->SetName("Face_f3");
+    pDoc->AddObject(std::move(pLine3));
+    auto pLine5 = std::make_unique<CPolyline>();
+    MakePolyline(f5, *pLine5);
+    pLine5->SetName("Face_f5");
+    pDoc->AddObject(std::move(pLine5));
+*/
+
+    for (size_t i = 0; i < P2ds.size() - 1; i++) {
+        int f4 = MakeFace(v4, vms[i], vms[i + 1]);
+        int f1 = MakeFace(v3, vms[i + 1], vms[i]);
+
+       /* auto pLine4 = std::make_unique<CPolyline>();
+        MakePolyline(f4, *pLine4);
+        pLine4->SetName("Face_f4");
+        pDoc->AddObject(std::move(pLine4));
+        auto pLine1 = std::make_unique<CPolyline>();
+        MakePolyline(f1, *pLine1);
+        pLine1->SetName("Face_f1");
+        pDoc->AddObject(std::move(pLine1));
+*/
+    }
+
+    faces_[f].corners.resize(3);
+
+    delete pLine;
+    return true;
+}
+
+
 
 int CMesh3D::MakeFace(std::vector < size_t> indV)
 {
@@ -1492,6 +1642,16 @@ int CMesh3D::MakeFace(std::vector < size_t> indV)
     face.normal = FaceNormal(face);
     faces_.push_back(std::move(face));
 	return static_cast<int>(faces_.size() - 1);
+}
+
+int CMesh3D::MakeFace(size_t ind1, size_t ind2, size_t ind3)
+{
+    std::vector < size_t> indV;
+    indV.push_back(ind1);
+    indV.push_back(ind2);
+    indV.push_back(ind3);
+    return MakeFace(indV);
+
 }
 
 MeshFace::MeshFace(std::initializer_list<size_t> vertex_indices) {
@@ -2928,7 +3088,11 @@ bool CMesh3D::TrimByPline(CPolyline* pLine, CPoint3d pc) {
             face_data.vertexToMove = info.vertexToMove;
             face_data.moveTarget = info.moveTarget;
         }
-
+        if (info.VariantCut == 11) {
+            face_data.v1 = info.touchedFaceVertices[0];
+            face_data.v2 = info.touchedFaceVertices[1];
+            face_data.Pnt = info.PntInFace;
+        }
         FacesData.push_back(face_data);
     }
 
@@ -2957,10 +3121,12 @@ bool CMesh3D::TrimByPline(CPolyline* pLine, CPoint3d pc) {
         case 8:
             SplitFaceByVar8(faceData.FaceID, faceData.vertexToMove, faceData.moveTarget);
             break;
-
+        case 11:
+            SplitFaceByVar11(faceData.FaceID, faceData.v1, faceData.v2, faceData.Pnt, pLine);
+            break;
         }
     }
-//    return true;
+    return true;
     if (cut_is_closed(cut)) {
         bool changed = false;
         for (Face& face : faces_) {
@@ -3352,7 +3518,9 @@ bool CMesh3D::MakePolyline(int nf, CPolyline& pLine)
         Vec3& v = vertices_[face.corners[i].v];
         pLine.AddPoint(CPoint3d(v.x, v.y, v.z));
     }
-    pLine.SetClosed(true);
+
+    pLine.MakeClosed();
 	return true;
 
 }
+

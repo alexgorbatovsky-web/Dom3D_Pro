@@ -1256,7 +1256,7 @@ bool trim_mesh_by_surface_boundary(CMesh3D* mesh,
 		loop_faces.push_back(std::move(loop_face));
 	}
 	bool NeedTest = false;
-	if (NeedTest && surface->m_ID == 4) {
+	if (NeedTest && surface->m_ID == 2) {
 		CAlfaDoc* pDoc = GetAlfaDoc();
 		if (pDoc) {
 			pDoc->AddLayer("Mesh3D ID =0");
