@@ -3,12 +3,18 @@
 #include "../CAlfaDoc.h"
 #include "Solid.h"
 
-#include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakePolygon.hxx>
+#include <BRepPrimAPI_MakePrism.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Vec.hxx>
 #include <Standard_Real.hxx>
+#include <TopoDS_Face.hxx>
+#include <TopoDS_Wire.hxx>
 
 #include <algorithm>
+#include <cmath>
 
 const char* SolidBoxTool::GetID() const {
     return "SolidBox";
@@ -30,7 +36,7 @@ std::vector<ToolParameter> SolidBoxTool::GetDefaultParameters() const {
     return {
         {"width", "Length", Width, 2.0, 900.0, 0.5},
         {"height", "Width", Height, 2.0, 900.0, 0.5},
-        {"depth", "Height", Depth, 3.0, 900.0, 0.5},
+        {"depth", "Height", Depth, -900.0, 900.0, 0.5},
         {"origin.x", "Origin X", 0.0, -1000000.0, 1000000.0, 0.1},
         {"origin.y", "Origin Y", 0.0, -1000000.0, 1000000.0, 0.1},
         {"origin.z", "Origin Z", 0.0, -1000000.0, 1000000.0, 0.1},
@@ -62,7 +68,10 @@ bool SolidBoxTool::DoParamOperation(CAlfaDoc& document, size_t object_index, con
 bool SolidBoxTool::RebuildShape(CSolid& solid, const std::vector<ToolParameter>& parameters) const {
     const float width = static_cast<float>(std::max(GetParameter(parameters, "width", Width), 0.001));
     const float height = static_cast<float>(std::max(GetParameter(parameters, "height", Height), 0.001));
-    const float depth = static_cast<float>(std::max(GetParameter(parameters, "depth", Depth), 0.001));
+    const float depth = static_cast<float>(GetParameter(parameters, "depth", Depth));
+    if (std::fabs(depth) <= 0.001f) {
+        return false;
+    }
     const gp_Pnt origin(GetParameter(parameters, "origin.x", 0.0),
                         GetParameter(parameters, "origin.y", 0.0),
                         GetParameter(parameters, "origin.z", 0.0));
@@ -106,18 +115,49 @@ bool SolidBoxTool::CreateBox(CSolid& solid,
                              const gp_Dir& normal,
                              const gp_Dir& u_direction,
                              const gp_Dir& v_direction) const {
-    const Standard_Real dx = width;
-    const Standard_Real dy = height;
-    const Standard_Real dz = depth;
-    const gp_Pnt opposite(origin.X() + u_direction.X() * dx + v_direction.X() * dy + normal.X() * dz,
-                          origin.Y() + u_direction.Y() * dx + v_direction.Y() * dy + normal.Y() * dz,
-                          origin.Z() + u_direction.Z() * dx + v_direction.Z() * dy + normal.Z() * dz);
-    const gp_Pnt min_corner(std::min(origin.X(), opposite.X()),
-                            std::min(origin.Y(), opposite.Y()),
-                            std::min(origin.Z(), opposite.Z()));
-    const gp_Pnt max_corner(std::max(origin.X(), opposite.X()),
-                            std::max(origin.Y(), opposite.Y()),
-                            std::max(origin.Z(), opposite.Z()));
-    solid.m_Shape = BRepPrimAPI_MakeBox(min_corner, max_corner).Shape();
-    return solid.ReBuldMesh();
+    try {
+        const gp_Vec u(
+            u_direction.X() * width,
+            u_direction.Y() * width,
+            u_direction.Z() * width);
+        const gp_Vec v(
+            v_direction.X() * height,
+            v_direction.Y() * height,
+            v_direction.Z() * height);
+        const gp_Pnt p0 = origin;
+        const gp_Pnt p1 = p0.Translated(u);
+        const gp_Pnt p2 = p1.Translated(v);
+        const gp_Pnt p3 = p0.Translated(v);
+
+        BRepBuilderAPI_MakePolygon polygon;
+        polygon.Add(p0);
+        polygon.Add(p1);
+        polygon.Add(p2);
+        polygon.Add(p3);
+        polygon.Close();
+        if (!polygon.IsDone()) {
+            return false;
+        }
+
+        const TopoDS_Wire wire = polygon.Wire();
+        BRepBuilderAPI_MakeFace face_builder(wire);
+        if (!face_builder.IsDone()) {
+            return false;
+        }
+        const TopoDS_Face face = face_builder.Face();
+        const gp_Vec extrusion(
+            normal.X() * depth,
+            normal.Y() * depth,
+            normal.Z() * depth);
+        BRepPrimAPI_MakePrism prism(face, extrusion);
+        prism.Build();
+        if (!prism.IsDone()) {
+            return false;
+        }
+        solid.m_Shape = prism.Shape();
+        return !solid.m_Shape.IsNull() && solid.ReBuldMesh();
+    } catch (...) {
+        return false;
+    }
 }
+

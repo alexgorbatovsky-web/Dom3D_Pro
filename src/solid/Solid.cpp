@@ -1080,6 +1080,14 @@ size_t CSolid::AddBooleanTool(std::unique_ptr<CSolid> tool)
 	return m_BooleanTools.size() - 1;
 }
 
+CSolid* CSolid::GetBooleanTool(size_t tool_index)
+{
+	if (tool_index >= m_BooleanTools.size()) {
+		return nullptr;
+	}
+	return m_BooleanTools[tool_index];
+}
+
 const CSolid* CSolid::GetBooleanTool(size_t tool_index) const
 {
 	if (tool_index >= m_BooleanTools.size()) {
@@ -1646,8 +1654,13 @@ void CSolid::Clear()
 
 void CSolid::Render3d(bool selected) const
 {
-	bool DrawIndexSurf = true;
-	const SolidDisplayMode mode = GetDisplayMode();
+	const bool DrawIndexSurf = false;
+	const bool has_selected_subobject = !m_SelectedEdges.empty()
+		|| !m_SelectedFaceIndices.empty();
+	const bool solid_selected = selected && !has_selected_subobject;
+	const SolidDisplayMode mode = ForceWireframeDisplay()
+		? SolidDisplayMode::Wireframe
+		: GetDisplayMode();
 	const MeshDisplayMode mesh_mode = CMesh3D::GetDisplayMode();
 	const bool draw_faces = mode == SolidDisplayMode::SurfacesAndEdges || mode == SolidDisplayMode::SurfacesAndRaisedMesh;
 	const bool draw_mesh = mode == SolidDisplayMode::MeshOnly || mode == SolidDisplayMode::SurfacesAndRaisedMesh;
@@ -1707,7 +1720,7 @@ void CSolid::Render3d(bool selected) const
 					selected_edges.push_back(edge_ref.second);
 				}
 			}
-			surface->RenderEdges(selected, selected_edges);
+			surface->RenderEdges(solid_color, selected_edges);
 		}
 		draw_surface_indices();
 		return;
@@ -1717,7 +1730,7 @@ void CSolid::Render3d(bool selected) const
 		for (CSurfaceFace* surface : m_Surfaces) {
 			if (surface && surface->pMesh3D) {
 				const Color surface_color = diagnostic_surface_wire_color(*surface, solid_color);
-				surface->pMesh3D->RenderWire(selected, true, &surface_color);
+				surface->pMesh3D->RenderWire(false, true, &surface_color);
 			}
 		}
 		draw_surface_indices();
@@ -1728,7 +1741,7 @@ void CSolid::Render3d(bool selected) const
 		for (CSurfaceFace* surface : m_Surfaces) {
 			if (surface && surface->pMesh3D) {
 				const Material face_material = material_for_surface(*surface);
-				surface->pMesh3D->RenderFaces(selected, draw_edges || mode == SolidDisplayMode::SurfacesAndRaisedMesh, &face_material);
+				surface->pMesh3D->RenderFaces(solid_selected, draw_edges || mode == SolidDisplayMode::SurfacesAndRaisedMesh, &face_material);
 			}
 		}
 		for (int selected_face_index : m_SelectedFaceIndices) {
@@ -1763,7 +1776,7 @@ void CSolid::Render3d(bool selected) const
 		for (CSurfaceFace* surface : m_Surfaces) {
 			if (surface && surface->pMesh3D) {
 				const Color surface_color = diagnostic_surface_wire_color(*surface, solid_color);
-				surface->pMesh3D->RenderWire(selected, mode == SolidDisplayMode::SurfacesAndRaisedMesh, &surface_color);
+				surface->pMesh3D->RenderWire(false, mode == SolidDisplayMode::SurfacesAndRaisedMesh, &surface_color);
 			}
 		}
 	}
@@ -1781,7 +1794,7 @@ void CSolid::Render3d(bool selected) const
 				if (edge_ref.first == i)
 					selected_edges.push_back(edge_ref.second);
 			}
-			surface->RenderEdges(selected, selected_edges);
+			surface->RenderEdges(solid_color, selected_edges);
 		}
 	}
 	draw_surface_indices();

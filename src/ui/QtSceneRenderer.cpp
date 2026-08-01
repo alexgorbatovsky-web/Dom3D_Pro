@@ -6,8 +6,6 @@
 #include <cmath>
 
 namespace {
-constexpr float kGridHalfSize = 12.0f;
-
 void set_color(float r, float g, float b, float a = 1.0f) {
     glColor4f(r, g, b, a);
 }
@@ -392,8 +390,8 @@ void QtSceneRenderer::CalculateClipPlanes(const CAlfaDoc& document, const Camera
     z_far = std::max(z_near + 10.0f, max_depth + scene_scale * 2.0f);
 }
 
-void QtSceneRenderer::DrawCoordinateAxes(bool) const {
-    const float length = kGridHalfSize;
+void QtSceneRenderer::DrawCoordinateAxes(bool xy_plane_grid) const {
+    const float length = xy_plane_grid ? kDefaultSceneSize : kDefaultGridHalfSize;
     const float lift = 0.02f;
 
     glDisable(GL_DEPTH_TEST);

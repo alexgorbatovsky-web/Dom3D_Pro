@@ -259,47 +259,7 @@ void CPoint3d::SetAgrPoz(CView3d* pv)
 	mod_coord_am(&p0, &cx, &cy, &cz);
 	*/
 }
-/*
-void CPoint3d::Read(char* str)
-{
-	if (str == NULL)
-		return;
-	char buf[BUFSIZE];
-	strncpy(buf, str, BUFSIZE);
-	String str1 = NULL;
-	str1 = strtok(buf, " 	");
-	if (str1 == NULL) {
-		x = 0;
-		y = 0;
-		z = 0;
-		return;
-	}
-	CAlfaDoc* pDoc = GetAlfaDoc();
-	if (pDoc)
-		x = pDoc->GetValue(str1);
-	else
-		x = atof(str1);
-	str1 = strtok(NULL, " 	");
-	if (str1 == NULL) {
-		y = 0;
-		z = 0;
-		return;
-	}
-	if (pDoc)
-		y = pDoc->GetValue(str1);
-	else
-		y = atof(str1);
-	str1 = strtok(NULL, " 	");
-	if (str1 == NULL) {
-		z = 0;
-		return;
-	}
-	if (pDoc)
-		z = pDoc->GetValue(str1);
-	else
-		z = atof(str1);
-}
-*/
+
 void CPoint3d::Shift(CVector* vect, double dist, CPoint3d* p)
 {
 	p->x = x + vect->l * dist;

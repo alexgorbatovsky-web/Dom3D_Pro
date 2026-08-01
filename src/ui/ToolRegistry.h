@@ -14,7 +14,8 @@ enum class ToolParameterType {
 
 enum class ToolParameterUnit {
     None,
-    Length
+    Length,
+    Angle
 };
 
 struct ToolParameter {
@@ -54,10 +55,17 @@ public:
     ActiveParametricObject CreateParametricObject(const std::string& id,
                                                   CAlfaDoc& document,
                                                   const std::vector<ToolParameter>& parameters) const;
+    ActiveParametricObject ApplyTrimToSelection(const std::string& id,
+                                                CAlfaDoc& document) const;
+    ActiveParametricObject ApplySketchFeatureToSelection(CAlfaDoc& document) const;
+    ActiveParametricObject ApplyOffsetFaceToSelection(CAlfaDoc& document) const;
+    bool ApplyOffsetFaceOnce(CAlfaDoc& document, double distance) const;
     void Rebuild(const ActiveParametricObject& active_object, CAlfaDoc& document) const;
     bool ReplayOperations(size_t object_index, CAlfaDoc& document) const;
     bool ReplayProfileDependents(unsigned long profile_id, CAlfaDoc& document) const;
     bool ReplayAllProfileDependents(CAlfaDoc& document) const;
+    bool ReplayAllTrimDependents(CAlfaDoc& document,
+                                 unsigned long cutter_id = 0) const;
     ActiveParametricObject ActiveObjectFromDocument(size_t object_index, const CAlfaObject& object, size_t operation_index = 0) const;
     std::string LabelFor(const std::string& id) const;
 

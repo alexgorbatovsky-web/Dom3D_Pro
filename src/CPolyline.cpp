@@ -1,5 +1,5 @@
 #include "CPolyline.h"
-
+#include "SystemCoord.h"
 #include "OpenGLCompat.h"
 #include "SurfaceUVMapping.h"
 #include "solid/SurfaceFace.h"
@@ -997,4 +997,76 @@ bool CPolyline::JoinMultuLines(std::vector<CPolyline*>* lines, std::vector<CPoly
         }
     }
     return true;
+}
+
+bool CPolyline::IsAllPointsZeroZ()
+{
+    for (int i = 0; i < np(); i++)
+        if (fabs(P(i)->z) > 0.001)
+            return false;
+    return true;
+}
+
+bool CPolyline::GetPlaneSC(CSystemCoord* msc)
+{
+    double dist_max = 0;
+    int i_max = 0;
+    CPoint3d pm = *P(0);
+
+    CPoint3d px = *P(1);
+    if (px.DistTo(&pm) < DDELTA)
+        for (int i = 0; i < np() - 1; i++) {
+            double dist = P(i)->DistTo(P(i + 1));
+            if (dist_max < dist) {
+                pm = *P(i);
+                px = *P(i + 1);
+                dist_max = dist;
+            }
+        }
+
+
+    CVector cx(&pm, &px);
+    dist_max = 0;
+    CPoint3d py;
+    for (int i = 0; i < np(); i++) {
+        double dist = P(i)->GetDistLine(&pm, &px);
+        if (dist_max < dist) {
+            py = *P(i);
+            dist_max = dist;
+        }
+    }
+
+    if (dist_max < DELTA) {
+        CVector cy;
+        py = pm;
+        cx.GetOrth(&cy);
+        py.Move(&cy, 100);
+    }
+    msc->Set(&pm, &px, &py);
+    return true;
+}
+
+void CPolyline::mod_coord_ma(CPoint3d* p0, CVector* cx, CVector* cy, CVector* cz)
+{
+    if (this == NULL)
+        return;
+    for (int i = 0; i < np(); i++)
+        P(i)->mod_coord_ma(p0, cx, cy, cz);
+}
+
+void CPolyline::mod_coord_am(CPoint3d* p0, CVector* cx, CVector* cy, CVector* cz)
+{
+    if (this == NULL)
+        return;
+    for (int i = 0; i < np(); i++)
+        P(i)->mod_coord_am(p0, cx, cy, cz);
+}
+
+void CPolyline::mod_coord_am(CSystemCoord* sc)
+{
+    mod_coord_am(&sc->p0, &sc->cx, &sc->cy, &sc->cz);
+}
+void CPolyline::mod_coord_ma(CSystemCoord* sc)
+{
+    mod_coord_ma(&sc->p0, &sc->cx, &sc->cy, &sc->cz);
 }

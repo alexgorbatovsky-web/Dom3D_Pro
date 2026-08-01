@@ -27,6 +27,7 @@
         <file alias="SmartHybridTool.png">icons/SmartHybridTool.png</file>
         <file alias="SmartHybridTransform.png">icons/SmartHybridTransform.png</file>
         <file alias="SolidBox.png">icons/SolidBox.png</file>
+        <file alias="SolidBeamTool.png">icons/SolidBeamTool.png</file>
         <file alias="SolidCylinder.png">icons/SolidCylinder.png</file>
         <file alias="SolidDraft.png">icons/SolidDraft.png</file>
         <file alias="SolidExtrudeFace.png">icons/SolidExtrudeFace.png</file>
@@ -34,6 +35,8 @@
         <file alias="SolidInSet.png">icons/SolidInSet.png</file>
         <file alias="SolidLowPoly.png">icons/SolidLowPoly.png</file>
         <file alias="SolidPrismTool.png">icons/SolidPrismTool.png</file>
+        <file alias="SolidPolyhedronTool.png">icons/SolidPolyhedronTool.png</file>
+        <file alias="SolidSketchFeature.png">icons/SolidSketchFeature.png</file>
         <file alias="SolidSphereTool.png">icons/SolidSphereTool.png</file>
         <file alias="SolidSweptTool.png">icons/SolidSweptTool.png</file>
         <file alias="SolidTorusTool.png">icons/SolidTorusTool.png</file>
@@ -41,6 +44,9 @@
         <file alias="SplitRings.png">icons/SplitRings.png</file>
         <file alias="SurfaceOfRevolution.png">icons/SurfaceOfRevolution.png</file>
         <file alias="ThickSolidTool.png">icons/ThickSolidTool.png</file>
+        <file alias="TrimByPlane.png">icons/TrimByPlane.png</file>
+        <file alias="TrimBySketch.png">icons/TrimBySketch.png</file>
+        <file alias="TrimBySurface.png">icons/TrimBySurface.png</file>
         <file alias="open.png">icons/open.png</file>
         <file alias="save.png">icons/save.png</file>
         <file alias="app_icon.ico">app_icon.ico</file>

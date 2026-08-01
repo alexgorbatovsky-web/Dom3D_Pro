@@ -9,6 +9,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
+#include <QTimer>
 
 #include <algorithm>
 #include <cmath>
@@ -38,7 +39,48 @@ bool IsLengthParameter(const ToolParameter& parameter) {
 
 bool IsInternalPlacementParameter(const ToolParameter& parameter) {
     return parameter.id.rfind("origin.", 0) == 0
-        || parameter.id.rfind("axis.", 0) == 0;
+        || parameter.id.rfind("axis.", 0) == 0
+        || parameter.id == "profile.id"
+        || parameter.id == "section.id"
+        || parameter.id == "guide.id"
+        || parameter.id == "cutter.id"
+        || parameter.id == "face.index"
+        || parameter.id == "boolean.body_id"
+        || parameter.id == "boolean.tool_index";
+}
+
+bool IsPlaneParameterVisible(const ActiveParametricObject& active,
+                             const ToolParameter& parameter) {
+    if (active.tool_id != "PlaneTool"
+        || parameter.id == "mode"
+        || parameter.id == "size") {
+        return true;
+    }
+    const auto method = std::find_if(
+        active.parameters.begin(),
+        active.parameters.end(),
+        [](const ToolParameter& candidate) {
+            return candidate.id == "mode";
+        });
+    const int mode = method == active.parameters.end()
+        ? 1
+        : std::clamp(static_cast<int>(method->value), 0, 5);
+    if (mode == 0) {
+        return parameter.id == "a"
+            || parameter.id == "b"
+            || parameter.id == "c"
+            || parameter.id == "d";
+    }
+    if (mode == 1) {
+        return parameter.id.rfind("plane.origin.", 0) == 0
+            || parameter.id.rfind("plane.normal.", 0) == 0;
+    }
+    if (mode == 2) {
+        return parameter.id.rfind("p1.", 0) == 0
+            || parameter.id.rfind("p2.", 0) == 0
+            || parameter.id.rfind("p3.", 0) == 0;
+    }
+    return parameter.id == "offset";
 }
 }
 
@@ -62,7 +104,8 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
 
     for (int i = 0; i < static_cast<int>(active_object_.parameters.size()); ++i) {
         ToolParameter& parameter = active_object_.parameters[static_cast<size_t>(i)];
-        if (IsInternalPlacementParameter(parameter)) {
+        if (IsInternalPlacementParameter(parameter)
+            || !IsPlaneParameterVisible(active_object_, parameter)) {
             continue;
         }
 
@@ -85,8 +128,16 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
             const int index = std::clamp(static_cast<int>(parameter.value), 0, std::max(0, editor->count() - 1));
             editor->setCurrentIndex(index);
             connect(editor, &QComboBox::currentIndexChanged, this, [this, i](int index) {
+                const bool rebuild_plane_form =
+                    active_object_.tool_id == "PlaneTool"
+                    && active_object_.parameters[static_cast<size_t>(i)].id == "mode";
                 active_object_.parameters[static_cast<size_t>(i)].value = static_cast<double>(index);
                 emit ParametersChanged();
+                if (rebuild_plane_form) {
+                    QTimer::singleShot(0, this, [this]() {
+                        SetActiveObject(active_object_);
+                    });
+                }
             });
             form_->addRow(QString::fromStdString(parameter.label), editor);
             continue;
@@ -94,16 +145,19 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
 
         constexpr double radians_to_degrees = 180.0 / 3.14159265358979323846;
         const bool solid_transform_angle = active_object_.tool_id == "SolidTransform" && parameter.id == "angle";
+        const bool degree_parameter = parameter.unit == ToolParameterUnit::Angle;
         const bool length_parameter = IsLengthParameter(parameter);
         const DisplayLengthUnit display_unit = LoadDisplayLengthUnit();
         const double display_factor = solid_transform_angle
             ? radians_to_degrees
             : (length_parameter ? MillimetersToDisplay(1.0, display_unit) : 1.0);
         auto* editor = new QDoubleSpinBox(this);
+        editor->setObjectName(
+            QStringLiteral("parameter_%1").arg(QString::fromStdString(parameter.id)));
         editor->setRange(parameter.minimum * display_factor, parameter.maximum * display_factor);
         editor->setSingleStep(parameter.step * display_factor);
-        editor->setDecimals(solid_transform_angle ? 1 : (length_parameter ? 3 : (parameter.step < 0.1 ? 2 : 1)));
-        editor->setSuffix(solid_transform_angle ? QString::fromUtf8("°") : (length_parameter ? DisplayLengthUnitSuffix(display_unit) : QString()));
+        editor->setDecimals((solid_transform_angle || degree_parameter) ? 1 : (length_parameter ? 3 : (parameter.step < 0.1 ? 2 : 1)));
+        editor->setSuffix((solid_transform_angle || degree_parameter) ? QString::fromUtf8("°") : (length_parameter ? DisplayLengthUnitSuffix(display_unit) : QString()));
         editor->setValue(parameter.value * display_factor);
         connect(editor, &QDoubleSpinBox::valueChanged, this, [this, i, display_factor](double value) {
             active_object_.parameters[static_cast<size_t>(i)].value = value / display_factor;
@@ -124,6 +178,18 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
     button_layout->addWidget(ok);
     button_layout->addWidget(cancel);
     form_->addRow(buttons);
+}
+
+void PropertyPanel::FocusParameter(const std::string& parameter_id) {
+    auto* editor = findChild<QDoubleSpinBox*>(
+        QStringLiteral("parameter_%1").arg(QString::fromStdString(parameter_id)));
+    if (!editor) {
+        return;
+    }
+    QTimer::singleShot(0, editor, [editor]() {
+        editor->setFocus(Qt::OtherFocusReason);
+        editor->selectAll();
+    });
 }
 
 const ActiveParametricObject& PropertyPanel::ActiveObject() const {

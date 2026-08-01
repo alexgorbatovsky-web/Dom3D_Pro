@@ -60,7 +60,8 @@ public:
 	bool IsPlanar() const;
 	bool GetCenterAndNormal(Vec3& center, Vec3& normal) const;
 	bool GetPoint(double U, double V, CPoint8d* pnt);
-	void RenderEdges(bool selected, const std::vector<int>& selected_edge_indices = {}) const;
+	void RenderEdges(const Color& color,
+	                 const std::vector<int>& selected_edge_indices = {}) const;
 	void PreviewTranslate(Vec3 delta);
 	void PreviewRotate(Vec3 center, Vec3 axis, float angle);
 	void PreviewScale(Vec3 center, Vec3 axis, float factor);

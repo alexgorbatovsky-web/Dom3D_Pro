@@ -42,10 +42,10 @@ public:
     const std::string& GetGroupName() const;
     void SetGroupName(std::string group_name);
     bool IsVisible() const;
-    void SetVisible(bool visible);
+    virtual void SetVisible(bool visible);
 
     Color GetColor() const;
-    void SetColor(Color color);
+    virtual void SetColor(Color color);
     Material GetMaterial() const;
     void SetMaterial(Material material);
     unsigned long GetMaterialId() const;
@@ -68,4 +68,97 @@ private:
     bool visible_ = true;
     std::string parametric_tool_id_;
     std::vector<ParametricParameterValue> parametric_parameters_;
+};
+
+#define RGB_BLACK	0x00000000
+#define RGB_BLUE	0x00FF0000
+#define RGB_GREEN	0x0000FF00
+#define RGB_CYAN	0x00FFFF00
+#define RGB_RED		0x000000FF
+#define RGB_MAGENTA	0x00FF00FF
+#define RGB_BROWN	0x0000418B
+#define RGB_LIGHTGRAY	0x00808080
+#define RGB_DARKGRAY	0x00404040
+#define RGB_LIGHTBLUE	0x00FFFF80
+#define RGB_LIGHTGREEN	0x0080FF80
+#define RGB_LIGHTCYAN	0x00FFFF00
+#define RGB_LIGHTRED		0x008080FF
+#define RGB_LIGHTMAGENTA	0x00FF00FF
+#define RGB_YELLOW	0x0000FFFF
+#define RGB_WHITE	0x00FFFFFF
+
+
+
+#define RGB_KR		0x00FF4392
+#define RGB_BSPLINE_CURVE	0x00B066E5
+#define RGB_CURVE2P	0x00E19D8D
+#define RGB_CURVE2PP	0x0092665b
+#define RGB_SMART_LINE	0x00FF8000
+#define RGB_SETKA	0x00FFBF00
+#define RGB_POLIS	0x00AF8FB0	
+#define RGB_TRACE	0x001FC94B
+#define RGB_DRAW_POLIGON	0x00A08A6A	
+#define RGB_MATMOD	0x007F7F7F
+#define RGB_CIRCLE	0x00B7B763
+#define RGB_INTERCURV	0x003274f0
+#define RGB_TOOL	0x007F2F2F
+#define RGB_ZAGOTOVKA	0x00D3BA7B
+#define RGB_FRONTZ	0x007F7F2F
+#define RGB_REARZ	0x007F7F7F
+#define RGB_NORMAL	0x000FAFFF
+#define RGB_POINT	0x0068CCCA
+#define RGB_POINTN	0x008C488E
+#define RGB_SCAN_POINT	0x0000FFFF
+#define RGB_SLED_TOOL	0x002DC994
+#define RGB_2DTOLL	0x00ef8888
+#define RGB_LINEV	0x00d76e8c
+#define RGB_LINEU	0x00ac82d7
+#define RGB_LINE	0x00FF3E40
+#define RGB_SOLID	0x00AF8FB0	
+
+#define RGB_PICT	0x00004393
+#define RGB_DIMS	0x005e5e00
+#define RGB_BASE	0x0000FF00
+#define RGB_RUBBERBAND	0x00F08F0E
+#define RGB_LIN_MAL	0x00FF7C3A
+#define RGB_TEXT	0x00B4B4B4
+
+enum TypeObject {
+    TYPE_EMPTY,
+    TYPE_POINT,
+    TYPE_VECTOR,
+    TYPE_LINE,
+    TYPE_CIRCLE,
+    TYPE_SPLINE,
+    TYPE_CONIC,
+    TYPE_SKETCH,
+    TYPE_EDGE,
+    TYPE_BEZIER_SPLINE,
+    TYPE_HATCHING,
+    TYPE_TRACE,
+    TYPE_SURFACE,
+    TYPE_CUNC,
+    TYPE_PLANE,
+    TYPE_SETKA,
+    TYPE_FACE,
+    TYPE_SOLID,
+    TYPE_LIGHT,
+    TYPE_TOLL,
+    TYPE_MSK,
+    TYPE_ASK,
+    TYPE_GRID,
+    TYPE_23,
+    TYPE_VIEW_DRAFT,
+    TYPE_GROUP,
+    TYPE_TEXT,
+    TYPE_DIMENSION,
+    TYPE_BITMAP,
+    TYPE_TABLE,
+    TYPE_KNOT,
+    TYPE_OLE,
+    TYPE_ASSEMBLY,
+    MSK_AXIS_X,
+    MSK_AXIS_Y,
+    MSK_AXIS_Z,
+    TYPE_VERTEX,
 };

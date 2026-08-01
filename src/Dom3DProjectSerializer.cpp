@@ -1,10 +1,18 @@
 #include "Dom3DProjectSerializer.h"
 
 #include "CadCurve3D.h"
+#include "BezierSpline.h"
 #include "CBSpline.h"
 #include "CMesh3D.h"
+#include "CGroup.h"
+#include "CAssembled.h"
 #include "CPolyline.h"
+#include "LinkLineHor.h"
+#include "LinkLineVert.h"
+#include "SmartLine.h"
+#include "SketchArcLine.h"
 #include "solid/Solid.h"
+#include "solid/AssociativeClone.h"
 #include "solid/SurfaceSet.h"
 
 #include <QDomDocument>
@@ -36,6 +44,15 @@ OrbitMode parse_orbit_mode(const QString& value) {
 }
 
 QString object_type_name(const CAlfaObject& object) {
+    if (dynamic_cast<const CAssembled*>(&object)) {
+        return "Assembly";
+    }
+    if (dynamic_cast<const CGroup*>(&object)) {
+        return "Group";
+    }
+    if (dynamic_cast<const CAssociativeClone*>(&object)) {
+        return "AssociativeClone";
+    }
     if (dynamic_cast<const CSurfaceSet*>(&object)) {
         return "SurfaceSet";
     }
@@ -47,6 +64,9 @@ QString object_type_name(const CAlfaObject& object) {
     }
     if (dynamic_cast<const CPolyline*>(&object)) {
         return "Curve";
+    }
+    if (dynamic_cast<const CSmartLine*>(&object)) {
+        return "Sketch";
     }
     if (dynamic_cast<const CBSpline*>(&object)) {
         return "BSpline";
@@ -68,6 +88,9 @@ QString default_room_name(const CAlfaObject& object) {
         return "Surfaces";
     }
     if (dynamic_cast<const CPolyline*>(&object)) {
+        return "Lines";
+    }
+    if (dynamic_cast<const CSmartLine*>(&object)) {
         return "Lines";
     }
     if (dynamic_cast<const CBSpline*>(&object)) {
@@ -307,6 +330,20 @@ void write_material(QXmlStreamWriter& xml, const Material& material) {
     xml.writeAttribute("lightTexture", QString::fromStdString(material.light_texture_path));
     xml.writeAttribute("bumpTexture", QString::fromStdString(material.bump_texture_path));
     xml.writeEndElement();
+}
+
+bool read_double_attr(const QDomElement& element, const char* name, double& value, QString& error) {
+    if (!element.hasAttribute(name)) {
+        error = QString("Missing XML attribute '%1'.").arg(name);
+        return false;
+    }
+    bool ok = false;
+    value = element.attribute(name).toDouble(&ok);
+    if (!ok) {
+        error = QString("Unsupported number in XML attribute '%1'.").arg(name);
+        return false;
+    }
+    return true;
 }
 
 void write_layers(QXmlStreamWriter& xml, const CAlfaDoc& document) {
@@ -713,13 +750,58 @@ bool Dom3DProjectSerializer::Save(const QString& path,
         xml.writeAttribute("objectColorB", QString::number(object_color.b, 'g', 9));
         xml.writeAttribute("visible", object.IsVisible() ? "true" : "false");
         xml.writeAttribute("layerId", QString::number(object.m_LayerID));
+        if (const auto* clone = dynamic_cast<const CAssociativeClone*>(&object)) {
+            xml.writeAttribute("sourceId", QString::number(clone->GetSourceId()));
+            const gp_GTrsf& placement = clone->GetPlacement();
+            for (int row = 1; row <= 3; ++row) {
+                for (int column = 1; column <= 4; ++column) {
+                    xml.writeAttribute(QString("p%1%2").arg(row).arg(column),
+                        QString::number(placement.Value(row, column), 'g', 17));
+                }
+            }
+        }
 
         write_material(xml, object.GetMaterial());
         write_identity_transform(xml);
         write_parameters(xml, object);
         write_operation_history(xml, object);
 
-        if (const auto* polyline = dynamic_cast<const CPolyline*>(&object)) {
+        if (const auto* group = dynamic_cast<const CGroup*>(&object)) {
+            xml.writeStartElement("geometry");
+            const auto* assembly = dynamic_cast<const CAssembled*>(group);
+            xml.writeAttribute("kind", assembly ? "assembly" : "group");
+            if (assembly) {
+                xml.writeAttribute("drawParam", QString::number(assembly->GetDrawParam()));
+                xml.writeAttribute("idDim", QString::number(assembly->GetIdDim()));
+            }
+            for (unsigned long id : group->GetElementIds()) {
+                xml.writeEmptyElement("element");
+                xml.writeAttribute("id", QString::number(id));
+            }
+            if (assembly) {
+                for (const CDimens3D* dimension : assembly->GetDimensions()) {
+                    if (!dimension) {
+                        continue;
+                    }
+                    xml.writeEmptyElement("dimension");
+                    xml.writeAttribute("parameter", QString::fromStdString(dimension->GetParameterId()));
+                    xml.writeAttribute("label", QString::fromStdString(dimension->GetLabel()));
+                    xml.writeAttribute("value", QString::number(dimension->GetValue(), 'g', 17));
+                    xml.writeAttribute("visible", dimension->IsVisible() ? "true" : "false");
+                    xml.writeAttribute("sx", QString::number(dimension->GetStart().x, 'g', 17));
+                    xml.writeAttribute("sy", QString::number(dimension->GetStart().y, 'g', 17));
+                    xml.writeAttribute("sz", QString::number(dimension->GetStart().z, 'g', 17));
+                    xml.writeAttribute("ex", QString::number(dimension->GetEnd().x, 'g', 17));
+                    xml.writeAttribute("ey", QString::number(dimension->GetEnd().y, 'g', 17));
+                    xml.writeAttribute("ez", QString::number(dimension->GetEnd().z, 'g', 17));
+                    xml.writeAttribute("ox", QString::number(dimension->GetOffsetDirection().x, 'g', 17));
+                    xml.writeAttribute("oy", QString::number(dimension->GetOffsetDirection().y, 'g', 17));
+                    xml.writeAttribute("oz", QString::number(dimension->GetOffsetDirection().z, 'g', 17));
+                    xml.writeAttribute("offset", QString::number(dimension->GetOffsetDistance(), 'g', 17));
+                }
+            }
+            xml.writeEndElement();
+        } else if (const auto* polyline = dynamic_cast<const CPolyline*>(&object)) {
             xml.writeStartElement("geometry");
             xml.writeAttribute("kind", "polyline");
             xml.writeAttribute("closed", polyline->IsClosed() ? "true" : "false");
@@ -729,6 +811,85 @@ bool Dom3DProjectSerializer::Save(const QString& path,
                 xml.writeAttribute("y", QString::number(point.y, 'g', 9));
                 xml.writeAttribute("z", QString::number(point.z, 'g', 9));
             }
+            xml.writeEndElement();
+        } else if (const auto* sketch = dynamic_cast<const CSmartLine*>(&object)) {
+            xml.writeStartElement("geometry");
+            xml.writeAttribute("kind", "parametric-sketch");
+            xml.writeAttribute("closed", sketch->IsClosed() ? "true" : "false");
+
+            const SketchCoordinateSystem& system = sketch->GetCoordinateSystem();
+            xml.writeEmptyElement("origin");
+            xml.writeAttribute("x", QString::number(system.origin.x, 'g', 17));
+            xml.writeAttribute("y", QString::number(system.origin.y, 'g', 17));
+            xml.writeAttribute("z", QString::number(system.origin.z, 'g', 17));
+            xml.writeEmptyElement("xAxis");
+            xml.writeAttribute("x", QString::number(system.x_axis.x, 'g', 17));
+            xml.writeAttribute("y", QString::number(system.x_axis.y, 'g', 17));
+            xml.writeAttribute("z", QString::number(system.x_axis.z, 'g', 17));
+            xml.writeEmptyElement("normal");
+            xml.writeAttribute("x", QString::number(system.normal.x, 'g', 17));
+            xml.writeAttribute("y", QString::number(system.normal.y, 'g', 17));
+            xml.writeAttribute("z", QString::number(system.normal.z, 'g', 17));
+            if (sketch->HasFaceAttachment()) {
+                const SketchFaceAttachment& attachment = sketch->GetFaceAttachment();
+                xml.writeEmptyElement("faceAttachment");
+                xml.writeAttribute("bodyId", QString::number(attachment.body_id));
+                xml.writeAttribute("faceIndex", QString::number(attachment.face_index));
+            }
+
+            xml.writeStartElement("lines");
+            for (std::size_t line_index = 0; line_index < sketch->GetNumLines(); ++line_index) {
+                const CLinkLine* line = sketch->GetLine(line_index);
+                xml.writeEmptyElement("line");
+                const char* line_type = "segment";
+                if (line->GetType() == LinkLineType::Horizontal) {
+                    line_type = "horizontal";
+                } else if (line->GetType() == LinkLineType::Vertical) {
+                    line_type = "vertical";
+                } else if (line->GetType() == LinkLineType::Bezier) {
+                    line_type = "bezier";
+                } else if (line->GetType() == LinkLineType::Arc) {
+                    line_type = "arc";
+                }
+                xml.writeAttribute("type", line_type);
+                xml.writeAttribute("x1", QString::number(line->GetStart().x, 'g', 17));
+                xml.writeAttribute("y1", QString::number(line->GetStart().y, 'g', 17));
+                xml.writeAttribute("x2", QString::number(line->GetEnd().x, 'g', 17));
+                xml.writeAttribute("y2", QString::number(line->GetEnd().y, 'g', 17));
+                if (const auto* bezier = dynamic_cast<const CBezierSpline*>(line)) {
+                    xml.writeAttribute("cx1", QString::number(bezier->GetControl1().x, 'g', 17));
+                    xml.writeAttribute("cy1", QString::number(bezier->GetControl1().y, 'g', 17));
+                    xml.writeAttribute("cx2", QString::number(bezier->GetControl2().x, 'g', 17));
+                    xml.writeAttribute("cy2", QString::number(bezier->GetControl2().y, 'g', 17));
+                } else if (const auto* arc = dynamic_cast<const CSketchArcLine*>(line)) {
+                    xml.writeAttribute("mx", QString::number(arc->GetPointOnArc().x, 'g', 17));
+                    xml.writeAttribute("my", QString::number(arc->GetPointOnArc().y, 'g', 17));
+                }
+            }
+            xml.writeEndElement();
+
+            xml.writeStartElement("constraints");
+            for (std::size_t constraint_index = 0;
+                 constraint_index < sketch->GetNumConstraints();
+                 ++constraint_index) {
+                const CConstraint* constraint = sketch->GetConstraint(constraint_index);
+                xml.writeEmptyElement("constraint");
+                xml.writeAttribute(
+                    "type",
+                    constraint->GetType() == ConstraintType::Horizontal ? "horizontal" : "vertical");
+                xml.writeAttribute("line", QString::number(constraint->GetLineIndex()));
+            }
+            xml.writeEndElement();
+
+            xml.writeStartElement("fillets");
+            for (std::size_t fillet_index = 0; fillet_index < sketch->GetNumFillets(); ++fillet_index) {
+                const CFillet* fillet = sketch->GetFillet(fillet_index);
+                xml.writeEmptyElement("fillet");
+                xml.writeAttribute("firstLine", QString::number(fillet->GetFirstLineIndex()));
+                xml.writeAttribute("secondLine", QString::number(fillet->GetSecondLineIndex()));
+                xml.writeAttribute("radius", QString::number(fillet->GetRadius(), 'g', 17));
+            }
+            xml.writeEndElement();
             xml.writeEndElement();
         } else if (const auto* spline = dynamic_cast<const CBSpline*>(&object)) {
             xml.writeStartElement("geometry");
@@ -939,7 +1100,67 @@ bool Dom3DProjectSerializer::Load(const QString& path,
         }
 
         std::unique_ptr<CAlfaObject> object;
-        if (type == "Curve") {
+        if (type == "Group" || type == "Assembly") {
+            const QDomElement geometry = required_child(object_element, "geometry", error);
+            if (geometry.isNull()) {
+                return false;
+            }
+            std::vector<unsigned long> element_ids;
+            for (QDomElement element = geometry.firstChildElement("element");
+                 !element.isNull();
+                 element = element.nextSiblingElement("element")) {
+                bool ok = false;
+                const unsigned long id = element.attribute("id").toULong(&ok);
+                if (!ok || id == 0) {
+                    error = "Group contains an invalid object ID.";
+                    return false;
+                }
+                element_ids.push_back(id);
+            }
+            if (type == "Assembly") {
+                auto assembly = std::make_unique<CAssembled>(
+                    object_element.attribute("name", "Assembly").toStdString(),
+                    std::move(element_ids));
+                bool draw_ok = false;
+                const uint draw_param = geometry.attribute("drawParam", "0").toUInt(&draw_ok);
+                bool id_ok = false;
+                const unsigned long id_dim = geometry.attribute("idDim", "0").toULong(&id_ok);
+                if (!draw_ok || !id_ok || draw_param > 255U) {
+                    error = "Assembly parameters are invalid.";
+                    return false;
+                }
+                assembly->SetDrawParam(static_cast<std::uint8_t>(draw_param));
+                assembly->SetIdDim(id_dim);
+                for (QDomElement dim = geometry.firstChildElement("dimension");
+                     !dim.isNull(); dim = dim.nextSiblingElement("dimension")) {
+                    double sx, sy, sz, ex, ey, ez, ox, oy, oz, offset, value;
+                    if (!read_double_attr(dim, "sx", sx, error)
+                        || !read_double_attr(dim, "sy", sy, error)
+                        || !read_double_attr(dim, "sz", sz, error)
+                        || !read_double_attr(dim, "ex", ex, error)
+                        || !read_double_attr(dim, "ey", ey, error)
+                        || !read_double_attr(dim, "ez", ez, error)
+                        || !read_double_attr(dim, "ox", ox, error)
+                        || !read_double_attr(dim, "oy", oy, error)
+                        || !read_double_attr(dim, "oz", oz, error)
+                        || !read_double_attr(dim, "offset", offset, error)
+                        || !read_double_attr(dim, "value", value, error)) {
+                        return false;
+                    }
+                    CDimens3D dimension(
+                        {sx, sy, sz}, {ex, ey, ez}, {ox, oy, oz}, offset,
+                        dim.attribute("parameter").toStdString(),
+                        dim.attribute("label").toStdString(), value);
+                    dimension.SetVisible(dim.attribute("visible", "true") == "true");
+                    assembly->AddDimension(dimension);
+                }
+                object = std::move(assembly);
+            } else {
+                object = std::make_unique<CGroup>(
+                    object_element.attribute("name", "Group").toStdString(),
+                    std::move(element_ids));
+            }
+        } else if (type == "Curve") {
             auto polyline = std::make_unique<CPolyline>(object_element.attribute("name", "Curve").toStdString());
             const QDomElement geometry = required_child(object_element, "geometry", error);
             if (geometry.isNull()) {
@@ -964,6 +1185,152 @@ bool Dom3DProjectSerializer::Load(const QString& path,
             }
             polyline->SetClosed(closed);
             object = std::move(polyline);
+        } else if (type == "Sketch") {
+            auto sketch = std::make_unique<CSmartLine>(
+                object_element.attribute("name", "Sketch").toStdString());
+            const QDomElement geometry = required_child(object_element, "geometry", error);
+            if (geometry.isNull()) {
+                return false;
+            }
+
+            CPoint3d origin;
+            CPoint3d x_axis;
+            CPoint3d normal;
+            const QDomElement origin_element = required_child(geometry, "origin", error);
+            const QDomElement x_axis_element = required_child(geometry, "xAxis", error);
+            const QDomElement normal_element = required_child(geometry, "normal", error);
+            if (origin_element.isNull() || x_axis_element.isNull() || normal_element.isNull() ||
+                !read_double_attr(origin_element, "x", origin.x, error) ||
+                !read_double_attr(origin_element, "y", origin.y, error) ||
+                !read_double_attr(origin_element, "z", origin.z, error) ||
+                !read_double_attr(x_axis_element, "x", x_axis.x, error) ||
+                !read_double_attr(x_axis_element, "y", x_axis.y, error) ||
+                !read_double_attr(x_axis_element, "z", x_axis.z, error) ||
+                !read_double_attr(normal_element, "x", normal.x, error) ||
+                !read_double_attr(normal_element, "y", normal.y, error) ||
+                !read_double_attr(normal_element, "z", normal.z, error) ||
+                !sketch->SetCoordinateSystem(origin, x_axis, normal)) {
+                if (error.isEmpty()) {
+                    error = "Sketch coordinate system is invalid.";
+                }
+                return false;
+            }
+
+            const QDomElement attachment_element =
+                geometry.firstChildElement("faceAttachment");
+            if (!attachment_element.isNull()) {
+                bool body_ok = false;
+                bool face_ok = false;
+                const qulonglong body_id =
+                    attachment_element.attribute("bodyId").toULongLong(&body_ok);
+                const int face_index =
+                    attachment_element.attribute("faceIndex").toInt(&face_ok);
+                if (!body_ok || body_id == 0 || !face_ok || face_index < 0) {
+                    error = "Sketch face attachment is invalid.";
+                    return false;
+                }
+                sketch->SetFaceAttachment(
+                    static_cast<unsigned long>(body_id), face_index);
+            }
+
+            const QDomElement lines_element = required_child(geometry, "lines", error);
+            if (lines_element.isNull()) {
+                return false;
+            }
+            for (QDomElement line_element = lines_element.firstChildElement("line");
+                 !line_element.isNull();
+                 line_element = line_element.nextSiblingElement("line")) {
+                CPoint3d start;
+                CPoint3d end;
+                if (!read_double_attr(line_element, "x1", start.x, error) ||
+                    !read_double_attr(line_element, "y1", start.y, error) ||
+                    !read_double_attr(line_element, "x2", end.x, error) ||
+                    !read_double_attr(line_element, "y2", end.y, error)) {
+                    return false;
+                }
+                const QString line_type = line_element.attribute("type", "segment");
+                std::unique_ptr<CLinkLine> line;
+                if (line_type == "horizontal") {
+                    line = std::make_unique<CLinkLineHor>(start, end);
+                } else if (line_type == "vertical") {
+                    line = std::make_unique<CLinkLineVert>(start, end);
+                } else if (line_type == "bezier") {
+                    CPoint3d control1;
+                    CPoint3d control2;
+                    if (!read_double_attr(line_element, "cx1", control1.x, error)
+                        || !read_double_attr(line_element, "cy1", control1.y, error)
+                        || !read_double_attr(line_element, "cx2", control2.x, error)
+                        || !read_double_attr(line_element, "cy2", control2.y, error)) {
+                        return false;
+                    }
+                    line = std::make_unique<CBezierSpline>(
+                        start, control1, control2, end);
+                } else if (line_type == "arc") {
+                    CPoint3d point_on_arc;
+                    if (!read_double_attr(line_element, "mx", point_on_arc.x, error)
+                        || !read_double_attr(line_element, "my", point_on_arc.y, error)) {
+                        return false;
+                    }
+                    auto arc = std::make_unique<CSketchArcLine>(start, point_on_arc, end);
+                    if (!arc->IsValid()) {
+                        error = "Sketch contains an invalid arc.";
+                        return false;
+                    }
+                    line = std::move(arc);
+                } else {
+                    line = std::make_unique<CLinkLine>(start, end);
+                }
+                if (!sketch->AddLine(std::move(line), false)) {
+                    error = "Sketch contains an invalid line.";
+                    return false;
+                }
+            }
+            if (!sketch->SetClosed(geometry.attribute("closed", "false") == "true") &&
+                geometry.attribute("closed", "false") == "true") {
+                error = "Closed sketch has too few lines.";
+                return false;
+            }
+
+            const QDomElement constraints_element = geometry.firstChildElement("constraints");
+            for (QDomElement constraint_element = constraints_element.firstChildElement("constraint");
+                 !constraint_element.isNull();
+                 constraint_element = constraint_element.nextSiblingElement("constraint")) {
+                bool index_ok = false;
+                const std::size_t line_index =
+                    constraint_element.attribute("line").toULongLong(&index_ok);
+                if (!index_ok) {
+                    error = "Sketch constraint has an invalid line index.";
+                    return false;
+                }
+                const QString constraint_type = constraint_element.attribute("type");
+                const bool added = constraint_type == "horizontal"
+                    ? sketch->ConstrainHorizontal(line_index)
+                    : constraint_type == "vertical"
+                        ? sketch->ConstrainVertical(line_index)
+                        : false;
+                if (!added) {
+                    error = "Sketch constraint is invalid.";
+                    return false;
+                }
+            }
+
+            const QDomElement fillets_element = geometry.firstChildElement("fillets");
+            for (QDomElement fillet_element = fillets_element.firstChildElement("fillet");
+                 !fillet_element.isNull();
+                 fillet_element = fillet_element.nextSiblingElement("fillet")) {
+                bool index_ok = false;
+                const std::size_t first_line =
+                    fillet_element.attribute("firstLine").toULongLong(&index_ok);
+                double radius = 0.0;
+                if (!index_ok || !read_double_attr(fillet_element, "radius", radius, error) ||
+                    !sketch->AddFillet(first_line, radius)) {
+                    if (error.isEmpty()) {
+                        error = "Sketch fillet is invalid.";
+                    }
+                    return false;
+                }
+            }
+            object = std::move(sketch);
         } else if (type == "BSpline") {
             auto spline = std::make_unique<CBSpline>(object_element.attribute("name", "B-Spline").toStdString());
             const QDomElement geometry = required_child(object_element, "geometry", error);
@@ -1108,7 +1475,7 @@ bool Dom3DProjectSerializer::Load(const QString& path,
                 return false;
             }
             object = std::move(mesh);
-        } else if (type == "Solid" || type == "SurfaceSet") {
+        } else if (type == "Solid" || type == "SurfaceSet" || type == "AssociativeClone") {
             std::unique_ptr<CSolid> solid = CSolid::Load(object_element, error);
             if (!solid) {
                 return false;
@@ -1116,7 +1483,38 @@ bool Dom3DProjectSerializer::Load(const QString& path,
             if (!read_boolean_tools(object_element, *solid, error)) {
                 return false;
             }
-            if (type == "SurfaceSet") {
+            if (type == "AssociativeClone") {
+                bool source_ok = false;
+                const unsigned long source_id = object_element.attribute("sourceId").toULong(&source_ok);
+                if (!source_ok || source_id == 0) {
+                    error = "Associative clone source ID is invalid.";
+                    return false;
+                }
+                double placement_values[3][4]{};
+                for (int row = 1; row <= 3; ++row) {
+                    for (int column = 1; column <= 4; ++column) {
+                        double value = 0.0;
+                        const QByteArray attribute = QString("p%1%2").arg(row).arg(column).toLatin1();
+                        if (!read_double_attr(object_element, attribute.constData(), value, error)) {
+                            return false;
+                        }
+                        placement_values[row - 1][column - 1] = value;
+                    }
+                }
+                const gp_Mat matrix(
+                    placement_values[0][0], placement_values[0][1], placement_values[0][2],
+                    placement_values[1][0], placement_values[1][1], placement_values[1][2],
+                    placement_values[2][0], placement_values[2][1], placement_values[2][2]);
+                const gp_GTrsf placement(matrix, gp_XYZ(
+                    placement_values[0][3], placement_values[1][3], placement_values[2][3]));
+                auto clone = std::make_unique<CAssociativeClone>(solid->m_Shape, source_id);
+                clone->SetPlacement(placement);
+                clone->SetName(object_element.attribute("name", "Linked Copy").toStdString());
+                clone->InitSurfaces();
+                clone->InitEdges();
+                clone->BuldMesh(0.1f);
+                object = std::move(clone);
+            } else if (type == "SurfaceSet") {
                 TopoDS_Shape shape = solid->m_Shape;
                 auto surface_set = std::make_unique<CSurfaceSet>(shape);
                 surface_set->SetName(object_element.attribute("name", "Surface Set").toStdString());

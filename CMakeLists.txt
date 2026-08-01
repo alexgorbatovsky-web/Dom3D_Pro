@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.16)
 
 project(Dom3D_Pro LANGUAGES CXX)
 
+include(CTest)
+
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 
@@ -68,7 +70,10 @@ set(DOM3D_SOURCES
     src/Material.cpp
     src/MaterialLibrary.cpp
     src/CAlfaObject.cpp
+    src/CGroup.cpp
+    src/CAssembled.cpp
     src/CAlfaDoc.cpp
+    src/ExtrudeShapeBuilder.cpp
     src/CMesh3D.cpp
     src/FillContour.cpp
     src/Line2D.cpp
@@ -85,13 +90,22 @@ set(DOM3D_SOURCES
     src/ProjectIO.cpp
     src/StepIO.cpp
     src/ThreeDSIO.cpp
+    src/solid/BeamShapeBuilder.cpp
+    src/solid/PlaneShapeBuilder.cpp
+    src/solid/OffsetFaceShapeBuilder.cpp
+    src/solid/PolyhedronShapeBuilder.cpp
+    src/solid/SketchFeatureShapeBuilder.cpp
+    src/solid/SolidBeamTool.cpp
     src/solid/SolidBoxTool.cpp
     src/solid/SolidCylinderTool.cpp
     src/solid/SolidPrismTool.cpp
     src/solid/SolidSphereTool.cpp
     src/solid/SolidTorusTool.cpp
     src/solid/SurfaceSet.cpp
+    src/solid/AssociativeClone.cpp
+    src/solid/TwoSketchSolidBuilder.cpp
     src/solid/SolidTool.cpp
+    src/solid/TrimShapeBuilder.cpp
     src/ui/MainWindow.cpp
     src/ui/MeasurementUnits.cpp
     src/ui/MaterialEditorDialog.cpp
@@ -127,9 +141,12 @@ set(DOM3D_SOURCES
 
 set(DOM3D_HEADERS
     src/CAlfaObject.h
+    src/CGroup.h
+    src/CAssembled.h
     src/Material.h
     src/MaterialLibrary.h
     src/CAlfaDoc.h
+    src/ExtrudeShapeBuilder.h
     src/Common.h
     src/CMesh3D.h
     src/FillContour.h
@@ -147,13 +164,22 @@ set(DOM3D_HEADERS
     src/ProjectIO.h
     src/StepIO.h
     src/ThreeDSIO.h
+    src/solid/BeamShapeBuilder.h
+    src/solid/PlaneShapeBuilder.h
+    src/solid/OffsetFaceShapeBuilder.h
+    src/solid/PolyhedronShapeBuilder.h
+    src/solid/SketchFeatureShapeBuilder.h
+    src/solid/SolidBeamTool.h
     src/solid/SolidBoxTool.h
     src/solid/SolidCylinderTool.h
     src/solid/SolidPrismTool.h
     src/solid/SolidSphereTool.h
     src/solid/SolidTorusTool.h
     src/solid/SurfaceSet.h
+    src/solid/AssociativeClone.h
+    src/solid/TwoSketchSolidBuilder.h
     src/solid/SolidTool.h
+    src/solid/TrimShapeBuilder.h
     src/ui/MainWindow.h
     src/ui/MeasurementUnits.h
     src/ui/MaterialEditorDialog.h
@@ -181,6 +207,60 @@ set(DOM3D_HEADERS
     src/iges/SplineCurve.h
 )
 
+# Minimal MFC-free sketch core.
+set(DOM3D_SKETCH_SOURCES
+    src/BezierSpline.cpp
+    src/BezierSpline.h
+    src/Dimens.cpp
+    src/Dimens.h
+    src/Constraint.cpp
+    src/Constraint.h
+    src/ConstraintHorLine.cpp
+    src/ConstraintHorLine.h
+    src/ConstraintVertLine.cpp
+    src/ConstraintVertLine.h
+    src/Fillet.cpp
+    src/Fillet.h
+    src/LinkLine.cpp
+    src/LinkLine.h
+    src/LinkLineHor.cpp
+    src/LinkLineHor.h
+    src/LinkLineVert.cpp
+    src/LinkLineVert.h
+    src/SmartLine.cpp
+    src/SketchArcLine.cpp
+    src/SmartLine.h
+    src/SketchArcLine.h
+    src/SketchProfileBuilder.cpp
+    src/SketchProfileBuilder.h
+    src/SweptSolidBuilder.cpp
+    src/SweptSolidBuilder.h
+)
+
+# Remaining legacy sketch sources stay visible in the IDE while they are
+# migrated away from MFC and the old Dom-3D object hierarchy.
+set(DOM3D_SKETCH_MIGRATION_FILES
+    src/Arc.cpp
+    src/Arc.h
+    src/Circle2D.cpp
+    src/Circle2D.h
+    src/Circle3D.cpp
+    src/Circle3D.h
+    src/LineStyleBox.cpp
+    src/LineStyleBox.h
+    src/OutLine.cpp
+    src/OutLine.h
+    src/Point5d.cpp
+    src/Point5d.h
+    src/Spline.cpp
+    src/Spline.h
+)
+
+set_source_files_properties(
+    ${DOM3D_SKETCH_MIGRATION_FILES}
+    PROPERTIES HEADER_FILE_ONLY TRUE
+)
+
 if(WIN32)
     list(APPEND DOM3D_SOURCES src/resources/Dom3D_Pro.rc)
 endif()
@@ -188,6 +268,8 @@ endif()
 add_executable(Dom3D_Pro
     ${DOM3D_SOURCES}
     ${DOM3D_HEADERS}
+    ${DOM3D_SKETCH_SOURCES}
+    ${DOM3D_SKETCH_MIGRATION_FILES}
 )
 
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT Dom3D_Pro)
@@ -200,6 +282,8 @@ set_target_properties(Dom3D_Pro PROPERTIES
 
 source_group("Source Files" FILES ${DOM3D_SOURCES})
 source_group("Header Files" FILES ${DOM3D_HEADERS})
+source_group("Sketch" FILES ${DOM3D_SKETCH_SOURCES})
+source_group("Sketch Migration (staged)" FILES ${DOM3D_SKETCH_MIGRATION_FILES})
 
 target_compile_features(Dom3D_Pro PRIVATE cxx_std_17)
 target_include_directories(Dom3D_Pro PRIVATE "${DOM3D_OPENCASCADE_INCLUDE_DIR}")
@@ -267,5 +351,170 @@ if(MSVC)
         /W4
         /permissive-
         "/FI${CMAKE_CURRENT_SOURCE_DIR}/src/legacy_compat.h"
+    )
+endif()
+
+if(BUILD_TESTING)
+    add_executable(SketchGeometryTests
+        tests/SketchGeometryTests.cpp
+        src/BezierSpline.cpp
+        src/Dimens.cpp
+        src/Fillet.cpp
+        src/SketchArcLine.cpp
+        src/LinkLine.cpp
+        src/LinkLineHor.cpp
+        src/LinkLineVert.cpp
+    )
+    target_compile_features(SketchGeometryTests PRIVATE cxx_std_17)
+    target_include_directories(SketchGeometryTests PRIVATE src)
+    target_link_libraries(SketchGeometryTests PRIVATE Qt6::Core)
+    if(MSVC)
+        target_compile_options(SketchGeometryTests PRIVATE
+            /W4
+            /permissive-
+            "/FI${CMAKE_CURRENT_SOURCE_DIR}/src/legacy_compat.h"
+        )
+    endif()
+    add_test(NAME SketchGeometryTests COMMAND SketchGeometryTests)
+
+    add_executable(ExtrudeShapeBuilderTests
+        tests/ExtrudeShapeBuilderTests.cpp
+        src/ExtrudeShapeBuilder.cpp
+    )
+    target_compile_features(ExtrudeShapeBuilderTests PRIVATE cxx_std_17)
+    target_include_directories(ExtrudeShapeBuilderTests PRIVATE
+        src
+        "${DOM3D_OPENCASCADE_INCLUDE_DIR}"
+    )
+    target_link_directories(ExtrudeShapeBuilderTests PRIVATE "${DOM3D_OPENCASCADE_LIBRARY_DIR}")
+    target_link_libraries(ExtrudeShapeBuilderTests PRIVATE Qt6::Core ${DOM3D_OPENCASCADE_LIBS})
+    if(MSVC)
+        target_compile_options(ExtrudeShapeBuilderTests PRIVATE
+            /W4
+            /permissive-
+            "/FI${CMAKE_CURRENT_SOURCE_DIR}/src/legacy_compat.h"
+        )
+    endif()
+    add_test(NAME ExtrudeShapeBuilderTests COMMAND ExtrudeShapeBuilderTests)
+    set_tests_properties(ExtrudeShapeBuilderTests PROPERTIES
+        ENVIRONMENT "PATH=${DOM3D_OPENCASCADE_BINARY_DIR};$ENV{PATH}"
+    )
+
+    add_executable(SketchFeatureShapeBuilderTests
+        tests/SketchFeatureShapeBuilderTests.cpp
+        src/ExtrudeShapeBuilder.cpp
+        src/solid/SketchFeatureShapeBuilder.cpp
+    )
+    target_compile_features(SketchFeatureShapeBuilderTests PRIVATE cxx_std_17)
+    target_include_directories(SketchFeatureShapeBuilderTests PRIVATE
+        src
+        "${DOM3D_OPENCASCADE_INCLUDE_DIR}"
+    )
+    target_link_directories(SketchFeatureShapeBuilderTests PRIVATE "${DOM3D_OPENCASCADE_LIBRARY_DIR}")
+    target_link_libraries(SketchFeatureShapeBuilderTests PRIVATE Qt6::Core ${DOM3D_OPENCASCADE_LIBS})
+    if(MSVC)
+        target_compile_options(SketchFeatureShapeBuilderTests PRIVATE
+            /W4
+            /permissive-
+            "/FI${CMAKE_CURRENT_SOURCE_DIR}/src/legacy_compat.h"
+        )
+    endif()
+    add_test(NAME SketchFeatureShapeBuilderTests COMMAND SketchFeatureShapeBuilderTests)
+    set_tests_properties(SketchFeatureShapeBuilderTests PROPERTIES
+        ENVIRONMENT "PATH=${DOM3D_OPENCASCADE_BINARY_DIR};$ENV{PATH}"
+    )
+
+    add_executable(OffsetFaceShapeBuilderTests
+        tests/OffsetFaceShapeBuilderTests.cpp
+        src/solid/OffsetFaceShapeBuilder.cpp
+        src/solid/TrimShapeBuilder.cpp
+    )
+    target_compile_features(OffsetFaceShapeBuilderTests PRIVATE cxx_std_17)
+    target_include_directories(OffsetFaceShapeBuilderTests PRIVATE
+        src
+        "${DOM3D_OPENCASCADE_INCLUDE_DIR}"
+    )
+    target_link_directories(OffsetFaceShapeBuilderTests PRIVATE "${DOM3D_OPENCASCADE_LIBRARY_DIR}")
+    target_link_libraries(OffsetFaceShapeBuilderTests PRIVATE Qt6::Core ${DOM3D_OPENCASCADE_LIBS})
+    if(MSVC)
+        target_compile_options(OffsetFaceShapeBuilderTests PRIVATE
+            /W4
+            /permissive-
+            "/FI${CMAKE_CURRENT_SOURCE_DIR}/src/legacy_compat.h"
+        )
+    endif()
+    add_test(NAME OffsetFaceShapeBuilderTests COMMAND OffsetFaceShapeBuilderTests)
+    set_tests_properties(OffsetFaceShapeBuilderTests PROPERTIES
+        ENVIRONMENT "PATH=${DOM3D_OPENCASCADE_BINARY_DIR};$ENV{PATH}"
+    )
+
+    add_executable(BeamShapeBuilderTests
+        tests/BeamShapeBuilderTests.cpp
+        src/solid/BeamShapeBuilder.cpp
+    )
+    target_compile_features(BeamShapeBuilderTests PRIVATE cxx_std_17)
+    target_include_directories(BeamShapeBuilderTests PRIVATE
+        src
+        "${DOM3D_OPENCASCADE_INCLUDE_DIR}"
+    )
+    target_link_directories(BeamShapeBuilderTests PRIVATE "${DOM3D_OPENCASCADE_LIBRARY_DIR}")
+    target_link_libraries(BeamShapeBuilderTests PRIVATE Qt6::Core ${DOM3D_OPENCASCADE_LIBS})
+    if(MSVC)
+        target_compile_options(BeamShapeBuilderTests PRIVATE
+            /W4
+            /permissive-
+            "/FI${CMAKE_CURRENT_SOURCE_DIR}/src/legacy_compat.h"
+        )
+    endif()
+    add_test(NAME BeamShapeBuilderTests COMMAND BeamShapeBuilderTests)
+    set_tests_properties(BeamShapeBuilderTests PROPERTIES
+        ENVIRONMENT "PATH=${DOM3D_OPENCASCADE_BINARY_DIR};$ENV{PATH}"
+    )
+
+    add_executable(TrimShapeBuilderTests
+        tests/TrimShapeBuilderTests.cpp
+        src/solid/PlaneShapeBuilder.cpp
+        src/solid/TrimShapeBuilder.cpp
+    )
+    target_compile_features(TrimShapeBuilderTests PRIVATE cxx_std_17)
+    target_include_directories(TrimShapeBuilderTests PRIVATE
+        src
+        "${DOM3D_OPENCASCADE_INCLUDE_DIR}"
+    )
+    target_link_directories(TrimShapeBuilderTests PRIVATE "${DOM3D_OPENCASCADE_LIBRARY_DIR}")
+    target_link_libraries(TrimShapeBuilderTests PRIVATE Qt6::Core ${DOM3D_OPENCASCADE_LIBS})
+    if(MSVC)
+        target_compile_options(TrimShapeBuilderTests PRIVATE
+            /W4
+            /permissive-
+            "/FI${CMAKE_CURRENT_SOURCE_DIR}/src/legacy_compat.h"
+        )
+    endif()
+    add_test(NAME TrimShapeBuilderTests COMMAND TrimShapeBuilderTests)
+    set_tests_properties(TrimShapeBuilderTests PROPERTIES
+        ENVIRONMENT "PATH=${DOM3D_OPENCASCADE_BINARY_DIR};$ENV{PATH}"
+    )
+
+    add_executable(PolyhedronShapeBuilderTests
+        tests/PolyhedronShapeBuilderTests.cpp
+        src/solid/PolyhedronShapeBuilder.cpp
+    )
+    target_compile_features(PolyhedronShapeBuilderTests PRIVATE cxx_std_17)
+    target_include_directories(PolyhedronShapeBuilderTests PRIVATE
+        src
+        "${DOM3D_OPENCASCADE_INCLUDE_DIR}"
+    )
+    target_link_directories(PolyhedronShapeBuilderTests PRIVATE "${DOM3D_OPENCASCADE_LIBRARY_DIR}")
+    target_link_libraries(PolyhedronShapeBuilderTests PRIVATE Qt6::Core ${DOM3D_OPENCASCADE_LIBS})
+    if(MSVC)
+        target_compile_options(PolyhedronShapeBuilderTests PRIVATE
+            /W4
+            /permissive-
+            "/FI${CMAKE_CURRENT_SOURCE_DIR}/src/legacy_compat.h"
+        )
+    endif()
+    add_test(NAME PolyhedronShapeBuilderTests COMMAND PolyhedronShapeBuilderTests)
+    set_tests_properties(PolyhedronShapeBuilderTests PROPERTIES
+        ENVIRONMENT "PATH=${DOM3D_OPENCASCADE_BINARY_DIR};$ENV{PATH}"
     )
 endif()

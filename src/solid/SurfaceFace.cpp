@@ -1880,12 +1880,15 @@ bool CSurfaceFace::InitEdges3DCoat()
 
 
 
-void CSurfaceFace::RenderEdges(bool selected, const std::vector<int>& selected_edge_indices) const
+void CSurfaceFace::RenderEdges(const Color& color,
+                              const std::vector<int>& selected_edge_indices) const
 {
-	const float width = selected ? 1.15f : 0.9f;
-	const float r = 0.035f;
-	const float g = 0.038f;
-	const float b = 0.040f;
+	// Object selection belongs to the shaded surface. Topological edges keep
+	// their regular style until an individual edge is selected.
+	const float width = 0.9f;
+	const float r = std::clamp(color.r, 0.0f, 1.0f);
+	const float g = std::clamp(color.g, 0.0f, 1.0f);
+	const float b = std::clamp(color.b, 0.0f, 1.0f);
 
 	for (int i = 0; i < static_cast<int>(m_Edges.size()); ++i) {
 		CSplineCurve* edge = m_Edges[static_cast<size_t>(i)];

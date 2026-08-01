@@ -12,7 +12,7 @@ int main(int argc, char* argv[]) {
     format.setDepthBufferSize(24);
     format.setSamples(4);
     format.setSwapBehavior(QSurfaceFormat::DoubleBuffer);
-    format.setSwapInterval(0);   // <-- выключить VSync
+    format.setSwapInterval(0);   // <-- off VSync
     QSurfaceFormat::setDefaultFormat(format);
 
     QApplication app(argc, argv);

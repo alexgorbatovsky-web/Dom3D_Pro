@@ -90,6 +90,12 @@ public:
     bool JoinG(CPolyline* line2);
     bool JoinLine(CPolyline* line2, double delta);
     static bool JoinMultuLines(std::vector<CPolyline*>* lines, std::vector<CPolyline*>* LinesJoin, double delta);
+    void mod_coord_ma(CPoint3d* p0, CVector* cx, CVector* cy, CVector* cz);
+    void mod_coord_am(CPoint3d* p0, CVector* cx, CVector* cy, CVector* cz);
+    void mod_coord_am(CSystemCoord* sc);
+    void mod_coord_ma(CSystemCoord* sc);
+    bool IsAllPointsZeroZ();
+    bool GetPlaneSC(CSystemCoord* msc);
 
 private:
     static CPoint3d ToPoint3d(CurvePoint point);

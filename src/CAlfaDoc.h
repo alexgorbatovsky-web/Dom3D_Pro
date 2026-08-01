@@ -14,6 +14,7 @@
 
 class CSolid;
 class CAlfaDoc;
+class CSmartLine;
 
 CAlfaDoc* GetAlfaDoc();
 
@@ -47,6 +48,29 @@ public:
     void AddCurvePoint(CPoint3d point);
     void AddBSplinePoint(CPoint3d point);
     void CreateSketchRectangle(const std::vector<CPoint3d>& points, const std::string& sketch_name);
+    bool CreateSketchPolyline(const std::vector<CPoint3d>& points,
+                              bool closed,
+                              const std::string& sketch_name,
+                              CPoint3d origin,
+                              CPoint3d x_axis,
+                              CPoint3d y_axis);
+    bool CreateSketchBezier(const std::vector<CPoint3d>& control_points,
+                            const std::string& sketch_name,
+                            CPoint3d origin,
+                            CPoint3d x_axis,
+                            CPoint3d y_axis);
+    bool CreateSweptSolid(unsigned long section_id,
+                          unsigned long guide_id,
+                          int transition_mode = 1,
+                          double delta_x = 0.0,
+                          double delta_y = 0.0,
+                          double angle_degrees = 0.0);
+    bool CreateFrameSolid(unsigned long profile_id,
+                          double width,
+                          double height);
+    bool CreatePolyhedronSolid(unsigned long profile_id,
+                               int axis_index,
+                               int turns);
     bool CloseSelectedOrActivePolyline();
     bool CloseSelectedOrActiveBSpline();
     bool CreateMeshFromSelectedPolyline(CVector3d dir, float dist);
@@ -71,6 +95,9 @@ public:
     bool SelectSolidMeshAtScreen(DomPoint point,
                                  const std::function<bool(Vec3, DomPoint&, float&)>& project_world,
                                  SelectionAction action = SelectionAction::Replace);
+    CSolid* FindSolidAtScreen(
+        DomPoint point,
+        const std::function<bool(Vec3, DomPoint&, float&)>& project_world);
     bool SelectMeshAtScreen(DomPoint point,
                             const std::function<bool(Vec3, DomPoint&, float&)>& project_world,
                             SelectionAction action = SelectionAction::Replace);
@@ -86,6 +113,19 @@ public:
     CSolid* GetSelectedFaceSolid();
     const CSolid* GetSelectedFaceSolid() const;
     bool GetSelectedSolidFaceCenterAndNormal(Vec3& center, Vec3& normal) const;
+    bool GetSelectedSolidFaceSketchPlane(Vec3& origin,
+                                         Vec3& x_axis,
+                                         Vec3& y_axis,
+                                         Vec3& normal,
+                                         unsigned long& body_id,
+                                         int& face_index) const;
+    bool GetSolidFaceSketchPlane(unsigned long body_id,
+                                 int face_index,
+                                 Vec3& origin,
+                                 Vec3& x_axis,
+                                 Vec3& y_axis,
+                                 Vec3& normal) const;
+    bool UpdateAttachedSketches();
     bool PreviewExtrudeSelectedSolidFace(Vec3 delta);
     bool BeginLiveExtrudeSelectedSolidFace(double taper_angle_degrees = 0.0);
     bool IsLiveExtrudeSelectedSolidFaceActive() const;
@@ -134,6 +174,15 @@ public:
     bool SelectCurvePointsInScreenRect(DomRect rect,
                                        const std::function<bool(Vec3, DomPoint&)>& world_to_screen,
                                        SelectionAction action = SelectionAction::Replace);
+    bool SelectObjectsInScreenRect(DomRect rect,
+                                   const std::function<bool(Vec3, DomPoint&)>& world_to_screen,
+                                   SelectionAction action = SelectionAction::Replace);
+    bool SelectSolidFacesInScreenRect(DomRect rect,
+                                      const std::function<bool(Vec3, DomPoint&)>& world_to_screen,
+                                      SelectionAction action = SelectionAction::Replace);
+    bool SelectSolidEdgesInScreenRect(DomRect rect,
+                                      const std::function<bool(Vec3, DomPoint&)>& world_to_screen,
+                                      SelectionAction action = SelectionAction::Replace);
     bool FindPolylinePointAtScreen(DomPoint point,
                                    const std::function<bool(Vec3, DomPoint&)>& world_to_screen,
                                    float tolerance,
@@ -158,6 +207,8 @@ public:
     const CMesh3D* GetSelectedMesh() const;
     CPolyline* GetSelectedPolyline();
     const CPolyline* GetSelectedPolyline() const;
+    CSmartLine* GetSelectedSketch();
+    const CSmartLine* GetSelectedSketch() const;
     CBSpline* GetSelectedBSpline();
     const CBSpline* GetSelectedBSpline() const;
     CSolid* GetSelectedSolid();
@@ -169,7 +220,14 @@ public:
     void EnsureObjectIds();
     void AddObject(std::unique_ptr<CAlfaObject> object);
     void AddMesh(std::unique_ptr<CMesh3D> mesh);
+    bool CreateGroupFromSelection();
+    bool CreateAssemblyFromSelection();
+    bool UngroupSelection();
     bool DuplicateSelectedObject();
+    bool CreateAssociativeCloneFromSelection();
+    bool RebuildAssociativeClones(unsigned long source_id = 0);
+    bool CreateSolidFromTwoSelectedSketches();
+    bool RebuildTwoSketchSolid(size_t object_index);
     bool MirrorSelectedObjects(Vec3 plane_point, Vec3 plane_normal);
     bool CreateLoftSurfaceFromSelectedBSplines();
     bool ReverseSelectedSurfaceNormals();
@@ -236,6 +294,7 @@ public:
     bool IsLayerSelectable(int layer_id) const;
     bool IsObjectVisible(const CAlfaObject& object) const;
     bool IsObjectSelectable(const CAlfaObject& object) const;
+    size_t ResolveGroupSelectionIndex(size_t object_index) const;
     void AssignObjectToWorkLayer(CAlfaObject& object) const;
     std::vector<Material>& GetMaterials();
     const std::vector<Material>& GetMaterials() const;

@@ -30,8 +30,8 @@ private:
     QRadioButton* offset_corner_ = nullptr;
     QRadioButton* offset_radius_ = nullptr;
     QSpinBox* angle_alignment_ = nullptr;
-    QCheckBox* spiral_ = nullptr;
-    QSpinBox* spiral_value_ = nullptr;
+    QCheckBox* snapping_enabled_ = nullptr;
+    QSpinBox* capture_distance_ = nullptr;
     QRadioButton* parametrization_none_ = nullptr;
     QRadioButton* parametrization_ortho_ = nullptr;
     QRadioButton* parametrization_max_template_ = nullptr;

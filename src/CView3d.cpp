@@ -2,6 +2,7 @@
 
 #include "OpenGLCompat.h"
 
+#include <cmath>
 #include <cstddef>
 //#include "GLU.h"
 
@@ -25,19 +26,22 @@ void CView3d::DrawGrid(bool xy_plane_grid) const {
     glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
     glLineWidth(1.0f);
     glBegin(GL_LINES);
-    const int first = xy_plane_grid ? 0 : -12;
-    const int last = 12;
-    for (int i = first; i <= last; ++i) {
-        const bool major = i % 4 == 0;
+    const float first = xy_plane_grid ? 0.0f : -kDefaultGridHalfSize;
+    const float last = xy_plane_grid ? kDefaultSceneSize : kDefaultGridHalfSize;
+    const int line_count = static_cast<int>(
+        std::round((last - first) / kDefaultGridStep));
+    for (int line_index = 0; line_index <= line_count; ++line_index) {
+        const float coordinate = first + static_cast<float>(line_index) * kDefaultGridStep;
+        const bool major = line_index % 4 == 0;
         const float r = major ? 0.34f : 0.22f;
         const float g = major ? 0.40f : 0.27f;
         const float b = major ? 0.48f : 0.34f;
         const float a = major ? 0.58f : 0.34f;
         set_color(r, g, b, a);
-        glVertex3f(static_cast<float>(i), static_cast<float>(first), 0.0f);
-        glVertex3f(static_cast<float>(i), static_cast<float>(last), 0.0f);
-        glVertex3f(static_cast<float>(first), static_cast<float>(i), 0.0f);
-        glVertex3f(static_cast<float>(last), static_cast<float>(i), 0.0f);
+        glVertex3f(coordinate, first, 0.0f);
+        glVertex3f(coordinate, last, 0.0f);
+        glVertex3f(first, coordinate, 0.0f);
+        glVertex3f(last, coordinate, 0.0f);
     }
     glEnd();
     glDisable(GL_LINE_SMOOTH);
@@ -131,4 +135,15 @@ void CView3d::Project(CPoint3d* wp, CPoint3d* win)
 
 //    gluProject(wp->x, wp->y, wp->z, m_mvmatrix, m_projmatrix, m_viewport, &win->x, &win->y, &win->z);
 //    win->y = Size_Y - win->y;
+}
+
+void Set_Color(unsigned long col)
+{
+    BYTE r = BYTE(col & 0x000000FF);
+    col = col >> 8;
+    BYTE g = BYTE(col & 0x000000FF);
+    col = col >> 8;
+    BYTE b = BYTE(col & 0x000000FF);
+
+    glColor3ub(r, g, b);
 }

@@ -88,15 +88,13 @@ QWidget* PreferencesDialog::CreateModelingPage() {
     angle_alignment_ = new QSpinBox(page);
     angle_alignment_->setRange(0, 90);
     alignment_layout->addRow("Angle alignment", angle_alignment_);
-    spiral_ = new QCheckBox("Spiral", page);
-    spiral_value_ = new QSpinBox(page);
-    spiral_value_->setRange(0, 100);
-    auto* spiral_row = new QWidget(page);
-    auto* spiral_layout = new QHBoxLayout(spiral_row);
-    spiral_layout->setContentsMargins(0, 0, 0, 0);
-    spiral_layout->addWidget(spiral_);
-    spiral_layout->addWidget(spiral_value_);
-    alignment_layout->addRow(spiral_row);
+    snapping_enabled_ = new QCheckBox("Snapping", page);
+    snapping_enabled_->setToolTip("Snap newly created curve points to existing points");
+    alignment_layout->addRow(snapping_enabled_);
+    capture_distance_ = new QSpinBox(page);
+    capture_distance_->setRange(1, 50);
+    capture_distance_->setSuffix(" px");
+    alignment_layout->addRow("Capture distance", capture_distance_);
     layout->addLayout(alignment_layout);
 
     auto* parametrization_group = new QGroupBox("Parametrization", page);
@@ -167,8 +165,8 @@ void PreferencesDialog::LoadSettings() {
     offset_corner_->setChecked(settings.value("preferences/modeling/offsetCornerMode", "corner").toString() == "corner");
     offset_radius_->setChecked(!offset_corner_->isChecked());
     angle_alignment_->setValue(settings.value("preferences/modeling/angleAlignment", 7).toInt());
-    spiral_->setChecked(settings.value("preferences/modeling/spiral", true).toBool());
-    spiral_value_->setValue(settings.value("preferences/modeling/spiralValue", 6).toInt());
+    snapping_enabled_->setChecked(settings.value("preferences/modeling/snappingEnabled", true).toBool());
+    capture_distance_->setValue(settings.value("preferences/modeling/captureDistance", 6).toInt());
 
     const QString parametrization = settings.value("preferences/modeling/parametrization", "maxTemplate").toString();
     parametrization_none_->setChecked(parametrization == "none");
@@ -190,8 +188,8 @@ void PreferencesDialog::ApplySettings() {
     settings.setValue("preferences/modeling/deleteLoop", delete_loop_->isChecked());
     settings.setValue("preferences/modeling/offsetCornerMode", offset_corner_->isChecked() ? "corner" : "radius");
     settings.setValue("preferences/modeling/angleAlignment", angle_alignment_->value());
-    settings.setValue("preferences/modeling/spiral", spiral_->isChecked());
-    settings.setValue("preferences/modeling/spiralValue", spiral_value_->value());
+    settings.setValue("preferences/modeling/snappingEnabled", snapping_enabled_->isChecked());
+    settings.setValue("preferences/modeling/captureDistance", capture_distance_->value());
 
     QString parametrization = "maxTemplate";
     if (parametrization_none_->isChecked()) {

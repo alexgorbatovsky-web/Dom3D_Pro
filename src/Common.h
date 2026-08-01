@@ -5,6 +5,11 @@
 constexpr int kPanelWidth = 280;
 constexpr int kToolbarHeight = 54;
 constexpr float kPi = 3.14159265358979323846f;
+constexpr float kDefaultSceneSize = 100.0f;
+constexpr float kDefaultGridHalfSize = kDefaultSceneSize * 0.5f;
+constexpr float kDefaultGridStep = 5.0f;
+constexpr float kDefaultCameraDistance = 62.5f;
+constexpr float kDefaultPlanCameraDistance = kDefaultSceneSize / 0.84f;
 
 constexpr int ID_FILE_NEW = 1001;
 constexpr int ID_FILE_SAVE = 1002;
@@ -82,7 +87,7 @@ inline constexpr Color kDefaultMeshObjectColor{
 struct Camera {
     Vec3 target{0.0f, 1.2f, 0.0f};
     Quaternion orientation{kDefaultCameraOrientation};
-    float distance = 15.0f;
+    float distance = kDefaultCameraDistance;
 };
 
 struct DomRect {
@@ -118,8 +123,14 @@ enum class ToolMode {
     DrawBSpline,
     EditPoint,
     SketchRectangle,
+    SketchPolyline,
+    SketchBezier,
+    SketchConvertBezier,
+    SketchConvertArc,
     SketchFillet,
-    SolidBoxRectangle
+    SolidBoxRectangle,
+    SolidCylinderCircle,
+    MovePointToPoint
 };
 
 enum class BooleanOperation {

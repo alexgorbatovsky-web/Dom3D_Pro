@@ -80,6 +80,7 @@ public:
 	virtual bool			PickCurrentPos() { return false; }
 	virtual bool			PickEmptySpace() { return true; }
 	virtual bool AllowRadisRMBControl() { return false; }
+	virtual bool ForceWireframeDisplay() const { return false; }
 
 	static SolidDisplayMode GetDisplayMode();
 	static void SetDisplayMode(SolidDisplayMode mode);
@@ -122,6 +123,7 @@ public:
 	void CopyOperationTreeFrom(const CSolid& source);
 	size_t AddBooleanToolCopy(const CSolid& tool);
 	size_t AddBooleanTool(std::unique_ptr<CSolid> tool);
+	CSolid* GetBooleanTool(size_t tool_index);
 	const CSolid* GetBooleanTool(size_t tool_index) const;
 	size_t GetBooleanToolCount() const { return m_BooleanTools.size(); }
 	void ClearBooleanTools();
