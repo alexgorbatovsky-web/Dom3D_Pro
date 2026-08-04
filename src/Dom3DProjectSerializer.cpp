@@ -6,6 +6,7 @@
 #include "CMesh3D.h"
 #include "CGroup.h"
 #include "CAssembled.h"
+#include "CKitchenCabinet.h"
 #include "CPolyline.h"
 #include "LinkLineHor.h"
 #include "LinkLineVert.h"
@@ -24,6 +25,7 @@
 #include <QStringList>
 #include <QXmlStreamWriter>
 
+#include <cmath>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -44,6 +46,9 @@ OrbitMode parse_orbit_mode(const QString& value) {
 }
 
 QString object_type_name(const CAlfaObject& object) {
+    if (dynamic_cast<const CKitchenCabinet*>(&object)) {
+        return "KitchenCabinet";
+    }
     if (dynamic_cast<const CAssembled*>(&object)) {
         return "Assembly";
     }
@@ -134,6 +139,10 @@ void write_surface_texture_transforms(QXmlStreamWriter& xml, const CSolid& solid
         xml.writeAttribute("scaleU", QString::number(transform.scale_u, 'g', 9));
         xml.writeAttribute("scaleV", QString::number(transform.scale_v, 'g', 9));
         xml.writeAttribute("rotation", QString::number(transform.rotation_degrees, 'g', 9));
+        xml.writeAttribute("fitToSurface", transform.fit_to_surface ? "1" : "0");
+        if (surface->MaterialOverride.enabled) {
+            xml.writeAttribute("materialId", QString::number(surface->MaterialOverride.material_id));
+        }
     }
     xml.writeEndElement();
 }
@@ -157,7 +166,10 @@ bool read_float_attr(const QDomElement& element, const char* name, float& value,
     return true;
 }
 
-bool read_surface_texture_transforms(const QDomElement& object_element, CSolid& solid, QString& error) {
+bool read_surface_texture_transforms(const QDomElement& object_element,
+                                     CSolid& solid,
+                                     const std::vector<Material>& materials,
+                                     QString& error) {
     const QDomElement transforms = object_element.firstChildElement("surfaceTextureTransforms");
     if (transforms.isNull()) {
         return true;
@@ -181,6 +193,7 @@ bool read_surface_texture_transforms(const QDomElement& object_element, CSolid& 
             || !read_float_attr(surface_element, "rotation", transform.rotation_degrees, error, false)) {
             return false;
         }
+        transform.fit_to_surface = surface_element.attribute("fitToSurface", "0") == "1";
         if (!surface_element.hasAttribute("scaleU")) {
             transform.scale_u = 1.0f;
         }
@@ -188,6 +201,20 @@ bool read_surface_texture_transforms(const QDomElement& object_element, CSolid& 
             transform.scale_v = 1.0f;
         }
         solid.SetSurfaceTextureTransform(index, transform);
+        if (surface_element.hasAttribute("materialId")) {
+            bool material_id_ok = false;
+            const unsigned long material_id = surface_element.attribute("materialId").toULong(&material_id_ok);
+            if (!material_id_ok) {
+                error = "Surface material contains an invalid material ID.";
+                return false;
+            }
+            const auto material = std::find_if(
+                materials.begin(), materials.end(),
+                [material_id](const Material& candidate) { return candidate.id == material_id; });
+            if (material != materials.end()) {
+                solid.SetSurfaceMaterial(index, *material);
+            }
+        }
     }
     return true;
 }
@@ -326,6 +353,7 @@ void write_material(QXmlStreamWriter& xml, const Material& material) {
     xml.writeAttribute("textureScaleU", QString::number(material.texture_scale_u, 'g', 9));
     xml.writeAttribute("textureScaleV", QString::number(material.texture_scale_v, 'g', 9));
     xml.writeAttribute("textureRotation", QString::number(material.texture_rotation_degrees, 'g', 9));
+    xml.writeAttribute("textureFitToSurface", material.texture_fit_to_surface ? "1" : "0");
     xml.writeAttribute("colorTexture", QString::fromStdString(material.color_texture_path));
     xml.writeAttribute("lightTexture", QString::fromStdString(material.light_texture_path));
     xml.writeAttribute("bumpTexture", QString::fromStdString(material.bump_texture_path));
@@ -430,6 +458,7 @@ bool read_material_element(const QDomElement& material_element, Material& materi
         return false;
     }
     material.color_texture_path = material_element.attribute("colorTexture", QString::fromStdString(material.color_texture_path)).toStdString();
+    material.texture_fit_to_surface = material_element.attribute("textureFitToSurface", "0") == "1";
     material.light_texture_path = material_element.attribute("lightTexture", QString::fromStdString(material.light_texture_path)).toStdString();
     material.bump_texture_path = material_element.attribute("bumpTexture", QString::fromStdString(material.bump_texture_path)).toStdString();
     return true;
@@ -732,6 +761,9 @@ bool Dom3DProjectSerializer::Save(const QString& path,
     xml.writeStartElement("objects");
     const auto& objects = document.GetObjects();
     for (size_t i = 0; i < objects.size(); ++i) {
+        if (!objects[i]) {
+            continue;
+        }
         const CAlfaObject& object = *objects[i];
         const QString type = object_type_name(object);
 
@@ -773,6 +805,33 @@ bool Dom3DProjectSerializer::Save(const QString& path,
             if (assembly) {
                 xml.writeAttribute("drawParam", QString::number(assembly->GetDrawParam()));
                 xml.writeAttribute("idDim", QString::number(assembly->GetIdDim()));
+                const CAssembled::TransformMatrix& transform =
+                    assembly->GetAssemblyTransform();
+                for (int row = 0; row < 4; ++row) {
+                    for (int column = 0; column < 4; ++column) {
+                        xml.writeAttribute(
+                            QString("transform%1%2").arg(row).arg(column),
+                            QString::number(
+                                transform[static_cast<size_t>(row * 4 + column)],
+                                'g', 17));
+                    }
+                }
+                if (const auto* cabinet = dynamic_cast<const CKitchenCabinet*>(assembly)) {
+                    const KitchenCabinetDefinition& definition = cabinet->GetDefinition();
+                    xml.writeAttribute("bodyType", QString::number(static_cast<unsigned int>(definition.body_type)));
+                    xml.writeAttribute("facadeType", QString::number(static_cast<unsigned int>(definition.facade_type)));
+                    xml.writeAttribute("facadeStyle", QString::number(static_cast<unsigned int>(definition.facade_style)));
+                    xml.writeAttribute("shelfCount", QString::number(definition.shelf_count));
+                    xml.writeAttribute("width", QString::number(definition.width, 'g', 17));
+                    xml.writeAttribute("depth", QString::number(definition.depth, 'g', 17));
+                    xml.writeAttribute("height", QString::number(definition.height, 'g', 17));
+                    xml.writeAttribute("panelThickness", QString::number(definition.panel_thickness, 'g', 17));
+                    xml.writeAttribute("facadeBulge", QString::number(definition.facade_bulge, 'g', 17));
+                    xml.writeAttribute("radius2Bulge", QString::number(definition.radius2_bulge, 'g', 17));
+                    xml.writeAttribute("radiusSideStraight", QString::number(definition.radius_side_straight, 'g', 17));
+                    xml.writeAttribute("doorOpenAngle", QString::number(definition.door_open_angle, 'g', 17));
+                    xml.writeAttribute("doorHingeSide", QString::number(definition.door_hinge_side));
+                }
             }
             for (unsigned long id : group->GetElementIds()) {
                 xml.writeEmptyElement("element");
@@ -1100,7 +1159,7 @@ bool Dom3DProjectSerializer::Load(const QString& path,
         }
 
         std::unique_ptr<CAlfaObject> object;
-        if (type == "Group" || type == "Assembly") {
+        if (type == "Group" || type == "Assembly" || type == "KitchenCabinet") {
             const QDomElement geometry = required_child(object_element, "geometry", error);
             if (geometry.isNull()) {
                 return false;
@@ -1117,10 +1176,70 @@ bool Dom3DProjectSerializer::Load(const QString& path,
                 }
                 element_ids.push_back(id);
             }
-            if (type == "Assembly") {
-                auto assembly = std::make_unique<CAssembled>(
-                    object_element.attribute("name", "Assembly").toStdString(),
-                    std::move(element_ids));
+            if (type == "Assembly" || type == "KitchenCabinet") {
+                std::unique_ptr<CAssembled> assembly;
+                if (type == "KitchenCabinet") {
+                    KitchenCabinetDefinition definition;
+                    bool body_ok = false;
+                    const uint body_type = geometry.attribute("bodyType", "0").toUInt(&body_ok);
+                    bool facade_ok = false;
+                    const uint facade_type = geometry.attribute("facadeType", "2").toUInt(&facade_ok);
+                    bool facade_style_ok = false;
+                    const uint facade_style = geometry.attribute("facadeStyle", "0").toUInt(&facade_style_ok);
+                    bool shelves_ok = false;
+                    const int shelf_count = geometry.attribute("shelfCount", "2").toInt(&shelves_ok);
+                    if (!body_ok || body_type > 6U || !facade_ok || facade_type > 2U
+                        || !facade_style_ok || facade_style > 4U
+                        || !shelves_ok
+                        || !read_double_attr(geometry, "width", definition.width, error)
+                        || !read_double_attr(geometry, "depth", definition.depth, error)
+                        || !read_double_attr(geometry, "height", definition.height, error)
+                        || !read_double_attr(geometry, "panelThickness", definition.panel_thickness, error)) {
+                        if (error.isEmpty()) {
+                            error = "Kitchen cabinet parameters are invalid.";
+                        }
+                        return false;
+                    }
+                    definition.body_type = static_cast<KitchenCabinetBodyType>(body_type);
+                    definition.facade_type = static_cast<KitchenCabinetFacadeType>(facade_type);
+                    definition.facade_style = static_cast<KitchenCabinetFacadeStyle>(facade_style);
+                    definition.shelf_count = shelf_count;
+                    definition.facade_bulge = definition.depth * 0.5;
+                    if (geometry.hasAttribute("facadeBulge")
+                        && !read_double_attr(geometry, "facadeBulge", definition.facade_bulge, error)) {
+                        return false;
+                    }
+                    if (geometry.hasAttribute("radius2Bulge")
+                        && !read_double_attr(geometry, "radius2Bulge", definition.radius2_bulge, error)) {
+                        return false;
+                    }
+                    if (geometry.hasAttribute("radiusSideStraight")
+                        && !read_double_attr(
+                            geometry, "radiusSideStraight", definition.radius_side_straight, error)) {
+                        return false;
+                    }
+                    if (geometry.hasAttribute("doorOpenAngle")
+                        && !read_double_attr(geometry, "doorOpenAngle", definition.door_open_angle, error)) {
+                        return false;
+                    }
+                    bool hinge_ok = true;
+                    definition.door_hinge_side = geometry.attribute("doorHingeSide", "0").toInt(&hinge_ok);
+                    if (!hinge_ok) {
+                        error = "Kitchen cabinet door hinge side is invalid.";
+                        return false;
+                    }
+                    if (!CKitchenCabinet::IsValid(definition)) {
+                        error = "Kitchen cabinet parameters are invalid.";
+                        return false;
+                    }
+                    assembly = std::make_unique<CKitchenCabinet>(
+                        object_element.attribute("name", "Kitchen Cabinet").toStdString(),
+                        std::move(element_ids), definition);
+                } else {
+                    assembly = std::make_unique<CAssembled>(
+                        object_element.attribute("name", "Assembly").toStdString(),
+                        std::move(element_ids));
+                }
                 bool draw_ok = false;
                 const uint draw_param = geometry.attribute("drawParam", "0").toUInt(&draw_ok);
                 bool id_ok = false;
@@ -1131,6 +1250,29 @@ bool Dom3DProjectSerializer::Load(const QString& path,
                 }
                 assembly->SetDrawParam(static_cast<std::uint8_t>(draw_param));
                 assembly->SetIdDim(id_dim);
+                CAssembled::TransformMatrix assembly_transform{
+                    1.0, 0.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0, 0.0,
+                    0.0, 0.0, 1.0, 0.0,
+                    0.0, 0.0, 0.0, 1.0};
+                for (int row = 0; row < 4; ++row) {
+                    for (int column = 0; column < 4; ++column) {
+                        const QString attribute =
+                            QString("transform%1%2").arg(row).arg(column);
+                        if (!geometry.hasAttribute(attribute)) {
+                            continue;
+                        }
+                        bool transform_ok = false;
+                        const double value =
+                            geometry.attribute(attribute).toDouble(&transform_ok);
+                        if (!transform_ok || !std::isfinite(value)) {
+                            error = "Assembly transform matrix is invalid.";
+                            return false;
+                        }
+                        assembly_transform[static_cast<size_t>(row * 4 + column)] = value;
+                    }
+                }
+                assembly->SetAssemblyTransform(assembly_transform);
                 for (QDomElement dim = geometry.firstChildElement("dimension");
                      !dim.isNull(); dim = dim.nextSiblingElement("dimension")) {
                     double sx, sy, sz, ex, ey, ez, ox, oy, oz, offset, value;
@@ -1532,7 +1674,7 @@ bool Dom3DProjectSerializer::Load(const QString& path,
         }
 
         if (auto* solid = dynamic_cast<CSolid*>(object.get())) {
-            if (!read_surface_texture_transforms(object_element, *solid, error)) {
+            if (!read_surface_texture_transforms(object_element, *solid, loaded_materials, error)) {
                 return false;
             }
         }

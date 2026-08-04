@@ -91,11 +91,14 @@ private:
     void BeginSketchFillet();
     void ShowSketchPanel();
     void ActivateParametricTool(const std::string& tool_id);
+    bool TryApplyPendingTrim();
+    void CancelPendingTrim(const QString& status_text = {});
     void ShowLowPolyTool();
     void ShowMeshFillContourTool();
     void ShowTrimMeshTestTool();
     void ShowClassifyFaceCutTool();
     void EditSelectedParametricObject();
+    bool ActiveParametricObjectIsAssembly() const;
     bool TryStartLiveEdgeToolFromSelection();
     bool TryStartLivePolylineExtrudeFromSelection();
     bool TryStartLivePolylineRevolveFromSelection();
@@ -173,12 +176,11 @@ private:
     QAction* mesh_only_action_ = nullptr;
     QAction* surfaces_wire_action_ = nullptr;
     QAction* solid_wireframe_action_ = nullptr;
+    QAction* solid_hidden_line_action_ = nullptr;
     QCheckBox* coordinate_axes_check_box_ = nullptr;
     QCheckBox* floor_grid_check_box_ = nullptr;
     QCheckBox* xy_plane_view_check_box_ = nullptr;
-    QPushButton* mesh_display_button_ = nullptr;
-    QPushButton* edit_texture_button_ = nullptr;
-    QMenu* mesh_display_menu_ = nullptr;
+    QAbstractButton* edit_texture_button_ = nullptr;
     QSlider* mesh_opacity_slider_ = nullptr;
     QLabel* mesh_opacity_value_label_ = nullptr;
     QLabel* projection_status_label_ = nullptr;
@@ -209,6 +211,7 @@ private:
     bool object_color_pick_pending_ = false;
     bool low_poly_pick_pending_ = false;
     bool edge_tool_started_from_face_quick_menu_ = false;
+    std::string pending_trim_tool_id_;
     PendingGroupCommand pending_group_command_ = PendingGroupCommand::None;
     BooleanOperation last_boolean_operation_ = BooleanOperation::Union;
     std::string project_path_;

@@ -9,6 +9,8 @@ constexpr float kDefaultSceneSize = 100.0f;
 constexpr float kDefaultGridHalfSize = kDefaultSceneSize * 0.5f;
 constexpr float kDefaultGridStep = 5.0f;
 constexpr float kDefaultCameraDistance = 62.5f;
+constexpr float kMinimumCameraDistance = 0.005f;
+constexpr float kMinimumOrthographicHalfHeight = 0.002f;
 constexpr float kDefaultPlanCameraDistance = kDefaultSceneSize / 0.84f;
 
 constexpr int ID_FILE_NEW = 1001;
@@ -112,6 +114,7 @@ struct ToolbarButton {
 
 enum class ToolMode {
     Orbit,
+    ZoomRect,
     DrawCurve,
     Select,
     Mesh,
@@ -171,7 +174,8 @@ enum class SolidDisplayMode {
     SurfacesAndEdges,
     MeshOnly,
     SurfacesAndRaisedMesh,
-    Wireframe
+    Wireframe,
+    HiddenLine
 };
 
 enum class MeshDisplayMode {
@@ -291,6 +295,21 @@ inline Vec3 scale_uniform(Vec3 value, float factor) {
 inline Vec3 camera_position(const Camera& camera) {
     const Vec3 forward = rotate(camera.orientation, {0.0f, 0.0f, -1.0f});
     return camera.target - forward * camera.distance;
+}
+
+inline Vec3 camera_position(const Camera& camera, bool orthographic) {
+    if (!orthographic) {
+        return camera_position(camera);
+    }
+
+    Camera view_camera = camera;
+    // In an orthographic projection distance controls only the visible scale.
+    // Keep the eye outside the scene while zooming in so the camera cannot
+    // cross the model and expose its interior.
+    view_camera.distance = camera.distance > kDefaultPlanCameraDistance
+        ? camera.distance
+        : kDefaultPlanCameraDistance;
+    return camera_position(view_camera);
 }
 
 inline void camera_basis(const Camera& camera, Vec3& forward, Vec3& right, Vec3& up) {

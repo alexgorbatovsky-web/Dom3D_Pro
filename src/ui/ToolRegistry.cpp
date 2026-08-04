@@ -3,6 +3,8 @@
 
 #include "../CMesh3D.h"
 #include "../CAssembled.h"
+#include "../CKitchenCabinet.h"
+#include "../FurnitureMaterialFactory.h"
 #include "../solid/AssociativeClone.h"
 #include "../CPolyline.h"
 #include "../SmartLine.h"
@@ -16,6 +18,7 @@
 #include "../solid/SolidSphereTool.h"
 #include "../solid/SolidTorusTool.h"
 #include "../solid/SolidTool.h"
+#include "../solid/TwoSketchSolidBuilder.h"
 #include "../solid/PlaneShapeBuilder.h"
 #include "../solid/PolyhedronShapeBuilder.h"
 #include "../solid/SketchFeatureShapeBuilder.h"
@@ -38,11 +41,14 @@
 #include <BRepFilletAPI_MakeChamfer.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepGProp.hxx>
 #include <GC_MakeArcOfCircle.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
 #include <BRepOffsetAPI_DraftAngle.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
+#include <BRepOffsetAPI_ThruSections.hxx>
 #include <GeomAbs_SurfaceType.hxx>
+#include <GProp_GProps.hxx>
 #include <gp_Ax1.hxx>
 #include <gp_Dir.hxx>
 #include <gp_GTrsf.hxx>
@@ -61,6 +67,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <memory>
 
 namespace {
@@ -213,6 +220,18 @@ TopoDS_Face first_face(const TopoDS_Shape& shape) {
     return TopoDS::Face(explorer.Current());
 }
 
+bool is_planar_surface(const CSurfaceSet& surface) {
+    const TopoDS_Face face = first_face(surface.m_Shape);
+    if (face.IsNull()) {
+        return false;
+    }
+    try {
+        return BRepAdaptor_Surface(face, true).GetType() == GeomAbs_Plane;
+    } catch (...) {
+        return false;
+    }
+}
+
 bool build_open_sketch_wire(const CSmartLine& sketch,
                             TopoDS_Wire& result) {
     result.Nullify();
@@ -262,7 +281,7 @@ bool apply_trim_operation(CSolid& solid,
         const TopoDS_Face face =
             plane ? first_face(plane->m_Shape) : TopoDS_Face();
         if (!plane
-            || plane->GetParametricToolId() != "PlaneTool"
+            || !is_planar_surface(*plane)
             || !TrimSolidByFace(solid.m_Shape, face, positive, result)) {
             return false;
         }
@@ -271,7 +290,7 @@ bool apply_trim_operation(CSolid& solid,
         const TopoDS_Face face =
             surface ? first_face(surface->m_Shape) : TopoDS_Face();
         if (!surface
-            || surface->GetParametricToolId() == "PlaneTool"
+            || is_planar_surface(*surface)
             || !TrimSolidByFace(solid.m_Shape, face, positive, result)) {
             return false;
         }
@@ -326,6 +345,147 @@ bool apply_trim_operation(CSolid& solid,
 
     solid.m_Shape = result;
     return solid.ReBuldMesh();
+}
+
+const char* default_material_name(const std::string& parameter_id) {
+    if (parameter_id.find("facade") != std::string::npos) {
+        return "Facade wood";
+    }
+    if (parameter_id.find("hardware") != std::string::npos
+        || parameter_id.find("leg_material") != std::string::npos) {
+        return "Steel";
+    }
+    return "Wood";
+}
+
+std::vector<ToolParameter> prepare_material_parameters(
+    CAlfaDoc& document,
+    const std::vector<ToolParameter>& source) {
+    std::vector<ToolParameter> parameters = source;
+    const bool has_material_parameter = std::any_of(
+        parameters.begin(), parameters.end(), [](const ToolParameter& parameter) {
+            return parameter.type == ToolParameterType::Material;
+        });
+    if (!has_material_parameter) {
+        return parameters;
+    }
+
+    FurnitureMaterialFactory::EnsureStandardMaterials(document);
+    for (ToolParameter& parameter : parameters) {
+        if (parameter.type != ToolParameterType::Material) {
+            continue;
+        }
+        parameter.options.clear();
+        parameter.option_values.clear();
+        for (const Material& material : document.GetMaterials()) {
+            parameter.options.push_back(material.name);
+            parameter.option_values.push_back(static_cast<double>(material.id));
+        }
+
+        const unsigned long selected_id = static_cast<unsigned long>(parameter.value);
+        if (!document.FindMaterial(selected_id)) {
+            const Material* preferred =
+                document.FindMaterial(default_material_name(parameter.id), true);
+            if (!preferred && !document.GetMaterials().empty()) {
+                preferred = &document.GetMaterials().front();
+            }
+            parameter.value = preferred ? static_cast<double>(preferred->id) : 0.0;
+        }
+    }
+    return parameters;
+}
+
+const Material* material_parameter(
+    const CAlfaDoc& document,
+    const std::vector<ToolParameter>& parameters,
+    const char* id) {
+    const unsigned long material_id =
+        static_cast<unsigned long>(param(parameters, id, 0.0));
+    return document.FindMaterial(material_id);
+}
+
+void assign_material(CAlfaObject& object, const Material* material) {
+    if (!material) {
+        return;
+    }
+    object.SetMaterial(*material);
+    object.SetMaterialId(material->id);
+}
+
+void fit_texture_to_broad_faces(CAlfaObject& object) {
+    auto* solid = dynamic_cast<CSolid*>(&object);
+    if (!solid || solid->GetNumSurfaces() <= 0) {
+        return;
+    }
+
+    std::vector<double> areas;
+    areas.reserve(static_cast<size_t>(solid->GetNumSurfaces()));
+    double maximum_area = 0.0;
+    for (TopExp_Explorer explorer(solid->m_Shape, TopAbs_FACE);
+         explorer.More(); explorer.Next()) {
+        GProp_GProps properties;
+        BRepGProp::SurfaceProperties(TopoDS::Face(explorer.Current()), properties);
+        const double area = std::max(0.0, properties.Mass());
+        areas.push_back(area);
+        maximum_area = std::max(maximum_area, area);
+    }
+    if (maximum_area <= 1.0e-9) {
+        return;
+    }
+
+    constexpr double broad_face_tolerance = 0.995;
+    const size_t surface_count = std::min(
+        areas.size(), static_cast<size_t>(solid->GetNumSurfaces()));
+    for (size_t index = 0; index < surface_count; ++index) {
+        if (areas[index] < maximum_area * broad_face_tolerance) {
+            continue;
+        }
+        const CSurfaceFace* surface = solid->GetSurfaceFace(static_cast<int>(index));
+        SurfaceTextureTransform transform =
+            surface ? surface->TextureTransform : SurfaceTextureTransform{};
+        transform.fit_to_surface = true;
+        solid->SetSurfaceTextureTransform(static_cast<int>(index), transform);
+    }
+}
+
+void assign_furniture_materials(
+    const CAlfaDoc& document,
+    std::vector<std::unique_ptr<CAlfaObject>>& parts,
+    const std::vector<ToolParameter>& parameters,
+    const std::string& tool_id) {
+    const Material* body = material_parameter(
+        document, parameters,
+        tool_id == "table" ? "base_material_id" : "body_material_id");
+    const Material* facade = material_parameter(
+        document, parameters, "facade_material_id");
+    const Material* hardware = material_parameter(
+        document, parameters, "hardware_material_id");
+    const Material* top = material_parameter(
+        document, parameters, "top_material_id");
+
+    for (const auto& part : parts) {
+        if (!part) {
+            continue;
+        }
+        const std::string& name = part->GetName();
+        const bool is_facade = name.find("Facade") != std::string::npos;
+        const bool is_hardware = name.find("Handle") != std::string::npos
+            || name.find("Guide") != std::string::npos
+            || (name.find("Leg") != std::string::npos && tool_id == "drawer_box");
+        const bool is_table_top = tool_id == "table" && name == "Table Top";
+        const Material* selected_material =
+            is_table_top ? top
+            : is_hardware ? hardware
+            : is_facade ? facade
+            : body;
+        assign_material(*part, selected_material);
+        const bool sheet_furniture_part = tool_id != "table" && !is_hardware;
+        if (sheet_furniture_part
+            && selected_material
+            && !selected_material->color_texture_path.empty()) {
+            fit_texture_to_broad_faces(*part);
+        }
+    }
 }
 
 bool apply_sketch_feature(CSolid& solid,
@@ -1227,6 +1387,50 @@ bool rebuild_extrude_base(CAlfaDoc& document, size_t object_index, const std::ve
     return true;
 }
 
+bool rebuild_two_sketch_base(CAlfaDoc& document,
+                             size_t object_index,
+                             const std::vector<ToolParameter>& parameters) {
+    auto& objects = document.GetObjects();
+    if (object_index >= objects.size() || !objects[object_index]) {
+        return false;
+    }
+
+    const auto* old_solid = dynamic_cast<const CSolid*>(objects[object_index].get());
+    const unsigned long first_id = static_cast<unsigned long>(
+        std::max(0.0, param(parameters, "profile.id", 0.0)));
+    const unsigned long second_id = static_cast<unsigned long>(
+        std::max(0.0, param(parameters, "section.id", 0.0)));
+    const auto* first = dynamic_cast<const CSmartLine*>(
+        document.FindObjectById(first_id));
+    const auto* second = dynamic_cast<const CSmartLine*>(
+        document.FindObjectById(second_id));
+    if (!old_solid || !first || !second) {
+        return false;
+    }
+
+    TopoDS_Shape shape;
+    if (!BuildSolidBetweenSketches(*first, *second, shape) || shape.IsNull()) {
+        return false;
+    }
+
+    auto solid = std::make_unique<CSolid>(shape);
+    solid->m_id = old_solid->m_id;
+    solid->SetName(old_solid->GetName());
+    solid->SetColor(old_solid->GetColor());
+    solid->SetMaterial(old_solid->GetMaterial());
+    solid->SetMaterialId(old_solid->GetMaterialId());
+    solid->SetGroupName(old_solid->GetGroupName());
+    solid->SetVisible(old_solid->IsVisible());
+    solid->m_LayerID = old_solid->m_LayerID;
+    solid->CopyOperationTreeFrom(*old_solid);
+    if (!solid->ReBuldMesh()) {
+        return false;
+    }
+
+    objects[object_index] = std::move(solid);
+    return true;
+}
+
 bool rebuild_swept_base(CAlfaDoc& document,
                         size_t object_index,
                         const std::vector<ToolParameter>& parameters) {
@@ -1643,6 +1847,13 @@ bool rebuild_solid_operation_tree(const ToolRegistry& registry,
                                   parameters_for_operation(registry, base_operation))) {
             return false;
         }
+    } else if (base_operation.tool_id == "SolidTwoSketches") {
+        if (!rebuild_two_sketch_base(
+                document,
+                active_object.object_index,
+                parameters_for_operation(registry, base_operation))) {
+            return false;
+        }
     } else if (base_operation.tool_id == "SurfaceOfRevolution") {
         if (!rebuild_revolve_base(document,
                                   active_object.object_index,
@@ -1799,6 +2010,49 @@ std::unique_ptr<CMesh3D> make_box(const std::string& name, float width, float he
     return mesh;
 }
 
+TopoDS_Shape furniture_box(double x, double y, double z,
+                                 double width, double depth, double height) {
+    BRepPrimAPI_MakeBox builder(gp_Pnt(x, y, z), width, depth, height);
+    builder.Build();
+    return builder.IsDone() ? builder.Shape() : TopoDS_Shape();
+}
+
+std::unique_ptr<CSolid> make_furniture_solid(
+    const std::string& name, TopoDS_Shape shape, Color color) {
+    if (shape.IsNull()) {
+        return nullptr;
+    }
+    auto solid = std::make_unique<CSolid>(shape);
+    solid->SetName(name);
+    solid->SetColor(color);
+    return solid->ReBuldMesh() ? std::move(solid) : nullptr;
+}
+
+void copy_solid_surface_appearance(const CAlfaObject& source, CAlfaObject& target) {
+    const auto* source_solid = dynamic_cast<const CSolid*>(&source);
+    auto* target_solid = dynamic_cast<CSolid*>(&target);
+    if (!source_solid || !target_solid) {
+        return;
+    }
+    const int count = std::min(source_solid->GetNumSurfaces(), target_solid->GetNumSurfaces());
+    for (int index = 0; index < count; ++index) {
+        const CSurfaceFace* source_surface = source_solid->GetSurfaceFace(index);
+        if (!source_surface) {
+            continue;
+        }
+        SurfaceTextureTransform transform = source_surface->TextureTransform;
+        const CSurfaceFace* target_surface = target_solid->GetSurfaceFace(index);
+        if (target_surface) {
+            transform.fit_to_surface = transform.fit_to_surface
+                || target_surface->TextureTransform.fit_to_surface;
+        }
+        target_solid->SetSurfaceTextureTransform(index, transform);
+        if (source_surface->MaterialOverride.enabled) {
+            target_solid->SetSurfaceMaterial(index, source_surface->MaterialOverride.material);
+        }
+    }
+}
+
 void replace_selected_mesh(CAlfaDoc& document, size_t index, std::unique_ptr<CMesh3D> mesh) {
     auto& objects = document.GetObjects();
     if (index >= objects.size() || !mesh) {
@@ -1806,6 +2060,7 @@ void replace_selected_mesh(CAlfaDoc& document, size_t index, std::unique_ptr<CMe
     }
 
     if (objects[index]) {
+        mesh->m_id = objects[index]->m_id;
         mesh->SetColor(objects[index]->GetColor());
         mesh->SetMaterial(objects[index]->GetMaterial());
         mesh->SetMaterialId(objects[index]->GetMaterialId());
@@ -1828,15 +2083,620 @@ void rebuild_box(CAlfaDoc& document,
     replace_selected_mesh(document, object_index, make_box(name, width, height, depth, -width * 0.5f, 0.0f, -depth * 0.5f, color));
 }
 
+KitchenCabinetDefinition kitchen_cabinet_definition(
+    const std::vector<ToolParameter>& parameters) {
+    KitchenCabinetDefinition definition;
+    definition.body_type = static_cast<KitchenCabinetBodyType>(std::clamp(
+        static_cast<int>(param(parameters, "body_type", 0.0)), 0, 6));
+    definition.facade_type = static_cast<KitchenCabinetFacadeType>(std::clamp(
+        static_cast<int>(param(parameters, "facade_type", 2.0)), 0, 2));
+    definition.facade_style = static_cast<KitchenCabinetFacadeStyle>(std::clamp(
+        static_cast<int>(param(parameters, "facade_style", 0.0)), 0, 4));
+    definition.shelf_count = std::clamp(
+        static_cast<int>(param(parameters, "shelf_count", 2.0)), 0, 100);
+    definition.door_open_angle = std::clamp(
+        param(parameters, "door_open_angle", 0.0), 0.0, 180.0);
+    definition.door_hinge_side = std::clamp(
+        static_cast<int>(param(parameters, "door_hinge_side", 0.0)), 0, 1);
+    definition.width = std::max(1.0, param(parameters, "width", 600.0));
+    definition.depth = std::max(1.0, param(parameters, "depth", 560.0));
+    definition.height = std::max(1.0, param(parameters, "height", 720.0));
+    const bool legacy_meter_dimensions =
+        definition.width <= 10.0 && definition.depth <= 10.0 && definition.height <= 10.0;
+    if (legacy_meter_dimensions) {
+        definition.width *= 1000.0;
+        definition.depth *= 1000.0;
+        definition.height *= 1000.0;
+    }
+    double panel_thickness = param(parameters, "panel_thickness", 18.0);
+    if (panel_thickness > 0.0 && panel_thickness < 1.0) {
+        panel_thickness *= 1000.0;
+    }
+    definition.panel_thickness = std::clamp(
+        panel_thickness, 0.1,
+        std::min({definition.width, definition.depth, definition.height}) * 0.49);
+    double facade_bulge = param(
+        parameters, "facade_bulge", definition.depth * 0.5);
+    if (legacy_meter_dimensions && facade_bulge > 0.0 && facade_bulge < 10.0) {
+        facade_bulge *= 1000.0;
+    }
+    definition.facade_bulge = std::clamp(
+        facade_bulge, 1.0, definition.width);
+    double radius2_bulge = param(parameters, "radius2_bulge", 120.0);
+    if (legacy_meter_dimensions && radius2_bulge > 0.0 && radius2_bulge < 10.0) {
+        radius2_bulge *= 1000.0;
+    }
+    definition.radius2_bulge = std::clamp(
+        radius2_bulge,
+        1.0,
+        std::min(definition.width * 0.499, definition.depth - 1.0));
+    double radius_side_straight = param(parameters, "radius_side_straight", 180.0);
+    if (legacy_meter_dimensions
+        && radius_side_straight > 0.0 && radius_side_straight < 10.0) {
+        radius_side_straight *= 1000.0;
+    }
+    definition.radius_side_straight = std::clamp(
+        radius_side_straight, 0.0, definition.depth - 1.0);
+    return definition;
+}
+
+void create_kitchen_cabinet(CAlfaDoc& document,
+                            const std::vector<ToolParameter>& parameters) {
+    FurnitureMaterialFactory::EnsureStandardMaterials(document);
+    const KitchenCabinetDefinition definition = kitchen_cabinet_definition(parameters);
+    auto parts = CKitchenCabinet::BuildParts(definition);
+    if (parts.empty()) {
+        return;
+    }
+    assign_furniture_materials(document, parts, parameters, "cabinet");
+    std::vector<unsigned long> ids;
+    ids.reserve(parts.size());
+    for (auto& part : parts) {
+        document.AddObject(std::move(part));
+        if (CAlfaObject* added = document.GetSelectedObject()) {
+            ids.push_back(added->m_id);
+        }
+    }
+    document.AddObject(std::make_unique<CKitchenCabinet>(
+        "Kitchen Cabinet", std::move(ids), definition));
+}
+
+void rebuild_kitchen_cabinet(CAlfaDoc& document,
+                             size_t cabinet_index,
+                             const std::vector<ToolParameter>& parameters) {
+    auto& objects = document.GetObjects();
+    if (cabinet_index >= objects.size()) {
+        return;
+    }
+    auto* cabinet = dynamic_cast<CKitchenCabinet*>(objects[cabinet_index].get());
+    if (!cabinet) {
+        return;
+    }
+    const KitchenCabinetDefinition definition = kitchen_cabinet_definition(parameters);
+    auto replacements = CKitchenCabinet::BuildParts(definition);
+    if (replacements.empty()) {
+        return;
+    }
+    assign_furniture_materials(document, replacements, parameters, "cabinet");
+    const unsigned long cabinet_id = cabinet->m_id;
+    const std::vector<unsigned long> old_ids = cabinet->GetElementIds();
+    std::vector<unsigned long> new_ids;
+    new_ids.reserve(replacements.size());
+    const size_t common_count = std::min(old_ids.size(), replacements.size());
+    for (size_t i = 0; i < common_count; ++i) {
+        const size_t part_index = document.FindObjectIndexById(old_ids[i]);
+        if (part_index >= objects.size() || !objects[part_index]) {
+            return;
+        }
+        CAlfaObject& old_part = *objects[part_index];
+        replacements[i]->m_id = old_part.m_id;
+        replacements[i]->m_LayerID = old_part.m_LayerID;
+        if (replacements[i]->GetMaterialId() == 0) {
+            replacements[i]->SetMaterial(old_part.GetMaterial());
+            replacements[i]->SetMaterialId(old_part.GetMaterialId());
+        }
+        copy_solid_surface_appearance(old_part, *replacements[i]);
+        replacements[i]->SetVisible(old_part.IsVisible());
+        objects[part_index] = std::move(replacements[i]);
+        new_ids.push_back(old_ids[i]);
+    }
+    for (size_t i = common_count; i < old_ids.size(); ++i) {
+        const size_t part_index = document.FindObjectIndexById(old_ids[i]);
+        if (part_index < objects.size()) {
+            objects[part_index].reset();
+        }
+    }
+    for (size_t i = common_count; i < replacements.size(); ++i) {
+        document.AddObject(std::move(replacements[i]));
+        if (CAlfaObject* added = document.GetSelectedObject()) {
+            new_ids.push_back(added->m_id);
+        }
+    }
+    cabinet = cabinet_index < objects.size()
+        ? dynamic_cast<CKitchenCabinet*>(objects[cabinet_index].get()) : nullptr;
+    if (!cabinet || cabinet->m_id != cabinet_id) {
+        return;
+    }
+    cabinet->SetElementIds(std::move(new_ids));
+    cabinet->SetDefinition(definition);
+    document.SelectObjectById(cabinet_id);
+}
+
+struct DeskDefinition {
+    int type = 0; // 0 - open, 1 - drawers left, 2 - drawers right
+    int drawer_count = 3;
+    double width = 1100.0;
+    double depth = 500.0;
+    double height = 700.0;
+    double panel_thickness = 18.0;
+    double back_panel_height = 300.0;
+    double drawer_width = 350.0;
+};
+
+DeskDefinition desk_definition(const std::vector<ToolParameter>& parameters) {
+    DeskDefinition result;
+    result.type = std::clamp(static_cast<int>(param(parameters, "desk_type", 0.0)), 0, 2);
+    result.drawer_count = std::clamp(
+        static_cast<int>(param(parameters, "drawer_count", 3.0)), 1, 8);
+    result.width = std::max(300.0, param(parameters, "width", 1100.0));
+    result.depth = std::max(200.0, param(parameters, "depth", 500.0));
+    result.height = std::max(300.0, param(parameters, "height", 700.0));
+    result.panel_thickness = std::clamp(
+        param(parameters, "panel_thickness", 18.0), 1.0,
+        std::min({result.width, result.depth, result.height}) * 0.2);
+    result.back_panel_height = std::clamp(
+        param(parameters, "back_panel_height", 300.0),
+        result.panel_thickness,
+        result.height - result.panel_thickness);
+    result.drawer_width = std::clamp(
+        param(parameters, "drawer_width", 350.0),
+        result.panel_thickness * 4.0,
+        result.width * 0.6);
+    return result;
+}
+
+std::vector<std::unique_ptr<CAlfaObject>> build_desk_parts(
+    const DeskDefinition& desk) {
+    const Color panel_color{0.58f, 0.32f, 0.15f};
+    const Color facade_color{0.66f, 0.37f, 0.17f};
+    const Color handle_color{0.22f, 0.22f, 0.20f};
+    const double thickness = desk.panel_thickness;
+    const double left = -desk.width * 0.5;
+    const double right = desk.width * 0.5;
+    const double front = -desk.depth * 0.5;
+    const double leg_height = desk.height - thickness;
+    std::vector<std::unique_ptr<CAlfaObject>> parts;
+    auto add = [&parts](const std::string& name, TopoDS_Shape shape, Color color) {
+        parts.push_back(make_furniture_solid(name, std::move(shape), color));
+    };
+
+    add("Desk Top",
+        furniture_box(left, front, leg_height,
+                            desk.width, desk.depth, thickness), panel_color);
+    add("Desk Left Side",
+        furniture_box(left, front, 0.0,
+                            thickness, desk.depth, leg_height), panel_color);
+    add("Desk Right Side",
+        furniture_box(right - thickness, front, 0.0,
+                            thickness, desk.depth, leg_height), panel_color);
+    add("Desk Back Panel",
+        furniture_box(left + thickness, front + desk.depth - thickness,
+                            leg_height - desk.back_panel_height,
+                            desk.width - 2.0 * thickness, thickness,
+                            desk.back_panel_height), panel_color);
+
+    if (desk.type != 0) {
+        const bool drawers_left = desk.type == 1;
+        const double pedestal_left = drawers_left
+            ? left + thickness
+            : right - thickness - desk.drawer_width;
+        const double partition_x = drawers_left
+            ? pedestal_left + desk.drawer_width - thickness
+            : pedestal_left;
+        add("Desk Drawer Partition",
+            furniture_box(partition_x, front, 0.0,
+                                thickness, desk.depth, leg_height), panel_color);
+        add("Desk Drawer Bottom",
+            furniture_box(pedestal_left, front, 0.0,
+                                desk.drawer_width, desk.depth, thickness), panel_color);
+
+        const double gap = 3.0;
+        const double facade_left = drawers_left
+            ? pedestal_left + gap
+            : pedestal_left + thickness + gap;
+        const double facade_width = std::max(
+            1.0, desk.drawer_width - thickness - 2.0 * gap);
+        const double facade_height = std::max(
+            1.0,
+            (leg_height - gap * static_cast<double>(desk.drawer_count + 1))
+                / static_cast<double>(desk.drawer_count));
+        for (int drawer = 0; drawer < desk.drawer_count; ++drawer) {
+            const double facade_z = gap
+                + static_cast<double>(drawer) * (facade_height + gap);
+            add("Desk Drawer Facade " + std::to_string(drawer + 1),
+                furniture_box(facade_left, front - thickness, facade_z,
+                                    facade_width, thickness, facade_height), facade_color);
+            const double handle_width = std::min(110.0, facade_width * 0.45);
+            add("Desk Drawer Handle " + std::to_string(drawer + 1),
+                furniture_box(
+                    facade_left + (facade_width - handle_width) * 0.5,
+                    front - thickness - 12.0,
+                    facade_z + facade_height * 0.62,
+                    handle_width, 12.0, 8.0), handle_color);
+        }
+    }
+
+    if (std::any_of(parts.begin(), parts.end(),
+                    [](const std::unique_ptr<CAlfaObject>& part) { return !part; })) {
+        return {};
+    }
+    return parts;
+}
+
+void create_desk(CAlfaDoc& document, const std::vector<ToolParameter>& parameters) {
+    FurnitureMaterialFactory::EnsureStandardMaterials(document);
+    auto parts = build_desk_parts(desk_definition(parameters));
+    if (parts.empty()) {
+        return;
+    }
+    assign_furniture_materials(document, parts, parameters, "desk");
+    std::vector<unsigned long> ids;
+    ids.reserve(parts.size());
+    for (auto& part : parts) {
+        document.AddObject(std::move(part));
+        if (CAlfaObject* added = document.GetSelectedObject()) {
+            ids.push_back(added->m_id);
+        }
+    }
+    document.AddObject(std::make_unique<CAssembled>("Desk", std::move(ids)));
+}
+
+void rebuild_desk(CAlfaDoc& document,
+                  size_t assembly_index,
+                  const std::vector<ToolParameter>& parameters) {
+    auto& objects = document.GetObjects();
+    if (assembly_index >= objects.size()) {
+        return;
+    }
+    auto* assembly = dynamic_cast<CAssembled*>(objects[assembly_index].get());
+    if (!assembly) {
+        return;
+    }
+    auto replacements = build_desk_parts(desk_definition(parameters));
+    if (replacements.empty()) {
+        return;
+    }
+    assign_furniture_materials(document, replacements, parameters, "desk");
+    const unsigned long assembly_id = assembly->m_id;
+    const std::vector<unsigned long> old_ids = assembly->GetElementIds();
+    std::vector<unsigned long> new_ids;
+    new_ids.reserve(replacements.size());
+    const size_t common_count = std::min(old_ids.size(), replacements.size());
+    for (size_t i = 0; i < common_count; ++i) {
+        const size_t part_index = document.FindObjectIndexById(old_ids[i]);
+        if (part_index >= objects.size() || !objects[part_index]) {
+            return;
+        }
+        CAlfaObject& old_part = *objects[part_index];
+        replacements[i]->m_id = old_part.m_id;
+        replacements[i]->m_LayerID = old_part.m_LayerID;
+        if (replacements[i]->GetMaterialId() == 0) {
+            replacements[i]->SetMaterial(old_part.GetMaterial());
+            replacements[i]->SetMaterialId(old_part.GetMaterialId());
+        }
+        copy_solid_surface_appearance(old_part, *replacements[i]);
+        replacements[i]->SetVisible(old_part.IsVisible());
+        objects[part_index] = std::move(replacements[i]);
+        new_ids.push_back(old_ids[i]);
+    }
+    for (size_t i = common_count; i < old_ids.size(); ++i) {
+        const size_t part_index = document.FindObjectIndexById(old_ids[i]);
+        if (part_index < objects.size()) {
+            objects[part_index].reset();
+        }
+    }
+    for (size_t i = common_count; i < replacements.size(); ++i) {
+        document.AddObject(std::move(replacements[i]));
+        if (CAlfaObject* added = document.GetSelectedObject()) {
+            new_ids.push_back(added->m_id);
+        }
+    }
+    assembly = assembly_index < objects.size()
+        ? dynamic_cast<CAssembled*>(objects[assembly_index].get()) : nullptr;
+    if (!assembly || assembly->m_id != assembly_id) {
+        return;
+    }
+    assembly->SetElementIds(std::move(new_ids));
+    document.SelectObjectById(assembly_id);
+}
+
+struct DrawerBoxDefinition {
+    double width = 600.0;
+    double height = 800.0;
+    double depth = 500.0;
+    double panel_thickness = 18.0;
+    double drawer_side_thickness = 12.0;
+    double drawer_bottom_thickness = 6.0;
+    double slide_clearance = 13.0;
+    int facade_type = 0;
+    int handle_type = 0;
+    int drawer_count = 3;
+    std::vector<double> drawer_heights{200.0, 200.0, 400.0};
+    bool make_legs = true;
+    double leg_height = 100.0;
+    int open_drawer = 0;
+    double pullout_distance = 300.0;
+};
+
+DrawerBoxDefinition drawer_box_definition(
+    const std::vector<ToolParameter>& parameters) {
+    DrawerBoxDefinition result;
+    result.width = std::max(300.0, param(parameters, "width", 600.0));
+    result.height = std::max(300.0, param(parameters, "height", 800.0));
+    result.depth = std::max(250.0, param(parameters, "depth", 500.0));
+    result.panel_thickness = std::clamp(
+        param(parameters, "panel_thickness", 18.0), 5.0,
+        std::min({result.width, result.depth, result.height}) * 0.15);
+    result.drawer_side_thickness = std::clamp(
+        param(parameters, "drawer_side_thickness", 12.0), 5.0, 30.0);
+    result.drawer_bottom_thickness = std::clamp(
+        param(parameters, "drawer_bottom_thickness", 6.0), 3.0, 20.0);
+    result.slide_clearance = std::clamp(
+        param(parameters, "slide_clearance", 13.0), 5.0, 40.0);
+    result.facade_type = std::clamp(
+        static_cast<int>(param(parameters, "facade_type", 0.0)), 0, 9);
+    result.handle_type = std::clamp(
+        static_cast<int>(param(parameters, "handle_type", 0.0)), 0, 3);
+    result.drawer_count = std::clamp(
+        static_cast<int>(param(parameters, "drawer_count", 3.0)), 1, 6);
+    result.drawer_heights.clear();
+    for (int drawer = 0; drawer < result.drawer_count; ++drawer) {
+        const std::string id = "drawer_height_" + std::to_string(drawer + 1);
+        const double fallback = drawer == 2 ? 400.0 : 200.0;
+        result.drawer_heights.push_back(std::max(40.0, param(parameters, id.c_str(), fallback)));
+    }
+    result.make_legs = param(parameters, "make_legs", 1.0) >= 0.5;
+    result.leg_height = std::clamp(
+        param(parameters, "leg_height", 100.0), 20.0, 300.0);
+    result.open_drawer = std::clamp(
+        static_cast<int>(param(parameters, "open_drawer", 0.0)), 0, 6);
+    result.pullout_distance = std::clamp(
+        param(parameters, "pullout_distance", 300.0), 0.0, result.depth * 0.9);
+    return result;
+}
+
+std::vector<std::unique_ptr<CAlfaObject>> build_drawer_box_parts(
+    const DrawerBoxDefinition& box) {
+    const Color carcass_color{0.58f, 0.32f, 0.15f};
+    const Color drawer_color{0.68f, 0.43f, 0.22f};
+    const Color facade_color{0.62f, 0.34f, 0.16f};
+    const Color rail_color{0.55f, 0.56f, 0.57f};
+    const Color handle_color{0.28f, 0.24f, 0.14f};
+    const double t = box.panel_thickness;
+    const double left = -box.width * 0.5;
+    const double front = -box.depth * 0.5;
+    const double base_z = box.make_legs ? box.leg_height : 0.0;
+    const double inner_width = std::max(1.0, box.width - 2.0 * t);
+    const double inner_height = std::max(1.0, box.height - 2.0 * t);
+    std::vector<std::unique_ptr<CAlfaObject>> parts;
+    auto add = [&parts](const std::string& name, TopoDS_Shape shape, Color color) {
+        parts.push_back(make_furniture_solid(name, std::move(shape), color));
+    };
+
+    add("Drawer Box Left Side",
+        furniture_box(left, front, base_z, t, box.depth, box.height), carcass_color);
+    add("Drawer Box Right Side",
+        furniture_box(left + box.width - t, front, base_z,
+                            t, box.depth, box.height), carcass_color);
+    add("Drawer Box Bottom",
+        furniture_box(left + t, front, base_z,
+                            inner_width, box.depth, t), carcass_color);
+    add("Drawer Box Top",
+        furniture_box(left + t, front, base_z + box.height - t,
+                            inner_width, box.depth, t), carcass_color);
+    add("Drawer Box Back",
+        furniture_box(left + t, front + box.depth - t, base_z + t,
+                            inner_width, t, inner_height), carcass_color);
+
+    if (box.make_legs) {
+        const double leg_size = std::min(45.0, t * 2.5);
+        const double leg_inset = 20.0;
+        const double leg_left = left + leg_inset;
+        const double leg_right = left + box.width - leg_inset - leg_size;
+        const double leg_front = front + leg_inset;
+        const double leg_back = front + box.depth - leg_inset - leg_size;
+        for (const auto& position : std::vector<std::pair<double, double>>{
+                 {leg_left, leg_front}, {leg_right, leg_front},
+                 {leg_right, leg_back}, {leg_left, leg_back}}) {
+            add("Drawer Box Leg",
+                furniture_box(position.first, position.second, 0.0,
+                                    leg_size, leg_size, box.leg_height), rail_color);
+        }
+    }
+
+    const double gap = 3.0;
+    const double available_facade_height = std::max(
+        1.0, box.height - gap * static_cast<double>(box.drawer_count + 1));
+    double requested_sum = 0.0;
+    for (double value : box.drawer_heights) {
+        requested_sum += value;
+    }
+    const double height_scale = requested_sum > 0.0
+        ? available_facade_height / requested_sum : 1.0;
+    const double drawer_depth = std::max(80.0, box.depth - t - 35.0);
+    const double drawer_outer_width = std::max(
+        80.0, inner_width - 2.0 * box.slide_clearance);
+    const double drawer_left = left + t + box.slide_clearance;
+    double facade_z = base_z + gap;
+    for (int drawer = 0; drawer < box.drawer_count; ++drawer) {
+        const double facade_height = box.drawer_heights[static_cast<size_t>(drawer)] * height_scale;
+        const double drawer_height = std::max(
+            45.0, std::min(facade_height - 28.0, facade_height * 0.72));
+        const double drawer_z = facade_z + 12.0;
+        const double extension = box.open_drawer == drawer + 1
+            ? -box.pullout_distance : 0.0;
+        const double drawer_front_y = front + 20.0 + extension;
+        const double side_t = box.drawer_side_thickness;
+        const double drawer_inner_width = std::max(1.0, drawer_outer_width - 2.0 * side_t);
+
+        add("Drawer " + std::to_string(drawer + 1) + " Left Side",
+            furniture_box(drawer_left, drawer_front_y, drawer_z,
+                                side_t, drawer_depth, drawer_height), drawer_color);
+        add("Drawer " + std::to_string(drawer + 1) + " Right Side",
+            furniture_box(drawer_left + drawer_outer_width - side_t,
+                                drawer_front_y, drawer_z,
+                                side_t, drawer_depth, drawer_height), drawer_color);
+        add("Drawer " + std::to_string(drawer + 1) + " Back",
+            furniture_box(drawer_left + side_t,
+                                drawer_front_y + drawer_depth - side_t, drawer_z,
+                                drawer_inner_width, side_t, drawer_height), drawer_color);
+        add("Drawer " + std::to_string(drawer + 1) + " Front Wall",
+            furniture_box(drawer_left + side_t, drawer_front_y, drawer_z,
+                                drawer_inner_width, side_t, drawer_height), drawer_color);
+        add("Drawer " + std::to_string(drawer + 1) + " Bottom",
+            furniture_box(drawer_left + side_t, drawer_front_y + side_t,
+                                drawer_z + 8.0,
+                                drawer_inner_width, drawer_depth - 2.0 * side_t,
+                                box.drawer_bottom_thickness), drawer_color);
+
+        const double rail_z = drawer_z + 18.0;
+        add("Drawer " + std::to_string(drawer + 1) + " Left Guide",
+            furniture_box(left + t, front + 22.0, rail_z,
+                                8.0, drawer_depth, 12.0), rail_color);
+        add("Drawer " + std::to_string(drawer + 1) + " Right Guide",
+            furniture_box(left + box.width - t - 8.0, front + 22.0, rail_z,
+                                8.0, drawer_depth, 12.0), rail_color);
+
+        const double facade_left = left + gap;
+        const double facade_width = box.width - 2.0 * gap;
+        if (box.facade_type == 0) {
+            add("Drawer " + std::to_string(drawer + 1) + " Facade",
+                furniture_box(facade_left, front - t + extension, facade_z,
+                                    facade_width, t, facade_height), facade_color);
+        } else {
+            const double frame_width = std::clamp(
+                std::min(facade_height, facade_width) * 0.12, 18.0, 55.0);
+            add("Drawer Facade Left Frame",
+                furniture_box(facade_left, front - t + extension, facade_z,
+                                    frame_width, t, facade_height), facade_color);
+            add("Drawer Facade Right Frame",
+                furniture_box(facade_left + facade_width - frame_width,
+                                    front - t + extension, facade_z,
+                                    frame_width, t, facade_height), facade_color);
+            add("Drawer Facade Bottom Frame",
+                furniture_box(facade_left + frame_width,
+                                    front - t + extension, facade_z,
+                                    facade_width - 2.0 * frame_width, t, frame_width), facade_color);
+            add("Drawer Facade Top Frame",
+                furniture_box(facade_left + frame_width,
+                                    front - t + extension,
+                                    facade_z + facade_height - frame_width,
+                                    facade_width - 2.0 * frame_width, t, frame_width), facade_color);
+            add("Drawer Facade Inset",
+                furniture_box(facade_left + frame_width,
+                                    front - t * 0.65 + extension,
+                                    facade_z + frame_width,
+                                    facade_width - 2.0 * frame_width,
+                                    t * 0.45,
+                                    facade_height - 2.0 * frame_width), facade_color);
+        }
+
+        if (box.handle_type != 3) {
+            const double handle_width = box.handle_type == 2
+                ? 24.0 : std::min(140.0, facade_width * 0.35);
+            const double handle_height = box.handle_type == 2 ? 24.0 : 10.0;
+            add("Drawer " + std::to_string(drawer + 1) + " Handle",
+                furniture_box(
+                    -handle_width * 0.5,
+                    front - t - 15.0 + extension,
+                    facade_z + facade_height * 0.58,
+                    handle_width, 15.0, handle_height), handle_color);
+        }
+        facade_z += facade_height + gap;
+    }
+
+    if (std::any_of(parts.begin(), parts.end(),
+                    [](const std::unique_ptr<CAlfaObject>& part) { return !part; })) {
+        return {};
+    }
+    return parts;
+}
+
+void create_drawer_box(CAlfaDoc& document,
+                       const std::vector<ToolParameter>& parameters) {
+    FurnitureMaterialFactory::EnsureStandardMaterials(document);
+    auto parts = build_drawer_box_parts(drawer_box_definition(parameters));
+    if (parts.empty()) {
+        return;
+    }
+    assign_furniture_materials(document, parts, parameters, "drawer_box");
+    std::vector<unsigned long> ids;
+    ids.reserve(parts.size());
+    for (auto& part : parts) {
+        document.AddObject(std::move(part));
+        if (CAlfaObject* added = document.GetSelectedObject()) {
+            ids.push_back(added->m_id);
+        }
+    }
+    document.AddObject(std::make_unique<CAssembled>("Drawer Box", std::move(ids)));
+}
+
+void rebuild_drawer_box(CAlfaDoc& document,
+                        size_t assembly_index,
+                        const std::vector<ToolParameter>& parameters) {
+    auto& objects = document.GetObjects();
+    if (assembly_index >= objects.size()) return;
+    auto* assembly = dynamic_cast<CAssembled*>(objects[assembly_index].get());
+    if (!assembly) return;
+    auto replacements = build_drawer_box_parts(drawer_box_definition(parameters));
+    if (replacements.empty()) return;
+    assign_furniture_materials(document, replacements, parameters, "drawer_box");
+    const unsigned long assembly_id = assembly->m_id;
+    const std::vector<unsigned long> old_ids = assembly->GetElementIds();
+    std::vector<unsigned long> new_ids;
+    new_ids.reserve(replacements.size());
+    const size_t common_count = std::min(old_ids.size(), replacements.size());
+    for (size_t i = 0; i < common_count; ++i) {
+        const size_t part_index = document.FindObjectIndexById(old_ids[i]);
+        if (part_index >= objects.size() || !objects[part_index]) return;
+        CAlfaObject& old_part = *objects[part_index];
+        replacements[i]->m_id = old_part.m_id;
+        replacements[i]->m_LayerID = old_part.m_LayerID;
+        if (replacements[i]->GetMaterialId() == 0) {
+            replacements[i]->SetMaterial(old_part.GetMaterial());
+            replacements[i]->SetMaterialId(old_part.GetMaterialId());
+        }
+        copy_solid_surface_appearance(old_part, *replacements[i]);
+        replacements[i]->SetVisible(old_part.IsVisible());
+        objects[part_index] = std::move(replacements[i]);
+        new_ids.push_back(old_ids[i]);
+    }
+    for (size_t i = common_count; i < old_ids.size(); ++i) {
+        const size_t part_index = document.FindObjectIndexById(old_ids[i]);
+        if (part_index < objects.size()) objects[part_index].reset();
+    }
+    for (size_t i = common_count; i < replacements.size(); ++i) {
+        document.AddObject(std::move(replacements[i]));
+        if (CAlfaObject* added = document.GetSelectedObject()) new_ids.push_back(added->m_id);
+    }
+    assembly = assembly_index < objects.size()
+        ? dynamic_cast<CAssembled*>(objects[assembly_index].get()) : nullptr;
+    if (!assembly || assembly->m_id != assembly_id) return;
+    assembly->SetElementIds(std::move(new_ids));
+    document.SelectObjectById(assembly_id);
+}
+
 struct TableGeometry {
     double width;
     double depth;
     double height;
     double top;
     double leg;
+    double leg_taper;
     double inset;
     double apron_height;
     double apron_thickness;
+    double apron_edge_radius;
     double arc_bulge;
     bool arc_top;
 };
@@ -1848,49 +2708,86 @@ TableGeometry table_geometry(const std::vector<ToolParameter>& parameters) {
         param(parameters, "height", 750.0),
         param(parameters, "top_thickness", 50.0),
         param(parameters, "leg_size", 40.0),
+        param(parameters, "leg_taper", 8.0),
         param(parameters, "leg_inset", 40.0),
         param(parameters, "apron_height", 60.0),
         param(parameters, "apron_thickness", 20.0),
+        param(parameters, "apron_edge_radius", 2.0),
         param(parameters, "arc_bulge", 100.0),
         param(parameters, "top_shape", 0.0) >= 0.5};
     result.top = std::clamp(result.top, 1.0, result.height - 1.0);
     result.leg = std::clamp(result.leg, 1.0, std::min(result.width, result.depth) * 0.4);
+    result.leg_taper = std::clamp(result.leg_taper, 0.0, result.leg * 0.49);
     result.inset = std::clamp(
         result.inset, 0.0,
         std::max(0.0, (std::min(result.width, result.depth) - result.leg) * 0.5));
     result.apron_height = std::clamp(result.apron_height, 1.0, result.height - result.top);
     result.apron_thickness = std::clamp(
         result.apron_thickness, 1.0, std::min(result.leg, result.depth * 0.25));
+    result.apron_edge_radius = std::clamp(
+        result.apron_edge_radius, 0.0,
+        std::min(result.apron_thickness, result.apron_height) * 0.49);
     result.arc_bulge = std::clamp(result.arc_bulge, 1.0, result.width);
     return result;
 }
 
 TopoDS_Shape table_box_shape(double x, double y, double z,
-                             double width, double height, double depth) {
-    BRepPrimAPI_MakeBox builder(gp_Pnt(x, y, z), width, height, depth);
+                             double width, double depth, double height) {
+    BRepPrimAPI_MakeBox builder(gp_Pnt(x, y, z), width, depth, height);
     builder.Build();
     return builder.IsDone() ? builder.Shape() : TopoDS_Shape();
 }
 
+TopoDS_Shape table_leg_shape(double x, double y, double height,
+                             double size, double taper) {
+    try {
+        BRepBuilderAPI_MakePolygon bottom;
+        bottom.Add(gp_Pnt(x + taper, y + taper, 0.0));
+        bottom.Add(gp_Pnt(x + size - taper, y + taper, 0.0));
+        bottom.Add(gp_Pnt(x + size - taper, y + size - taper, 0.0));
+        bottom.Add(gp_Pnt(x + taper, y + size - taper, 0.0));
+        bottom.Close();
+
+        BRepBuilderAPI_MakePolygon top;
+        top.Add(gp_Pnt(x, y, height));
+        top.Add(gp_Pnt(x + size, y, height));
+        top.Add(gp_Pnt(x + size, y + size, height));
+        top.Add(gp_Pnt(x, y + size, height));
+        top.Close();
+        if (!bottom.IsDone() || !top.IsDone()) {
+            return {};
+        }
+
+        BRepOffsetAPI_ThruSections loft(true, false, 1.0e-7);
+        loft.CheckCompatibility(true);
+        loft.AddWire(bottom.Wire());
+        loft.AddWire(top.Wire());
+        loft.Build();
+        return loft.IsDone() ? loft.Shape() : TopoDS_Shape();
+    } catch (...) {
+        return {};
+    }
+}
+
 TopoDS_Shape table_top_shape(const TableGeometry& geometry) {
-    const double y = geometry.height - geometry.top;
+    const double z = geometry.height - geometry.top;
     if (!geometry.arc_top) {
         return table_box_shape(
-            -geometry.width * 0.5, y, -geometry.depth * 0.5,
-            geometry.width, geometry.top, geometry.depth);
+            -geometry.width * 0.5, -geometry.depth * 0.5, z,
+            geometry.width, geometry.depth, geometry.top);
     }
     try {
-        const gp_Pnt front_left(-geometry.width * 0.5, y, -geometry.depth * 0.5);
-        const gp_Pnt front_right(geometry.width * 0.5, y, -geometry.depth * 0.5);
-        const gp_Pnt back_right(geometry.width * 0.5, y, geometry.depth * 0.5);
-        const gp_Pnt back_left(-geometry.width * 0.5, y, geometry.depth * 0.5);
+        const gp_Pnt front_left(-geometry.width * 0.5, -geometry.depth * 0.5, z);
+        const gp_Pnt front_right(geometry.width * 0.5, -geometry.depth * 0.5, z);
+        const gp_Pnt back_right(geometry.width * 0.5, geometry.depth * 0.5, z);
+        const gp_Pnt back_left(-geometry.width * 0.5, geometry.depth * 0.5, z);
         GC_MakeArcOfCircle right_arc(
             front_right,
-            gp_Pnt(geometry.width * 0.5 + geometry.arc_bulge, y, 0.0),
+            gp_Pnt(geometry.width * 0.5 + geometry.arc_bulge, 0.0, z),
             back_right);
         GC_MakeArcOfCircle left_arc(
             back_left,
-            gp_Pnt(-geometry.width * 0.5 - geometry.arc_bulge, y, 0.0),
+            gp_Pnt(-geometry.width * 0.5 - geometry.arc_bulge, 0.0, z),
             front_left);
         if (!right_arc.IsDone() || !left_arc.IsDone()) {
             return {};
@@ -1907,7 +2804,7 @@ TopoDS_Shape table_top_shape(const TableGeometry& geometry) {
         if (!face.IsDone()) {
             return {};
         }
-        BRepPrimAPI_MakePrism prism(face.Face(), gp_Vec(0.0, geometry.top, 0.0));
+        BRepPrimAPI_MakePrism prism(face.Face(), gp_Vec(0.0, 0.0, geometry.top));
         prism.Build();
         return prism.IsDone() ? prism.Shape() : TopoDS_Shape();
     } catch (...) {
@@ -1927,6 +2824,18 @@ std::unique_ptr<CSolid> make_table_solid(
         return nullptr;
     }
     return solid;
+}
+
+std::unique_ptr<CSolid> make_table_apron(
+    const std::string& name, TopoDS_Shape shape, Color color, double edge_radius) {
+    auto apron = make_table_solid(name, std::move(shape), color);
+    if (!apron) {
+        return nullptr;
+    }
+    if (edge_radius > 0.0001 && !apply_fillet_all_edges(*apron, edge_radius)) {
+        return nullptr;
+    }
+    return apron;
 }
 
 std::unique_ptr<CAssociativeClone> make_table_clone(
@@ -1960,6 +2869,7 @@ void add_table_object(CAlfaDoc& document,
 }
 
 void create_table(CAlfaDoc& document, const std::vector<ToolParameter>& parameters) {
+    FurnitureMaterialFactory::EnsureStandardMaterials(document);
     const TableGeometry g = table_geometry(parameters);
     const Color wood{0.58f, 0.32f, 0.15f};
     const Color apron_color{0.72f, 0.16f, 0.12f};
@@ -1968,20 +2878,18 @@ void create_table(CAlfaDoc& document, const std::vector<ToolParameter>& paramete
     const double right = g.width * 0.5 - g.inset - g.leg;
     const double front = -g.depth * 0.5 + g.inset;
     const double back = g.depth * 0.5 - g.inset - g.leg;
-    const double apron_y = leg_height - g.apron_height;
-    const double long_x = left + g.leg;
-    const double long_length = std::max(1.0, right - long_x);
-    const double long_front_z = front + g.leg;
-    const double long_back_z = back - g.apron_thickness;
-    const double short_z = front + g.leg;
-    const double short_length = std::max(1.0, back - short_z);
-    const double short_left_x = left + g.leg;
-    const double short_right_x = right - g.apron_thickness;
+    const double apron_z = leg_height - g.apron_height;
+    const double frame_left = left - g.apron_thickness;
+    const double frame_right = right + g.leg + g.apron_thickness;
+    const double frame_front = front - g.apron_thickness;
+    const double frame_back = back + g.leg + g.apron_thickness;
+    const double long_length = std::max(1.0, frame_right - frame_left);
+    const double short_length = std::max(1.0, frame_back - frame_front - 2.0 * g.apron_thickness);
 
     std::vector<std::unique_ptr<CAlfaObject>> parts;
     auto top = make_table_solid("Table Top", table_top_shape(g), wood);
     auto leg = make_table_solid(
-        "Table Leg", table_box_shape(left, 0.0, front, g.leg, leg_height, g.leg), wood);
+        "Table Leg", table_leg_shape(left, front, leg_height, g.leg, g.leg_taper), wood);
     if (!top || !leg) return;
     document.EnsureObjectId(*leg);
     CSolid* leg_source = leg.get();
@@ -1989,14 +2897,14 @@ void create_table(CAlfaDoc& document, const std::vector<ToolParameter>& paramete
     parts.push_back(std::move(top));
     parts.push_back(std::move(leg));
     parts.push_back(make_table_clone(*leg_source, leg_id, "Table Leg Clone 1", right - left, 0.0, 0.0));
-    parts.push_back(make_table_clone(*leg_source, leg_id, "Table Leg Clone 2", right - left, 0.0, back - front));
-    parts.push_back(make_table_clone(*leg_source, leg_id, "Table Leg Clone 3", 0.0, 0.0, back - front));
+    parts.push_back(make_table_clone(*leg_source, leg_id, "Table Leg Clone 2", right - left, back - front, 0.0));
+    parts.push_back(make_table_clone(*leg_source, leg_id, "Table Leg Clone 3", 0.0, back - front, 0.0));
 
-    auto long_apron = make_table_solid(
+    auto long_apron = make_table_apron(
         "Table Long Apron",
-        table_box_shape(long_x, apron_y, long_front_z,
-                        long_length, g.apron_height, g.apron_thickness),
-        apron_color);
+        table_box_shape(frame_left, frame_front, apron_z,
+                        long_length, g.apron_thickness, g.apron_height),
+        apron_color, g.apron_edge_radius);
     if (!long_apron) return;
     document.EnsureObjectId(*long_apron);
     CSolid* long_source = long_apron.get();
@@ -2004,13 +2912,13 @@ void create_table(CAlfaDoc& document, const std::vector<ToolParameter>& paramete
     parts.push_back(std::move(long_apron));
     parts.push_back(make_table_clone(
         *long_source, long_id, "Table Long Apron Clone",
-        0.0, 0.0, long_back_z - long_front_z));
+        0.0, frame_back - frame_front - g.apron_thickness, 0.0));
 
-    auto short_apron = make_table_solid(
+    auto short_apron = make_table_apron(
         "Table Short Apron",
-        table_box_shape(short_left_x, apron_y, short_z,
-                        g.apron_thickness, g.apron_height, short_length),
-        apron_color);
+        table_box_shape(frame_left, front, apron_z,
+                        g.apron_thickness, short_length, g.apron_height),
+        apron_color, g.apron_edge_radius);
     if (!short_apron) return;
     document.EnsureObjectId(*short_apron);
     CSolid* short_source = short_apron.get();
@@ -2018,13 +2926,14 @@ void create_table(CAlfaDoc& document, const std::vector<ToolParameter>& paramete
     parts.push_back(std::move(short_apron));
     parts.push_back(make_table_clone(
         *short_source, short_id, "Table Short Apron Clone",
-        short_right_x - short_left_x, 0.0, 0.0));
+        frame_right - frame_left - g.apron_thickness, 0.0, 0.0));
 
     if (parts.size() != 9
         || std::any_of(parts.begin(), parts.end(),
                        [](const std::unique_ptr<CAlfaObject>& item) { return !item; })) {
         return;
     }
+    assign_furniture_materials(document, parts, parameters, "table");
     std::vector<unsigned long> ids;
     for (auto& part : parts) {
         add_table_object(document, std::move(part), ids);
@@ -2036,8 +2945,10 @@ void copy_table_identity(const CAlfaObject& old, CAlfaObject& replacement) {
     replacement.m_id = old.m_id;
     replacement.m_LayerID = old.m_LayerID;
     replacement.SetColor(old.GetColor());
-    replacement.SetMaterial(old.GetMaterial());
-    replacement.SetMaterialId(old.GetMaterialId());
+    if (replacement.GetMaterialId() == 0) {
+        replacement.SetMaterial(old.GetMaterial());
+        replacement.SetMaterialId(old.GetMaterialId());
+    }
     replacement.SetVisible(old.IsVisible());
 }
 
@@ -2060,27 +2971,28 @@ void rebuild_table(CAlfaDoc& document,
     const double right = g.width * 0.5 - g.inset - g.leg;
     const double front = -g.depth * 0.5 + g.inset;
     const double back = g.depth * 0.5 - g.inset - g.leg;
-    const double apron_y = leg_height - g.apron_height;
-    const double long_x = left + g.leg;
-    const double long_front_z = front + g.leg;
-    const double long_back_z = back - g.apron_thickness;
-    const double short_z = front + g.leg;
-    const double short_left_x = left + g.leg;
-    const double short_right_x = right - g.apron_thickness;
+    const double apron_z = leg_height - g.apron_height;
+    const double frame_left = left - g.apron_thickness;
+    const double frame_right = right + g.leg + g.apron_thickness;
+    const double frame_front = front - g.apron_thickness;
+    const double frame_back = back + g.leg + g.apron_thickness;
+    const double long_length = std::max(1.0, frame_right - frame_left);
+    const double short_length = std::max(1.0, frame_back - frame_front - 2.0 * g.apron_thickness);
 
     std::vector<std::unique_ptr<CAlfaObject>> replacements;
     replacements.push_back(make_table_solid("Table Top", table_top_shape(g), wood));
-    auto leg = make_table_solid("Table Leg", table_box_shape(left, 0.0, front, g.leg, leg_height, g.leg), wood);
+    auto leg = make_table_solid("Table Leg", table_leg_shape(left, front, leg_height, g.leg, g.leg_taper), wood);
     if (!leg) return;
     CSolid* leg_source = leg.get();
     replacements.push_back(std::move(leg));
     replacements.push_back(make_table_clone(*leg_source, ids[1], "Table Leg Clone 1", right - left, 0.0, 0.0));
-    replacements.push_back(make_table_clone(*leg_source, ids[1], "Table Leg Clone 2", right - left, 0.0, back - front));
-    replacements.push_back(make_table_clone(*leg_source, ids[1], "Table Leg Clone 3", 0.0, 0.0, back - front));
-    auto long_apron = make_table_solid(
+    replacements.push_back(make_table_clone(*leg_source, ids[1], "Table Leg Clone 2", right - left, back - front, 0.0));
+    replacements.push_back(make_table_clone(*leg_source, ids[1], "Table Leg Clone 3", 0.0, back - front, 0.0));
+    auto long_apron = make_table_apron(
         "Table Long Apron",
-        table_box_shape(long_x, apron_y, long_front_z,
-                        std::max(1.0, right - long_x), g.apron_height, g.apron_thickness), red);
+        table_box_shape(frame_left, frame_front, apron_z,
+                        long_length, g.apron_thickness, g.apron_height),
+        red, g.apron_edge_radius);
     if (!long_apron) return;
     CSolid* long_source = long_apron.get();
     unsigned long long_source_id = migrate_mesh_table ? 0UL : ids[5];
@@ -2089,11 +3001,12 @@ void rebuild_table(CAlfaDoc& document,
         long_source_id = long_apron->m_id;
     }
     replacements.push_back(std::move(long_apron));
-    replacements.push_back(make_table_clone(*long_source, long_source_id, "Table Long Apron Clone", 0.0, 0.0, long_back_z - long_front_z));
-    auto short_apron = make_table_solid(
+    replacements.push_back(make_table_clone(*long_source, long_source_id, "Table Long Apron Clone", 0.0, frame_back - frame_front - g.apron_thickness, 0.0));
+    auto short_apron = make_table_apron(
         "Table Short Apron",
-        table_box_shape(short_left_x, apron_y, short_z,
-                        g.apron_thickness, g.apron_height, std::max(1.0, back - short_z)), red);
+        table_box_shape(frame_left, front, apron_z,
+                        g.apron_thickness, short_length, g.apron_height),
+        red, g.apron_edge_radius);
     if (!short_apron) return;
     CSolid* short_source = short_apron.get();
     unsigned long short_source_id = migrate_mesh_table ? 0UL : ids[7];
@@ -2102,9 +3015,10 @@ void rebuild_table(CAlfaDoc& document,
         short_source_id = short_apron->m_id;
     }
     replacements.push_back(std::move(short_apron));
-    replacements.push_back(make_table_clone(*short_source, short_source_id, "Table Short Apron Clone", short_right_x - short_left_x, 0.0, 0.0));
+    replacements.push_back(make_table_clone(*short_source, short_source_id, "Table Short Apron Clone", frame_right - frame_left - g.apron_thickness, 0.0, 0.0));
     if (std::any_of(replacements.begin(), replacements.end(),
                     [](const std::unique_ptr<CAlfaObject>& item) { return !item; })) return;
+    assign_furniture_materials(document, replacements, parameters, "table");
 
     const size_t existing_count = ids.size();
     for (size_t i = 0; i < existing_count; ++i) {
@@ -2623,15 +3537,44 @@ ToolRegistry::ToolRegistry() {
         "cabinet",
         "Cabinet",
         {
-            {"width", "Width", 1.6, 0.5, 4.0, 0.1},
-            {"height", "Height", 0.9, 0.3, 2.6, 0.1},
-            {"depth", "Depth", 0.7, 0.3, 2.0, 0.1}
+            {"body_type", "Body Type", 0.0, 0.0, 6.0, 1.0,
+                ToolParameterType::Combo,
+                {"Straight", "Corner", "Radius", "Corner-2", "Radius-2",
+                 "Radius-3", "Radius-4"}},
+            {"facade_type", "Facade", 2.0, 0.0, 2.0, 1.0,
+                ToolParameterType::Combo, {"Open", "Single Door", "Double Door"}},
+            {"facade_style", "Facade Style", 0.0, 0.0, 4.0, 1.0,
+                ToolParameterType::Combo,
+                {"Plain", "Frame", "Screen", "Milled", "Milano"}},
+            {"width", "Width", 600.0, 300.0, 3000.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"height", "Height", 720.0, 300.0, 2600.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"depth", "Depth", 560.0, 200.0, 1200.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"facade_bulge", "Facade Bulge", 280.0, 10.0, 1500.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"radius2_bulge", "Radius-2 Bulge", 120.0, 10.0, 1000.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"radius_side_straight", "Radius-4 Straight", 180.0, 0.0, 1000.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"panel_thickness", "Panel Thickness", 18.0, 5.0, 100.0, 1.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"shelf_count", "Shelf Count", 2.0, 0.0, 20.0, 1.0},
+            {"door_open_angle", "Door Open Angle", 0.0, 0.0, 150.0, 5.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Angle},
+            {"door_hinge_side", "Door Hinge", 0.0, 0.0, 1.0, 1.0,
+                ToolParameterType::Combo, {"Left", "Right"}},
+            {"body_material_id", "Body Material", 0.0, 0.0, 4294967295.0, 1.0,
+                ToolParameterType::Material},
+            {"facade_material_id", "Facade Material", 0.0, 0.0, 4294967295.0, 1.0,
+                ToolParameterType::Material}
         },
         [](CAlfaDoc& document, const std::vector<ToolParameter>& parameters) {
-            document.AddMesh(make_box("Parametric Cabinet", static_cast<float>(param(parameters, "width", 1.6)), static_cast<float>(param(parameters, "height", 0.9)), static_cast<float>(param(parameters, "depth", 0.7)), -0.8f, 0.0f, -0.35f, {0.38f, 0.56f, 0.43f}));
+            create_kitchen_cabinet(document, parameters);
         },
         [](CAlfaDoc& document, size_t index, const std::vector<ToolParameter>& parameters) {
-            rebuild_box(document, index, parameters, "Parametric Cabinet", {0.38f, 0.56f, 0.43f}, 0.7f);
+            rebuild_kitchen_cabinet(document, index, parameters);
         }
     });
 
@@ -2649,16 +3592,24 @@ ToolRegistry::ToolRegistry() {
                 ToolParameterType::Number, {}, ToolParameterUnit::Length},
             {"leg_size", "Leg Size", 40.0, 10.0, 200.0, 5.0,
                 ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"leg_taper", "Leg Taper", 8.0, 0.0, 90.0, 1.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
             {"leg_inset", "Leg Inset", 40.0, 0.0, 500.0, 5.0,
                 ToolParameterType::Number, {}, ToolParameterUnit::Length},
             {"apron_height", "Apron Height", 60.0, 10.0, 300.0, 5.0,
                 ToolParameterType::Number, {}, ToolParameterUnit::Length},
             {"apron_thickness", "Apron Thickness", 20.0, 5.0, 100.0, 5.0,
                 ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"apron_edge_radius", "Apron Edge Radius", 2.0, 0.0, 50.0, 0.5,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
             {"top_shape", "Top Shape", 0.0, 0.0, 1.0, 1.0,
                 ToolParameterType::Combo, {"Rectangle", "Arc Ends"}},
             {"arc_bulge", "Arc Bulge", 100.0, 10.0, 1000.0, 10.0,
-                ToolParameterType::Number, {}, ToolParameterUnit::Length}
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"top_material_id", "Top Material", 0.0, 0.0, 4294967295.0, 1.0,
+                ToolParameterType::Material},
+            {"base_material_id", "Base Material", 0.0, 0.0, 4294967295.0, 1.0,
+                ToolParameterType::Material}
         },
         [](CAlfaDoc& document, const std::vector<ToolParameter>& parameters) {
             create_table(document, parameters);
@@ -2666,6 +3617,106 @@ ToolRegistry::ToolRegistry() {
         [](CAlfaDoc& document, size_t index,
            const std::vector<ToolParameter>& parameters) {
             rebuild_table(document, index, parameters);
+        }
+    });
+
+    tools_.push_back({
+        "desk",
+        "Desk",
+        {
+            {"desk_type", "Desk Type", 0.0, 0.0, 2.0, 1.0,
+                ToolParameterType::Combo,
+                {"Without Drawers", "Drawers Left", "Drawers Right"}},
+            {"width", "Width", 1100.0, 600.0, 3000.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"height", "Height", 700.0, 500.0, 1200.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"depth", "Depth", 500.0, 300.0, 1200.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"panel_thickness", "Panel Thickness", 18.0, 5.0, 100.0, 1.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"back_panel_height", "Back Panel Height", 300.0, 100.0, 800.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"drawer_width", "Drawer Unit Width", 350.0, 200.0, 900.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"drawer_count", "Drawer Count", 3.0, 1.0, 8.0, 1.0},
+            {"body_material_id", "Body Material", 0.0, 0.0, 4294967295.0, 1.0,
+                ToolParameterType::Material},
+            {"facade_material_id", "Facade Material", 0.0, 0.0, 4294967295.0, 1.0,
+                ToolParameterType::Material},
+            {"hardware_material_id", "Hardware Material", 0.0, 0.0, 4294967295.0, 1.0,
+                ToolParameterType::Material}
+        },
+        [](CAlfaDoc& document, const std::vector<ToolParameter>& parameters) {
+            create_desk(document, parameters);
+        },
+        [](CAlfaDoc& document, size_t index,
+           const std::vector<ToolParameter>& parameters) {
+            rebuild_desk(document, index, parameters);
+        }
+    });
+
+    tools_.push_back({
+        "drawer_box",
+        "Drawer Box",
+        {
+            {"width", "Width", 600.0, 300.0, 1800.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"height", "Height", 800.0, 300.0, 2400.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"depth", "Depth", 500.0, 250.0, 1000.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"facade_type", "Facade Type", 0.0, 0.0, 9.0, 1.0,
+                ToolParameterType::Combo,
+                {"Chipboard Panel", "MDF Profile", "Panel into Profile",
+                 "MDF Profile AGT-1032", "MDF Profile Milano", "Frame",
+                 "Screen", "Frame + Screen", "Frame-2", "Milling"}},
+            {"handle_type", "Handle Type", 0.0, 0.0, 3.0, 1.0,
+                ToolParameterType::Combo, {"Modern", "Classic", "Knob", "None"}},
+            {"panel_thickness", "Panel Thickness", 18.0, 5.0, 50.0, 1.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"drawer_side_thickness", "Drawer Side Thickness", 12.0, 5.0, 30.0, 1.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"drawer_bottom_thickness", "Drawer Bottom Thickness", 6.0, 3.0, 20.0, 1.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"slide_clearance", "Slide Clearance", 13.0, 5.0, 40.0, 0.5,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"drawer_count", "Drawer Count", 3.0, 1.0, 6.0, 1.0},
+            {"drawer_height_1", "Drawer 1 Height", 200.0, 50.0, 1000.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"drawer_height_2", "Drawer 2 Height", 200.0, 50.0, 1000.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"drawer_height_3", "Drawer 3 Height", 400.0, 50.0, 1000.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"drawer_height_4", "Drawer 4 Height", 200.0, 50.0, 1000.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"drawer_height_5", "Drawer 5 Height", 200.0, 50.0, 1000.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"drawer_height_6", "Drawer 6 Height", 200.0, 50.0, 1000.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"make_legs", "Make Legs", 1.0, 0.0, 1.0, 1.0,
+                ToolParameterType::Checkbox},
+            {"leg_height", "Leg Height", 100.0, 20.0, 300.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"open_drawer", "Open Drawer", 0.0, 0.0, 6.0, 1.0,
+                ToolParameterType::Combo,
+                {"Closed", "Drawer 1", "Drawer 2", "Drawer 3",
+                 "Drawer 4", "Drawer 5", "Drawer 6"}},
+            {"pullout_distance", "Pullout Distance", 300.0, 0.0, 800.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"body_material_id", "Body Material", 0.0, 0.0, 4294967295.0, 1.0,
+                ToolParameterType::Material},
+            {"facade_material_id", "Facade Material", 0.0, 0.0, 4294967295.0, 1.0,
+                ToolParameterType::Material},
+            {"hardware_material_id", "Hardware Material", 0.0, 0.0, 4294967295.0, 1.0,
+                ToolParameterType::Material}
+        },
+        [](CAlfaDoc& document, const std::vector<ToolParameter>& parameters) {
+            create_drawer_box(document, parameters);
+        },
+        [](CAlfaDoc& document, size_t index,
+           const std::vector<ToolParameter>& parameters) {
+            rebuild_drawer_box(document, index, parameters);
         }
     });
 }
@@ -2689,13 +3740,25 @@ ActiveParametricObject ToolRegistry::Activate(const std::string& id, CAlfaDoc& d
         return {};
     }
 
+    const std::vector<ToolParameter> parameters =
+        prepare_material_parameters(document, tool->defaults);
     const size_t object_count_before = document.GetObjects().size();
-    tool->create(document, tool->defaults);
-    if (id == "table"
+    tool->create(document, parameters);
+    if (id == "SolidTwoSketches") {
+        if (document.GetObjects().size() <= object_count_before) {
+            return {};
+        }
+        CAlfaObject* object = document.GetSelectedObject();
+        return object
+            ? ActiveObjectFromDocument(
+                  document.GetSelectedObjectIndex(), *object, 0, &document)
+            : ActiveParametricObject{};
+    }
+    if ((id == "table" || id == "cabinet" || id == "desk" || id == "drawer_box")
         && document.GetObjects().size() <= object_count_before) {
         return {};
     }
-    if (id == "table"
+    if ((id == "table" || id == "cabinet" || id == "desk" || id == "drawer_box")
         && !dynamic_cast<CAssembled*>(document.GetSelectedObject())) {
         return {};
     }
@@ -2703,8 +3766,8 @@ ActiveParametricObject ToolRegistry::Activate(const std::string& id, CAlfaDoc& d
         return {};
     }
     const size_t object_index = document.GetSelectedObjectIndex();
-    store_parametric_definition(document, object_index, tool->id, tool->label, 0, tool->defaults);
-    return {tool->id, object_index, 0, tool->defaults};
+    store_parametric_definition(document, object_index, tool->id, tool->label, 0, parameters);
+    return {tool->id, object_index, 0, parameters};
 }
 
 ActiveParametricObject ToolRegistry::CreateParametricObject(const std::string& id,
@@ -2715,10 +3778,48 @@ ActiveParametricObject ToolRegistry::CreateParametricObject(const std::string& i
         return {};
     }
 
-    tool->create(document, parameters);
+    ActiveParametricObject prepared = PrepareParametricObject(
+        id, document, parameters);
+    if (prepared.tool_id.empty()) {
+        return {};
+    }
+    const size_t object_count_before = document.GetObjects().size();
+    tool->create(document, prepared.parameters);
+    if (id == "SolidTwoSketches") {
+        if (document.GetObjects().size() <= object_count_before) {
+            return {};
+        }
+        CAlfaObject* object = document.GetSelectedObject();
+        return object
+            ? ActiveObjectFromDocument(
+                  document.GetSelectedObjectIndex(), *object, 0, &document)
+            : ActiveParametricObject{};
+    }
+    if ((id == "table" || id == "cabinet" || id == "desk" || id == "drawer_box")
+        && (document.GetObjects().size() <= object_count_before
+            || !dynamic_cast<CAssembled*>(document.GetSelectedObject()))) {
+        return {};
+    }
     const size_t object_index = document.GetSelectedObjectIndex();
-    store_parametric_definition(document, object_index, tool->id, tool->label, 0, parameters);
-    return {tool->id, object_index, 0, parameters};
+    store_parametric_definition(
+        document, object_index, tool->id, tool->label, 0, prepared.parameters);
+    prepared.object_index = object_index;
+    return prepared;
+}
+
+ActiveParametricObject ToolRegistry::PrepareParametricObject(
+    const std::string& id,
+    CAlfaDoc& document,
+    const std::vector<ToolParameter>& parameters) const {
+    const ToolDefinition* tool = Find(id);
+    if (!tool || !tool->create || parameters.empty()) {
+        return {};
+    }
+    return {
+        tool->id,
+        std::numeric_limits<size_t>::max(),
+        0,
+        prepare_material_parameters(document, parameters)};
 }
 
 ActiveParametricObject ToolRegistry::ApplyTrimToSelection(
@@ -2741,8 +3842,7 @@ ActiveParametricObject ToolRegistry::ApplyTrimToSelection(
         }
         CAlfaObject* object = objects[index].get();
         if (auto* surface = dynamic_cast<CSurfaceSet*>(object)) {
-            const bool is_plane =
-                surface->GetParametricToolId() == "PlaneTool";
+            const bool is_plane = is_planar_surface(*surface);
             if ((id == "TrimByPlane" && is_plane)
                 || (id == "TrimBySurface" && !is_plane)) {
                 if (cutter) {
@@ -2771,7 +3871,7 @@ ActiveParametricObject ToolRegistry::ApplyTrimToSelection(
     auto* body = body_index < objects.size()
         ? dynamic_cast<CSolid*>(objects[body_index].get())
         : nullptr;
-    if (!body || !cutter || body->GetNumOperations() <= 0) {
+    if (!body || !cutter) {
         return {};
     }
 
@@ -2787,6 +3887,11 @@ ActiveParametricObject ToolRegistry::ApplyTrimToSelection(
     if (!apply_trim_operation(*body, document, id, parameters)) {
         return {};
     }
+    if (body->GetNumOperations() <= 0) {
+        document.EnsureObjectId(*body);
+        transient_trim_bases_[body->m_id] = previous_shape;
+        return {id, body_index, 0, std::move(parameters), true};
+    }
     const size_t operation_index =
         static_cast<size_t>(body->GetNumOperations());
     body->SetParametricOperation(
@@ -2796,6 +3901,41 @@ ActiveParametricObject ToolRegistry::ApplyTrimToSelection(
         parameter_values(parameters),
         body->FindCreatedSurfaceIndices(previous_shape));
     return {id, body_index, operation_index, std::move(parameters)};
+}
+
+void ToolRegistry::AcceptTransientTrim(
+    const ActiveParametricObject& active_object,
+    const CAlfaDoc& document) const {
+    if (!active_object.transient
+        || active_object.object_index >= document.GetObjects().size()
+        || !document.GetObjects()[active_object.object_index]) {
+        return;
+    }
+    transient_trim_bases_.erase(
+        document.GetObjects()[active_object.object_index]->m_id);
+}
+
+bool ToolRegistry::CancelTransientTrim(
+    const ActiveParametricObject& active_object,
+    CAlfaDoc& document) const {
+    if (!active_object.transient
+        || active_object.object_index >= document.GetObjects().size()) {
+        return false;
+    }
+    auto* body = dynamic_cast<CSolid*>(
+        document.GetObjects()[active_object.object_index].get());
+    if (!body) {
+        return false;
+    }
+    const auto found = transient_trim_bases_.find(body->m_id);
+    if (found == transient_trim_bases_.end()) {
+        return false;
+    }
+    body->m_Shape = found->second;
+    transient_trim_bases_.erase(found);
+    body->ClearSelectedEdge();
+    body->ClearSelectedFace();
+    return body->ReBuldMesh();
 }
 
 ActiveParametricObject ToolRegistry::ApplySketchFeatureToSelection(
@@ -2960,6 +4100,31 @@ bool ToolRegistry::ApplyOffsetFaceOnce(CAlfaDoc& document,
 }
 
 void ToolRegistry::Rebuild(const ActiveParametricObject& active_object, CAlfaDoc& document) const {
+    if (active_object.transient
+        && (active_object.tool_id == "TrimByPlane"
+            || active_object.tool_id == "TrimBySketch"
+            || active_object.tool_id == "TrimBySurface")
+        && active_object.object_index < document.GetObjects().size()) {
+        auto* body = dynamic_cast<CSolid*>(
+            document.GetObjects()[active_object.object_index].get());
+        if (!body) {
+            return;
+        }
+        const auto found = transient_trim_bases_.find(body->m_id);
+        if (found == transient_trim_bases_.end()) {
+            return;
+        }
+        body->m_Shape = found->second;
+        if (apply_trim_operation(
+                *body, document, active_object.tool_id,
+                active_object.parameters)) {
+            document.UpdateAttachedSketches();
+        } else {
+            body->ReBuldMesh();
+        }
+        return;
+    }
+
     const int boolean_tool_index = static_cast<int>(
         param(active_object.parameters, "boolean.tool_index", -1.0));
     if (boolean_tool_index >= 0
@@ -3037,6 +4202,12 @@ void ToolRegistry::Rebuild(const ActiveParametricObject& active_object, CAlfaDoc
     const ToolDefinition* tool = Find(active_object.tool_id);
     if (tool && tool->rebuild) {
         tool->rebuild(document, active_object.object_index, active_object.parameters);
+        if (active_object.object_index < document.GetObjects().size()) {
+            if (auto* assembly = dynamic_cast<CAssembled*>(
+                    document.GetObjects()[active_object.object_index].get())) {
+                assembly->ApplyStoredTransformToElements();
+            }
+        }
         store_parametric_definition(document,
                                     active_object.object_index,
                                     active_object.tool_id,
@@ -3178,7 +4349,11 @@ bool ToolRegistry::ReplayAllTrimDependents(
     return rebuilt_any;
 }
 
-ActiveParametricObject ToolRegistry::ActiveObjectFromDocument(size_t object_index, const CAlfaObject& object, size_t operation_index) const {
+ActiveParametricObject ToolRegistry::ActiveObjectFromDocument(
+    size_t object_index,
+    const CAlfaObject& object,
+    size_t operation_index,
+    CAlfaDoc* document) const {
     std::string tool_id = object.GetParametricToolId();
     std::vector<ParametricParameterValue> saved_parameters = object.GetParametricParameters();
     if (const auto* solid = dynamic_cast<const CSolid*>(&object)) {
@@ -3239,7 +4414,12 @@ ActiveParametricObject ToolRegistry::ActiveObjectFromDocument(size_t object_inde
         return {};
     }
 
-    return {tool_id, object_index, operation_index, merge_saved_parameters(tool->defaults, saved_parameters)};
+    std::vector<ToolParameter> parameters =
+        merge_saved_parameters(tool->defaults, saved_parameters);
+    if (document) {
+        parameters = prepare_material_parameters(*document, parameters);
+    }
+    return {tool_id, object_index, operation_index, std::move(parameters)};
 }
 
 std::string ToolRegistry::LabelFor(const std::string& id) const {

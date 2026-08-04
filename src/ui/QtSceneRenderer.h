@@ -24,7 +24,7 @@ public:
     bool WorldToScreen(Vec3 point, const Camera& camera, bool orthographic, int width, int height, DomPoint& screen_point) const;
 
 private:
-    void CalculateClipPlanes(const CAlfaDoc& document, const Camera& camera, float& z_near, float& z_far) const;
+    void CalculateClipPlanes(const CAlfaDoc& document, const Camera& camera, bool orthographic, float& z_near, float& z_far) const;
     void DrawCoordinateAxes(bool xy_plane_view) const;
     void DrawTransformGizmo(const CAlfaDoc& document, const Camera& camera, TransformOperation operation, TransformAxis highlighted_axis) const;
     void Perspective(float fov_y, float aspect, float z_near, float z_far) const;

@@ -1,5 +1,6 @@
 #include <windows.h>
 #include "OpenGLViewport.h"
+#include "TransformGizmoGeometry.h"
 
 #include "../CBSpline.h"
 #include "../CPolyline.h"
@@ -419,6 +420,7 @@ void OpenGLViewport::SetTool(ToolMode tool) {
     dragging_polyline_point_ = false;
     dragging_sketch_handle_ = false;
     selecting_with_rect_ = false;
+    zoom_rect_active_ = false;
     active_sketch_handle_kind_ = SketchHandleKind::None;
     curve_point_drag_has_plane_ = false;
     curve_preview_valid_ = false;
@@ -461,7 +463,7 @@ void OpenGLViewport::SetTool(ToolMode tool) {
     active_transform_axis_ = TransformAxis::None;
     highlighted_transform_axis_ = TransformAxis::None;
     if (material_interaction_mode_ == MaterialInteractionMode::None) {
-        if (tool_ == ToolMode::DrawCurve || tool_ == ToolMode::DrawBSpline || tool_ == ToolMode::EditPoint) {
+        if (tool_ == ToolMode::DrawCurve || tool_ == ToolMode::DrawBSpline || tool_ == ToolMode::EditPoint || tool_ == ToolMode::ZoomRect) {
             setCursor(Qt::CrossCursor);
         } else if (tool_ == ToolMode::SketchRectangle
                    || tool_ == ToolMode::SketchPolyline
@@ -606,10 +608,57 @@ void OpenGLViewport::FitToDocument() {
     }
 
     const Vec3 center = (min_point + max_point) * 0.5f;
-    const Vec3 size = max_point - min_point;
-    const float radius = std::max(1.0f, std::sqrt(dot(size, size)) * 0.5f);
+    Vec3 forward{};
+    Vec3 right{};
+    Vec3 up{};
+    viewport_camera_basis(camera_, forward, right, up);
+
+    constexpr float kFitPadding = 1.12f;
+    constexpr float kPerspectiveFovY = 48.0f;
+    const float aspect = static_cast<float>(std::max(1, width()))
+        / static_cast<float>(std::max(1, height()));
+    const float tan_half_fov = std::tan(deg_to_rad(kPerspectiveFovY) * 0.5f);
+    float fitted_distance = kMinimumCameraDistance;
+
+    const Vec3 corners[] = {
+        {min_point.x, min_point.y, min_point.z},
+        {max_point.x, min_point.y, min_point.z},
+        {min_point.x, max_point.y, min_point.z},
+        {max_point.x, max_point.y, min_point.z},
+        {min_point.x, min_point.y, max_point.z},
+        {max_point.x, min_point.y, max_point.z},
+        {min_point.x, max_point.y, max_point.z},
+        {max_point.x, max_point.y, max_point.z},
+    };
+
+    if (orthographic_projection_) {
+        float required_half_height = 0.0f;
+        for (const Vec3& corner : corners) {
+            const Vec3 offset = corner - center;
+            required_half_height = std::max(
+                required_half_height,
+                std::max(std::fabs(dot(offset, up)),
+                         std::fabs(dot(offset, right)) / aspect));
+        }
+        fitted_distance = required_half_height * kFitPadding / 0.42f;
+    } else {
+        for (const Vec3& corner : corners) {
+            const Vec3 offset = corner - center;
+            const float depth_offset = dot(offset, forward);
+            const float horizontal_distance =
+                std::fabs(dot(offset, right)) * kFitPadding / (tan_half_fov * aspect)
+                - depth_offset;
+            const float vertical_distance =
+                std::fabs(dot(offset, up)) * kFitPadding / tan_half_fov
+                - depth_offset;
+            fitted_distance = std::max(
+                fitted_distance,
+                std::max(horizontal_distance, vertical_distance));
+        }
+    }
+
     camera_.target = center;
-    camera_.distance = std::clamp(radius * 1.5f, 2.0f, 100000.0f);
+    camera_.distance = std::clamp(fitted_distance, kMinimumCameraDistance, 100000.0f);
     update();
 }
 
@@ -1353,6 +1402,9 @@ void OpenGLViewport::paintGL() {
     if (tool_ == ToolMode::Select && selecting_with_rect_) {
         DrawSelectRubberBandRect();
     }
+    if (tool_ == ToolMode::ZoomRect && zoom_rect_active_) {
+        DrawZoomRubberBandRect();
+    }
     if (!solid_dimension_object_.tool_id.empty()) {
         DrawSolidDimensions();
     }
@@ -1374,6 +1426,30 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
         return;
     }
 
+    if (event->button() == Qt::RightButton
+        && document_
+        && tool_ == ToolMode::Transform
+        && event->modifiers().testFlag(Qt::ShiftModifier)) {
+        const DomPoint screen_point{event->pos().x(), event->pos().y()};
+        auto world_to_screen = [this](Vec3 world, DomPoint& screen) {
+            return renderer_.WorldToScreen(world, camera_, orthographic_projection_, width(), height(), screen);
+        };
+        Vec3 origin{};
+        if (document_->HasSelection()
+            && document_->PickTransformGizmoOriginAtScreen(screen_point, world_to_screen, 14.0f, origin)) {
+            document_->SetTransformGizmoOrigin(origin);
+            emit StatusTextChanged(QString("Gizmo Origin: X %1, Y %2, Z %3")
+                .arg(origin.x, 0, 'f', 3)
+                .arg(origin.y, 0, 'f', 3)
+                .arg(origin.z, 0, 'f', 3));
+            update();
+        } else {
+            emit StatusTextChanged("Gizmo Origin: click a vertex or edge with Shift + right mouse button");
+        }
+        event->accept();
+        return;
+    }
+
     if (event->button() == Qt::RightButton) {
         zooming_ = true;
         orbiting_ = false;
@@ -1387,15 +1463,54 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
         return;
     }
 
+    if (tool_ == ToolMode::ZoomRect) {
+        zoom_rect_active_ = true;
+        zoom_rect_start_ = event->pos();
+        zoom_rect_current_ = event->pos();
+        update();
+        return;
+    }
+
     if (tool_ == ToolMode::Select && !solid_dimension_object_.tool_id.empty()) {
-        const auto hit = std::find_if(
-            solid_dimension_hits_.begin(),
-            solid_dimension_hits_.end(),
-            [event](const SolidDimensionHit& dimension) {
-                return dimension.rect.adjusted(-4, -4, 4, 4).contains(event->pos());
-            });
-        if (hit != solid_dimension_hits_.end()) {
-            emit SolidDimensionEditRequested(hit->parameter_id, hit->value);
+        const SolidDimensionHit* best_hit = nullptr;
+        float best_distance = std::numeric_limits<float>::max();
+
+        // Labels are the most explicit target. If several overlap, use the
+        // one whose center is nearest to the click.
+        for (const SolidDimensionHit& dimension : solid_dimension_hits_) {
+            if (!dimension.is_label
+                || !dimension.rect.adjusted(-4, -4, 4, 4).contains(event->pos())) {
+                continue;
+            }
+            const QPoint delta = event->pos() - dimension.rect.center();
+            const float distance = std::sqrt(
+                static_cast<float>(delta.x() * delta.x() + delta.y() * delta.y()));
+            if (distance < best_distance) {
+                best_distance = distance;
+                best_hit = &dimension;
+            }
+        }
+
+        // When no label was clicked, test the actual dimension segment rather
+        // than its bounding rectangle (which can cover unrelated dimensions).
+        if (!best_hit) {
+            const DomPoint mouse{event->pos().x(), event->pos().y()};
+            constexpr float kDimensionHitTolerance = 10.0f;
+            for (const SolidDimensionHit& dimension : solid_dimension_hits_) {
+                if (dimension.is_label) {
+                    continue;
+                }
+                const float distance = DistanceToScreenSegment(
+                    mouse, dimension.line_start, dimension.line_end);
+                if (distance <= kDimensionHitTolerance && distance < best_distance) {
+                    best_distance = distance;
+                    best_hit = &dimension;
+                }
+            }
+        }
+
+        if (best_hit) {
+            emit SolidDimensionEditRequested(best_hit->parameter_id, best_hit->value);
             event->accept();
             return;
         }
@@ -1594,10 +1709,12 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
         }
 
         SelectionAction action = SelectionAction::Replace;
-        if (event->modifiers().testFlag(Qt::ShiftModifier)) {
-            action = SelectionAction::Add;
-        } else if (event->modifiers().testFlag(Qt::ControlModifier)) {
+        const bool shift = event->modifiers().testFlag(Qt::ShiftModifier);
+        const bool control = event->modifiers().testFlag(Qt::ControlModifier);
+        if (shift && control) {
             action = SelectionAction::Remove;
+        } else if (shift || control) {
+            action = SelectionAction::Add;
         }
         selecting_with_rect_ = true;
         rect_selection_action_ = action;
@@ -1645,7 +1762,7 @@ void OpenGLViewport::mouseDoubleClickEvent(QMouseEvent* event) {
         Vec3 right{};
         Vec3 up{};
         viewport_camera_basis(camera_, forward, right, up);
-        depth = dot(world - camera_position(camera_), forward);
+        depth = dot(world - camera_position(camera_, orthographic_projection_), forward);
         return depth > 0.0f && renderer_.WorldToScreen(world, camera_, orthographic_projection_, width(), height(), screen);
     };
 
@@ -1883,6 +2000,13 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
         return;
     }
 
+    if (zoom_rect_active_ && tool_ == ToolMode::ZoomRect) {
+        zoom_rect_current_ = event->pos();
+        update();
+        last_mouse_ = event->pos();
+        return;
+    }
+
     if (dragging_face_extrude_ && tool_ == ToolMode::FaceExtrude) {
         HandleFaceExtrudeDrag(event->pos());
         return;
@@ -1894,7 +2018,7 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
     }
 
     if (dragging_transform_ && tool_ == ToolMode::Transform) {
-        HandleTransformDrag(event->pos());
+        HandleTransformDrag(event->pos(), event->modifiers());
         return;
     }
 
@@ -1968,10 +2092,11 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
         const int viewport_height = std::max(1, height());
         float world_per_pixel = camera_.distance * 0.0018f;
         if (orthographic_projection_) {
-            const float half_height = std::max(0.25f, camera_.distance * 0.42f);
+            const float half_height = std::max(
+                kMinimumOrthographicHalfHeight, camera_.distance * 0.42f);
             world_per_pixel = (2.0f * half_height) / static_cast<float>(viewport_height);
         } else {
-            const float depth = std::max(0.001f, dot(camera_.target - camera_position(camera_), forward));
+            const float depth = std::max(0.001f, dot(camera_.target - camera_position(camera_, orthographic_projection_), forward));
             world_per_pixel = (2.0f * depth * std::tan(deg_to_rad(48.0f) * 0.5f)) / static_cast<float>(viewport_height);
         }
         camera_.target = camera_.target - right * (static_cast<float>(delta.x()) * world_per_pixel)
@@ -1984,13 +2109,33 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
     if (zooming_) {
         const float zoom_factor = std::pow(1.01f, -static_cast<float>(delta.y()));
         camera_.distance *= zoom_factor;
-        camera_.distance = std::clamp(camera_.distance, 0.25f, 100000.0f);
+        camera_.distance = std::clamp(
+            camera_.distance, kMinimumCameraDistance, 100000.0f);
         last_mouse_ = event->pos();
         update();
     }
 }
 
 void OpenGLViewport::mouseReleaseEvent(QMouseEvent* event) {
+    if (event->button() == Qt::LeftButton
+        && zoom_rect_active_
+        && tool_ == ToolMode::ZoomRect) {
+        zoom_rect_current_ = event->pos();
+        zoom_rect_active_ = false;
+        if (ApplyZoomRect()) {
+            SetTool(ToolMode::Select);
+            emit StatusTextChanged(
+                orthographic_projection_
+                    ? "Zoom By Rect applied (Ortho)"
+                    : "Zoom By Rect applied (Perspective)");
+        } else {
+            emit StatusTextChanged("Zoom By Rect: drag a larger rectangle");
+            update();
+        }
+        event->accept();
+        return;
+    }
+
     bool select_click_completed = false;
     if (event->button() == Qt::LeftButton
         && selecting_with_rect_
@@ -2111,14 +2256,16 @@ void OpenGLViewport::mouseReleaseEvent(QMouseEvent* event) {
     dragging_draft_face_ = false;
     selecting_edit_points_ = false;
     selecting_with_rect_ = false;
+    zoom_rect_active_ = false;
     transform_drag_has_preview_ = false;
     transform_drag_move_delta_ = {};
+    transform_drag_rotation_input_angle_ = 0.0f;
     transform_drag_rotation_angle_ = 0.0f;
     transform_drag_scale_factor_ = 1.0f;
     active_transform_axis_ = TransformAxis::None;
     highlighted_transform_axis_ = TransformAxis::None;
     if (material_interaction_mode_ == MaterialInteractionMode::None) {
-        if (tool_ == ToolMode::DrawCurve || tool_ == ToolMode::DrawBSpline || tool_ == ToolMode::EditPoint) {
+        if (tool_ == ToolMode::DrawCurve || tool_ == ToolMode::DrawBSpline || tool_ == ToolMode::EditPoint || tool_ == ToolMode::ZoomRect) {
             setCursor(Qt::CrossCursor);
         } else if (tool_ == ToolMode::SketchRectangle
                    || tool_ == ToolMode::SketchPolyline
@@ -2136,6 +2283,14 @@ void OpenGLViewport::mouseReleaseEvent(QMouseEvent* event) {
 }
 
 void OpenGLViewport::keyPressEvent(QKeyEvent* event) {
+    if (event->key() == Qt::Key_Escape && tool_ == ToolMode::ZoomRect) {
+        zoom_rect_active_ = false;
+        SetTool(ToolMode::Select);
+        emit StatusTextChanged("Zoom By Rect canceled. Select tool is active");
+        event->accept();
+        return;
+    }
+
     if ((event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter)
         && tool_ == ToolMode::MovePointToPoint
         && move_point_stage_ == MovePointStage::SelectObjects) {
@@ -2336,6 +2491,7 @@ void OpenGLViewport::keyPressEvent(QKeyEvent* event) {
         transform_drag_has_preview_ = false;
         transform_drag_move_delta_ = {};
         transform_drag_axis_ = {};
+        transform_drag_rotation_input_angle_ = 0.0f;
         transform_drag_rotation_angle_ = 0.0f;
         transform_drag_scale_factor_ = 1.0f;
         SetTool(ToolMode::Select);
@@ -2427,7 +2583,8 @@ void OpenGLViewport::wheelEvent(QWheelEvent* event) {
     const float wheel_steps = static_cast<float>(event->angleDelta().y()) / 120.0f;
     const float zoom_factor = std::pow(1.12f, -wheel_steps);
     camera_.distance *= zoom_factor;
-    camera_.distance = std::clamp(camera_.distance, 0.25f, 100000.0f);
+    camera_.distance = std::clamp(
+        camera_.distance, kMinimumCameraDistance, 100000.0f);
     update();
 }
 
@@ -2528,7 +2685,7 @@ void OpenGLViewport::SelectAt(const QPoint& point, SelectionAction action) {
         Vec3 right{};
         Vec3 up{};
         viewport_camera_basis(camera_, forward, right, up);
-        depth = dot(world - camera_position(camera_), forward);
+        depth = dot(world - camera_position(camera_, orthographic_projection_), forward);
         return depth > 0.0f && renderer_.WorldToScreen(world, camera_, orthographic_projection_, width(), height(), screen);
     };
 
@@ -2628,7 +2785,7 @@ CAlfaObject* OpenGLViewport::FindObjectForMaterialAt(const QPoint& point) {
         Vec3 right{};
         Vec3 up{};
         viewport_camera_basis(camera_, forward, right, up);
-        depth = dot(world - camera_position(camera_), forward);
+        depth = dot(world - camera_position(camera_, orthographic_projection_), forward);
         return depth > 0.0f && renderer_.WorldToScreen(world, camera_, orthographic_projection_, width(), height(), screen);
     };
     if (CSolid* solid = document_->FindSolidAtScreen(screen_point, project_world)) {
@@ -2678,7 +2835,7 @@ void OpenGLViewport::HandleBooleanClick(const QPoint& point) {
         Vec3 right{};
         Vec3 up{};
         viewport_camera_basis(camera_, forward, right, up);
-        depth = dot(world - camera_position(camera_), forward);
+        depth = dot(world - camera_position(camera_, orthographic_projection_), forward);
         return depth > 0.0f && renderer_.WorldToScreen(world, camera_, orthographic_projection_, width(), height(), screen);
     };
     bool selected_solid = document_->SelectSolidMeshAtScreen(screen_point, project_world, SelectionAction::Replace);
@@ -2773,7 +2930,7 @@ void OpenGLViewport::HandleFaceExtrudeClick(const QPoint& point) {
         Vec3 right{};
         Vec3 up{};
         viewport_camera_basis(camera_, forward, right, up);
-        depth = dot(world - camera_position(camera_), forward);
+        depth = dot(world - camera_position(camera_, orthographic_projection_), forward);
         return depth > 0.0f && renderer_.WorldToScreen(world, camera_, orthographic_projection_, width(), height(), screen);
     };
 
@@ -2889,7 +3046,7 @@ void OpenGLViewport::HandleDraftFaceClick(const QPoint& point) {
         Vec3 right{};
         Vec3 up{};
         viewport_camera_basis(camera_, forward, right, up);
-        depth = dot(world - camera_position(camera_), forward);
+        depth = dot(world - camera_position(camera_, orthographic_projection_), forward);
         return depth > 0.0f && renderer_.WorldToScreen(world, camera_, orthographic_projection_, width(), height(), screen);
     };
 
@@ -2935,7 +3092,7 @@ void OpenGLViewport::HandleThickSolidClick(const QPoint& point) {
         Vec3 right{};
         Vec3 up{};
         viewport_camera_basis(camera_, forward, right, up);
-        depth = dot(world - camera_position(camera_), forward);
+        depth = dot(world - camera_position(camera_, orthographic_projection_), forward);
         return depth > 0.0f && renderer_.WorldToScreen(world, camera_, orthographic_projection_, width(), height(), screen);
     };
 
@@ -3074,15 +3231,18 @@ void OpenGLViewport::HandleTransformClick(const QPoint& point, bool add_to_selec
             dragging_transform_ = true;
             transform_drag_has_preview_ = false;
             transform_drag_move_delta_ = {};
+            transform_drag_rotation_input_angle_ = 0.0f;
             transform_drag_rotation_angle_ = 0.0f;
             transform_drag_scale_factor_ = 1.0f;
-            document_->GetSelectionCenter(transform_drag_center_);
+            document_->GetTransformGizmoCenter(transform_drag_center_);
             transform_drag_axis_ = AxisVector(axis);
             last_mouse_ = point;
             update();
             return;
         }
     }
+
+    document_->ClearTransformGizmoOrigin();
 
     const DomPoint screen_point{point.x(), point.y()};
     auto world_to_screen = [this](Vec3 world, DomPoint& screen) {
@@ -3093,7 +3253,7 @@ void OpenGLViewport::HandleTransformClick(const QPoint& point, bool add_to_selec
         Vec3 right{};
         Vec3 up{};
         viewport_camera_basis(camera_, forward, right, up);
-        depth = dot(world - camera_position(camera_), forward);
+        depth = dot(world - camera_position(camera_, orthographic_projection_), forward);
         return depth > 0.0f && renderer_.WorldToScreen(world, camera_, orthographic_projection_, width(), height(), screen);
     };
 
@@ -3138,7 +3298,7 @@ void OpenGLViewport::HandleTransformClick(const QPoint& point, bool add_to_selec
     update();
 }
 
-void OpenGLViewport::HandleTransformDrag(const QPoint& point) {
+void OpenGLViewport::HandleTransformDrag(const QPoint& point, Qt::KeyboardModifiers modifiers) {
     if (!document_ || active_transform_axis_ == TransformAxis::None) {
         return;
     }
@@ -3162,9 +3322,11 @@ void OpenGLViewport::HandleTransformDrag(const QPoint& point) {
         const int viewport_height = std::max(1, height());
         float world_per_pixel = 1.0f;
         if (orthographic_projection_) {
-            world_per_pixel = (std::max(0.25f, camera_.distance * 0.42f) * 2.0f) / static_cast<float>(viewport_height);
+            world_per_pixel = (
+                std::max(kMinimumOrthographicHalfHeight, camera_.distance * 0.42f)
+                * 2.0f) / static_cast<float>(viewport_height);
         } else {
-            const float depth = std::max(0.001f, dot(center - camera_position(camera_), forward));
+            const float depth = std::max(0.001f, dot(center - camera_position(camera_, orthographic_projection_), forward));
             world_per_pixel = (2.0f * depth * std::tan(deg_to_rad(48.0f) * 0.5f)) / static_cast<float>(viewport_height);
         }
 
@@ -3173,7 +3335,6 @@ void OpenGLViewport::HandleTransformDrag(const QPoint& point) {
             transform_drag_move_delta_ = transform_drag_move_delta_ + delta;
             transform_drag_has_preview_ = true;
             last_mouse_ = point;
-            emit DocumentChanged();
             update();
         }
         return;
@@ -3186,7 +3347,6 @@ void OpenGLViewport::HandleTransformDrag(const QPoint& point) {
             transform_drag_scale_factor_ *= factor;
             transform_drag_has_preview_ = true;
             last_mouse_ = point;
-            emit DocumentChanged();
             update();
         }
         return;
@@ -3194,25 +3354,48 @@ void OpenGLViewport::HandleTransformDrag(const QPoint& point) {
 
     const Vec3 axis = AxisVector(active_transform_axis_);
     const float gizmo_size = std::max(0.8f, camera_.distance * 0.10f);
+    const float axis_distance =
+        gizmo_size * TransformGizmoGeometry::kAxisDistanceScale;
     DomPoint center_screen{};
     DomPoint axis_screen{};
     if (!renderer_.WorldToScreen(center, camera_, orthographic_projection_, width(), height(), center_screen)
-        || !renderer_.WorldToScreen(center + axis * gizmo_size, camera_, orthographic_projection_, width(), height(), axis_screen)) {
+        || !renderer_.WorldToScreen(center + axis * axis_distance, camera_, orthographic_projection_, width(), height(), axis_screen)) {
         return;
     }
 
     const float axis_dx = static_cast<float>(axis_screen.x - center_screen.x);
     const float axis_dy = static_cast<float>(axis_screen.y - center_screen.y);
     const float axis_len_sq = axis_dx * axis_dx + axis_dy * axis_dy;
-    if (axis_len_sq <= 0.0001f) {
+    float pixels_along_axis = 0.0f;
+    float world_delta = 0.0f;
+    float pixels_around_axis = 0.0f;
+    if (axis_len_sq > 16.0f) {
+        const float axis_len = std::sqrt(axis_len_sq);
+        pixels_along_axis = (mouse_dx * axis_dx + mouse_dy * axis_dy) / axis_len;
+        const float pixels_per_world = axis_len / axis_distance;
+        world_delta = pixels_along_axis / pixels_per_world;
+        pixels_around_axis = (mouse_dx * -axis_dy + mouse_dy * axis_dx) / axis_len;
+    } else if (transform_operation_ == TransformOperation::Rotate) {
+        // When looking exactly along the rotation axis, its screen projection
+        // is a point. Measure the cursor's angular movement around the arc
+        // center instead of trying to derive a perpendicular projected axis.
+        const float previous_x = static_cast<float>(last_mouse_.x() - axis_screen.x);
+        const float previous_y = static_cast<float>(axis_screen.y - last_mouse_.y());
+        const float current_x = static_cast<float>(point.x() - axis_screen.x);
+        const float current_y = static_cast<float>(axis_screen.y - point.y());
+        const float previous_length_sq = previous_x * previous_x + previous_y * previous_y;
+        const float current_length_sq = current_x * current_x + current_y * current_y;
+        if (previous_length_sq <= 1.0f || current_length_sq <= 1.0f) {
+            last_mouse_ = point;
+            return;
+        }
+        const float cross = previous_x * current_y - previous_y * current_x;
+        const float dot_product = previous_x * current_x + previous_y * current_y;
+        const float angular_delta = std::atan2(cross, dot_product);
+        pixels_around_axis = angular_delta / 0.01f;
+    } else {
         return;
     }
-
-    const float axis_len = std::sqrt(axis_len_sq);
-    const float pixels_along_axis = (mouse_dx * axis_dx + mouse_dy * axis_dy) / axis_len;
-    const float pixels_per_world = axis_len / gizmo_size;
-    const float world_delta = pixels_along_axis / pixels_per_world;
-    const float pixels_around_axis = (mouse_dx * -axis_dy + mouse_dy * axis_dx) / axis_len;
 
     bool transformed = false;
     if (transform_operation_ == TransformOperation::Move) {
@@ -3222,12 +3405,23 @@ void OpenGLViewport::HandleTransformDrag(const QPoint& point) {
             transform_drag_move_delta_ = transform_drag_move_delta_ + delta;
         }
     } else if (transform_operation_ == TransformOperation::Rotate) {
-        const float angle = pixels_around_axis * 0.01f;
-        transformed = document_->PreviewRotateSelectedObjects(center, axis, angle);
+        constexpr float kRotationSnapAngle = 3.14159265f / 4.0f;
+        transform_drag_rotation_input_angle_ += pixels_around_axis * 0.01f;
+        float target_angle = transform_drag_rotation_input_angle_;
+        if (modifiers.testFlag(Qt::ControlModifier)) {
+            target_angle = std::trunc(target_angle / kRotationSnapAngle) * kRotationSnapAngle;
+        }
+        const float angle_to_apply = target_angle - transform_drag_rotation_angle_;
+        if (std::fabs(angle_to_apply) > 0.000001f) {
+            transformed = document_->PreviewRotateSelectedObjects(center, axis, angle_to_apply);
+        }
         if (transformed) {
-            transform_drag_rotation_angle_ += angle;
+            transform_drag_rotation_angle_ = target_angle;
             transform_drag_axis_ = axis;
         }
+        // Mouse movement must continue accumulating while Ctrl snapping keeps
+        // the object at its current 45-degree step.
+        last_mouse_ = point;
     } else {
         const float factor = std::clamp(1.0f + pixels_along_axis * 0.01f, 0.05f, 20.0f);
         transformed = document_->PreviewScaleSelectedObjects(center, axis, factor);
@@ -3240,8 +3434,9 @@ void OpenGLViewport::HandleTransformDrag(const QPoint& point) {
     const float active_pixels = transform_operation_ == TransformOperation::Rotate ? pixels_around_axis : pixels_along_axis;
     if (std::fabs(active_pixels) > 0.0001f && transformed) {
         transform_drag_has_preview_ = true;
-        last_mouse_ = point;
-        emit DocumentChanged();
+        if (transform_operation_ != TransformOperation::Rotate) {
+            last_mouse_ = point;
+        }
         update();
     }
 }
@@ -3273,11 +3468,13 @@ TransformAxis OpenGLViewport::HitTestTransformGizmo(const QPoint& point) const {
     }
 
     Vec3 center{};
-    if (!document_->GetSelectionCenter(center)) {
+    if (!document_->GetTransformGizmoCenter(center)) {
         return TransformAxis::None;
     }
 
     const float gizmo_size = std::max(0.8f, camera_.distance * 0.10f);
+    const float axis_distance =
+        gizmo_size * TransformGizmoGeometry::kAxisDistanceScale;
     DomPoint center_screen{};
     if (!renderer_.WorldToScreen(center, camera_, orthographic_projection_, width(), height(), center_screen)) {
         return TransformAxis::None;
@@ -3327,12 +3524,13 @@ TransformAxis OpenGLViewport::HitTestTransformGizmo(const QPoint& point) const {
         TransformAxis best_arc_axis = TransformAxis::None;
         float best_arc_distance = 18.0f;
         constexpr int kSegments = 72;
-        const float arc_radius = gizmo_size * 0.46f;
+        const float arc_radius =
+            gizmo_size * TransformGizmoGeometry::kRotationArcRadiusScale;
         const TransformAxis axes[] = {TransformAxis::X, TransformAxis::Y, TransformAxis::Z};
         const DomPoint mouse_point{point.x(), point.y()};
         for (TransformAxis axis : axes) {
             const Vec3 direction = AxisVector(axis);
-            const Vec3 arc_center = center + direction * gizmo_size;
+            const Vec3 arc_center = center + direction * axis_distance;
             Vec3 tangent{};
             Vec3 bitangent{};
             rotation_arc_basis(direction, forward, tangent, bitangent);
@@ -3340,7 +3538,9 @@ TransformAxis OpenGLViewport::HitTestTransformGizmo(const QPoint& point) const {
             DomPoint previous{};
             bool has_previous = false;
             for (int i = 0; i <= kSegments; ++i) {
-                const float angle = static_cast<float>(i) * 3.14159265f / static_cast<float>(kSegments);
+                const float angle = TransformGizmoGeometry::kRotationArcStart
+                    + TransformGizmoGeometry::kRotationArcSweep
+                        * static_cast<float>(i) / static_cast<float>(kSegments);
                 const Vec3 world_point = arc_center + tangent * (std::cos(angle) * arc_radius) + bitangent * (std::sin(angle) * arc_radius);
                 DomPoint screen_point{};
                 if (!renderer_.WorldToScreen(world_point, camera_, orthographic_projection_, width(), height(), screen_point)) {
@@ -3368,7 +3568,7 @@ TransformAxis OpenGLViewport::HitTestTransformGizmo(const QPoint& point) const {
     const TransformAxis axes[] = {TransformAxis::X, TransformAxis::Y, TransformAxis::Z};
     for (TransformAxis axis : axes) {
         DomPoint axis_end{};
-        if (!renderer_.WorldToScreen(center + AxisVector(axis) * gizmo_size, camera_, orthographic_projection_, width(), height(), axis_end)) {
+        if (!renderer_.WorldToScreen(center + AxisVector(axis) * axis_distance, camera_, orthographic_projection_, width(), height(), axis_end)) {
             continue;
         }
 
@@ -3541,7 +3741,7 @@ void OpenGLViewport::HandleSketchRectangleClick(const QPoint& point) {
             Vec3 right{};
             Vec3 up{};
             viewport_camera_basis(camera_, forward, right, up);
-            depth = dot(world - camera_position(camera_), forward);
+            depth = dot(world - camera_position(camera_, orthographic_projection_), forward);
             return depth > 0.0f
                 && renderer_.WorldToScreen(
                     world,
@@ -3989,7 +4189,7 @@ void OpenGLViewport::HandleSolidBoxRectangleClick(const QPoint& point) {
             Vec3 right{};
             Vec3 up{};
             viewport_camera_basis(camera_, forward, right, up);
-            depth = dot(world - camera_position(camera_), forward);
+            depth = dot(world - camera_position(camera_, orthographic_projection_), forward);
             return depth > 0.0f
                 && renderer_.WorldToScreen(
                     world,
@@ -4070,7 +4270,7 @@ void OpenGLViewport::HandleSolidCylinderCircleClick(const QPoint& point) {
             Vec3 right{};
             Vec3 up{};
             viewport_camera_basis(camera_, forward, right, up);
-            depth = dot(world - camera_position(camera_), forward);
+            depth = dot(world - camera_position(camera_, orthographic_projection_), forward);
             return depth > 0.0f
                 && renderer_.WorldToScreen(
                     world, camera_, orthographic_projection_, width(), height(), screen);
@@ -4173,12 +4373,13 @@ bool OpenGLViewport::ScreenToSketchPlane(const QPoint& point, CPoint3d& result) 
     Vec3 up{};
     viewport_camera_basis(camera_, forward, right, up);
 
-    Vec3 ray_origin = camera_position(camera_);
+    Vec3 ray_origin = camera_position(camera_, orthographic_projection_);
     Vec3 ray_direction{};
     if (orthographic_projection_) {
-        const float half_height = std::max(0.25f, camera_.distance * 0.42f);
+        const float half_height = std::max(
+            kMinimumOrthographicHalfHeight, camera_.distance * 0.42f);
         const float half_width = half_height * aspect;
-        ray_origin = camera_position(camera_) + right * (ndc_x * half_width) + up * (ndc_y * half_height);
+        ray_origin = camera_position(camera_, orthographic_projection_) + right * (ndc_x * half_width) + up * (ndc_y * half_height);
         ray_direction = forward;
     } else {
         const float tan_half_fov = std::tan(deg_to_rad(48.0f) * 0.5f);
@@ -4527,12 +4728,13 @@ bool OpenGLViewport::ScreenToWorldPlane(const QPoint& point, Vec3 plane_point, V
     Vec3 up{};
     viewport_camera_basis(camera_, forward, right, up);
 
-    Vec3 ray_origin = camera_position(camera_);
+    Vec3 ray_origin = camera_position(camera_, orthographic_projection_);
     Vec3 ray_direction{};
     if (orthographic_projection_) {
-        const float half_height = std::max(0.25f, camera_.distance * 0.42f);
+        const float half_height = std::max(
+            kMinimumOrthographicHalfHeight, camera_.distance * 0.42f);
         const float half_width = half_height * aspect;
-        ray_origin = camera_position(camera_) + right * (ndc_x * half_width) + up * (ndc_y * half_height);
+        ray_origin = camera_position(camera_, orthographic_projection_) + right * (ndc_x * half_width) + up * (ndc_y * half_height);
         ray_direction = forward;
     } else {
         const float tan_half_fov = std::tan(deg_to_rad(48.0f) * 0.5f);
@@ -4590,12 +4792,13 @@ bool OpenGLViewport::ScreenToPlaneY(const QPoint& point, double y, CPoint3d& res
     Vec3 up{};
     viewport_camera_basis(camera_, forward, right, up);
 
-    Vec3 ray_origin = camera_position(camera_);
+    Vec3 ray_origin = camera_position(camera_, orthographic_projection_);
     Vec3 ray_direction{};
     if (orthographic_projection_) {
-        const float half_height = std::max(0.25f, camera_.distance * 0.42f);
+        const float half_height = std::max(
+            kMinimumOrthographicHalfHeight, camera_.distance * 0.42f);
         const float half_width = half_height * aspect;
-        ray_origin = camera_position(camera_) + right * (ndc_x * half_width) + up * (ndc_y * half_height);
+        ray_origin = camera_position(camera_, orthographic_projection_) + right * (ndc_x * half_width) + up * (ndc_y * half_height);
         ray_direction = forward;
     } else {
         const float tan_half_fov = std::tan(deg_to_rad(48.0f) * 0.5f);
@@ -4628,12 +4831,13 @@ bool OpenGLViewport::ScreenToViewPlane(const QPoint& point, Vec3 plane_point, CP
     Vec3 up{};
     viewport_camera_basis(camera_, forward, right, up);
 
-    Vec3 ray_origin = camera_position(camera_);
+    Vec3 ray_origin = camera_position(camera_, orthographic_projection_);
     Vec3 ray_direction{};
     if (orthographic_projection_) {
-        const float half_height = std::max(0.25f, camera_.distance * 0.42f);
+        const float half_height = std::max(
+            kMinimumOrthographicHalfHeight, camera_.distance * 0.42f);
         const float half_width = half_height * aspect;
-        ray_origin = camera_position(camera_) + right * (ndc_x * half_width) + up * (ndc_y * half_height);
+        ray_origin = camera_position(camera_, orthographic_projection_) + right * (ndc_x * half_width) + up * (ndc_y * half_height);
         ray_direction = forward;
     } else {
         const float tan_half_fov = std::tan(deg_to_rad(48.0f) * 0.5f);
@@ -5041,9 +5245,27 @@ void OpenGLViewport::DrawSelectRubberBandRect() {
 
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_LIGHTING);
-    glDisable(GL_BLEND);
-    glEnable(GL_COLOR_LOGIC_OP);
-    glLogicOp(GL_INVERT);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    const bool crossing = rect_selection_current_.x() >= rect_selection_start_.x();
+    if (crossing) {
+        glColor4f(0.20f, 0.90f, 0.34f, 0.10f);
+    } else {
+        glColor4f(0.20f, 0.55f, 1.00f, 0.10f);
+    }
+    glBegin(GL_QUADS);
+    glVertex2i(rect.left(), rect.top());
+    glVertex2i(rect.right(), rect.top());
+    glVertex2i(rect.right(), rect.bottom());
+    glVertex2i(rect.left(), rect.bottom());
+    glEnd();
+
+    if (crossing) {
+        glColor4f(0.25f, 1.00f, 0.40f, 0.95f);
+    } else {
+        glColor4f(0.28f, 0.65f, 1.00f, 0.95f);
+    }
     glLineWidth(1.0f);
     glBegin(GL_LINE_LOOP);
     glVertex2i(rect.left(), rect.top());
@@ -5051,7 +5273,7 @@ void OpenGLViewport::DrawSelectRubberBandRect() {
     glVertex2i(rect.right(), rect.bottom());
     glVertex2i(rect.left(), rect.bottom());
     glEnd();
-    glDisable(GL_COLOR_LOGIC_OP);
+    glDisable(GL_BLEND);
     glEnable(GL_DEPTH_TEST);
 
     glMatrixMode(GL_MODELVIEW);
@@ -5059,6 +5281,88 @@ void OpenGLViewport::DrawSelectRubberBandRect() {
     glMatrixMode(GL_PROJECTION);
     glPopMatrix();
     glMatrixMode(GL_MODELVIEW);
+}
+
+void OpenGLViewport::DrawZoomRubberBandRect() {
+    const QRect rect = QRect(zoom_rect_start_, zoom_rect_current_).normalized();
+    if (rect.width() <= 0 && rect.height() <= 0) {
+        return;
+    }
+
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    glOrtho(0.0, width(), height(), 0.0, -1.0, 1.0);
+
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
+
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_LIGHTING);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    glColor4f(0.62f, 0.34f, 1.00f, 0.12f);
+    glBegin(GL_QUADS);
+    glVertex2i(rect.left(), rect.top());
+    glVertex2i(rect.right(), rect.top());
+    glVertex2i(rect.right(), rect.bottom());
+    glVertex2i(rect.left(), rect.bottom());
+    glEnd();
+
+    glColor4f(0.72f, 0.48f, 1.00f, 1.00f);
+    glLineWidth(1.4f);
+    glBegin(GL_LINE_LOOP);
+    glVertex2i(rect.left(), rect.top());
+    glVertex2i(rect.right(), rect.top());
+    glVertex2i(rect.right(), rect.bottom());
+    glVertex2i(rect.left(), rect.bottom());
+    glEnd();
+
+    glLineWidth(1.0f);
+    glDisable(GL_BLEND);
+    glEnable(GL_DEPTH_TEST);
+
+    glMatrixMode(GL_MODELVIEW);
+    glPopMatrix();
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
+}
+
+bool OpenGLViewport::ApplyZoomRect() {
+    const QRect rect = QRect(zoom_rect_start_, zoom_rect_current_).normalized();
+    const int viewport_width = std::max(1, width());
+    const int viewport_height = std::max(1, height());
+    if (rect.width() < 8 || rect.height() < 8) {
+        return false;
+    }
+
+    CPoint3d center_world{};
+    if (!ScreenToViewPlane(rect.center(), camera_.target, center_world)) {
+        return false;
+    }
+
+    const float width_factor =
+        static_cast<float>(rect.width()) / static_cast<float>(viewport_width);
+    const float height_factor =
+        static_cast<float>(rect.height()) / static_cast<float>(viewport_height);
+    const float fit_factor = std::clamp(
+        std::max(width_factor, height_factor) * 1.05f,
+        0.001f,
+        1.0f);
+
+    camera_.target = {
+        static_cast<float>(center_world.x),
+        static_cast<float>(center_world.y),
+        static_cast<float>(center_world.z)};
+    camera_.distance = std::clamp(
+        camera_.distance * fit_factor,
+        kMinimumCameraDistance,
+        100000.0f);
+    update();
+    return true;
 }
 
 Vec3 OpenGLViewport::AxisVector(TransformAxis axis) const {
@@ -5301,7 +5605,10 @@ void OpenGLViewport::DrawSolidDimensions() {
         solid_dimension_hits_.push_back(
             {arrow_hit_rect,
              QString::fromStdString(dimension.GetParameterId()),
-             dimension.GetValue()});
+             dimension.GetValue(),
+             false,
+             {qRound(dimension_start.x()), qRound(dimension_start.y())},
+             {qRound(dimension_end.x()), qRound(dimension_end.y())}});
 
         const QString text = QString("%1%2")
             .arg(MillimetersToDisplay(dimension.GetValue(), display_unit), 0, 'f', 1)
@@ -5322,7 +5629,10 @@ void OpenGLViewport::DrawSolidDimensions() {
         solid_dimension_hits_.push_back(
             {label_rect,
              QString::fromStdString(dimension.GetParameterId()),
-             dimension.GetValue()});
+             dimension.GetValue(),
+             true,
+             {},
+             {}});
     }
 }
 

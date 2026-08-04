@@ -2,6 +2,7 @@
 
 #include "CGroup.h"
 #include "CAssembled.h"
+#include "CKitchenCabinet.h"
 #include "SmartLine.h"
 #include "SketchProfileBuilder.h"
 #include "ExtrudeShapeBuilder.h"
@@ -23,6 +24,7 @@
 #include <BRepBuilderAPI_MakeShape.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
+#include <BRep_Tool.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepFilletAPI_MakeChamfer.hxx>
@@ -48,6 +50,7 @@
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
+#include <TopoDS_Vertex.hxx>
 #include <TopoDS_Wire.hxx>
 #include <TopoDS.hxx>
 #include <TopTools_ListOfShape.hxx>
@@ -55,6 +58,7 @@
 #include <TopTools_MapOfShape.hxx>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <functional>
 #include <limits>
@@ -66,6 +70,211 @@
 
 namespace {
 CAlfaDoc* g_current_alfa_doc = nullptr;
+
+struct ScreenRectBounds {
+    int left = 0;
+    int right = 0;
+    int top = 0;
+    int bottom = 0;
+};
+
+ScreenRectBounds normalize_screen_rect(DomRect rect)
+{
+    return {
+        std::min(rect.left, rect.right),
+        std::max(rect.left, rect.right),
+        std::min(rect.top, rect.bottom),
+        std::max(rect.top, rect.bottom)
+    };
+}
+
+bool screen_point_inside(DomPoint point, const ScreenRectBounds& rect)
+{
+    return point.x >= rect.left && point.x <= rect.right
+        && point.y >= rect.top && point.y <= rect.bottom;
+}
+
+double screen_orientation(DomPoint a, DomPoint b, DomPoint c)
+{
+    return static_cast<double>(b.x - a.x) * static_cast<double>(c.y - a.y)
+        - static_cast<double>(b.y - a.y) * static_cast<double>(c.x - a.x);
+}
+
+bool screen_point_on_segment(DomPoint point, DomPoint a, DomPoint b)
+{
+    constexpr double epsilon = 0.001;
+    return std::fabs(screen_orientation(a, b, point)) <= epsilon
+        && point.x >= std::min(a.x, b.x) && point.x <= std::max(a.x, b.x)
+        && point.y >= std::min(a.y, b.y) && point.y <= std::max(a.y, b.y);
+}
+
+bool screen_segments_intersect(DomPoint a, DomPoint b, DomPoint c, DomPoint d)
+{
+    const double o1 = screen_orientation(a, b, c);
+    const double o2 = screen_orientation(a, b, d);
+    const double o3 = screen_orientation(c, d, a);
+    const double o4 = screen_orientation(c, d, b);
+    if (((o1 > 0.0 && o2 < 0.0) || (o1 < 0.0 && o2 > 0.0))
+        && ((o3 > 0.0 && o4 < 0.0) || (o3 < 0.0 && o4 > 0.0))) {
+        return true;
+    }
+    return (std::fabs(o1) <= 0.001 && screen_point_on_segment(c, a, b))
+        || (std::fabs(o2) <= 0.001 && screen_point_on_segment(d, a, b))
+        || (std::fabs(o3) <= 0.001 && screen_point_on_segment(a, c, d))
+        || (std::fabs(o4) <= 0.001 && screen_point_on_segment(b, c, d));
+}
+
+bool screen_segment_intersects_rect(DomPoint a, DomPoint b, const ScreenRectBounds& rect)
+{
+    if (screen_point_inside(a, rect) || screen_point_inside(b, rect)) {
+        return true;
+    }
+    const DomPoint top_left{rect.left, rect.top};
+    const DomPoint top_right{rect.right, rect.top};
+    const DomPoint bottom_right{rect.right, rect.bottom};
+    const DomPoint bottom_left{rect.left, rect.bottom};
+    return screen_segments_intersect(a, b, top_left, top_right)
+        || screen_segments_intersect(a, b, top_right, bottom_right)
+        || screen_segments_intersect(a, b, bottom_right, bottom_left)
+        || screen_segments_intersect(a, b, bottom_left, top_left);
+}
+
+bool screen_point_in_polygon(DomPoint point, const std::vector<DomPoint>& polygon)
+{
+    if (polygon.size() < 3) {
+        return false;
+    }
+    bool inside = false;
+    for (size_t i = 0, j = polygon.size() - 1; i < polygon.size(); j = i++) {
+        const DomPoint a = polygon[j];
+        const DomPoint b = polygon[i];
+        if (screen_point_on_segment(point, a, b)) {
+            return true;
+        }
+        const bool crosses = (a.y > point.y) != (b.y > point.y);
+        if (crosses) {
+            const double x = static_cast<double>(b.x - a.x)
+                    * static_cast<double>(point.y - a.y)
+                    / static_cast<double>(b.y - a.y)
+                + static_cast<double>(a.x);
+            if (static_cast<double>(point.x) < x) {
+                inside = !inside;
+            }
+        }
+    }
+    return inside;
+}
+
+bool screen_polygon_intersects_rect(
+    const std::vector<DomPoint>& polygon,
+    const ScreenRectBounds& rect)
+{
+    if (polygon.empty()) {
+        return false;
+    }
+    if (std::any_of(polygon.begin(), polygon.end(), [&](DomPoint point) {
+            return screen_point_inside(point, rect);
+        })) {
+        return true;
+    }
+    for (size_t i = 0; i < polygon.size(); ++i) {
+        if (screen_segment_intersects_rect(
+                polygon[i], polygon[(i + 1) % polygon.size()], rect)) {
+            return true;
+        }
+    }
+    const DomPoint corners[] = {
+        {rect.left, rect.top},
+        {rect.right, rect.top},
+        {rect.right, rect.bottom},
+        {rect.left, rect.bottom}
+    };
+    return std::any_of(std::begin(corners), std::end(corners), [&](DomPoint corner) {
+        return screen_point_in_polygon(corner, polygon);
+    });
+}
+
+bool projected_points_match_rect(
+    const std::vector<Vec3>& points,
+    const ScreenRectBounds& rect,
+    bool crossing,
+    const std::function<bool(Vec3, DomPoint&)>& world_to_screen,
+    bool closed = false)
+{
+    if (points.empty()) {
+        return false;
+    }
+    std::vector<DomPoint> projected(points.size());
+    std::vector<bool> valid(points.size(), false);
+    bool any_inside = false;
+    bool all_inside = true;
+    for (size_t i = 0; i < points.size(); ++i) {
+        valid[i] = world_to_screen(points[i], projected[i]);
+        const bool inside = valid[i] && screen_point_inside(projected[i], rect);
+        any_inside = any_inside || inside;
+        all_inside = all_inside && inside;
+    }
+    if (!crossing) {
+        return all_inside;
+    }
+    if (any_inside) {
+        return true;
+    }
+    const size_t segment_count = closed ? points.size() : points.size() - 1;
+    for (size_t i = 0; i < segment_count; ++i) {
+        const size_t next = (i + 1) % points.size();
+        if (valid[i] && valid[next]
+            && screen_segment_intersects_rect(projected[i], projected[next], rect)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool mesh_matches_screen_rect(
+    const CMesh3D& mesh,
+    const ScreenRectBounds& rect,
+    bool crossing,
+    const std::function<bool(Vec3, DomPoint&)>& world_to_screen)
+{
+    const std::vector<Vec3>& vertices = mesh.GetVertices();
+    if (vertices.empty()) {
+        return false;
+    }
+    std::vector<DomPoint> projected(vertices.size());
+    std::vector<bool> valid(vertices.size(), false);
+    bool all_inside = true;
+    for (size_t i = 0; i < vertices.size(); ++i) {
+        valid[i] = world_to_screen(vertices[i], projected[i]);
+        all_inside = all_inside
+            && valid[i] && screen_point_inside(projected[i], rect);
+    }
+    if (!crossing) {
+        return all_inside;
+    }
+    for (size_t i = 0; i < vertices.size(); ++i) {
+        if (valid[i] && screen_point_inside(projected[i], rect)) {
+            return true;
+        }
+    }
+    for (const CMesh3D::Face& face : mesh.GetFaces()) {
+        std::vector<DomPoint> polygon;
+        polygon.reserve(CMesh3D::FaceVertexCount(face));
+        bool face_valid = true;
+        for (size_t i = 0; i < CMesh3D::FaceVertexCount(face); ++i) {
+            const size_t vertex_index = CMesh3D::GetFaceVertexIndex(face, i);
+            if (vertex_index >= projected.size() || !valid[vertex_index]) {
+                face_valid = false;
+                break;
+            }
+            polygon.push_back(projected[vertex_index]);
+        }
+        if (face_valid && screen_polygon_intersects_rect(polygon, rect)) {
+            return true;
+        }
+    }
+    return false;
+}
 
 std::vector<TopoDS_Edge> unique_edges(const std::vector<TopoDS_Edge>& edges)
 {
@@ -741,24 +950,7 @@ bool hit_test_sketch_screen(const CSmartLine& sketch,
                             const std::function<bool(Vec3, DomPoint&)>& world_to_screen,
                             float tolerance)
 {
-    for (size_t line_index = 0; line_index < sketch.GetNumLines(); ++line_index) {
-        const CLinkLine* line = sketch.GetLine(line_index);
-        if (!line) {
-            continue;
-        }
-        const CPoint3d world_start = sketch.LocalToWorld(line->GetStart());
-        const CPoint3d world_end = sketch.LocalToWorld(line->GetEnd());
-        DomPoint screen_start{};
-        DomPoint screen_end{};
-        if (!world_to_screen(to_vec3(world_start), screen_start)
-            || !world_to_screen(to_vec3(world_end), screen_end)) {
-            continue;
-        }
-        if (distance_to_screen_segment(point, screen_start, screen_end) <= tolerance) {
-            return true;
-        }
-    }
-    return false;
+    return sketch.HitTestScreen(point, world_to_screen, tolerance);
 }
 
 bool hit_test_bspline_screen(const CBSpline& spline,
@@ -3199,10 +3391,103 @@ bool CAlfaDoc::SelectObjectsInScreenRect(
     DomRect rect,
     const std::function<bool(Vec3, DomPoint&)>& world_to_screen,
     SelectionAction action) {
-    const int left = std::min(rect.left, rect.right);
-    const int right = std::max(rect.left, rect.right);
-    const int top = std::min(rect.top, rect.bottom);
-    const int bottom = std::max(rect.top, rect.bottom);
+    // Dom-3D convention requested for Select By Rectangle:
+    // left-to-right is crossing, right-to-left is fully enclosed.
+    const bool crossing = rect.right >= rect.left;
+    const ScreenRectBounds screen_rect = normalize_screen_rect(rect);
+
+    const auto bounds_match = [&](const CAlfaObject& object) {
+        Vec3 min_point{};
+        Vec3 max_point{};
+        if (!object.GetBounds(min_point, max_point)) {
+            return false;
+        }
+        bool all_inside = true;
+        bool projected_any = false;
+        int projected_left = std::numeric_limits<int>::max();
+        int projected_right = std::numeric_limits<int>::min();
+        int projected_top = std::numeric_limits<int>::max();
+        int projected_bottom = std::numeric_limits<int>::min();
+        for (int x = 0; x < 2; ++x) {
+            for (int y = 0; y < 2; ++y) {
+                for (int z = 0; z < 2; ++z) {
+                    const Vec3 corner{
+                        x == 0 ? min_point.x : max_point.x,
+                        y == 0 ? min_point.y : max_point.y,
+                        z == 0 ? min_point.z : max_point.z
+                    };
+                    DomPoint screen{};
+                    const bool projected = world_to_screen(corner, screen);
+                    projected_any = projected_any || projected;
+                    all_inside = all_inside
+                        && projected && screen_point_inside(screen, screen_rect);
+                    if (projected) {
+                        projected_left = std::min(projected_left, screen.x);
+                        projected_right = std::max(projected_right, screen.x);
+                        projected_top = std::min(projected_top, screen.y);
+                        projected_bottom = std::max(projected_bottom, screen.y);
+                    }
+                }
+            }
+        }
+        if (!crossing) {
+            return all_inside;
+        }
+        return projected_any
+            && projected_right >= screen_rect.left
+            && projected_left <= screen_rect.right
+            && projected_bottom >= screen_rect.top
+            && projected_top <= screen_rect.bottom;
+    };
+
+    const auto object_matches = [&](const CAlfaObject& object) {
+        if (const auto* solid = dynamic_cast<const CSolid*>(&object)) {
+            bool has_mesh = false;
+            bool matches = !crossing;
+            for (int surface_index = 0; surface_index < solid->GetNumSurfaces(); ++surface_index) {
+                const CSurfaceFace* surface = solid->GetSurfaceFace(surface_index);
+                if (!surface || !surface->pMesh3D
+                    || surface->pMesh3D->GetVertices().empty()) {
+                    continue;
+                }
+                has_mesh = true;
+                const bool surface_matches = mesh_matches_screen_rect(
+                    *surface->pMesh3D, screen_rect, crossing, world_to_screen);
+                matches = crossing
+                    ? matches || surface_matches
+                    : matches && surface_matches;
+                if (crossing && matches) {
+                    break;
+                }
+            }
+            return has_mesh ? matches : bounds_match(object);
+        }
+        if (const auto* mesh = dynamic_cast<const CMesh3D*>(&object)) {
+            return mesh_matches_screen_rect(
+                *mesh, screen_rect, crossing, world_to_screen);
+        }
+        if (const auto* polyline = dynamic_cast<const CPolyline*>(&object)) {
+            std::vector<Vec3> points;
+            points.reserve(polyline->GetPoints().size());
+            for (const CPoint3d& point : polyline->GetPoints()) {
+                points.push_back(to_vec3(point));
+            }
+            return projected_points_match_rect(
+                points, screen_rect, crossing, world_to_screen, polyline->IsClosed());
+        }
+        if (const auto* spline = dynamic_cast<const CBSpline*>(&object)) {
+            std::vector<Vec3> points;
+            constexpr int sample_count = 64;
+            points.reserve(sample_count + 1);
+            for (int i = 0; i <= sample_count; ++i) {
+                points.push_back(to_vec3(spline->Evaluate(
+                    static_cast<float>(i) / static_cast<float>(sample_count))));
+            }
+            return projected_points_match_rect(
+                points, screen_rect, crossing, world_to_screen, spline->IsClosed());
+        }
+        return bounds_match(object);
+    };
 
     std::vector<size_t> found_indices;
     for (size_t object_index = 0; object_index < objects_.size(); ++object_index) {
@@ -3211,33 +3496,7 @@ bool CAlfaDoc::SelectObjectsInScreenRect(
             continue;
         }
 
-        Vec3 min_point{};
-        Vec3 max_point{};
-        if (!object->GetBounds(min_point, max_point)) {
-            continue;
-        }
-
-        bool inside = true;
-        for (int x = 0; x < 2 && inside; ++x) {
-            for (int y = 0; y < 2 && inside; ++y) {
-                for (int z = 0; z < 2; ++z) {
-                    const Vec3 corner{
-                        x == 0 ? min_point.x : max_point.x,
-                        y == 0 ? min_point.y : max_point.y,
-                        z == 0 ? min_point.z : max_point.z
-                    };
-                    DomPoint screen{};
-                    if (!world_to_screen(corner, screen)
-                        || screen.x < left || screen.x > right
-                        || screen.y < top || screen.y > bottom) {
-                        inside = false;
-                        break;
-                    }
-                }
-            }
-        }
-
-        if (inside) {
+        if (object_matches(*object)) {
             found_indices.push_back(object_index);
         }
     }
@@ -3311,16 +3570,8 @@ bool CAlfaDoc::SelectSolidFacesInScreenRect(
     DomRect rect,
     const std::function<bool(Vec3, DomPoint&)>& world_to_screen,
     SelectionAction action) {
-    const int left = std::min(rect.left, rect.right);
-    const int right = std::max(rect.left, rect.right);
-    const int top = std::min(rect.top, rect.bottom);
-    const int bottom = std::max(rect.top, rect.bottom);
-    const auto point_inside = [&](Vec3 point) {
-        DomPoint screen{};
-        return world_to_screen(point, screen)
-            && screen.x >= left && screen.x <= right
-            && screen.y >= top && screen.y <= bottom;
-    };
+    const bool crossing = rect.right >= rect.left;
+    const ScreenRectBounds screen_rect = normalize_screen_rect(rect);
 
     size_t found_solid_index = objects_.size();
     std::vector<int> found_faces;
@@ -3336,8 +3587,8 @@ bool CAlfaDoc::SelectSolidFacesInScreenRect(
             if (!surface || !surface->pMesh3D || surface->pMesh3D->GetVertices().empty()) {
                 continue;
             }
-            const auto& vertices = surface->pMesh3D->GetVertices();
-            if (std::all_of(vertices.begin(), vertices.end(), point_inside)) {
+            if (mesh_matches_screen_rect(
+                    *surface->pMesh3D, screen_rect, crossing, world_to_screen)) {
                 solid_faces.push_back(surface_index);
             }
         }
@@ -3407,16 +3658,8 @@ bool CAlfaDoc::SelectSolidEdgesInScreenRect(
     DomRect rect,
     const std::function<bool(Vec3, DomPoint&)>& world_to_screen,
     SelectionAction action) {
-    const int left = std::min(rect.left, rect.right);
-    const int right = std::max(rect.left, rect.right);
-    const int top = std::min(rect.top, rect.bottom);
-    const int bottom = std::max(rect.top, rect.bottom);
-    const auto point_inside = [&](Vec3 point) {
-        DomPoint screen{};
-        return world_to_screen(point, screen)
-            && screen.x >= left && screen.x <= right
-            && screen.y >= top && screen.y <= bottom;
-    };
+    const bool crossing = rect.right >= rect.left;
+    const ScreenRectBounds screen_rect = normalize_screen_rect(rect);
 
     size_t found_solid_index = objects_.size();
     std::vector<std::pair<int, int>> found_edges;
@@ -3433,20 +3676,18 @@ bool CAlfaDoc::SelectSolidEdgesInScreenRect(
                 continue;
             }
             for (int edge_index = 0; edge_index < surface->GetEdgeCount(); ++edge_index) {
-                std::vector<CPoint3d> points;
-                surface->GetPreparedPolylinePoints(edge_index, points);
-                bool inside = !points.empty();
-                for (const CPoint3d& point : points) {
-                    if (!point_inside(to_vec3(point))) {
-                        inside = false;
-                        break;
-                    }
-                }
-                if (points.empty()) {
+                std::vector<Vec3> edge_points;
+                bool inside = false;
+                if (surface->GetEdgePolylinePoints(edge_index, edge_points)) {
+                    inside = projected_points_match_rect(
+                        edge_points, screen_rect, crossing, world_to_screen);
+                } else {
                     Vec3 start{};
                     Vec3 end{};
-                    inside = surface->GetEdgeEndpoints(edge_index, start, end)
-                        && point_inside(start) && point_inside(end);
+                    if (surface->GetEdgeEndpoints(edge_index, start, end)) {
+                        inside = projected_points_match_rect(
+                            {start, end}, screen_rect, crossing, world_to_screen);
+                    }
                 }
                 if (inside) {
                     solid_edges.emplace_back(surface_index, edge_index);
@@ -3597,7 +3838,20 @@ void CAlfaDoc::ClearSelection() {
     draft_face_.reset();
     has_selected_solid_face_ = false;
     has_selected_object_ = false;
+    ClearTransformGizmoOrigin();
     ClearPointSelection();
+}
+
+bool CAlfaDoc::SelectObjectById(unsigned long object_id) {
+    const size_t index = FindObjectIndexById(object_id);
+    if (index >= objects_.size() || !objects_[index]) {
+        return false;
+    }
+    ClearSelection();
+    selected_object_index_ = index;
+    selected_object_indices_ = {index};
+    has_selected_object_ = true;
+    return true;
 }
 
 void CAlfaDoc::ClearPointSelection() {
@@ -3844,6 +4098,51 @@ void CAlfaDoc::AddMesh(std::unique_ptr<CMesh3D> mesh) {
     AddObject(std::move(mesh));
 }
 
+bool CAlfaDoc::IsObjectSelectionHighlighted(size_t index) const {
+    if (index >= objects_.size() || !objects_[index]) {
+        return false;
+    }
+    if (IsObjectSelected(index)) {
+        return true;
+    }
+
+    const unsigned long target_id = objects_[index]->m_id;
+    std::set<unsigned long> visited_groups;
+    const auto contains_recursive =
+        [this, target_id, &visited_groups](const auto& self,
+                                           const CGroup& group) -> bool {
+            if (!visited_groups.insert(group.m_id).second) {
+                return false;
+            }
+            for (unsigned long element_id : group.GetElementIds()) {
+                if (element_id == target_id) {
+                    return true;
+                }
+                const CAlfaObject* child = FindObjectById(element_id);
+                const auto* child_group = dynamic_cast<const CGroup*>(child);
+                if (child_group && self(self, *child_group)) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+    for (size_t selected_index : selected_object_indices_) {
+        if (selected_index >= objects_.size()
+            || selected_index == hidden_selection_highlight_index_
+            || !objects_[selected_index]) {
+            continue;
+        }
+        const auto* group =
+            dynamic_cast<const CGroup*>(objects_[selected_index].get());
+        visited_groups.clear();
+        if (group && contains_recursive(contains_recursive, *group)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool CAlfaDoc::CreateGroupFromSelection() {
     if (!HasSelection()) {
         return false;
@@ -4001,11 +4300,27 @@ bool CAlfaDoc::DuplicateSelectedObject() {
                         }
                     }
                     std::unique_ptr<CGroup> group_copy;
-                    if (const auto* assembly = dynamic_cast<const CAssembled*>(group)) {
+                    if (const auto* cabinet = dynamic_cast<const CKitchenCabinet*>(group)) {
+                        auto cabinet_copy = std::make_unique<CKitchenCabinet>(
+                            cabinet->GetName() + " Copy", std::move(child_copy_ids),
+                            cabinet->GetDefinition());
+                        cabinet_copy->SetDrawParam(cabinet->GetDrawParam());
+                        cabinet_copy->SetIdDim(cabinet->GetIdDim());
+                        cabinet_copy->SetAssemblyTransform(
+                            cabinet->GetAssemblyTransform());
+                        for (const CDimens3D* dimension : cabinet->GetDimensions()) {
+                            if (dimension) {
+                                cabinet_copy->AddDimension(*dimension);
+                            }
+                        }
+                        group_copy = std::move(cabinet_copy);
+                    } else if (const auto* assembly = dynamic_cast<const CAssembled*>(group)) {
                         auto assembly_copy = std::make_unique<CAssembled>(
                             assembly->GetName() + " Copy", std::move(child_copy_ids));
                         assembly_copy->SetDrawParam(assembly->GetDrawParam());
                         assembly_copy->SetIdDim(assembly->GetIdDim());
+                        assembly_copy->SetAssemblyTransform(
+                            assembly->GetAssemblyTransform());
                         for (const CDimens3D* dimension : assembly->GetDimensions()) {
                             if (dimension) {
                                 assembly_copy->AddDimension(*dimension);
@@ -4021,6 +4336,11 @@ bool CAlfaDoc::DuplicateSelectedObject() {
                     group_copy->CAlfaObject::SetColor(group->GetColor());
                     group_copy->SetMaterial(group->GetMaterial());
                     group_copy->SetMaterialId(group->GetMaterialId());
+                    if (group->IsParametric()) {
+                        group_copy->SetParametricDefinition(
+                            group->GetParametricToolId(),
+                            group->GetParametricParameters());
+                    }
                     group_copy->m_LayerID = group->m_LayerID;
                     copy = std::move(group_copy);
                 } else {
@@ -4502,13 +4822,71 @@ bool CAlfaDoc::UniformScaleSelectedObjects(Vec3 center, float factor) {
     return scaled;
 }
 
+std::vector<size_t> CAlfaDoc::GetSelectedTransformRootIndices() const {
+    std::vector<size_t> selected_indices;
+    selected_indices.reserve(selected_object_indices_.size());
+    for (size_t index : selected_object_indices_) {
+        if (index < objects_.size() && objects_[index]) {
+            selected_indices.push_back(index);
+        }
+    }
+    if (selected_indices.size() < 2) {
+        return selected_indices;
+    }
+
+    std::function<bool(const CGroup&, unsigned long, std::set<const CGroup*>&)> contains_object;
+    contains_object = [&](const CGroup& group,
+                          unsigned long object_id,
+                          std::set<const CGroup*>& visited_groups) {
+        if (!visited_groups.insert(&group).second) {
+            return false;
+        }
+        for (unsigned long child_id : group.GetElementIds()) {
+            if (child_id == object_id) {
+                return true;
+            }
+            const auto* child_group = dynamic_cast<const CGroup*>(FindObjectById(child_id));
+            if (child_group && contains_object(*child_group, object_id, visited_groups)) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    std::vector<size_t> root_indices;
+    root_indices.reserve(selected_indices.size());
+    for (size_t candidate_index : selected_indices) {
+        const CAlfaObject* candidate = objects_[candidate_index].get();
+        bool contained_by_selected_group = false;
+        for (size_t possible_parent_index : selected_indices) {
+            if (possible_parent_index == candidate_index) {
+                continue;
+            }
+            const auto* possible_parent =
+                dynamic_cast<const CGroup*>(objects_[possible_parent_index].get());
+            if (!possible_parent) {
+                continue;
+            }
+            std::set<const CGroup*> visited_groups;
+            if (contains_object(*possible_parent, candidate->m_id, visited_groups)) {
+                contained_by_selected_group = true;
+                break;
+            }
+        }
+        if (!contained_by_selected_group) {
+            root_indices.push_back(candidate_index);
+        }
+    }
+    return root_indices;
+}
+
 bool CAlfaDoc::PreviewMoveSelectedObjects(Vec3 delta) {
     if (!HasSelection()) {
         return false;
     }
 
     bool moved = false;
-    for (size_t index : selected_object_indices_) {
+    for (size_t index : GetSelectedTransformRootIndices()) {
         if (index >= objects_.size()) {
             continue;
         }
@@ -4530,7 +4908,7 @@ bool CAlfaDoc::PreviewRotateSelectedObjects(Vec3 center, Vec3 axis, float angle)
     }
 
     bool rotated = false;
-    for (size_t index : selected_object_indices_) {
+    for (size_t index : GetSelectedTransformRootIndices()) {
         if (index >= objects_.size()) {
             continue;
         }
@@ -4552,7 +4930,7 @@ bool CAlfaDoc::PreviewScaleSelectedObjects(Vec3 center, Vec3 axis, float factor)
     }
 
     bool scaled = false;
-    for (size_t index : selected_object_indices_) {
+    for (size_t index : GetSelectedTransformRootIndices()) {
         if (index >= objects_.size()) {
             continue;
         }
@@ -4574,7 +4952,7 @@ bool CAlfaDoc::PreviewUniformScaleSelectedObjects(Vec3 center, float factor) {
 
 bool CAlfaDoc::CommitMoveSelectedSolids(Vec3 delta) {
     bool moved = false;
-    for (size_t index : selected_object_indices_) {
+    for (size_t index : GetSelectedTransformRootIndices()) {
         if (index < objects_.size()) {
             if (auto* group = dynamic_cast<CGroup*>(objects_[index].get())) {
                 moved = group->CommitTranslate(delta) || moved;
@@ -4592,7 +4970,7 @@ bool CAlfaDoc::CommitMoveSelectedSolids(Vec3 delta) {
 
 bool CAlfaDoc::CommitRotateSelectedSolids(Vec3 center, Vec3 axis, float angle) {
     bool rotated = false;
-    for (size_t index : selected_object_indices_) {
+    for (size_t index : GetSelectedTransformRootIndices()) {
         if (index < objects_.size()) {
             if (auto* group = dynamic_cast<CGroup*>(objects_[index].get())) {
                 rotated = group->CommitRotate(center, axis, angle) || rotated;
@@ -4614,7 +4992,7 @@ bool CAlfaDoc::CommitScaleSelectedSolids(Vec3 center, Vec3 axis, float factor) {
     }
 
     bool scaled = false;
-    for (size_t index : selected_object_indices_) {
+    for (size_t index : GetSelectedTransformRootIndices()) {
         if (index < objects_.size()) {
             if (auto* group = dynamic_cast<CGroup*>(objects_[index].get())) {
                 scaled = group->CommitScale(center, axis, factor) || scaled;
@@ -5048,6 +5426,144 @@ bool CAlfaDoc::GetSelectionCenter(Vec3& center) const {
     return true;
 }
 
+bool CAlfaDoc::GetTransformGizmoCenter(Vec3& center) const {
+    if (!HasSelection()) {
+        return false;
+    }
+    if (has_transform_gizmo_origin_) {
+        center = transform_gizmo_origin_;
+        return true;
+    }
+    return GetSelectionCenter(center);
+}
+
+void CAlfaDoc::SetTransformGizmoOrigin(Vec3 origin) {
+    transform_gizmo_origin_ = origin;
+    has_transform_gizmo_origin_ = true;
+}
+
+void CAlfaDoc::ClearTransformGizmoOrigin() {
+    has_transform_gizmo_origin_ = false;
+    transform_gizmo_origin_ = {};
+}
+
+bool CAlfaDoc::PickTransformGizmoOriginAtScreen(
+    DomPoint point,
+    const std::function<bool(Vec3, DomPoint&)>& world_to_screen,
+    float tolerance,
+    Vec3& origin) const {
+    if (!world_to_screen || tolerance <= 0.0f) {
+        return false;
+    }
+
+    // Vertices have priority over edges, so a click close to an endpoint
+    // always produces an exact and predictable snap.
+    float best_vertex_distance = tolerance;
+    bool found_vertex = false;
+    for (const ObjectPtr& object : objects_) {
+        const auto* solid = object ? dynamic_cast<const CSolid*>(object.get()) : nullptr;
+        if (!solid || solid->m_Shape.IsNull() || !IsObjectVisible(*solid) || !IsObjectSelectable(*solid)) {
+            continue;
+        }
+        for (TopExp_Explorer explorer(solid->m_Shape, TopAbs_VERTEX); explorer.More(); explorer.Next()) {
+            const gp_Pnt p = BRep_Tool::Pnt(TopoDS::Vertex(explorer.Current()));
+            const Vec3 world{static_cast<float>(p.X()), static_cast<float>(p.Y()), static_cast<float>(p.Z())};
+            DomPoint screen{};
+            if (!world_to_screen(world, screen)) {
+                continue;
+            }
+            const float dx = static_cast<float>(screen.x - point.x);
+            const float dy = static_cast<float>(screen.y - point.y);
+            const float distance = std::sqrt(dx * dx + dy * dy);
+            if (distance <= best_vertex_distance) {
+                best_vertex_distance = distance;
+                origin = world;
+                found_vertex = true;
+            }
+        }
+    }
+    if (found_vertex) {
+        return true;
+    }
+
+    float best_edge_distance = tolerance;
+    bool found_edge = false;
+    constexpr int kCurveSamples = 64;
+    for (const ObjectPtr& object : objects_) {
+        const auto* solid = object ? dynamic_cast<const CSolid*>(object.get()) : nullptr;
+        if (!solid || solid->m_Shape.IsNull() || !IsObjectVisible(*solid) || !IsObjectSelectable(*solid)) {
+            continue;
+        }
+        for (TopExp_Explorer explorer(solid->m_Shape, TopAbs_EDGE); explorer.More(); explorer.Next()) {
+            const TopoDS_Edge edge = TopoDS::Edge(explorer.Current());
+            BRepAdaptor_Curve curve(edge);
+            const double first = curve.FirstParameter();
+            const double last = curve.LastParameter();
+            if (!std::isfinite(first) || !std::isfinite(last) || last <= first) {
+                continue;
+            }
+
+            DomPoint previous_screen{};
+            double previous_parameter = first;
+            bool has_previous = false;
+            for (int sample = 0; sample <= kCurveSamples; ++sample) {
+                const double parameter = first + (last - first)
+                    * static_cast<double>(sample) / static_cast<double>(kCurveSamples);
+                const gp_Pnt current_world = curve.Value(parameter);
+                const Vec3 current{
+                    static_cast<float>(current_world.X()),
+                    static_cast<float>(current_world.Y()),
+                    static_cast<float>(current_world.Z())};
+                DomPoint current_screen{};
+                if (!world_to_screen(current, current_screen)) {
+                    has_previous = false;
+                    continue;
+                }
+
+                if (has_previous) {
+                    const float vx = static_cast<float>(current_screen.x - previous_screen.x);
+                    const float vy = static_cast<float>(current_screen.y - previous_screen.y);
+                    const float wx = static_cast<float>(point.x - previous_screen.x);
+                    const float wy = static_cast<float>(point.y - previous_screen.y);
+                    const float length_squared = vx * vx + vy * vy;
+                    const float segment_t = length_squared > 0.0001f
+                        ? std::clamp((wx * vx + wy * vy) / length_squared, 0.0f, 1.0f)
+                        : 0.0f;
+                    const float nearest_x = static_cast<float>(previous_screen.x) + vx * segment_t;
+                    const float nearest_y = static_cast<float>(previous_screen.y) + vy * segment_t;
+                    const float dx = static_cast<float>(point.x) - nearest_x;
+                    const float dy = static_cast<float>(point.y) - nearest_y;
+                    const float distance = std::sqrt(dx * dx + dy * dy);
+                    if (distance <= best_edge_distance) {
+                        best_edge_distance = distance;
+                        if (curve.GetType() == GeomAbs_Circle) {
+                            const gp_Pnt center = curve.Circle().Location();
+                            origin = {
+                                static_cast<float>(center.X()),
+                                static_cast<float>(center.Y()),
+                                static_cast<float>(center.Z())};
+                        } else {
+                            const double nearest_parameter = previous_parameter
+                                + (parameter - previous_parameter) * static_cast<double>(segment_t);
+                            const gp_Pnt nearest = curve.Value(nearest_parameter);
+                            origin = {
+                                static_cast<float>(nearest.X()),
+                                static_cast<float>(nearest.Y()),
+                                static_cast<float>(nearest.Z())};
+                        }
+                        found_edge = true;
+                    }
+                }
+
+                previous_screen = current_screen;
+                previous_parameter = parameter;
+                has_previous = true;
+            }
+        }
+    }
+    return found_edge;
+}
+
 CPolyline& CAlfaDoc::GetActivePolyline() {
     EnsureActivePolyline();
     return *static_cast<CPolyline*>(objects_[active_object_index_].get());
@@ -5215,6 +5731,37 @@ bool CAlfaDoc::CreateSolidFromTwoSelectedSketches() {
     EnsureObjectId(*second);
     TopoDS_Shape shape;
     if (!BuildSolidBetweenSketches(*first, *second, shape)) return false;
+
+    // Early versions of the Solid-panel button created the correct B-Rep but
+    // then overwrote both source references with the registry defaults (0).
+    // Reuse and repair such a body instead of leaving an unfixable duplicate
+    // in existing projects.
+    for (size_t index = 0; index < objects_.size(); ++index) {
+        auto* existing = dynamic_cast<CSolid*>(objects_[index].get());
+        const ParametricFunction* operation = existing
+            ? existing->GetOperation(0)
+            : nullptr;
+        if (!operation || operation->ToolId != "SolidTwoSketches") {
+            continue;
+        }
+        unsigned long stored_first_id = 0;
+        unsigned long stored_second_id = 0;
+        for (const ParametricParameterValue& parameter : operation->Parameters) {
+            if (parameter.id == "profile.id") {
+                stored_first_id = static_cast<unsigned long>(parameter.value);
+            } else if (parameter.id == "section.id") {
+                stored_second_id = static_cast<unsigned long>(parameter.value);
+            }
+        }
+        if (stored_first_id != 0 || stored_second_id != 0) {
+            continue;
+        }
+        existing->SetParametricOperation(0, "SolidTwoSketches", "Body by Two Sketches", {
+            {"profile.id", static_cast<double>(first->m_id)},
+            {"section.id", static_cast<double>(second->m_id)}});
+        return RebuildTwoSketchSolid(index);
+    }
+
     auto solid = std::make_unique<CSolid>(shape);
     solid->SetName("Body by Two Sketches");
     solid->SetColor({0.72f, 0.72f, 0.69f});
@@ -5315,6 +5862,26 @@ const Material* CAlfaDoc::FindMaterial(unsigned long id) const {
     return nullptr;
 }
 
+Material* CAlfaDoc::FindMaterial(const std::string& name, bool case_insensitive) {
+    const auto same_name = [&name, case_insensitive](const Material& material) {
+        if (!case_insensitive) {
+            return material.name == name;
+        }
+        return std::equal(
+            material.name.begin(), material.name.end(),
+            name.begin(), name.end(),
+            [](unsigned char left, unsigned char right) {
+                return std::tolower(left) == std::tolower(right);
+            });
+    };
+    const auto found = std::find_if(materials_.begin(), materials_.end(), same_name);
+    return found == materials_.end() ? nullptr : &*found;
+}
+
+const Material* CAlfaDoc::FindMaterial(const std::string& name, bool case_insensitive) const {
+    return const_cast<CAlfaDoc*>(this)->FindMaterial(name, case_insensitive);
+}
+
 Material& CAlfaDoc::UpsertMaterial(Material material) {
     if (material.id == 0) {
         unsigned long next_id = 1;
@@ -5350,6 +5917,15 @@ bool CAlfaDoc::DeleteMaterial(unsigned long id) {
         if (object && object->GetMaterialId() == id) {
             object->SetMaterialId(0);
             AssignDefaultMaterial(*object);
+        }
+        if (auto* solid = dynamic_cast<CSolid*>(object.get())) {
+            for (int surface_index = 0; surface_index < solid->GetNumSurfaces(); ++surface_index) {
+                const CSurfaceFace* surface = solid->GetSurfaceFace(surface_index);
+                if (surface && surface->MaterialOverride.enabled
+                    && surface->MaterialOverride.material_id == id) {
+                    solid->ClearSurfaceMaterial(surface_index);
+                }
+            }
         }
     }
     return true;

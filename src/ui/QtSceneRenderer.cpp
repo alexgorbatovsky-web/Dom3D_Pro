@@ -1,9 +1,11 @@
 #include "QtSceneRenderer.h"
+#include "TransformGizmoGeometry.h"
 
 #include "../OpenGLCompat.h"
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace {
 void set_color(float r, float g, float b, float a = 1.0f) {
@@ -33,8 +35,8 @@ void set_axis_color(TransformAxis axis, bool highlighted) {
     }
 }
 
-void qt_camera_basis(const Camera& camera, Vec3& eye, Vec3& forward, Vec3& right, Vec3& up) {
-    eye = camera_position(camera);
+void qt_camera_basis(const Camera& camera, bool orthographic, Vec3& eye, Vec3& forward, Vec3& right, Vec3& up) {
+    eye = camera_position(camera, orthographic);
     forward = normalize(rotate(camera.orientation, {0.0f, 0.0f, -1.0f}));
     right = normalize(rotate(camera.orientation, {1.0f, 0.0f, 0.0f}));
     up = normalize(rotate(camera.orientation, {0.0f, 1.0f, 0.0f}));
@@ -78,7 +80,9 @@ void draw_rotate_arc(Vec3 center, Vec3 axis, Vec3 camera_forward, float radius) 
 
     glBegin(GL_LINE_STRIP);
     for (int i = 0; i <= kSegments; ++i) {
-        const float angle = static_cast<float>(i) * 3.14159265f / static_cast<float>(kSegments);
+        const float angle = TransformGizmoGeometry::kRotationArcStart
+            + TransformGizmoGeometry::kRotationArcSweep
+                * static_cast<float>(i) / static_cast<float>(kSegments);
         const Vec3 point = center + tangent * (std::cos(angle) * radius) + bitangent * (std::sin(angle) * radius);
         glVertex3f(point.x, point.y, point.z);
     }
@@ -171,7 +175,7 @@ void QtSceneRenderer::Render(const CAlfaDoc& document,
     glLoadIdentity();
     float z_near = 0.1f;
     float z_far = 100.0f;
-    CalculateClipPlanes(document, camera, z_near, z_far);
+    CalculateClipPlanes(document, camera, orthographic, z_near, z_far);
     const float aspect = static_cast<float>(viewport_width) / viewport_height;
     if (orthographic) {
         Orthographic(camera, aspect, z_near, z_far);
@@ -185,7 +189,7 @@ void QtSceneRenderer::Render(const CAlfaDoc& document,
     Vec3 view_forward{};
     Vec3 view_right{};
     Vec3 view_up{};
-    qt_camera_basis(camera, view_eye, view_forward, view_right, view_up);
+    qt_camera_basis(camera, orthographic, view_eye, view_forward, view_right, view_up);
     LookAt(view_eye, camera.target, view_up);
 
     view3d_.Draw(document, xy_plane_view, show_floor_grid);
@@ -203,7 +207,7 @@ void QtSceneRenderer::Render(const CAlfaDoc& document,
             Vec3 camera_forward{};
             Vec3 camera_right{};
             Vec3 camera_up{};
-            qt_camera_basis(camera, eye, camera_forward, camera_right, camera_up);
+            qt_camera_basis(camera, orthographic, eye, camera_forward, camera_right, camera_up);
 
             glDisable(GL_DEPTH_TEST);
             glEnable(GL_BLEND);
@@ -236,7 +240,7 @@ void QtSceneRenderer::Render(const CAlfaDoc& document,
             Vec3 camera_forward{};
             Vec3 camera_right{};
             Vec3 camera_up{};
-            qt_camera_basis(camera, eye, camera_forward, camera_right, camera_up);
+            qt_camera_basis(camera, orthographic, eye, camera_forward, camera_right, camera_up);
 
             glDisable(GL_DEPTH_TEST);
             glEnable(GL_BLEND);
@@ -280,12 +284,13 @@ bool QtSceneRenderer::ScreenToFloor(int screen_x, int screen_y, int width, int h
     Vec3 forward{};
     Vec3 right{};
     Vec3 up{};
-    qt_camera_basis(camera, eye, forward, right, up);
+    qt_camera_basis(camera, orthographic, eye, forward, right, up);
 
     Vec3 ray_origin = eye;
     Vec3 ray = normalize(forward + right * (ndc_x * aspect * tan_half) + up * (ndc_y * tan_half));
     if (orthographic) {
-        const float ortho_half_height = std::max(0.25f, camera.distance * 0.42f);
+        const float ortho_half_height = std::max(
+            kMinimumOrthographicHalfHeight, camera.distance * 0.42f);
         const float ortho_half_width = ortho_half_height * aspect;
         ray_origin = camera.target + right * (ndc_x * ortho_half_width) + up * (ndc_y * ortho_half_height);
         ray = forward;
@@ -312,7 +317,7 @@ bool QtSceneRenderer::WorldToScreen(Vec3 point, const Camera& camera, bool ortho
     Vec3 forward{};
     Vec3 right{};
     Vec3 up{};
-    qt_camera_basis(camera, eye, forward, right, up);
+    qt_camera_basis(camera, orthographic, eye, forward, right, up);
     const Vec3 local = point - eye;
 
     const float camera_x = dot(local, right);
@@ -327,7 +332,8 @@ bool QtSceneRenderer::WorldToScreen(Vec3 point, const Camera& camera, bool ortho
     float ndc_x = camera_x / (camera_z * tan_half * aspect);
     float ndc_y = camera_y / (camera_z * tan_half);
     if (orthographic) {
-        const float ortho_half_height = std::max(0.25f, camera.distance * 0.42f);
+        const float ortho_half_height = std::max(
+            kMinimumOrthographicHalfHeight, camera.distance * 0.42f);
         const float ortho_half_width = ortho_half_height * aspect;
         ndc_x = camera_x / ortho_half_width;
         ndc_y = camera_y / ortho_half_height;
@@ -338,15 +344,16 @@ bool QtSceneRenderer::WorldToScreen(Vec3 point, const Camera& camera, bool ortho
     return true;
 }
 
-void QtSceneRenderer::CalculateClipPlanes(const CAlfaDoc& document, const Camera& camera, float& z_near, float& z_far) const {
+void QtSceneRenderer::CalculateClipPlanes(const CAlfaDoc& document, const Camera& camera, bool orthographic, float& z_near, float& z_far) const {
     Vec3 eye{};
     Vec3 forward{};
     Vec3 right{};
     Vec3 up{};
-    qt_camera_basis(camera, eye, forward, right, up);
+    qt_camera_basis(camera, orthographic, eye, forward, right, up);
 
-    float min_depth = camera.distance;
-    float max_depth = camera.distance;
+    float min_depth = std::numeric_limits<float>::max();
+    float max_depth = -std::numeric_limits<float>::max();
+    float scene_extent = 0.0f;
     bool has_scene_bounds = false;
 
     for (const auto& object : document.GetObjects()) {
@@ -361,6 +368,8 @@ void QtSceneRenderer::CalculateClipPlanes(const CAlfaDoc& document, const Camera
         }
 
         has_scene_bounds = true;
+        const Vec3 extent = max_point - min_point;
+        scene_extent = std::max(scene_extent, std::sqrt(dot(extent, extent)));
         const Vec3 corners[] = {
             {min_point.x, min_point.y, min_point.z},
             {max_point.x, min_point.y, min_point.z},
@@ -379,15 +388,24 @@ void QtSceneRenderer::CalculateClipPlanes(const CAlfaDoc& document, const Camera
         }
     }
 
-    const float scene_scale = std::max(1.0f, camera.distance);
+    const float near_floor = std::clamp(
+        camera.distance * 0.0001f, 0.000001f, 0.02f);
     if (!has_scene_bounds) {
-        z_near = std::max(0.02f, camera.distance * 0.01f);
-        z_far = std::max(100.0f, camera.distance * 8.0f);
+        z_near = near_floor;
+        z_far = std::max(z_near * 1000.0f, camera.distance * 8.0f);
         return;
     }
 
-    z_near = std::max(0.02f, std::min(scene_scale * 0.01f, std::max(0.02f, min_depth - scene_scale)));
-    z_far = std::max(z_near + 10.0f, max_depth + scene_scale * 2.0f);
+    // Keep the near plane in front of the nearest scene corner when possible.
+    // If the camera is inside the scene bounds, fall back to a very small
+    // distance derived from the current zoom instead of clipping at 20 mm.
+    z_near = min_depth > near_floor
+        ? std::max(near_floor, min_depth * 0.25f)
+        : near_floor;
+    const float far_margin = std::max(
+        {scene_extent * 0.10f, camera.distance * 0.10f, 0.01f});
+    z_far = std::max(
+        {z_near * 100.0f, max_depth + far_margin, camera.distance + far_margin});
 }
 
 void QtSceneRenderer::DrawCoordinateAxes(bool xy_plane_grid) const {
@@ -421,18 +439,20 @@ void QtSceneRenderer::DrawCoordinateAxes(bool xy_plane_grid) const {
 
 void QtSceneRenderer::DrawTransformGizmo(const CAlfaDoc& document, const Camera& camera, TransformOperation operation, TransformAxis highlighted_axis) const {
     Vec3 center{};
-    if (!document.GetSelectionCenter(center)) {
+    if (!document.GetTransformGizmoCenter(center)) {
         return;
     }
 
     const float size = std::max(0.8f, camera.distance * 0.10f);
+    const float axis_distance =
+        size * TransformGizmoGeometry::kAxisDistanceScale;
     const float arrow_size = size * 0.18f;
     const TransformAxis axes[] = {TransformAxis::X, TransformAxis::Y, TransformAxis::Z};
     Vec3 eye{};
     Vec3 camera_forward{};
     Vec3 camera_right{};
     Vec3 camera_up{};
-    qt_camera_basis(camera, eye, camera_forward, camera_right, camera_up);
+    qt_camera_basis(camera, false, eye, camera_forward, camera_right, camera_up);
 
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
@@ -444,7 +464,7 @@ void QtSceneRenderer::DrawTransformGizmo(const CAlfaDoc& document, const Camera&
     glBegin(GL_LINES);
     for (TransformAxis axis : axes) {
         const Vec3 direction = axis_vector(axis);
-        const Vec3 end = center + direction * size;
+        const Vec3 end = center + direction * axis_distance;
         set_axis_color(axis, highlighted_axis == axis);
         glVertex3f(center.x, center.y, center.z);
         glVertex3f(end.x, end.y, end.z);
@@ -457,7 +477,7 @@ void QtSceneRenderer::DrawTransformGizmo(const CAlfaDoc& document, const Camera&
         for (TransformAxis axis : axes) {
             const Vec3 direction = axis_vector(axis);
             set_axis_color(axis, highlighted_axis == axis);
-            draw_arrow_head(center + direction * size, direction, camera_forward, arrow_size);
+            draw_arrow_head(center + direction * axis_distance, direction, camera_forward, arrow_size);
         }
         glEnd();
 
@@ -470,7 +490,11 @@ void QtSceneRenderer::DrawTransformGizmo(const CAlfaDoc& document, const Camera&
         for (TransformAxis axis : axes) {
             const Vec3 direction = axis_vector(axis);
             set_axis_color(axis, highlighted_axis == axis);
-            draw_rotate_arc(center + direction * size, direction, camera_forward, size * 0.46f);
+            draw_rotate_arc(
+                center + direction * axis_distance,
+                direction,
+                camera_forward,
+                size * TransformGizmoGeometry::kRotationArcRadiusScale);
         }
     }
 
@@ -487,7 +511,8 @@ void QtSceneRenderer::Perspective(float fov_y, float aspect, float z_near, float
 }
 
 void QtSceneRenderer::Orthographic(const Camera& camera, float aspect, float z_near, float z_far) const {
-    const float half_height = std::max(0.25f, camera.distance * 0.42f);
+    const float half_height = std::max(
+        kMinimumOrthographicHalfHeight, camera.distance * 0.42f);
     const float half_width = half_height * aspect;
     glOrtho(-half_width, half_width, -half_height, half_height, z_near, z_far);
 }

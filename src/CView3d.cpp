@@ -1,6 +1,7 @@
 #include "CView3d.h"
 
 #include "OpenGLCompat.h"
+#include "SmartLine.h"
 
 #include <cmath>
 #include <cstddef>
@@ -88,14 +89,29 @@ void CView3d::DrawRoom() const {
 
 void CView3d::DrawObjects(const CAlfaDoc& document) const {
     const auto& objects = document.GetObjects();
-    for (size_t index = 0; index < objects.size(); ++index) {
-        if (!objects[index] || !document.IsObjectVisible(*objects[index])) {
-            continue;
+    const auto is_curve_overlay = [](const CAlfaObject& object) {
+        return dynamic_cast<const CPolyline*>(&object)
+            || dynamic_cast<const CBSpline*>(&object)
+            || dynamic_cast<const CSmartLine*>(&object);
+    };
+    const auto draw_pass = [&](bool overlay) {
+        for (size_t index = 0; index < objects.size(); ++index) {
+            if (!objects[index]
+                || !document.IsObjectVisible(*objects[index])
+                || is_curve_overlay(*objects[index]) != overlay) {
+                continue;
+            }
+            const bool selected = document.IsObjectSelectionHighlighted(index);
+            const bool has_selected_point = document.HasSelection()
+                && document.GetSelectedObjectIndex() == index
+                && document.HasSelectedPoint();
+            objects[index]->Render3d(
+                selected, has_selected_point, document.GetSelectedPointIndex());
         }
-        const bool selected = document.IsObjectSelected(index);
-        const bool has_selected_point = document.HasSelection() && document.GetSelectedObjectIndex() == index && document.HasSelectedPoint();
-        objects[index]->Render3d(selected, has_selected_point, document.GetSelectedPointIndex());
-    }
+    };
+
+    draw_pass(false);
+    draw_pass(true);
 }
 
 void CView3d::DrawBox(float x, float y, float z, float w, float h, float d, float r, float g, float b) const {

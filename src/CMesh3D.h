@@ -5,6 +5,7 @@
 #include "Line2D.h"
 #include <iosfwd>
 #include <functional>
+#include <array>
 #include <initializer_list>
 #include <string>
 #include <vector>
@@ -114,7 +115,10 @@ public:
 
     void Render();
     void Render3d(bool selected) const override;
-    void RenderFaces(bool selected, bool offset_fill = false, const Material* material_override = nullptr) const;
+    void RenderFaces(bool selected,
+                     bool offset_fill = false,
+                     const Material* material_override = nullptr,
+                     bool diagnostic_rgb = false) const;
     void RenderWire(bool selected, bool draw_on_top = false, const Color* color_override = nullptr) const;
     void Render2d(float center_x, float center_y, float scale) const override;
     static Material material_Defailt;
@@ -131,6 +135,7 @@ public:
     void Rotate(Vec3 center, Vec3 axis, float angle) override;
     void Scale(Vec3 center, Vec3 axis, float factor) override;
     void Mirror(Vec3 plane_point, Vec3 plane_normal) override;
+    bool ApplyAffineTransform(const std::array<double, 16>& matrix);
     bool GetBounds(Vec3& min_point, Vec3& max_point) const override;
     bool Save(std::ostream& stream) const override;
     bool Load(std::istream& stream);

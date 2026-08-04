@@ -1545,7 +1545,7 @@ bool CSurfaceFace::BuldMeshTriangle(float Deflection, float AngDeflection)
 			linear_deflection,
 			false,
 			angular_deflection,
-			true);
+			false);
 		mesher.Perform();
 		aTriangulation = BRep_Tool::Triangulation(theFace, aLoc, Poly_MeshPurpose_NONE);
 	}
@@ -1918,10 +1918,8 @@ void CSurfaceFace::PreviewTranslate(Vec3 delta)
 	CPoint3d from(0.0, 0.0, 0.0);
 	CPoint3d to(delta.x, delta.y, delta.z);
 	for (CSplineCurve* edge : m_Edges) {
-		if (edge) {
+		if (edge)
 			edge->Move(&from, &to);
-			edge->Update();
-		}
 	}
 }
 
@@ -2033,6 +2031,33 @@ bool CSurfaceFace::GetEdgeEndpoints(int edge_index, Vec3& start, Vec3& end) cons
 	start = {static_cast<float>(p0.x), static_cast<float>(p0.y), static_cast<float>(p0.z)};
 	end = {static_cast<float>(p1.x), static_cast<float>(p1.y), static_cast<float>(p1.z)};
 	return dot(end - start, end - start) > 0.000001f;
+}
+
+bool CSurfaceFace::GetEdgePolylinePoints(int edge_index, std::vector<Vec3>& points) const
+{
+	points.clear();
+	if (edge_index < 0 || edge_index >= static_cast<int>(m_Edges.size()))
+		return false;
+
+	CSplineCurve* edge = m_Edges[static_cast<size_t>(edge_index)];
+	if (!edge || edge->np() < 2)
+		return false;
+
+	const int steps = std::max(16, edge->np() * 3);
+	points.reserve(static_cast<size_t>(steps + 1));
+	for (int step = 0; step <= steps; ++step) {
+		const double parameter = static_cast<double>(edge->np() - 1)
+			* static_cast<double>(step) / static_cast<double>(steps);
+		CPoint3d point;
+		if (edge->GetPoint(parameter, &point)) {
+			points.push_back({
+				static_cast<float>(point.x),
+				static_cast<float>(point.y),
+				static_cast<float>(point.z)
+			});
+		}
+	}
+	return points.size() >= 2;
 }
 
 void CSurfaceFace::PrepareEdges(float Deflection)

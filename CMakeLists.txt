@@ -69,9 +69,12 @@ set(DOM3D_SOURCES
     src/main.cpp
     src/Material.cpp
     src/MaterialLibrary.cpp
+    src/FurnitureMaterialFactory.cpp
     src/CAlfaObject.cpp
     src/CGroup.cpp
     src/CAssembled.cpp
+    src/CFacadeFurniture.cpp
+    src/CKitchenCabinet.cpp
     src/CAlfaDoc.cpp
     src/ExtrudeShapeBuilder.cpp
     src/CMesh3D.cpp
@@ -143,8 +146,11 @@ set(DOM3D_HEADERS
     src/CAlfaObject.h
     src/CGroup.h
     src/CAssembled.h
+    src/CFacadeFurniture.h
+    src/CKitchenCabinet.h
     src/Material.h
     src/MaterialLibrary.h
+    src/FurnitureMaterialFactory.h
     src/CAlfaDoc.h
     src/ExtrudeShapeBuilder.h
     src/Common.h

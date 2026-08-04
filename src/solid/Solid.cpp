@@ -959,6 +959,7 @@ CSolid* CSolid::pCSolidTool=NULL;
 int CSolid::NumReadFile =0;
 bool CSolid::DoSmooth = false;
 SolidDisplayMode CSolid::s_DisplayMode = SolidDisplayMode::SurfacesAndEdges;
+bool CSolid::s_EdgeDrawingEnabled = true;
 bool CSolid::s_SurfaceTransparencyEnabled = false;
 
 
@@ -1112,6 +1113,16 @@ SolidDisplayMode CSolid::GetDisplayMode()
 void CSolid::SetDisplayMode(SolidDisplayMode mode)
 {
 	s_DisplayMode = mode;
+}
+
+bool CSolid::IsEdgeDrawingEnabled()
+{
+	return s_EdgeDrawingEnabled;
+}
+
+void CSolid::SetEdgeDrawingEnabled(bool enabled)
+{
+	s_EdgeDrawingEnabled = enabled;
 }
 
 bool CSolid::IsSurfaceTransparencyEnabled()
@@ -1415,6 +1426,47 @@ bool CSolid::SetSelectedSurfaceTextureTransform(const SurfaceTextureTransform& t
 	return changed;
 }
 
+bool CSolid::SetSurfaceMaterial(int surface_index, const Material& material)
+{
+	CSurfaceFace* surface = GetSurfaceFace(surface_index);
+	if (!surface)
+		return false;
+	surface->MaterialOverride.enabled = true;
+	surface->MaterialOverride.material_id = material.id;
+	surface->MaterialOverride.material = material;
+	return true;
+}
+
+bool CSolid::SetSurfaceMaterialById(unsigned long surface_id, const Material& material)
+{
+	for (CSurfaceFace* surface : m_Surfaces) {
+		if (surface && static_cast<unsigned long>(surface->m_ID) == surface_id) {
+			surface->MaterialOverride.enabled = true;
+			surface->MaterialOverride.material_id = material.id;
+			surface->MaterialOverride.material = material;
+			return true;
+		}
+	}
+	return false;
+}
+
+bool CSolid::ClearSurfaceMaterial(int surface_index)
+{
+	CSurfaceFace* surface = GetSurfaceFace(surface_index);
+	if (!surface)
+		return false;
+	surface->MaterialOverride = {};
+	return true;
+}
+
+bool CSolid::SetSelectedSurfaceMaterial(const Material& material)
+{
+	bool changed = false;
+	for (int surface_index : m_SelectedFaceIndices)
+		changed = SetSurfaceMaterial(surface_index, material) || changed;
+	return changed;
+}
+
 std::vector<int> CSolid::FindCreatedSurfaceIndices(const TopoDS_Shape& previous_shape) const
 {
 	std::vector<TopoDS_Face> previous_faces;
@@ -1514,9 +1566,13 @@ bool CSolid::InitEdges()
 bool CSolid::InitSurfaces()
 {
 	std::vector<SurfaceTextureTransform> texture_transforms;
+	std::vector<SurfaceMaterialOverride> material_overrides;
 	texture_transforms.reserve(m_Surfaces.size());
+	material_overrides.reserve(m_Surfaces.size());
 	for (const CSurfaceFace* surface : m_Surfaces)
 		texture_transforms.push_back(surface ? surface->TextureTransform : SurfaceTextureTransform{});
+	for (const CSurfaceFace* surface : m_Surfaces)
+		material_overrides.push_back(surface ? surface->MaterialOverride : SurfaceMaterialOverride{});
 
 	for (int i = 0; i < m_Surfaces.size(); i++)
 		delete m_Surfaces[i];
@@ -1530,6 +1586,8 @@ bool CSolid::InitSurfaces()
 		surf->lenEdgeMax = lenEdgeMax;
 		if (static_cast<size_t>(surf->m_ID) < texture_transforms.size())
 			surf->TextureTransform = texture_transforms[static_cast<size_t>(surf->m_ID)];
+		if (static_cast<size_t>(surf->m_ID) < material_overrides.size())
+			surf->MaterialOverride = material_overrides[static_cast<size_t>(surf->m_ID)];
 		m_Surfaces.push_back(surf);
 	}
 	IsSurfaceInit = true;
@@ -1545,7 +1603,11 @@ bool CSolid::BuldMesh(float Deflection)
 		Deflection /= 10.0;
 		if (m_Shape.IsNull())
 			return false;
-/*
+		// Mesh the complete topological shape once.  Meshing every face in
+		// CSurfaceFace::BuldMeshTriangle separately is especially expensive for
+		// swept furniture profiles and also repeats shared-edge calculations.
+		// The per-surface pass below only extracts the triangulations produced
+		// here into the renderer's CMesh3D objects.
 		try {
 			BRepTools::Clean(m_Shape);
 			const Standard_Real linear_deflection =
@@ -1557,15 +1619,13 @@ bool CSolid::BuldMesh(float Deflection)
 				linear_deflection,
 				false,
 				angular_deflection,
-				true);
+				false);
 			mesher.Perform();
 			if (!mesher.IsDone())
 				return false;
 		} catch (const Standard_Failure&) {
 			return false;
 		}
-*/
-
 
 		bool ok = true;
 		for (int i = 0; i < m_Surfaces.size(); i++) {
@@ -1662,9 +1722,13 @@ void CSolid::Render3d(bool selected) const
 		? SolidDisplayMode::Wireframe
 		: GetDisplayMode();
 	const MeshDisplayMode mesh_mode = CMesh3D::GetDisplayMode();
-	const bool draw_faces = mode == SolidDisplayMode::SurfacesAndEdges || mode == SolidDisplayMode::SurfacesAndRaisedMesh;
+	const bool draw_faces = mode == SolidDisplayMode::SurfacesAndEdges
+		|| mode == SolidDisplayMode::SurfacesAndRaisedMesh
+		|| mode == SolidDisplayMode::HiddenLine;
 	const bool draw_mesh = mode == SolidDisplayMode::MeshOnly || mode == SolidDisplayMode::SurfacesAndRaisedMesh;
-	const bool draw_edges = mode != SolidDisplayMode::MeshOnly;
+	const bool draw_edges = (IsEdgeDrawingEnabled()
+		|| mode == SolidDisplayMode::HiddenLine)
+		&& mode != SolidDisplayMode::MeshOnly;
 	Material surface_material = GetMaterial();
 	if (mesh_mode == MeshDisplayMode::SurfaceGray) {
 		surface_material.diffuse = {0.62f, 0.69f, 0.75f};
@@ -1677,13 +1741,37 @@ void CSolid::Render3d(bool selected) const
 	}
 //	const Color solid_color = surface_material.diffuse;
 	const Color solid_color = GetColor();
-	const auto material_for_surface = [&surface_material](const CSurfaceFace& surface) {
-		Material material = surface_material;
+	const auto material_for_surface = [&surface_material, mesh_mode, mode](const CSurfaceFace& surface) {
+		Material material = surface.MaterialOverride.enabled
+			? surface.MaterialOverride.material
+			: surface_material;
+		if (mode == SolidDisplayMode::HiddenLine) {
+			material.diffuse = {0.055f, 0.065f, 0.075f};
+			material.specular = 0.0f;
+			material.shininess = 4.0f;
+			material.color_texture_path.clear();
+			material.light_texture_path.clear();
+			material.bump_texture_path.clear();
+		} else if (mesh_mode == MeshDisplayMode::SurfaceGray) {
+			material.diffuse = {0.62f, 0.69f, 0.75f};
+			material.alpha = surface_material.alpha;
+			material.specular = 0.24f;
+			material.shininess = 42.0f;
+			material.color_texture_path.clear();
+			material.light_texture_path.clear();
+			material.bump_texture_path.clear();
+		} else if (mesh_mode == MeshDisplayMode::SurfaceColored) {
+			material.color_texture_path.clear();
+			material.light_texture_path.clear();
+			material.bump_texture_path.clear();
+		}
 		material.texture_offset_u += surface.TextureTransform.offset_u;
 		material.texture_offset_v += surface.TextureTransform.offset_v;
 		material.texture_scale_u *= surface.TextureTransform.scale_u;
 		material.texture_scale_v *= surface.TextureTransform.scale_v;
 		material.texture_rotation_degrees += surface.TextureTransform.rotation_degrees;
+		material.texture_fit_to_surface = material.texture_fit_to_surface
+			|| surface.TextureTransform.fit_to_surface;
 		return material;
 	};
 	const auto draw_surface_indices = [this, DrawIndexSurf]() {
@@ -1741,7 +1829,11 @@ void CSolid::Render3d(bool selected) const
 		for (CSurfaceFace* surface : m_Surfaces) {
 			if (surface && surface->pMesh3D) {
 				const Material face_material = material_for_surface(*surface);
-				surface->pMesh3D->RenderFaces(solid_selected, draw_edges || mode == SolidDisplayMode::SurfacesAndRaisedMesh, &face_material);
+				surface->pMesh3D->RenderFaces(
+					solid_selected,
+					draw_edges || mode == SolidDisplayMode::SurfacesAndRaisedMesh,
+					&face_material,
+					mesh_mode == MeshDisplayMode::SurfaceColored);
 			}
 		}
 		for (int selected_face_index : m_SelectedFaceIndices) {
@@ -1880,6 +1972,8 @@ std::unique_ptr<CAlfaObject> CSolid::Clone() const
 		const CSurfaceFace* source_surface = GetSurfaceFace(i);
 		if (source_surface)
 			copy->SetSurfaceTextureTransform(i, source_surface->TextureTransform);
+		if (source_surface && source_surface->MaterialOverride.enabled)
+			copy->SetSurfaceMaterial(i, source_surface->MaterialOverride.material);
 	}
 	copy->ReBuldMesh();
 	return copy;
@@ -1996,6 +2090,23 @@ void CSolid::Mirror(Vec3 plane_point, Vec3 plane_normal)
 		                      "Mirror",
 		                      transform_parameters(3, {}, plane_point, unit_normal, 0.0, -1.0));
 	}
+}
+
+bool CSolid::ApplyAffineTransform(const std::array<double, 16>& matrix)
+{
+	gp_GTrsf transform;
+	for (int row = 0; row < 3; ++row) {
+		for (int column = 0; column < 4; ++column) {
+			transform.SetValue(
+				row + 1,
+				column + 1,
+				matrix[static_cast<size_t>(row * 4 + column)]);
+		}
+	}
+	if (!apply_shape_transform(m_Shape, transform))
+		return false;
+	ClearSelectedEdge();
+	return ReBuldMesh();
 }
 
 void CSolid::PreviewTranslate(Vec3 delta)

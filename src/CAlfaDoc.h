@@ -189,6 +189,7 @@ public:
                                    size_t& object_index,
                                    size_t& point_index) const;
     void ClearSelection();
+    bool SelectObjectById(unsigned long object_id);
     void ClearPointSelection();
     bool HasSelection() const;
     bool ExpandSelectedGroups();
@@ -198,6 +199,7 @@ public:
     size_t GetSelectedObjectIndex() const;
     size_t GetSelectedPointIndex() const;
     bool IsObjectSelected(size_t index) const;
+    bool IsObjectSelectionHighlighted(size_t index) const;
     void SetObjectSelectionHighlightHidden(size_t index, bool hidden);
     size_t GetSelectedObjectCount() const;
     const std::vector<size_t>& GetSelectedObjectIndices() const;
@@ -274,6 +276,14 @@ public:
     void CancelLiveChamfer();
     bool GetSelectionBounds(Vec3& min_point, Vec3& max_point) const;
     bool GetSelectionCenter(Vec3& center) const;
+    bool GetTransformGizmoCenter(Vec3& center) const;
+    void SetTransformGizmoOrigin(Vec3 origin);
+    void ClearTransformGizmoOrigin();
+    bool PickTransformGizmoOriginAtScreen(
+        DomPoint point,
+        const std::function<bool(Vec3, DomPoint&)>& world_to_screen,
+        float tolerance,
+        Vec3& origin) const;
 
     CPolyline& GetActivePolyline();
     const CPolyline& GetActivePolyline() const;
@@ -301,6 +311,8 @@ public:
     void ResetDefaultMaterials();
     Material* FindMaterial(unsigned long id);
     const Material* FindMaterial(unsigned long id) const;
+    Material* FindMaterial(const std::string& name, bool case_insensitive = true);
+    const Material* FindMaterial(const std::string& name, bool case_insensitive = true) const;
     Material& UpsertMaterial(Material material);
     bool DeleteMaterial(unsigned long id);
 
@@ -318,6 +330,7 @@ private:
     void EnsureActivePolyline();
     void EnsureActiveBSpline();
     void AssignDefaultMaterial(CAlfaObject& object);
+    std::vector<size_t> GetSelectedTransformRootIndices() const;
 
     ObjectList objects_;
     std::vector<Material> materials_;
@@ -339,5 +352,7 @@ private:
     bool has_selected_solid_face_ = false;
     bool has_selected_object_ = false;
     bool has_selected_point_ = false;
+    bool has_transform_gizmo_origin_ = false;
+    Vec3 transform_gizmo_origin_{};
     size_t hidden_selection_highlight_index_ = static_cast<size_t>(-1);
 };

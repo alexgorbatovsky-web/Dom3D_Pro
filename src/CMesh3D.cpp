@@ -34,6 +34,7 @@
 void Step(const char* text);
 
 namespace {
+constexpr GLint kGlClampToEdge = 0x812F;
 QString resolve_texture_path(const std::string& texture_path) {
     const QString path = QString::fromStdString(texture_path).trimmed();
     if (path.isEmpty()) {
@@ -54,6 +55,14 @@ QString resolve_texture_path(const std::string& texture_path) {
     const QString app_relative_path = app_dir.filePath(path);
     if (QFileInfo::exists(app_relative_path)) {
         return QFileInfo(app_relative_path).absoluteFilePath();
+    }
+
+    QDir build_dir(app_dir);
+    if (build_dir.cdUp()) {
+        const QString shared_release_path = build_dir.filePath("Release/" + path);
+        if (QFileInfo::exists(shared_release_path)) {
+            return QFileInfo(shared_release_path).absoluteFilePath();
+        }
     }
 
     if (info.exists()) {
@@ -126,13 +135,19 @@ UV transform_uv(UV uv, const Material& material) {
     const float angle = deg_to_rad(material.texture_rotation_degrees);
     const float c = std::cos(angle);
     const float s = std::sin(angle);
-    const float u = uv.u * scale_u;
-    const float v = uv.v * scale_v;
+    const float u = (uv.u - 0.5f) * scale_u;
+    const float v = (uv.v - 0.5f) * scale_v;
 
     return {
-        u * c - v * s + material.texture_offset_u,
-        u * s + v * c + material.texture_offset_v
+        u * c - v * s + 0.5f + material.texture_offset_u,
+        u * s + v * c + 0.5f + material.texture_offset_v
     };
+}
+
+UV fit_uv_to_bounds(UV uv, UV minimum, UV maximum) {
+    const float width = std::max(maximum.u - minimum.u, 0.00001f);
+    const float height = std::max(maximum.v - minimum.v, 0.00001f);
+    return {(uv.u - minimum.u) / width, (uv.v - minimum.v) / height};
 }
 
 float clamp01(float value) {
@@ -164,21 +179,14 @@ Color shaded_color(Color base, Vec3 normal, float specular_strength, float shini
     };
 }
 
-Color normal_rgb_color(Vec3 normal) {
+Color normal_rgb_color(Vec3 normal, bool selected) {
     const Vec3 n = normalize(normal);
-    const float x = std::fabs(n.x);
-    const float y = std::fabs(n.y);
-    const float z = std::fabs(n.z);
-    const float sum = std::max(0.0001f, x + y + z);
-    const Color x_color{1.00f, 0.42f, 0.38f};
-    const Color y_color{0.42f, 1.00f, 0.30f};
-    const Color z_color{0.42f, 0.68f, 1.00f};
-    const float ambient = 0.16f;
-
+    const float direction = selected ? -1.0f : 1.0f;
+    constexpr float kDom3dChannelScale = 127.0f / 255.0f;
     return {
-        clamp01(ambient + (x_color.r * x + y_color.r * y + z_color.r * z) / sum * 0.84f),
-        clamp01(ambient + (x_color.g * x + y_color.g * y + z_color.g * z) / sum * 0.84f),
-        clamp01(ambient + (x_color.b * x + y_color.b * y + z_color.b * z) / sum * 0.84f)
+        clamp01((direction * n.x + 1.0f) * kDom3dChannelScale),
+        clamp01((direction * n.y + 1.0f) * kDom3dChannelScale),
+        clamp01((direction * n.z + 1.0f) * kDom3dChannelScale)
     };
 }
 
@@ -2406,17 +2414,26 @@ void CMesh3D::Render3d(bool selected) const {
         return;
     }
 
-    const Material material = mode == MeshDisplayMode::SurfaceGray ? material_Defailt : GetMaterial();
+    Material material = mode == MeshDisplayMode::SurfaceGray ? material_Defailt : GetMaterial();
+    if (mode == MeshDisplayMode::SurfaceColored) {
+        material.color_texture_path.clear();
+        material.light_texture_path.clear();
+        material.bump_texture_path.clear();
+    }
 
     const bool draw_edges = mode != MeshDisplayMode::SurfaceMaterial;
-    RenderFaces(selected, draw_edges, &material);
+    RenderFaces(selected, draw_edges, &material,
+                mode == MeshDisplayMode::SurfaceColored);
     if (draw_edges) {
         const Color wire_color = GetColor();
         RenderWire(selected, true, &wire_color);
     }
 }
 
-void CMesh3D::RenderFaces(bool selected, bool offset_fill, const Material* material_override) const {
+void CMesh3D::RenderFaces(bool selected,
+                          bool offset_fill,
+                          const Material* material_override,
+                          bool diagnostic_rgb) const {
     if (vertices_.empty() || faces_.empty()) {
         return;
     }
@@ -2426,8 +2443,25 @@ void CMesh3D::RenderFaces(bool selected, bool offset_fill, const Material* mater
     const float specular_strength = std::clamp(material.specular <= 0.0f ? 0.18f : material.specular, 0.0f, 1.0f);
     const float shininess = std::clamp(material.shininess <= 0.0f ? 36.0f : material.shininess, 4.0f, 96.0f);
     const float alpha = selected ? std::min(material.alpha + 0.04f, 1.0f) : material.alpha;
-    const GLuint color_texture = texture_id_for_path(material.color_texture_path);
+    // Selection is rendered in diagnostic RGB by surface normal.  A bound
+    // color texture would modulate (and usually hide) those RGB colors, so it
+    // must be suppressed for this draw pass without changing the material.
+    const GLuint color_texture = (selected || diagnostic_rgb)
+        ? 0
+        : texture_id_for_path(material.color_texture_path);
     const bool has_texture = color_texture != 0;
+    UV texture_uv_min{};
+    UV texture_uv_max{};
+    if (material.texture_fit_to_surface && !uvs_.empty()) {
+        texture_uv_min = uvs_.front();
+        texture_uv_max = uvs_.front();
+        for (const UV& uv : uvs_) {
+            texture_uv_min.u = std::min(texture_uv_min.u, uv.u);
+            texture_uv_min.v = std::min(texture_uv_min.v, uv.v);
+            texture_uv_max.u = std::max(texture_uv_max.u, uv.u);
+            texture_uv_max.v = std::max(texture_uv_max.v, uv.v);
+        }
+    }
 
     std::vector<Vec3> vertex_normals;
     if (normals_.size() == vertices_.size()) {
@@ -2461,6 +2495,10 @@ void CMesh3D::RenderFaces(bool selected, bool offset_fill, const Material* mater
     if (has_texture) {
         glEnable(GL_TEXTURE_2D);
         glBindTexture(GL_TEXTURE_2D, color_texture);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,
+            material.texture_fit_to_surface ? kGlClampToEdge : GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,
+            material.texture_fit_to_surface ? kGlClampToEdge : GL_REPEAT);
         glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
     }
     if (offset_fill) {
@@ -2484,14 +2522,19 @@ void CMesh3D::RenderFaces(bool selected, bool offset_fill, const Material* mater
                 const Vec3& normal = normals_.empty() || corner.n >= normals_.size()
                     ? vertex_normals[vertex_index]
                     : normals_[corner.n];
-                const Color shade = (selected && !has_texture) ? normal_rgb_color(normal) : shaded_color(color, normal, specular_strength, shininess, selected);
+                const Color shade = ((selected || diagnostic_rgb) && !has_texture)
+                    ? normal_rgb_color(normal, selected)
+                    : shaded_color(color, normal, specular_strength, shininess, selected);
                 const Vec3& vertex = vertices_[vertex_index];
                 glNormal3f(normal.x, normal.y, normal.z);
                 glColor4f(shade.r, shade.g, shade.b, alpha);
                 if (has_texture) {
-                    const UV base_uv = corner.uv < uvs_.size()
+                    UV base_uv = corner.uv < uvs_.size()
                         ? uvs_[corner.uv]
                         : projected_uv_for_face(vertex, face_normal);
+                    if (material.texture_fit_to_surface && !uvs_.empty()) {
+                        base_uv = fit_uv_to_bounds(base_uv, texture_uv_min, texture_uv_max);
+                    }
                     const UV uv = transform_uv(base_uv, material);
                     glTexCoord2f(uv.u, uv.v);
                 }
@@ -2794,6 +2837,58 @@ void CMesh3D::Mirror(Vec3 plane_point, Vec3 plane_normal) {
         std::reverse(face.corners.begin(), face.corners.end());
         face.normal = FaceNormal(face);
     }
+}
+
+bool CMesh3D::ApplyAffineTransform(const std::array<double, 16>& matrix) {
+    const double a = matrix[0], b = matrix[1], c = matrix[2];
+    const double d = matrix[4], e = matrix[5], f = matrix[6];
+    const double g = matrix[8], h = matrix[9], i = matrix[10];
+    const double determinant =
+        a * (e * i - f * h)
+        - b * (d * i - f * g)
+        + c * (d * h - e * g);
+    if (std::fabs(determinant) <= 1.0e-15) {
+        return false;
+    }
+
+    for (Vec3& vertex : vertices_) {
+        const double x = vertex.x;
+        const double y = vertex.y;
+        const double z = vertex.z;
+        vertex = {
+            static_cast<float>(a * x + b * y + c * z + matrix[3]),
+            static_cast<float>(d * x + e * y + f * z + matrix[7]),
+            static_cast<float>(g * x + h * y + i * z + matrix[11])};
+    }
+
+    const double inverse_transpose[9]{
+        (e * i - f * h) / determinant,
+        (f * g - d * i) / determinant,
+        (d * h - e * g) / determinant,
+        (c * h - b * i) / determinant,
+        (a * i - c * g) / determinant,
+        (b * g - a * h) / determinant,
+        (b * f - c * e) / determinant,
+        (c * d - a * f) / determinant,
+        (a * e - b * d) / determinant};
+    for (Vec3& normal : normals_) {
+        const double x = normal.x;
+        const double y = normal.y;
+        const double z = normal.z;
+        normal = normalize({
+            static_cast<float>(inverse_transpose[0] * x + inverse_transpose[1] * y + inverse_transpose[2] * z),
+            static_cast<float>(inverse_transpose[3] * x + inverse_transpose[4] * y + inverse_transpose[5] * z),
+            static_cast<float>(inverse_transpose[6] * x + inverse_transpose[7] * y + inverse_transpose[8] * z)});
+    }
+    if (determinant < 0.0) {
+        for (Face& face : faces_) {
+            std::reverse(face.corners.begin(), face.corners.end());
+        }
+    }
+    for (Face& face : faces_) {
+        face.normal = FaceNormal(face);
+    }
+    return true;
 }
 
 bool CMesh3D::GetBounds(Vec3& min_point, Vec3& max_point) const {

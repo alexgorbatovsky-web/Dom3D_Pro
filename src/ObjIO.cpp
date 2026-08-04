@@ -214,11 +214,11 @@ UV transformed_uv(UV uv, const Material& material) {
     const float radians = material.texture_rotation_degrees * kPi / 180.0f;
     const float cosine = std::cos(radians);
     const float sine = std::sin(radians);
-    const float u = uv.u * material.texture_scale_u;
-    const float v = uv.v * material.texture_scale_v;
+    const float u = (uv.u - 0.5f) * material.texture_scale_u;
+    const float v = (uv.v - 0.5f) * material.texture_scale_v;
     return {
-        u * cosine - v * sine + material.texture_offset_u,
-        u * sine + v * cosine + material.texture_offset_v
+        u * cosine - v * sine + 0.5f + material.texture_offset_u,
+        u * sine + v * cosine + 0.5f + material.texture_offset_v
     };
 }
 
@@ -599,6 +599,8 @@ bool ObjIO::Export(const std::string& path, const CAlfaDoc& document, std::strin
             material.texture_scale_u *= surface->TextureTransform.scale_u;
             material.texture_scale_v *= surface->TextureTransform.scale_v;
             material.texture_rotation_degrees += surface->TextureTransform.rotation_degrees;
+            material.texture_fit_to_surface = material.texture_fit_to_surface
+                || surface->TextureTransform.fit_to_surface;
             if (!ExportMesh(file,
                             *surface->pMesh3D,
                             material,
@@ -645,7 +647,21 @@ bool ObjIO::ExportMesh(std::ostream& stream,
 
     const bool has_uvs = mesh.GetUVs().size() == mesh.GetVertices().size();
     if (has_uvs) {
+        UV uv_min = mesh.GetUVs().front();
+        UV uv_max = mesh.GetUVs().front();
+        if (material.texture_fit_to_surface) {
+            for (const UV& uv : mesh.GetUVs()) {
+                uv_min.u = std::min(uv_min.u, uv.u);
+                uv_min.v = std::min(uv_min.v, uv.v);
+                uv_max.u = std::max(uv_max.u, uv.u);
+                uv_max.v = std::max(uv_max.v, uv.v);
+            }
+        }
         for (UV uv : mesh.GetUVs()) {
+            if (material.texture_fit_to_surface) {
+                uv.u = (uv.u - uv_min.u) / std::max(uv_max.u - uv_min.u, 0.00001f);
+                uv.v = (uv.v - uv_min.v) / std::max(uv_max.v - uv_min.v, 0.00001f);
+            }
             uv = transformed_uv(uv, material);
             stream << "vt " << uv.u << " " << uv.v << "\n";
         }

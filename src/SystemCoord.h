@@ -22,7 +22,7 @@ public:
 	CSystemCoord();
 	CSystemCoord(CPoint3d *p0,CVector* cx,CVector* cy,CVector* cz);
 	CSystemCoord(CPoint3d *p0, CPoint3d *px,  CPoint3d *py);
-	CSystemCoord(CPoint3d *p0,CVector *v0);//Система Корд. с пл. XY перпенд вектору
+	CSystemCoord(CPoint3d *p0,CVector *v0);//System Cord. from pl. XY perpendicular to vector
 
 
 // Attributes

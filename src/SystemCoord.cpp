@@ -89,7 +89,7 @@ void CSystemCoord::mod_coord_ma(CSystemCoord* sc)
 BOOL CSystemCoord::GetMirrorSC(CPlane* pl)
 {
 CPoint3d pn;
-    pl->CrossNormal(&pn, &p0);//опускаем нормаль на плоскость
+    pl->CrossNormal(&pn, &p0);//Put  the normal to the plane
 
     cz.l=pl->a;
     cz.m=pl->b;
@@ -98,76 +98,7 @@ CPoint3d pn;
 
 	return cy.MultVectors(&cz, &cx);
 }
-/*
-void ModifMsc(short init, CAlfaDoc* pDoci, void* )
-{
-static char step=0;
-static CPoint3d p0;
-static CPoint3d px;
-static CPoint3d py;
-static CAlfaDoc* pDoc;
 
-	if(init){
-		step=1;
-		pDoc=pDoci;
-		GetPoint(&p0, pDoc, ModifMsc);
-		Message_user(IDS_POINT_ORIGIN_SC);
-		return;
-		}
-
-	if(step==1){
-		step=2;
-		GetPoint(&px, pDoc, ModifMsc);
-		Message_user(IDS_POINT_AXIS_X);
-		return;
-		}
-	if(step==2){
-		step=3;
-		GetPoint(&py, pDoc, ModifMsc);
-		Message_user(IDS_POINT_PL_XY);
-		return;
-		}
-
-CPoint3d P0;
-CVector cxt,cyt,czt;
-	pDoc->GetSystemCoord(&P0, &cxt, &cyt, &czt);
-	pDoc->WriteUndoMSK(&P0, &cxt, &cyt, &czt);////////Сохраняем старую СК
-
-    p0.mod_coord_ma(&P0, &cxt, &cyt, &czt);
-    px.mod_coord_ma(&P0, &cxt, &cyt, &czt);
-    py.mod_coord_ma(&P0, &cxt, &cyt, &czt);
-
-    if(POINTs_SC(&p0, &px, &py, &cxt, &cyt, &czt)){
-		Message_err(IDS_ZERRO_POINTS);	
-		pDoc->PopUndo();
-		return ;
-		}
-
-	pDoc->SetSystemCoord(&p0, &cxt, &cyt, &czt);
-}
-*/
-/*
-void ModifPointOriginSc(short init, CAlfaDoc* pDoci, void* )
-{
-static CPoint3d p0;
-static CAlfaDoc* pDoc;
-
-	if(init){
-		pDoc=pDoci;
-		GetPoint(&p0, pDoc, ModifPointOriginSc);
-		Message_user(IDS_POINT_ORIGIN_SC);
-		return;
-		}
-
-	CPoint3d P0;
-	CVector cxt,cyt,czt;
-	pDoc->GetSystemCoord(&P0, &cxt, &cyt, &czt);
-	pDoc->WriteUndoMSK(&P0, &cxt, &cyt, &czt);////////Сохраняем старую СК
-
-    p0.mod_coord_ma(&P0, &cxt, &cyt, &czt);
-	pDoc->SetSystemCoord(&p0, &cxt, &cyt, &czt);
-}
-*/
 BOOL CSystemCoord::Set(CPoint3d* p0i, CPoint3d* px, CPoint3d* py)
 {
 	p0=*p0i;
@@ -189,7 +120,6 @@ bool CSystemCoord::IsValid()
 	
 void CSystemCoord::print()
 {
-//	Step("========CSystemCoord==========");
 	FILE* strm =NULL;
 	p0.print("p0", strm);
 
@@ -203,7 +133,6 @@ void CSystemCoord::GetEulerAngles(double& alfa, double& beta, double& gamma, CPo
 	CPlane pl1(0, 0, 1, 0); // Plane XY
 	CPlane pl2(&p0, &cz); // Plane xy this System Coordinate
 	pl1.CroossCPlane(&pl2, &p1, &p2);
-//	AddLine(&p1, &p2, RGB_RED);
 	CVector N(&p1, &p2);
 	CVector acx(1,0,0);
 	alfa = acx.GetAngle(&N);

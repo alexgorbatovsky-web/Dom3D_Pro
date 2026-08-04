@@ -8,6 +8,7 @@
 #include "SurfaceFace.h"
 
 #include <functional>
+#include <array>
 #include <iosfwd>
 #include <string>
 #include <utility>
@@ -84,6 +85,8 @@ public:
 
 	static SolidDisplayMode GetDisplayMode();
 	static void SetDisplayMode(SolidDisplayMode mode);
+	static bool IsEdgeDrawingEnabled();
+	static void SetEdgeDrawingEnabled(bool enabled);
 	static bool IsSurfaceTransparencyEnabled();
 	static void SetSurfaceTransparencyEnabled(bool enabled);
 
@@ -98,6 +101,7 @@ public:
 	void Rotate(Vec3 center, Vec3 axis, float angle) override;
 	void Scale(Vec3 center, Vec3 axis, float factor) override;
 	void Mirror(Vec3 plane_point, Vec3 plane_normal) override;
+	bool ApplyAffineTransform(const std::array<double, 16>& matrix);
 	void PreviewTranslate(Vec3 delta);
 	void PreviewRotate(Vec3 center, Vec3 axis, float angle);
 	void PreviewScale(Vec3 center, Vec3 axis, float factor);
@@ -159,6 +163,10 @@ public:
 	const std::vector<int>& GetSelectedFaceIndices() const { return m_SelectedFaceIndices; }
 	bool SetSurfaceTextureTransform(int surface_index, const SurfaceTextureTransform& transform);
 	bool SetSelectedSurfaceTextureTransform(const SurfaceTextureTransform& transform);
+	bool SetSurfaceMaterial(int surface_index, const Material& material);
+	bool SetSurfaceMaterialById(unsigned long surface_id, const Material& material);
+	bool ClearSurfaceMaterial(int surface_index);
+	bool SetSelectedSurfaceMaterial(const Material& material);
 	std::vector<int> FindCreatedSurfaceIndices(const TopoDS_Shape& previous_shape) const;
 	void SetOperationHighlightedSurfaces(std::vector<int> surface_indices);
 	void ClearOperationHighlightedSurfaces();
@@ -201,6 +209,7 @@ public:
 	bool NeedUpdateSculpt;
 static	int NumReadFile;
 	static SolidDisplayMode s_DisplayMode;
+	static bool s_EdgeDrawingEnabled;
 	static bool s_SurfaceTransparencyEnabled;
 	bool MeshQuadroX;
 	float AngDeflection;

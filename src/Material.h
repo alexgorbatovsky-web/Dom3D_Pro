@@ -18,6 +18,7 @@ struct Material {
     float texture_scale_u = 1.0f;
     float texture_scale_v = 1.0f;
     float texture_rotation_degrees = 0.0f;
+    bool texture_fit_to_surface = false;
     unsigned long id = 0;
     std::string name = "Material";
     std::string color_texture_path;

@@ -120,18 +120,37 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
             continue;
         }
 
-        if (parameter.type == ToolParameterType::Combo) {
+        if (parameter.type == ToolParameterType::Combo
+            || parameter.type == ToolParameterType::Material) {
             auto* editor = new QComboBox(this);
+            editor->setObjectName(
+                QStringLiteral("parameter_%1").arg(QString::fromStdString(parameter.id)));
             for (const std::string& option : parameter.options) {
                 editor->addItem(QString::fromStdString(option));
             }
-            const int index = std::clamp(static_cast<int>(parameter.value), 0, std::max(0, editor->count() - 1));
+            int index = static_cast<int>(parameter.value);
+            if (parameter.option_values.size() == parameter.options.size()) {
+                const auto selected = std::find(
+                    parameter.option_values.begin(),
+                    parameter.option_values.end(),
+                    parameter.value);
+                index = selected == parameter.option_values.end()
+                    ? 0
+                    : static_cast<int>(std::distance(parameter.option_values.begin(), selected));
+            }
+            index = std::clamp(index, 0, std::max(0, editor->count() - 1));
             editor->setCurrentIndex(index);
             connect(editor, &QComboBox::currentIndexChanged, this, [this, i](int index) {
+                ToolParameter& parameter =
+                    active_object_.parameters[static_cast<size_t>(i)];
                 const bool rebuild_plane_form =
                     active_object_.tool_id == "PlaneTool"
-                    && active_object_.parameters[static_cast<size_t>(i)].id == "mode";
-                active_object_.parameters[static_cast<size_t>(i)].value = static_cast<double>(index);
+                    && parameter.id == "mode";
+                parameter.value = parameter.option_values.size() == parameter.options.size()
+                    && index >= 0
+                    && static_cast<size_t>(index) < parameter.option_values.size()
+                    ? parameter.option_values[static_cast<size_t>(index)]
+                    : static_cast<double>(index);
                 emit ParametersChanged();
                 if (rebuild_plane_form) {
                     QTimer::singleShot(0, this, [this]() {

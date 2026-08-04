@@ -179,7 +179,7 @@ private:
     void HandleThickSolidClick(const QPoint& point);
     void HandleTransformClick(const QPoint& point, bool add_to_selection);
     void HandleMovePointToPointClick(const QPoint& point);
-    void HandleTransformDrag(const QPoint& point);
+    void HandleTransformDrag(const QPoint& point, Qt::KeyboardModifiers modifiers);
     void CommitTransformDrag();
     TransformAxis HitTestTransformGizmo(const QPoint& point) const;
     bool HitTestSelectedPolylineHandle(const QPoint& point, size_t* point_index = nullptr) const;
@@ -195,6 +195,8 @@ private:
     void DrawSelectedCurvePointHandles();
     void DrawEditPointSelectionRect();
     void DrawSelectRubberBandRect();
+    void DrawZoomRubberBandRect();
+    bool ApplyZoomRect();
     Vec3 AxisVector(TransformAxis axis) const;
     float DistanceToScreenSegment(DomPoint point, DomPoint start, DomPoint end) const;
     void DrawCoordinateAxisLabels();
@@ -244,6 +246,7 @@ private:
     bool curve_point_drag_has_plane_ = false;
     bool selecting_edit_points_ = false;
     bool selecting_with_rect_ = false;
+    bool zoom_rect_active_ = false;
     bool selection_confirmation_mode_ = false;
     bool picking_xy_point_ = false;
     enum class MovePointStage { SelectObjects, PickSource, PickTarget };
@@ -255,6 +258,8 @@ private:
     QPoint edit_point_selection_current_;
     QPoint rect_selection_start_;
     QPoint rect_selection_current_;
+    QPoint zoom_rect_start_;
+    QPoint zoom_rect_current_;
     bool highlighted_draft_face_gizmo_ = false;
     bool highlighted_polyline_handle_ = false;
     Vec3 face_extrude_center_{};
@@ -271,6 +276,7 @@ private:
     Vec3 transform_drag_center_{};
     Vec3 transform_drag_axis_{};
     Vec3 transform_drag_move_delta_{};
+    float transform_drag_rotation_input_angle_ = 0.0f;
     float transform_drag_rotation_angle_ = 0.0f;
     float transform_drag_scale_factor_ = 1.0f;
     bool has_boolean_body_ = false;
@@ -311,6 +317,9 @@ private:
         QRect rect;
         QString parameter_id;
         double value = 0.0;
+        bool is_label = false;
+        DomPoint line_start{};
+        DomPoint line_end{};
     };
     ActiveParametricObject solid_dimension_object_;
     std::vector<CDimens3D> solid_dimensions_;
