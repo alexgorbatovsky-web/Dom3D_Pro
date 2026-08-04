@@ -14,6 +14,7 @@ public:
 
     void Clear();
     void SetActiveObject(const ActiveParametricObject& active_object);
+    void UpdateParameterValue(const std::string& parameter_id, double value);
     void FocusParameter(const std::string& parameter_id);
     const ActiveParametricObject& ActiveObject() const;
 

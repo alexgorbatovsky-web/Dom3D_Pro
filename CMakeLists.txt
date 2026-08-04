@@ -74,6 +74,8 @@ set(DOM3D_SOURCES
     src/CGroup.cpp
     src/CAssembled.cpp
     src/CFacadeFurniture.cpp
+    src/CFurnitureAssemblies.cpp
+    src/CFurnitureDrawer.cpp
     src/CKitchenCabinet.cpp
     src/CAlfaDoc.cpp
     src/ExtrudeShapeBuilder.cpp
@@ -147,6 +149,8 @@ set(DOM3D_HEADERS
     src/CGroup.h
     src/CAssembled.h
     src/CFacadeFurniture.h
+    src/CFurnitureAssemblies.h
+    src/CFurnitureDrawer.h
     src/CKitchenCabinet.h
     src/Material.h
     src/MaterialLibrary.h

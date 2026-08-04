@@ -3842,15 +3842,39 @@ void CAlfaDoc::ClearSelection() {
     ClearPointSelection();
 }
 
-bool CAlfaDoc::SelectObjectById(unsigned long object_id) {
+bool CAlfaDoc::SelectObjectById(unsigned long object_id, SelectionAction action) {
     const size_t index = FindObjectIndexById(object_id);
     if (index >= objects_.size() || !objects_[index]) {
         return false;
     }
-    ClearSelection();
+
+    if (action == SelectionAction::Remove) {
+        const auto found = std::find(
+            selected_object_indices_.begin(), selected_object_indices_.end(), index);
+        if (found == selected_object_indices_.end()) {
+            return false;
+        }
+        selected_object_indices_.erase(found);
+        if (selected_object_indices_.empty()) {
+            ClearSelection();
+        } else {
+            selected_object_index_ = selected_object_indices_.back();
+            active_object_index_ = selected_object_index_;
+            has_selected_object_ = true;
+        }
+        return true;
+    }
+
+    if (action == SelectionAction::Replace) {
+        ClearSelection();
+    } else if (IsObjectSelected(index)) {
+        return true;
+    }
     selected_object_index_ = index;
-    selected_object_indices_ = {index};
+    active_object_index_ = index;
+    selected_object_indices_.push_back(index);
     has_selected_object_ = true;
+    ClearPointSelection();
     return true;
 }
 

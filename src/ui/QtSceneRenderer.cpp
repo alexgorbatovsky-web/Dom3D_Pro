@@ -482,7 +482,12 @@ void QtSceneRenderer::DrawTransformGizmo(const CAlfaDoc& document, const Camera&
         glEnd();
 
         glLineWidth(2.8f);
-        draw_center_ring(center, camera_right, camera_up, size * 0.14f, highlighted_axis == TransformAxis::ScreenPlane);
+        draw_center_ring(
+            center,
+            camera_right,
+            camera_up,
+            size * TransformGizmoGeometry::kMoveCenterRingRadiusScale,
+            highlighted_axis == TransformAxis::ScreenPlane);
     } else if (operation == TransformOperation::Scale) {
         draw_center_cube(center, size * 0.075f, highlighted_axis == TransformAxis::UniformScale);
     } else if (operation == TransformOperation::Rotate) {

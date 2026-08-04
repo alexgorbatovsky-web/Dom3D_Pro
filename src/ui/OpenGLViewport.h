@@ -81,6 +81,9 @@ public:
     void SetSolidDimensionEdit(
         const ActiveParametricObject& active_object,
         const QString& primary_parameter = {});
+    void SetSolidDimensionEdits(
+        const std::vector<ActiveParametricObject>& active_objects,
+        size_t primary_operation_index);
     void ClearSolidDimensionEdit();
     void BeginPickXYPoint();
     void BeginMovePointToPoint();
@@ -101,11 +104,13 @@ signals:
     void SolidBoxRectangleFinished(std::vector<ToolParameter> parameters);
     void SolidCylinderCircleFinished(std::vector<ToolParameter> parameters);
     void SketchFaceSelectionFinished(bool selected);
-    void SolidDimensionEditRequested(QString parameter_id, double current_value);
+    void SolidDimensionEditRequested(int operation_index, QString parameter_id, double current_value);
+    void SolidDimensionGripChanged(int operation_index, QString parameter_id, double value, bool finished);
     void EdgeQuickMenuRequested(QPoint global_position);
     void FaceQuickMenuRequested(QPoint global_position);
     void ObjectQuickMenuRequested(QPoint global_position);
     void ObjectDoubleClicked();
+    void FurnitureInteractionRequested(unsigned long object_id);
     void FilesDropped(const QStringList& paths);
 
 protected:
@@ -318,13 +323,29 @@ private:
         QString parameter_id;
         double value = 0.0;
         bool is_label = false;
+        bool is_grip = false;
         DomPoint line_start{};
         DomPoint line_end{};
+        size_t source_index = 0;
     };
     ActiveParametricObject solid_dimension_object_;
+    std::vector<ActiveParametricObject> solid_dimension_objects_;
     std::vector<CDimens3D> solid_dimensions_;
     std::vector<SolidDimensionHit> solid_dimension_hits_;
     QString solid_dimension_primary_parameter_;
+    QString highlighted_solid_dimension_grip_;
+    int highlighted_solid_dimension_operation_index_ = -1;
+    QString active_solid_dimension_grip_;
+    int active_solid_dimension_operation_index_ = -1;
+    bool dragging_solid_dimension_grip_ = false;
+    QPoint solid_dimension_drag_start_mouse_;
+    double solid_dimension_drag_start_value_ = 0.0;
+    double solid_dimension_drag_minimum_ = 0.0;
+    double solid_dimension_drag_maximum_ = 0.0;
+    double solid_dimension_drag_step_ = 0.1;
+    QPointF solid_dimension_drag_screen_direction_;
+    double solid_dimension_drag_screen_length_ = 1.0;
+    double solid_dimension_drag_current_value_ = 0.0;
     QPoint edge_quick_menu_anchor_;
     unsigned int edge_quick_menu_generation_ = 0;
     Material material_drag_preview_;

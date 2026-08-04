@@ -88,6 +88,7 @@
 #include <QWidgetAction>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <fstream>
 #include <functional>
@@ -1352,7 +1353,8 @@ SolidOperationsDialogResult ShowSolidOperationsDialog(QWidget* parent,
                                                        CAlfaDoc& document,
                                                        size_t object_index,
                                                        const ToolRegistry& registry,
-                                                       const std::function<void()>& name_changed) {
+                                                       const std::function<void()>& name_changed,
+                                                       const std::function<void(int, bool)>& dimensions_changed) {
     const auto current_solid = [&document, object_index]() -> CSolid* {
         if (object_index >= document.GetObjects().size()) {
             return nullptr;
@@ -1412,6 +1414,11 @@ SolidOperationsDialogResult ShowSolidOperationsDialog(QWidget* parent,
     }
     root_layout->addWidget(list, 1);
 
+    auto* all_dimensions = new QCheckBox("All Dimensions", &dialog);
+    all_dimensions->setToolTip(
+        "Show editable dimensions for every supported operation");
+    root_layout->addWidget(all_dimensions);
+
     auto* delete_button = new QPushButton("Delete", &dialog);
     root_layout->addWidget(delete_button);
 
@@ -1436,7 +1443,8 @@ SolidOperationsDialogResult ShowSolidOperationsDialog(QWidget* parent,
     };
     update_delete_state();
 
-    const auto update_operation_highlight = [current_solid, list, name_changed]() {
+    const auto update_operation_highlight = [current_solid, list, all_dimensions,
+                                             name_changed, dimensions_changed]() {
         CSolid* edited_solid = current_solid();
         const QListWidgetItem* item = list->currentItem();
         const ParametricFunction* operation =
@@ -1450,12 +1458,21 @@ SolidOperationsDialogResult ShowSolidOperationsDialog(QWidget* parent,
         if (name_changed) {
             name_changed();
         }
+        if (dimensions_changed && item) {
+            dimensions_changed(
+                item->data(Qt::UserRole).toInt(),
+                all_dimensions->isChecked());
+        }
     };
     QObject::connect(list, &QListWidget::currentItemChanged, &dialog, [update_delete_state, update_operation_highlight](QListWidgetItem*, QListWidgetItem*) {
         update_delete_state();
         update_operation_highlight();
     });
     update_operation_highlight();
+    QObject::connect(all_dimensions, &QCheckBox::toggled, &dialog,
+                     [update_operation_highlight](bool) {
+        update_operation_highlight();
+    });
     QObject::connect(ok_button, &QPushButton::clicked, &dialog, [&dialog, list, name_edit, &result]() {
         result.action = SolidOperationsDialogAction::Accept;
         result.object_name = name_edit->text().trimmed().toStdString();
@@ -1549,6 +1566,11 @@ MainWindow::MainWindow(QWidget* parent)
     sketch_dock_->hide();
     RestoreUserInterfaceSettings();
     statusBar()->showMessage("Ready");
+
+    furniture_animation_timer_ = new QTimer(this);
+    furniture_animation_timer_->setInterval(30);
+    connect(furniture_animation_timer_, &QTimer::timeout,
+            this, &MainWindow::AdvanceFurnitureAnimation);
 
     connect(viewport_, &OpenGLViewport::DocumentChanged, this, [this]() {
         bool selected_sketch_found = false;
@@ -1665,12 +1687,25 @@ MainWindow::MainWindow(QWidget* parent)
     connect(viewport_, &OpenGLViewport::ObjectDoubleClicked, this, [this]() {
         EditSelectedParametricObject();
     });
+    connect(viewport_, &OpenGLViewport::FurnitureInteractionRequested,
+            this, &MainWindow::StartFurnitureInteraction);
     connect(viewport_, &OpenGLViewport::SolidDimensionEditRequested,
             this,
-            [this](const QString& parameter_id, double current_value) {
+            [this](int operation_index, const QString& parameter_id, double current_value) {
+        ActiveParametricObject solid_dimension_object;
         ActiveParametricObject* dimension_object = nullptr;
         if (solid_body_edit_mode_) {
-            dimension_object = &solid_body_dimension_object_;
+            if (solid_body_edit_object_index_ < document_.GetObjects().size()) {
+                auto* solid = dynamic_cast<CSolid*>(
+                    document_.GetObjects()[solid_body_edit_object_index_].get());
+                if (solid && operation_index >= 0
+                    && operation_index < solid->GetNumOperations()) {
+                    solid_dimension_object = tool_registry_.ActiveObjectFromDocument(
+                        solid_body_edit_object_index_, *solid,
+                        static_cast<size_t>(operation_index), &document_);
+                    dimension_object = &solid_dimension_object;
+                }
+            }
         } else if (active_parametric_edit_existing_) {
             dimension_object = &active_parametric_object_;
         } else if (!active_parametric_object_.tool_id.empty()) {
@@ -1679,7 +1714,9 @@ MainWindow::MainWindow(QWidget* parent)
         if (!dimension_object
             || (dimension_object->tool_id != "SolidBox"
                 && dimension_object->tool_id != "SolidCylinder"
-                && dimension_object->tool_id != "SolidPrismTool")) {
+                && dimension_object->tool_id != "SolidPrismTool"
+                && dimension_object->tool_id != "fillet_edge"
+                && dimension_object->tool_id != "fillet_all_edges")) {
             return;
         }
         const auto parameter = std::find_if(
@@ -1719,15 +1756,26 @@ MainWindow::MainWindow(QWidget* parent)
         if (!solid_body_edit_mode_) {
             property_panel_->SetActiveObject(*dimension_object);
         }
-        tool_registry_.Rebuild(*dimension_object, document_);
-        viewport_->SetSolidDimensionEdit(
-            *dimension_object,
-            !active_parametric_edit_existing_
-                    && (dimension_object->tool_id == "SolidBox"
-                        || dimension_object->tool_id == "SolidCylinder")
-                ? QString::fromLatin1(
-                    dimension_object->tool_id == "SolidBox" ? "depth" : "height")
-                : QString());
+        if ((dimension_object->tool_id == "fillet_edge"
+             || dimension_object->tool_id == "fillet_all_edges")
+            && !active_parametric_edit_existing_
+            && document_.HasLiveFillet()) {
+            document_.UpdateLiveFillet(parameter->value);
+        } else {
+            tool_registry_.Rebuild(*dimension_object, document_);
+        }
+        if (solid_body_edit_mode_) {
+            UpdateSolidBodyDimensions();
+        } else {
+            viewport_->SetSolidDimensionEdit(
+                *dimension_object,
+                !active_parametric_edit_existing_
+                        && (dimension_object->tool_id == "SolidBox"
+                            || dimension_object->tool_id == "SolidCylinder")
+                    ? QString::fromLatin1(
+                        dimension_object->tool_id == "SolidBox" ? "depth" : "height")
+                    : QString());
+        }
         RefreshSceneTree();
         viewport_->update();
         statusBar()->showMessage(
@@ -1736,8 +1784,93 @@ MainWindow::MainWindow(QWidget* parent)
                     tool_registry_.LabelFor(dimension_object->tool_id)))
                 .arg(QString::fromStdString(parameter->label))
                 .arg(display_value, 0, 'f', 3)
-                .arg(DisplayLengthUnitSuffix(unit)),
-            1400);
+                 .arg(DisplayLengthUnitSuffix(unit)),
+             1400);
+    });
+    connect(viewport_, &OpenGLViewport::SolidDimensionGripChanged,
+            this,
+            [this](int operation_index, const QString& parameter_id,
+                   double requested_value, bool finished) {
+        const auto supports_dimension_grips = [](const std::string& tool_id) {
+            return tool_id == "SolidBox"
+                || tool_id == "SolidCylinder"
+                || tool_id == "SolidPrismTool"
+                || tool_id == "fillet_edge"
+                || tool_id == "fillet_all_edges";
+        };
+        ActiveParametricObject solid_dimension_object;
+        ActiveParametricObject* dimension_object = nullptr;
+        if (solid_body_edit_mode_
+            && solid_body_edit_object_index_ < document_.GetObjects().size()) {
+            auto* solid = dynamic_cast<CSolid*>(
+                document_.GetObjects()[solid_body_edit_object_index_].get());
+            if (solid && operation_index >= 0
+                && operation_index < solid->GetNumOperations()) {
+                solid_dimension_object = tool_registry_.ActiveObjectFromDocument(
+                    solid_body_edit_object_index_, *solid,
+                    static_cast<size_t>(operation_index), &document_);
+                if (supports_dimension_grips(solid_dimension_object.tool_id)) {
+                    dimension_object = &solid_dimension_object;
+                }
+            }
+        } else if (supports_dimension_grips(active_parametric_object_.tool_id)) {
+            dimension_object = &active_parametric_object_;
+        }
+        if (!dimension_object) {
+            return;
+        }
+
+        const auto parameter = std::find_if(
+            dimension_object->parameters.begin(),
+            dimension_object->parameters.end(),
+            [&parameter_id](const ToolParameter& candidate) {
+                return QString::fromStdString(candidate.id) == parameter_id;
+            });
+        if (parameter == dimension_object->parameters.end()) {
+            return;
+        }
+
+        double value = std::clamp(
+            requested_value, parameter->minimum, parameter->maximum);
+        if (parameter->id == "depth" && std::abs(value) < 0.01) {
+            value = value < 0.0 ? -0.01 : 0.01;
+        }
+        const bool changed = std::abs(parameter->value - value) > 1.0e-8;
+        if (changed) {
+            parameter->value = value;
+            if (solid_body_edit_mode_) {
+                solid_body_dimensions_modified_ = true;
+            } else if (dimension_object == &active_parametric_object_) {
+                property_panel_->UpdateParameterValue(parameter->id, value);
+            }
+            if ((dimension_object->tool_id == "fillet_edge"
+                 || dimension_object->tool_id == "fillet_all_edges")
+                && !active_parametric_edit_existing_
+                && document_.HasLiveFillet()) {
+                document_.UpdateLiveFillet(value);
+            } else {
+                tool_registry_.Rebuild(*dimension_object, document_);
+            }
+        }
+
+        if (solid_body_edit_mode_) {
+            UpdateSolidBodyDimensions();
+        } else {
+            viewport_->SetSolidDimensionEdit(*dimension_object, parameter_id);
+        }
+        if (finished) {
+            RefreshSceneTree();
+            const DisplayLengthUnit unit = LoadDisplayLengthUnit();
+            statusBar()->showMessage(
+                QString("%1: %2 = %3%4")
+                    .arg(QString::fromStdString(
+                        tool_registry_.LabelFor(dimension_object->tool_id)))
+                    .arg(QString::fromStdString(parameter->label))
+                    .arg(MillimetersToDisplay(value, unit), 0, 'f', 3)
+                    .arg(DisplayLengthUnitSuffix(unit)),
+                1400);
+        }
+        viewport_->update();
     });
     connect(viewport_, &OpenGLViewport::EdgeQuickMenuRequested,
             this,
@@ -1921,6 +2054,11 @@ MainWindow::MainWindow(QWidget* parent)
                 || active_parametric_object_.tool_id == "fillet_all_edges"
                 || active_parametric_object_.tool_id == "ChamferSolid")) {
             tool_registry_.Rebuild(active_parametric_object_, document_);
+            if (active_parametric_object_.tool_id == "fillet_edge"
+                || active_parametric_object_.tool_id == "fillet_all_edges") {
+                viewport_->SetSolidDimensionEdit(
+                    active_parametric_object_, QStringLiteral("radius"));
+            }
             RefreshSceneTree();
             viewport_->update();
             const double value = active_parametric_object_.parameters.empty() ? 2.0 : active_parametric_object_.parameters[0].value;
@@ -1937,6 +2075,10 @@ MainWindow::MainWindow(QWidget* parent)
                 return;
             }
             const bool rebuilt = document_.UpdateLiveFillet(radius);
+            if (rebuilt) {
+                viewport_->SetSolidDimensionEdit(
+                    active_parametric_object_, QStringLiteral("radius"));
+            }
             RefreshSceneTree();
             viewport_->update();
             statusBar()->showMessage(rebuilt
@@ -2115,6 +2257,255 @@ MainWindow::MainWindow(QWidget* parent)
     QTimer::singleShot(0, this, [this]() {
         ShowGreetingDialog();
     });
+}
+
+void MainWindow::StartFurnitureInteraction(unsigned long object_id) {
+    if (!furniture_animation_timer_ || furniture_animation_timer_->isActive()) {
+        return;
+    }
+
+    const CAlfaObject* clicked_object = document_.FindObjectById(object_id);
+    if (!clicked_object) {
+        return;
+    }
+
+    size_t assembly_index = document_.GetObjects().size();
+    const CAssembled* assembly = nullptr;
+    for (size_t index = 0; index < document_.GetObjects().size(); ++index) {
+        const auto* candidate = dynamic_cast<const CAssembled*>(
+            document_.GetObjects()[index].get());
+        if (!candidate || !candidate->Contains(object_id)) {
+            continue;
+        }
+        const std::string& tool_id = candidate->GetParametricToolId();
+        if (tool_id == "cabinet" || tool_id == "desk"
+            || tool_id == "drawer_box") {
+            assembly_index = index;
+            assembly = candidate;
+            break;
+        }
+    }
+    if (!assembly) {
+        return;
+    }
+
+    furniture_animation_selection_ids_.clear();
+    for (size_t selected_index : document_.GetSelectedObjectIndices()) {
+        if (selected_index < document_.GetObjects().size()
+            && document_.GetObjects()[selected_index]) {
+            furniture_animation_selection_ids_.push_back(
+                document_.GetObjects()[selected_index]->m_id);
+        }
+    }
+
+    ActiveParametricObject animation = tool_registry_.ActiveObjectFromDocument(
+        assembly_index, *assembly, 0, &document_);
+    if (animation.tool_id.empty()) {
+        return;
+    }
+    const auto find_parameter = [&animation](const std::string& id) -> ToolParameter* {
+        const auto found = std::find_if(
+            animation.parameters.begin(), animation.parameters.end(),
+            [&id](const ToolParameter& parameter) { return parameter.id == id; });
+        return found == animation.parameters.end() ? nullptr : &*found;
+    };
+
+    furniture_animation_final_drawer_ = -1.0;
+    furniture_animation_saved_distance_ = 0.0;
+    furniture_animation_preview_value_ = 0.0;
+    furniture_animation_preview_ids_.clear();
+    if (animation.tool_id == "cabinet") {
+        const std::string& facade_name = clicked_object->GetName();
+        if (facade_name.find("Facade") == std::string::npos) {
+            return;
+        }
+        const ToolParameter* facade_type = find_parameter("facade_type");
+        const ToolParameter* body_type = find_parameter("body_type");
+        const bool independent_double_doors = facade_type && body_type
+            && static_cast<int>(std::lround(facade_type->value)) == 2
+            && static_cast<int>(std::lround(body_type->value)) != 1;
+        if (independent_double_doors) {
+            if (facade_name.find("Left Facade") != std::string::npos) {
+                furniture_animation_parameter_id_ = "left_door_open_angle";
+            } else if (facade_name.find("Right Facade") != std::string::npos) {
+                furniture_animation_parameter_id_ = "right_door_open_angle";
+            } else {
+                return;
+            }
+        } else {
+            furniture_animation_parameter_id_ = "door_open_angle";
+        }
+        ToolParameter* angle = find_parameter(furniture_animation_parameter_id_);
+        if (!angle) {
+            return;
+        }
+        furniture_animation_start_value_ = angle->value;
+        furniture_animation_end_value_ = angle->value > 1.0 ? 0.0 : 90.0;
+    } else {
+        const std::string& name = clicked_object->GetName();
+        const auto digit = std::find_if(name.begin(), name.end(), [](unsigned char ch) {
+            return std::isdigit(ch) != 0;
+        });
+        if (digit == name.end() || name.find("Handle") == std::string::npos) {
+            return;
+        }
+        int drawer = 0;
+        for (auto cursor = digit;
+             cursor != name.end() && std::isdigit(
+                 static_cast<unsigned char>(*cursor)) != 0;
+             ++cursor) {
+            drawer = drawer * 10 + (*cursor - '0');
+        }
+        drawer = std::max(1, drawer);
+        ToolParameter* open_drawer = find_parameter("open_drawer");
+        ToolParameter* distance = find_parameter("pullout_distance");
+        if (!open_drawer || !distance || drawer > static_cast<int>(open_drawer->maximum)) {
+            return;
+        }
+
+        const int current_open = static_cast<int>(std::lround(open_drawer->value));
+        furniture_animation_parameter_id_ = "pullout_distance";
+        furniture_animation_saved_distance_ = distance->value;
+        furniture_animation_start_value_ = current_open == drawer
+            ? distance->value : 0.0;
+        furniture_animation_end_value_ = current_open == drawer
+            ? 0.0 : distance->value;
+        furniture_animation_final_drawer_ = current_open == drawer
+            ? 0.0 : static_cast<double>(drawer);
+        open_drawer->value = static_cast<double>(drawer);
+
+        const std::string drawer_number = std::to_string(drawer);
+        const std::string drawer_prefix = "Drawer " + drawer_number + " ";
+        const std::string desk_drawer_prefix =
+            "Desk Drawer " + drawer_number + " ";
+        const std::string desk_facade = "Desk Drawer Facade " + drawer_number;
+        const std::string desk_handle = "Desk Drawer Handle " + drawer_number;
+        for (unsigned long child_id : assembly->GetElementIds()) {
+            const CAlfaObject* child = document_.FindObjectById(child_id);
+            if (!child) {
+                continue;
+            }
+            const std::string& child_name = child->GetName();
+            const bool desk_part = child_name == desk_facade
+                || child_name == desk_handle
+                || child_name.rfind(desk_drawer_prefix, 0) == 0;
+            const bool drawer_part = child_name.rfind(drawer_prefix, 0) == 0
+                && child_name.find(" Guide") == std::string::npos;
+            if (desk_part || drawer_part) {
+                furniture_animation_preview_ids_.push_back(child_id);
+            }
+        }
+        furniture_animation_preview_value_ = furniture_animation_start_value_;
+    }
+
+    furniture_animation_object_ = std::move(animation);
+    furniture_animation_frame_ = 0;
+    furniture_animation_timer_->start();
+    statusBar()->showMessage(
+        furniture_animation_object_.tool_id == "cabinet"
+            ? "Door animation"
+            : "Drawer animation");
+}
+
+void MainWindow::RestoreFurnitureAnimationSelection() {
+    document_.ClearSelection();
+    for (size_t index = 0;
+         index < furniture_animation_selection_ids_.size(); ++index) {
+        document_.SelectObjectById(
+            furniture_animation_selection_ids_[index],
+            index == 0 ? SelectionAction::Replace : SelectionAction::Add);
+    }
+}
+
+void MainWindow::AdvanceFurnitureAnimation() {
+    if (!furniture_animation_timer_
+        || furniture_animation_object_.tool_id.empty()
+        || furniture_animation_object_.object_index >= document_.GetObjects().size()
+        || !document_.GetObjects()[furniture_animation_object_.object_index]) {
+        if (furniture_animation_timer_) {
+            furniture_animation_timer_->stop();
+        }
+        furniture_animation_object_ = {};
+        return;
+    }
+
+    constexpr int frame_count = 20;
+    ++furniture_animation_frame_;
+    const double time = std::clamp(
+        static_cast<double>(furniture_animation_frame_) / frame_count,
+        0.0,
+        1.0);
+    const double eased = time * time * (3.0 - 2.0 * time);
+    const double value = furniture_animation_start_value_
+        + (furniture_animation_end_value_ - furniture_animation_start_value_) * eased;
+
+    auto find_parameter = [this](const std::string& id) -> ToolParameter* {
+        const auto found = std::find_if(
+            furniture_animation_object_.parameters.begin(),
+            furniture_animation_object_.parameters.end(),
+            [&id](const ToolParameter& parameter) { return parameter.id == id; });
+        return found == furniture_animation_object_.parameters.end()
+            ? nullptr : &*found;
+    };
+    ToolParameter* animated_parameter = find_parameter(
+        furniture_animation_parameter_id_);
+    if (!animated_parameter) {
+        furniture_animation_timer_->stop();
+        furniture_animation_object_ = {};
+        return;
+    }
+    animated_parameter->value = value;
+    if (furniture_animation_final_drawer_ >= 0.0
+        && !furniture_animation_preview_ids_.empty()) {
+        const float delta = static_cast<float>(
+            furniture_animation_preview_value_ - value);
+        for (unsigned long id : furniture_animation_preview_ids_) {
+            if (auto* solid = dynamic_cast<CSolid*>(document_.FindObjectById(id))) {
+                solid->PreviewTranslate({0.0f, delta, 0.0f});
+            }
+        }
+        furniture_animation_preview_value_ = value;
+    } else {
+        tool_registry_.Rebuild(furniture_animation_object_, document_);
+        RestoreFurnitureAnimationSelection();
+    }
+    viewport_->update();
+
+    if (furniture_animation_frame_ < frame_count) {
+        return;
+    }
+
+    if (furniture_animation_final_drawer_ >= 0.0) {
+        if (ToolParameter* open_drawer = find_parameter("open_drawer")) {
+            open_drawer->value = furniture_animation_final_drawer_;
+        }
+        if (ToolParameter* distance = find_parameter("pullout_distance")) {
+            distance->value = furniture_animation_saved_distance_;
+        }
+        tool_registry_.Rebuild(furniture_animation_object_, document_);
+        RestoreFurnitureAnimationSelection();
+    }
+    furniture_animation_timer_->stop();
+
+    if (active_parametric_object_.object_index
+            == furniture_animation_object_.object_index
+        && active_parametric_object_.tool_id
+            == furniture_animation_object_.tool_id) {
+        active_parametric_object_ = furniture_animation_object_;
+        property_panel_->SetActiveObject(active_parametric_object_);
+    }
+    RefreshSceneTree();
+    viewport_->update();
+    statusBar()->showMessage(
+        furniture_animation_object_.tool_id == "cabinet"
+            ? (furniture_animation_end_value_ > 0.0
+                ? "Door opened" : "Door closed")
+            : (furniture_animation_final_drawer_ > 0.0
+                ? "Drawer opened" : "Drawer closed"),
+        1400);
+    furniture_animation_object_ = {};
+    furniture_animation_preview_ids_.clear();
+    furniture_animation_selection_ids_.clear();
 }
 
 void MainWindow::CreateActions() {
@@ -5627,6 +6018,10 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
             statusBar()->showMessage("Fillet: операция не выполнена");
             return;
         }
+        if (document_.HasLiveFillet()) {
+            viewport_->SetSolidDimensionEdit(
+                active_parametric_object_, QStringLiteral("radius"));
+        }
         RefreshSceneTree();
         viewport_->update();
         statusBar()->showMessage(document_.HasLiveFillet()
@@ -5678,6 +6073,10 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
             || tool_id == "SolidBeamTool" || tool_id == "SolidBox" || tool_id == "SolidCylinder" || tool_id == "SolidSphereTool"
             || tool_id == "SolidTorusTool" || tool_id == "SolidPrismTool") {
             document_.ClearSelection();
+        }
+        if (tool_id == "SolidPrismTool") {
+            viewport_->SetSolidDimensionEdit(
+                active_parametric_object_, QStringLiteral("height"));
         }
     } else {
         ClearActiveProperties();
@@ -5987,6 +6386,53 @@ void MainWindow::ShowClassifyFaceCutTool() {
     statusBar()->showMessage("Classify Face Cut: выбери Plface и нажми Use Selected Plface", 1900);
 }
 
+void MainWindow::UpdateSolidBodyDimensions() {
+    if (!solid_body_edit_mode_
+        || solid_body_edit_object_index_ >= document_.GetObjects().size()) {
+        viewport_->ClearSolidDimensionEdit();
+        return;
+    }
+    auto* solid = dynamic_cast<CSolid*>(
+        document_.GetObjects()[solid_body_edit_object_index_].get());
+    if (!solid) {
+        viewport_->ClearSolidDimensionEdit();
+        return;
+    }
+
+    const auto supports_dimensions = [](const std::string& tool_id) {
+        return tool_id == "SolidBox"
+            || tool_id == "SolidCylinder"
+            || tool_id == "SolidPrismTool"
+            || tool_id == "fillet_edge"
+            || tool_id == "fillet_all_edges";
+    };
+    std::vector<ActiveParametricObject> dimension_objects;
+    for (int operation_index = 0;
+         operation_index < solid->GetNumOperations();
+         ++operation_index) {
+        if (!solid_body_all_dimensions_
+            && operation_index != solid_body_selected_operation_index_) {
+            continue;
+        }
+        ActiveParametricObject active_object =
+            tool_registry_.ActiveObjectFromDocument(
+                solid_body_edit_object_index_,
+                *solid,
+                static_cast<size_t>(operation_index),
+                &document_);
+        if (supports_dimensions(active_object.tool_id)) {
+            dimension_objects.push_back(std::move(active_object));
+        }
+    }
+    if (dimension_objects.empty()) {
+        viewport_->ClearSolidDimensionEdit();
+        return;
+    }
+    viewport_->SetSolidDimensionEdits(
+        dimension_objects,
+        static_cast<size_t>(solid_body_selected_operation_index_));
+}
+
 void MainWindow::EditSelectedParametricObject() {
     CAlfaObject* object = document_.GetSelectedObject();
     if (!object || !object->IsParametric()) {
@@ -6030,14 +6476,31 @@ void MainWindow::EditSelectedParametricObject() {
             const ActiveParametricObject initial_body_dimension_object =
                 tool_registry_.ActiveObjectFromDocument(
                     edited_object_index, *solid, 0, &document_);
+            std::vector<ActiveParametricObject> initial_dimension_objects;
+            for (int index = 0; index < solid->GetNumOperations(); ++index) {
+                ActiveParametricObject initial_object =
+                    tool_registry_.ActiveObjectFromDocument(
+                        edited_object_index, *solid,
+                        static_cast<size_t>(index), &document_);
+                if (initial_object.tool_id == "SolidBox"
+                    || initial_object.tool_id == "SolidCylinder"
+                    || initial_object.tool_id == "SolidPrismTool"
+                    || initial_object.tool_id == "fillet_edge"
+                    || initial_object.tool_id == "fillet_all_edges") {
+                    initial_dimension_objects.push_back(std::move(initial_object));
+                }
+            }
             solid_body_dimension_object_ = initial_body_dimension_object;
+            solid_body_edit_object_index_ = edited_object_index;
+            solid_body_selected_operation_index_ = 0;
+            solid_body_all_dimensions_ = false;
             solid_body_edit_mode_ =
                 solid_body_dimension_object_.tool_id == "SolidBox"
                 || solid_body_dimension_object_.tool_id == "SolidCylinder"
                 || solid_body_dimension_object_.tool_id == "SolidPrismTool";
             solid_body_dimensions_modified_ = false;
             if (solid_body_edit_mode_) {
-                viewport_->SetSolidDimensionEdit(solid_body_dimension_object_);
+                UpdateSolidBodyDimensions();
                 statusBar()->showMessage(
                     "Body edit: click a dimension label to change the size");
             }
@@ -6051,12 +6514,20 @@ void MainWindow::EditSelectedParametricObject() {
                 [this]() {
                     RefreshSceneTree();
                     viewport_->update();
+                },
+                [this](int selected_operation_index, bool all_dimensions) {
+                    solid_body_selected_operation_index_ = selected_operation_index;
+                    solid_body_all_dimensions_ = all_dimensions;
+                    UpdateSolidBodyDimensions();
                 });
             const bool body_dimensions_were_active = solid_body_edit_mode_;
             const bool body_dimensions_were_modified = solid_body_dimensions_modified_;
             solid_body_edit_mode_ = false;
             solid_body_dimensions_modified_ = false;
             solid_body_dimension_object_ = {};
+            solid_body_edit_object_index_ = static_cast<size_t>(-1);
+            solid_body_selected_operation_index_ = 0;
+            solid_body_all_dimensions_ = false;
             viewport_->ClearSolidDimensionEdit();
             object = edited_object_index < document_.GetObjects().size()
                 ? document_.GetObjects()[edited_object_index].get()
@@ -6067,20 +6538,27 @@ void MainWindow::EditSelectedParametricObject() {
             if (!solid) {
                 return;
             }
+            const auto finish_solid_edit = [this]() {
+                document_.ClearSelection();
+                viewport_->ClearSolidDimensionEdit();
+                RefreshSceneTree();
+                viewport_->update();
+            };
             if (operation_action.action == SolidOperationsDialogAction::None) {
                 if (body_dimensions_were_active && body_dimensions_were_modified) {
-                    tool_registry_.Rebuild(initial_body_dimension_object, document_);
-                    RefreshSceneTree();
-                    viewport_->update();
+                    for (const ActiveParametricObject& initial_object
+                         : initial_dimension_objects) {
+                        tool_registry_.Rebuild(initial_object, document_);
+                    }
                 }
+                finish_solid_edit();
                 return;
             }
             if (!operation_action.object_name.empty()) {
                 solid->SetName(operation_action.object_name);
             }
             if (operation_action.action == SolidOperationsDialogAction::Accept) {
-                RefreshSceneTree();
-                viewport_->update();
+                finish_solid_edit();
                 statusBar()->showMessage("Solid changes accepted", 1200);
                 return;
             }
@@ -6091,8 +6569,7 @@ void MainWindow::EditSelectedParametricObject() {
                     statusBar()->showMessage("Operation delete failed", 1400);
                     return;
                 }
-                RefreshSceneTree();
-                viewport_->update();
+                finish_solid_edit();
                 statusBar()->showMessage("Operation deleted", 1200);
                 return;
             }
@@ -6148,6 +6625,8 @@ bool MainWindow::TryStartLiveEdgeToolFromSelection() {
             statusBar()->showMessage("Fillet: операция не выполнена");
             return false;
         }
+        viewport_->SetSolidDimensionEdit(
+            active_parametric_object_, QStringLiteral("radius"));
         RefreshSceneTree();
         viewport_->update();
         statusBar()->showMessage("Fillet: меняй Radius, OK оставит результат");
@@ -6506,7 +6985,9 @@ void MainWindow::AcceptActiveProperties() {
 
     active_parametric_object_ = {};
     active_parametric_edit_existing_ = false;
+    document_.ClearSelection();
     viewport_->ClearSolidDimensionEdit();
+    RefreshSceneTree();
     if (properties_dock_) {
         properties_dock_->hide();
     }

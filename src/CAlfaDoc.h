@@ -189,7 +189,8 @@ public:
                                    size_t& object_index,
                                    size_t& point_index) const;
     void ClearSelection();
-    bool SelectObjectById(unsigned long object_id);
+    bool SelectObjectById(unsigned long object_id,
+                          SelectionAction action = SelectionAction::Replace);
     void ClearPointSelection();
     bool HasSelection() const;
     bool ExpandSelectedGroups();

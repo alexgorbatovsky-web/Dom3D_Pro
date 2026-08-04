@@ -3,6 +3,7 @@
 
 #include "../CMesh3D.h"
 #include "../CAssembled.h"
+#include "../CFurnitureAssemblies.h"
 #include "../CKitchenCabinet.h"
 #include "../FurnitureMaterialFactory.h"
 #include "../solid/AssociativeClone.h"
@@ -2010,24 +2011,6 @@ std::unique_ptr<CMesh3D> make_box(const std::string& name, float width, float he
     return mesh;
 }
 
-TopoDS_Shape furniture_box(double x, double y, double z,
-                                 double width, double depth, double height) {
-    BRepPrimAPI_MakeBox builder(gp_Pnt(x, y, z), width, depth, height);
-    builder.Build();
-    return builder.IsDone() ? builder.Shape() : TopoDS_Shape();
-}
-
-std::unique_ptr<CSolid> make_furniture_solid(
-    const std::string& name, TopoDS_Shape shape, Color color) {
-    if (shape.IsNull()) {
-        return nullptr;
-    }
-    auto solid = std::make_unique<CSolid>(shape);
-    solid->SetName(name);
-    solid->SetColor(color);
-    return solid->ReBuldMesh() ? std::move(solid) : nullptr;
-}
-
 void copy_solid_surface_appearance(const CAlfaObject& source, CAlfaObject& target) {
     const auto* source_solid = dynamic_cast<const CSolid*>(&source);
     auto* target_solid = dynamic_cast<CSolid*>(&target);
@@ -2096,6 +2079,10 @@ KitchenCabinetDefinition kitchen_cabinet_definition(
         static_cast<int>(param(parameters, "shelf_count", 2.0)), 0, 100);
     definition.door_open_angle = std::clamp(
         param(parameters, "door_open_angle", 0.0), 0.0, 180.0);
+    definition.left_door_open_angle = std::clamp(
+        param(parameters, "left_door_open_angle", 0.0), 0.0, 180.0);
+    definition.right_door_open_angle = std::clamp(
+        param(parameters, "right_door_open_angle", 0.0), 0.0, 180.0);
     definition.door_hinge_side = std::clamp(
         static_cast<int>(param(parameters, "door_hinge_side", 0.0)), 0, 1);
     definition.width = std::max(1.0, param(parameters, "width", 600.0));
@@ -2222,22 +2209,15 @@ void rebuild_kitchen_cabinet(CAlfaDoc& document,
     document.SelectObjectById(cabinet_id);
 }
 
-struct DeskDefinition {
-    int type = 0; // 0 - open, 1 - drawers left, 2 - drawers right
-    int drawer_count = 3;
-    double width = 1100.0;
-    double depth = 500.0;
-    double height = 700.0;
-    double panel_thickness = 18.0;
-    double back_panel_height = 300.0;
-    double drawer_width = 350.0;
-};
-
 DeskDefinition desk_definition(const std::vector<ToolParameter>& parameters) {
     DeskDefinition result;
     result.type = std::clamp(static_cast<int>(param(parameters, "desk_type", 0.0)), 0, 2);
     result.drawer_count = std::clamp(
         static_cast<int>(param(parameters, "drawer_count", 3.0)), 1, 8);
+    result.open_drawer = std::clamp(
+        static_cast<int>(param(parameters, "open_drawer", 0.0)),
+        0,
+        result.drawer_count);
     result.width = std::max(300.0, param(parameters, "width", 1100.0));
     result.depth = std::max(200.0, param(parameters, "depth", 500.0));
     result.height = std::max(300.0, param(parameters, "height", 700.0));
@@ -2252,90 +2232,16 @@ DeskDefinition desk_definition(const std::vector<ToolParameter>& parameters) {
         param(parameters, "drawer_width", 350.0),
         result.panel_thickness * 4.0,
         result.width * 0.6);
+    result.pullout_distance = std::clamp(
+        param(parameters, "pullout_distance", 300.0),
+        0.0,
+        result.depth * 0.9);
     return result;
-}
-
-std::vector<std::unique_ptr<CAlfaObject>> build_desk_parts(
-    const DeskDefinition& desk) {
-    const Color panel_color{0.58f, 0.32f, 0.15f};
-    const Color facade_color{0.66f, 0.37f, 0.17f};
-    const Color handle_color{0.22f, 0.22f, 0.20f};
-    const double thickness = desk.panel_thickness;
-    const double left = -desk.width * 0.5;
-    const double right = desk.width * 0.5;
-    const double front = -desk.depth * 0.5;
-    const double leg_height = desk.height - thickness;
-    std::vector<std::unique_ptr<CAlfaObject>> parts;
-    auto add = [&parts](const std::string& name, TopoDS_Shape shape, Color color) {
-        parts.push_back(make_furniture_solid(name, std::move(shape), color));
-    };
-
-    add("Desk Top",
-        furniture_box(left, front, leg_height,
-                            desk.width, desk.depth, thickness), panel_color);
-    add("Desk Left Side",
-        furniture_box(left, front, 0.0,
-                            thickness, desk.depth, leg_height), panel_color);
-    add("Desk Right Side",
-        furniture_box(right - thickness, front, 0.0,
-                            thickness, desk.depth, leg_height), panel_color);
-    add("Desk Back Panel",
-        furniture_box(left + thickness, front + desk.depth - thickness,
-                            leg_height - desk.back_panel_height,
-                            desk.width - 2.0 * thickness, thickness,
-                            desk.back_panel_height), panel_color);
-
-    if (desk.type != 0) {
-        const bool drawers_left = desk.type == 1;
-        const double pedestal_left = drawers_left
-            ? left + thickness
-            : right - thickness - desk.drawer_width;
-        const double partition_x = drawers_left
-            ? pedestal_left + desk.drawer_width - thickness
-            : pedestal_left;
-        add("Desk Drawer Partition",
-            furniture_box(partition_x, front, 0.0,
-                                thickness, desk.depth, leg_height), panel_color);
-        add("Desk Drawer Bottom",
-            furniture_box(pedestal_left, front, 0.0,
-                                desk.drawer_width, desk.depth, thickness), panel_color);
-
-        const double gap = 3.0;
-        const double facade_left = drawers_left
-            ? pedestal_left + gap
-            : pedestal_left + thickness + gap;
-        const double facade_width = std::max(
-            1.0, desk.drawer_width - thickness - 2.0 * gap);
-        const double facade_height = std::max(
-            1.0,
-            (leg_height - gap * static_cast<double>(desk.drawer_count + 1))
-                / static_cast<double>(desk.drawer_count));
-        for (int drawer = 0; drawer < desk.drawer_count; ++drawer) {
-            const double facade_z = gap
-                + static_cast<double>(drawer) * (facade_height + gap);
-            add("Desk Drawer Facade " + std::to_string(drawer + 1),
-                furniture_box(facade_left, front - thickness, facade_z,
-                                    facade_width, thickness, facade_height), facade_color);
-            const double handle_width = std::min(110.0, facade_width * 0.45);
-            add("Desk Drawer Handle " + std::to_string(drawer + 1),
-                furniture_box(
-                    facade_left + (facade_width - handle_width) * 0.5,
-                    front - thickness - 12.0,
-                    facade_z + facade_height * 0.62,
-                    handle_width, 12.0, 8.0), handle_color);
-        }
-    }
-
-    if (std::any_of(parts.begin(), parts.end(),
-                    [](const std::unique_ptr<CAlfaObject>& part) { return !part; })) {
-        return {};
-    }
-    return parts;
 }
 
 void create_desk(CAlfaDoc& document, const std::vector<ToolParameter>& parameters) {
     FurnitureMaterialFactory::EnsureStandardMaterials(document);
-    auto parts = build_desk_parts(desk_definition(parameters));
+    auto parts = CDeskFurniture::BuildParts(desk_definition(parameters));
     if (parts.empty()) {
         return;
     }
@@ -2348,7 +2254,7 @@ void create_desk(CAlfaDoc& document, const std::vector<ToolParameter>& parameter
             ids.push_back(added->m_id);
         }
     }
-    document.AddObject(std::make_unique<CAssembled>("Desk", std::move(ids)));
+    document.AddObject(std::make_unique<CDeskFurniture>("Desk", std::move(ids)));
 }
 
 void rebuild_desk(CAlfaDoc& document,
@@ -2362,7 +2268,7 @@ void rebuild_desk(CAlfaDoc& document,
     if (!assembly) {
         return;
     }
-    auto replacements = build_desk_parts(desk_definition(parameters));
+    auto replacements = CDeskFurniture::BuildParts(desk_definition(parameters));
     if (replacements.empty()) {
         return;
     }
@@ -2410,24 +2316,6 @@ void rebuild_desk(CAlfaDoc& document,
     document.SelectObjectById(assembly_id);
 }
 
-struct DrawerBoxDefinition {
-    double width = 600.0;
-    double height = 800.0;
-    double depth = 500.0;
-    double panel_thickness = 18.0;
-    double drawer_side_thickness = 12.0;
-    double drawer_bottom_thickness = 6.0;
-    double slide_clearance = 13.0;
-    int facade_type = 0;
-    int handle_type = 0;
-    int drawer_count = 3;
-    std::vector<double> drawer_heights{200.0, 200.0, 400.0};
-    bool make_legs = true;
-    double leg_height = 100.0;
-    int open_drawer = 0;
-    double pullout_distance = 300.0;
-};
-
 DrawerBoxDefinition drawer_box_definition(
     const std::vector<ToolParameter>& parameters) {
     DrawerBoxDefinition result;
@@ -2465,167 +2353,11 @@ DrawerBoxDefinition drawer_box_definition(
     return result;
 }
 
-std::vector<std::unique_ptr<CAlfaObject>> build_drawer_box_parts(
-    const DrawerBoxDefinition& box) {
-    const Color carcass_color{0.58f, 0.32f, 0.15f};
-    const Color drawer_color{0.68f, 0.43f, 0.22f};
-    const Color facade_color{0.62f, 0.34f, 0.16f};
-    const Color rail_color{0.55f, 0.56f, 0.57f};
-    const Color handle_color{0.28f, 0.24f, 0.14f};
-    const double t = box.panel_thickness;
-    const double left = -box.width * 0.5;
-    const double front = -box.depth * 0.5;
-    const double base_z = box.make_legs ? box.leg_height : 0.0;
-    const double inner_width = std::max(1.0, box.width - 2.0 * t);
-    const double inner_height = std::max(1.0, box.height - 2.0 * t);
-    std::vector<std::unique_ptr<CAlfaObject>> parts;
-    auto add = [&parts](const std::string& name, TopoDS_Shape shape, Color color) {
-        parts.push_back(make_furniture_solid(name, std::move(shape), color));
-    };
-
-    add("Drawer Box Left Side",
-        furniture_box(left, front, base_z, t, box.depth, box.height), carcass_color);
-    add("Drawer Box Right Side",
-        furniture_box(left + box.width - t, front, base_z,
-                            t, box.depth, box.height), carcass_color);
-    add("Drawer Box Bottom",
-        furniture_box(left + t, front, base_z,
-                            inner_width, box.depth, t), carcass_color);
-    add("Drawer Box Top",
-        furniture_box(left + t, front, base_z + box.height - t,
-                            inner_width, box.depth, t), carcass_color);
-    add("Drawer Box Back",
-        furniture_box(left + t, front + box.depth - t, base_z + t,
-                            inner_width, t, inner_height), carcass_color);
-
-    if (box.make_legs) {
-        const double leg_size = std::min(45.0, t * 2.5);
-        const double leg_inset = 20.0;
-        const double leg_left = left + leg_inset;
-        const double leg_right = left + box.width - leg_inset - leg_size;
-        const double leg_front = front + leg_inset;
-        const double leg_back = front + box.depth - leg_inset - leg_size;
-        for (const auto& position : std::vector<std::pair<double, double>>{
-                 {leg_left, leg_front}, {leg_right, leg_front},
-                 {leg_right, leg_back}, {leg_left, leg_back}}) {
-            add("Drawer Box Leg",
-                furniture_box(position.first, position.second, 0.0,
-                                    leg_size, leg_size, box.leg_height), rail_color);
-        }
-    }
-
-    const double gap = 3.0;
-    const double available_facade_height = std::max(
-        1.0, box.height - gap * static_cast<double>(box.drawer_count + 1));
-    double requested_sum = 0.0;
-    for (double value : box.drawer_heights) {
-        requested_sum += value;
-    }
-    const double height_scale = requested_sum > 0.0
-        ? available_facade_height / requested_sum : 1.0;
-    const double drawer_depth = std::max(80.0, box.depth - t - 35.0);
-    const double drawer_outer_width = std::max(
-        80.0, inner_width - 2.0 * box.slide_clearance);
-    const double drawer_left = left + t + box.slide_clearance;
-    double facade_z = base_z + gap;
-    for (int drawer = 0; drawer < box.drawer_count; ++drawer) {
-        const double facade_height = box.drawer_heights[static_cast<size_t>(drawer)] * height_scale;
-        const double drawer_height = std::max(
-            45.0, std::min(facade_height - 28.0, facade_height * 0.72));
-        const double drawer_z = facade_z + 12.0;
-        const double extension = box.open_drawer == drawer + 1
-            ? -box.pullout_distance : 0.0;
-        const double drawer_front_y = front + 20.0 + extension;
-        const double side_t = box.drawer_side_thickness;
-        const double drawer_inner_width = std::max(1.0, drawer_outer_width - 2.0 * side_t);
-
-        add("Drawer " + std::to_string(drawer + 1) + " Left Side",
-            furniture_box(drawer_left, drawer_front_y, drawer_z,
-                                side_t, drawer_depth, drawer_height), drawer_color);
-        add("Drawer " + std::to_string(drawer + 1) + " Right Side",
-            furniture_box(drawer_left + drawer_outer_width - side_t,
-                                drawer_front_y, drawer_z,
-                                side_t, drawer_depth, drawer_height), drawer_color);
-        add("Drawer " + std::to_string(drawer + 1) + " Back",
-            furniture_box(drawer_left + side_t,
-                                drawer_front_y + drawer_depth - side_t, drawer_z,
-                                drawer_inner_width, side_t, drawer_height), drawer_color);
-        add("Drawer " + std::to_string(drawer + 1) + " Front Wall",
-            furniture_box(drawer_left + side_t, drawer_front_y, drawer_z,
-                                drawer_inner_width, side_t, drawer_height), drawer_color);
-        add("Drawer " + std::to_string(drawer + 1) + " Bottom",
-            furniture_box(drawer_left + side_t, drawer_front_y + side_t,
-                                drawer_z + 8.0,
-                                drawer_inner_width, drawer_depth - 2.0 * side_t,
-                                box.drawer_bottom_thickness), drawer_color);
-
-        const double rail_z = drawer_z + 18.0;
-        add("Drawer " + std::to_string(drawer + 1) + " Left Guide",
-            furniture_box(left + t, front + 22.0, rail_z,
-                                8.0, drawer_depth, 12.0), rail_color);
-        add("Drawer " + std::to_string(drawer + 1) + " Right Guide",
-            furniture_box(left + box.width - t - 8.0, front + 22.0, rail_z,
-                                8.0, drawer_depth, 12.0), rail_color);
-
-        const double facade_left = left + gap;
-        const double facade_width = box.width - 2.0 * gap;
-        if (box.facade_type == 0) {
-            add("Drawer " + std::to_string(drawer + 1) + " Facade",
-                furniture_box(facade_left, front - t + extension, facade_z,
-                                    facade_width, t, facade_height), facade_color);
-        } else {
-            const double frame_width = std::clamp(
-                std::min(facade_height, facade_width) * 0.12, 18.0, 55.0);
-            add("Drawer Facade Left Frame",
-                furniture_box(facade_left, front - t + extension, facade_z,
-                                    frame_width, t, facade_height), facade_color);
-            add("Drawer Facade Right Frame",
-                furniture_box(facade_left + facade_width - frame_width,
-                                    front - t + extension, facade_z,
-                                    frame_width, t, facade_height), facade_color);
-            add("Drawer Facade Bottom Frame",
-                furniture_box(facade_left + frame_width,
-                                    front - t + extension, facade_z,
-                                    facade_width - 2.0 * frame_width, t, frame_width), facade_color);
-            add("Drawer Facade Top Frame",
-                furniture_box(facade_left + frame_width,
-                                    front - t + extension,
-                                    facade_z + facade_height - frame_width,
-                                    facade_width - 2.0 * frame_width, t, frame_width), facade_color);
-            add("Drawer Facade Inset",
-                furniture_box(facade_left + frame_width,
-                                    front - t * 0.65 + extension,
-                                    facade_z + frame_width,
-                                    facade_width - 2.0 * frame_width,
-                                    t * 0.45,
-                                    facade_height - 2.0 * frame_width), facade_color);
-        }
-
-        if (box.handle_type != 3) {
-            const double handle_width = box.handle_type == 2
-                ? 24.0 : std::min(140.0, facade_width * 0.35);
-            const double handle_height = box.handle_type == 2 ? 24.0 : 10.0;
-            add("Drawer " + std::to_string(drawer + 1) + " Handle",
-                furniture_box(
-                    -handle_width * 0.5,
-                    front - t - 15.0 + extension,
-                    facade_z + facade_height * 0.58,
-                    handle_width, 15.0, handle_height), handle_color);
-        }
-        facade_z += facade_height + gap;
-    }
-
-    if (std::any_of(parts.begin(), parts.end(),
-                    [](const std::unique_ptr<CAlfaObject>& part) { return !part; })) {
-        return {};
-    }
-    return parts;
-}
-
 void create_drawer_box(CAlfaDoc& document,
                        const std::vector<ToolParameter>& parameters) {
     FurnitureMaterialFactory::EnsureStandardMaterials(document);
-    auto parts = build_drawer_box_parts(drawer_box_definition(parameters));
+    auto parts = CDrawerBoxFurniture::BuildParts(
+        drawer_box_definition(parameters));
     if (parts.empty()) {
         return;
     }
@@ -2638,7 +2370,8 @@ void create_drawer_box(CAlfaDoc& document,
             ids.push_back(added->m_id);
         }
     }
-    document.AddObject(std::make_unique<CAssembled>("Drawer Box", std::move(ids)));
+    document.AddObject(std::make_unique<CDrawerBoxFurniture>(
+        "Drawer Box", std::move(ids)));
 }
 
 void rebuild_drawer_box(CAlfaDoc& document,
@@ -2648,7 +2381,8 @@ void rebuild_drawer_box(CAlfaDoc& document,
     if (assembly_index >= objects.size()) return;
     auto* assembly = dynamic_cast<CAssembled*>(objects[assembly_index].get());
     if (!assembly) return;
-    auto replacements = build_drawer_box_parts(drawer_box_definition(parameters));
+    auto replacements = CDrawerBoxFurniture::BuildParts(
+        drawer_box_definition(parameters));
     if (replacements.empty()) return;
     assign_furniture_materials(document, replacements, parameters, "drawer_box");
     const unsigned long assembly_id = assembly->m_id;
@@ -3561,7 +3295,11 @@ ToolRegistry::ToolRegistry() {
             {"panel_thickness", "Panel Thickness", 18.0, 5.0, 100.0, 1.0,
                 ToolParameterType::Number, {}, ToolParameterUnit::Length},
             {"shelf_count", "Shelf Count", 2.0, 0.0, 20.0, 1.0},
-            {"door_open_angle", "Door Open Angle", 0.0, 0.0, 150.0, 5.0,
+            {"door_open_angle", "Single/Corner Door Angle", 0.0, 0.0, 150.0, 5.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Angle},
+            {"left_door_open_angle", "Left Door Angle", 0.0, 0.0, 150.0, 5.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Angle},
+            {"right_door_open_angle", "Right Door Angle", 0.0, 0.0, 150.0, 5.0,
                 ToolParameterType::Number, {}, ToolParameterUnit::Angle},
             {"door_hinge_side", "Door Hinge", 0.0, 0.0, 1.0, 1.0,
                 ToolParameterType::Combo, {"Left", "Right"}},
@@ -3640,6 +3378,12 @@ ToolRegistry::ToolRegistry() {
             {"drawer_width", "Drawer Unit Width", 350.0, 200.0, 900.0, 10.0,
                 ToolParameterType::Number, {}, ToolParameterUnit::Length},
             {"drawer_count", "Drawer Count", 3.0, 1.0, 8.0, 1.0},
+            {"open_drawer", "Open Drawer", 0.0, 0.0, 8.0, 1.0,
+                ToolParameterType::Combo,
+                {"Closed", "Drawer 1", "Drawer 2", "Drawer 3", "Drawer 4",
+                 "Drawer 5", "Drawer 6", "Drawer 7", "Drawer 8"}},
+            {"pullout_distance", "Pullout Distance", 300.0, 0.0, 800.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
             {"body_material_id", "Body Material", 0.0, 0.0, 4294967295.0, 1.0,
                 ToolParameterType::Material},
             {"facade_material_id", "Facade Material", 0.0, 0.0, 4294967295.0, 1.0,
@@ -4407,6 +4151,26 @@ ActiveParametricObject ToolRegistry::ActiveObjectFromDocument(
                         std::move(parameters)};
                 }
             }
+        }
+    }
+    if (tool_id == "cabinet") {
+        double legacy_angle = 0.0;
+        bool has_left_angle = false;
+        bool has_right_angle = false;
+        for (const ParametricParameterValue& parameter : saved_parameters) {
+            if (parameter.id == "door_open_angle") {
+                legacy_angle = parameter.value;
+            } else if (parameter.id == "left_door_open_angle") {
+                has_left_angle = true;
+            } else if (parameter.id == "right_door_open_angle") {
+                has_right_angle = true;
+            }
+        }
+        if (!has_left_angle) {
+            saved_parameters.push_back({"left_door_open_angle", legacy_angle});
+        }
+        if (!has_right_angle) {
+            saved_parameters.push_back({"right_door_open_angle", legacy_angle});
         }
     }
     const ToolDefinition* tool = Find(tool_id);

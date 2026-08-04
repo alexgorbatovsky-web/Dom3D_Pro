@@ -1669,6 +1669,44 @@ bool CSurfaceFace::GetCenterAndNormal(Vec3& center, Vec3& normal) const
 			                    static_cast<float>(direction.Z()) * sign});
 			return dot(normal, normal) > 0.000001f;
 		}
+
+		// Curved faces (especially fillet cylinders and tori) need a real
+		// surface normal. The old planar-mesh fallback deliberately rejects
+		// them, so evaluate the OpenCascade surface at the middle of its UV
+		// bounds instead.
+		Standard_Real u_min = 0.0;
+		Standard_Real u_max = 0.0;
+		Standard_Real v_min = 0.0;
+		Standard_Real v_max = 0.0;
+		BRepTools::UVBounds(face, u_min, u_max, v_min, v_max);
+		if (std::isfinite(u_min) && std::isfinite(u_max)
+			&& std::isfinite(v_min) && std::isfinite(v_max)
+			&& u_max > u_min && v_max > v_min) {
+			gp_Pnt point;
+			gp_Vec du;
+			gp_Vec dv;
+			surface.D1(
+				(u_min + u_max) * 0.5,
+				(v_min + v_max) * 0.5,
+				point,
+				du,
+				dv);
+			gp_Vec direction = du.Crossed(dv);
+			if (direction.SquareMagnitude() > 1.0e-18) {
+				direction.Normalize();
+				if (face.Orientation() == TopAbs_REVERSED)
+					direction.Reverse();
+				center = {
+					static_cast<float>(point.X()),
+					static_cast<float>(point.Y()),
+					static_cast<float>(point.Z())};
+				normal = {
+					static_cast<float>(direction.X()),
+					static_cast<float>(direction.Y()),
+					static_cast<float>(direction.Z())};
+				return true;
+			}
+		}
 	} catch (const Standard_Failure&) {
 	}
 

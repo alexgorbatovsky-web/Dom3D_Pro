@@ -1079,10 +1079,16 @@ void OpenGLViewport::SetSolidDimensionEdit(
     const bool supports_dimensions =
         active_object.tool_id == "SolidBox"
         || active_object.tool_id == "SolidCylinder"
-        || active_object.tool_id == "SolidPrismTool";
+        || active_object.tool_id == "SolidPrismTool"
+        || active_object.tool_id == "fillet_edge"
+        || active_object.tool_id == "fillet_all_edges";
     solid_dimension_object_ = supports_dimensions
         ? active_object
         : ActiveParametricObject{};
+    solid_dimension_objects_.clear();
+    if (supports_dimensions) {
+        solid_dimension_objects_.push_back(active_object);
+    }
     solid_dimensions_.clear();
     solid_dimension_hits_.clear();
     solid_dimension_primary_parameter_ = primary_parameter;
@@ -1132,6 +1138,9 @@ void OpenGLViewport::SetSolidDimensionEdit(
             parameter_id,
             label,
             value);
+        solid_dimensions_.back().SetActive(
+            QString::fromLatin1(parameter_id)
+            == solid_dimension_primary_parameter_);
     };
 
     if (solid_dimension_object_.tool_id == "SolidBox") {
@@ -1295,15 +1304,125 @@ void OpenGLViewport::SetSolidDimensionEdit(
             "height",
             "Height",
             height_value);
+    } else if (solid_dimension_object_.tool_id == "fillet_edge"
+               || solid_dimension_object_.tool_id == "fillet_all_edges") {
+        const double radius = parameter_value(
+            solid_dimension_object_.parameters, "radius", 2.0);
+        CSolid* solid = nullptr;
+        if (document_
+            && solid_dimension_object_.object_index
+                   < document_->GetObjects().size()) {
+            solid = dynamic_cast<CSolid*>(document_->GetObjects()[
+                solid_dimension_object_.object_index].get());
+        }
+        if (solid) {
+            std::vector<int> surface_indices;
+            if (document_->HasLiveFillet()) {
+                surface_indices = document_->GetLiveFilletCreatedSurfaceIndices();
+            } else if (const ParametricFunction* operation = solid->GetOperation(
+                           static_cast<int>(solid_dimension_object_.operation_index))) {
+                surface_indices = operation->CreatedSurfaceIndices;
+            }
+            if (surface_indices.empty()) {
+                surface_indices.reserve(static_cast<size_t>(solid->GetNumSurfaces()));
+                for (int i = 0; i < solid->GetNumSurfaces(); ++i) {
+                    surface_indices.push_back(i);
+                }
+            }
+
+            bool found = false;
+            double best_screen_length = -1.0;
+            CPoint3d best_start{};
+            CPoint3d best_end{};
+            for (int surface_index : surface_indices) {
+                Vec3 center{};
+                Vec3 normal{};
+                if (!solid->GetFaceCenterAndNormal(surface_index, center, normal)) {
+                    continue;
+                }
+                normal = normalize(normal);
+                const CPoint3d end(center.x, center.y, center.z);
+                const CPoint3d start(
+                    center.x - normal.x * radius,
+                    center.y - normal.y * radius,
+                    center.z - normal.z * radius);
+                DomPoint start_screen{};
+                DomPoint end_screen{};
+                double screen_length = 0.0;
+                if (renderer_.WorldToScreen(
+                        point_to_vec3(start), camera_, orthographic_projection_,
+                        width(), height(), start_screen)
+                    && renderer_.WorldToScreen(
+                        point_to_vec3(end), camera_, orthographic_projection_,
+                        width(), height(), end_screen)) {
+                    screen_length = std::hypot(
+                        static_cast<double>(end_screen.x - start_screen.x),
+                        static_cast<double>(end_screen.y - start_screen.y));
+                }
+                if (!found || screen_length > best_screen_length) {
+                    found = true;
+                    best_screen_length = screen_length;
+                    best_start = start;
+                    best_end = end;
+                }
+            }
+            if (found) {
+                solid_dimensions_.emplace_back(
+                    best_start,
+                    best_end,
+                    CPoint3d(0.0, 0.0, 1.0),
+                    0.0,
+                    "radius",
+                    "Radius",
+                    radius);
+                solid_dimensions_.back().SetActive(true);
+            }
+        }
     }
+    update();
+}
+
+void OpenGLViewport::SetSolidDimensionEdits(
+    const std::vector<ActiveParametricObject>& active_objects,
+    size_t primary_operation_index) {
+    std::vector<CDimens3D> combined_dimensions;
+    std::vector<ActiveParametricObject> combined_objects;
+
+    for (const ActiveParametricObject& active_object : active_objects) {
+        SetSolidDimensionEdit(active_object);
+        if (solid_dimensions_.empty()) {
+            continue;
+        }
+        const size_t source_index = combined_objects.size();
+        combined_objects.push_back(active_object);
+        for (CDimens3D dimension : solid_dimensions_) {
+            dimension.SetSourceIndex(source_index);
+            dimension.SetActive(active_object.operation_index == primary_operation_index);
+            combined_dimensions.push_back(std::move(dimension));
+        }
+    }
+
+    solid_dimension_objects_ = std::move(combined_objects);
+    solid_dimensions_ = std::move(combined_dimensions);
+    solid_dimension_object_ = solid_dimension_objects_.empty()
+        ? ActiveParametricObject{}
+        : solid_dimension_objects_.front();
+    solid_dimension_hits_.clear();
+    solid_dimension_primary_parameter_.clear();
     update();
 }
 
 void OpenGLViewport::ClearSolidDimensionEdit() {
     solid_dimension_object_ = {};
+    solid_dimension_objects_.clear();
     solid_dimensions_.clear();
     solid_dimension_hits_.clear();
     solid_dimension_primary_parameter_.clear();
+    highlighted_solid_dimension_grip_.clear();
+    highlighted_solid_dimension_operation_index_ = -1;
+    active_solid_dimension_grip_.clear();
+    active_solid_dimension_operation_index_ = -1;
+    dragging_solid_dimension_grip_ = false;
     update();
 }
 
@@ -1471,14 +1590,79 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
         return;
     }
 
-    if (tool_ == ToolMode::Select && !solid_dimension_object_.tool_id.empty()) {
+    if ((tool_ == ToolMode::Select || tool_ == ToolMode::Orbit)
+        && !solid_dimension_object_.tool_id.empty()) {
         const SolidDimensionHit* best_hit = nullptr;
         float best_distance = std::numeric_limits<float>::max();
+
+        // Grips are direct-manipulation handles and take precedence over
+        // dimension labels and lines when their screen areas overlap.
+        for (const SolidDimensionHit& dimension : solid_dimension_hits_) {
+            if (!dimension.is_grip || !dimension.rect.contains(event->pos())) {
+                continue;
+            }
+            const QPoint delta = event->pos() - dimension.rect.center();
+            const float distance = std::hypot(
+                static_cast<float>(delta.x()),
+                static_cast<float>(delta.y()));
+            if (distance < best_distance) {
+                best_distance = distance;
+                best_hit = &dimension;
+            }
+        }
+
+        if (best_hit && best_hit->is_grip) {
+            if (best_hit->source_index >= solid_dimension_objects_.size()) {
+                return;
+            }
+            const ActiveParametricObject& dimension_object =
+                solid_dimension_objects_[best_hit->source_index];
+            const auto parameter = std::find_if(
+                dimension_object.parameters.begin(),
+                dimension_object.parameters.end(),
+                [best_hit](const ToolParameter& candidate) {
+                    return QString::fromStdString(candidate.id)
+                        == best_hit->parameter_id;
+                });
+            const float line_dx = static_cast<float>(
+                best_hit->line_end.x - best_hit->line_start.x);
+            const float line_dy = static_cast<float>(
+                best_hit->line_end.y - best_hit->line_start.y);
+            const double line_length = std::hypot(line_dx, line_dy);
+            if (parameter != dimension_object.parameters.end()
+                && line_length > 0.5) {
+                dragging_solid_dimension_grip_ = true;
+                active_solid_dimension_grip_ = best_hit->parameter_id;
+                active_solid_dimension_operation_index_ =
+                    static_cast<int>(dimension_object.operation_index);
+                highlighted_solid_dimension_grip_ = best_hit->parameter_id;
+                highlighted_solid_dimension_operation_index_ =
+                    active_solid_dimension_operation_index_;
+                solid_dimension_drag_start_mouse_ = event->pos();
+                solid_dimension_drag_start_value_ = parameter->value;
+                solid_dimension_drag_current_value_ = parameter->value;
+                solid_dimension_drag_minimum_ = parameter->minimum;
+                solid_dimension_drag_maximum_ = parameter->maximum;
+                solid_dimension_drag_step_ = parameter->step;
+                solid_dimension_drag_screen_direction_ = QPointF(
+                    line_dx / line_length, line_dy / line_length);
+                // A tiny fillet radius can project to only a few pixels. Keep
+                // its real geometry, but give dragging a usable tablet/mouse
+                // sensitivity instead of dividing by that tiny length.
+                solid_dimension_drag_screen_length_ = std::max(line_length, 24.0);
+                setCursor(Qt::ClosedHandCursor);
+                event->accept();
+                return;
+            }
+        }
+
+        best_hit = nullptr;
+        best_distance = std::numeric_limits<float>::max();
 
         // Labels are the most explicit target. If several overlap, use the
         // one whose center is nearest to the click.
         for (const SolidDimensionHit& dimension : solid_dimension_hits_) {
-            if (!dimension.is_label
+            if (!dimension.is_label || dimension.is_grip
                 || !dimension.rect.adjusted(-4, -4, 4, 4).contains(event->pos())) {
                 continue;
             }
@@ -1497,7 +1681,7 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
             const DomPoint mouse{event->pos().x(), event->pos().y()};
             constexpr float kDimensionHitTolerance = 10.0f;
             for (const SolidDimensionHit& dimension : solid_dimension_hits_) {
-                if (dimension.is_label) {
+                if (dimension.is_label || dimension.is_grip) {
                     continue;
                 }
                 const float distance = DistanceToScreenSegment(
@@ -1510,7 +1694,12 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
         }
 
         if (best_hit) {
-            emit SolidDimensionEditRequested(best_hit->parameter_id, best_hit->value);
+            if (best_hit->source_index < solid_dimension_objects_.size()) {
+                emit SolidDimensionEditRequested(
+                    static_cast<int>(solid_dimension_objects_[best_hit->source_index].operation_index),
+                    best_hit->parameter_id,
+                    best_hit->value);
+            }
             event->accept();
             return;
         }
@@ -1575,6 +1764,26 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
         active_transform_axis_ = TransformAxis::None;
         highlighted_transform_axis_ = TransformAxis::None;
         return;
+    }
+
+    if (event->button() == Qt::LeftButton
+        && !event->modifiers().testFlag(Qt::ShiftModifier)
+        && !event->modifiers().testFlag(Qt::ControlModifier)
+        && (tool_ == ToolMode::Select || tool_ == ToolMode::Orbit)) {
+        if (CAlfaObject* object = FindObjectForMaterialAt(event->pos())) {
+            const std::string& name = object->GetName();
+            const bool furniture_handle =
+                name.find("Desk Drawer Handle") != std::string::npos
+                || (name.rfind("Drawer ", 0) == 0
+                    && name.find(" Handle") != std::string::npos);
+            const bool cabinet_facade = name.find("Cabinet") != std::string::npos
+                && name.find("Facade") != std::string::npos;
+            if (furniture_handle || cabinet_facade) {
+                emit FurnitureInteractionRequested(object->m_id);
+                event->accept();
+                return;
+            }
+        }
     }
 
     if (tool_ == ToolMode::DrawCurve) {
@@ -1787,6 +1996,64 @@ void OpenGLViewport::mouseDoubleClickEvent(QMouseEvent* event) {
 
 void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
     const QPoint delta = event->pos() - last_mouse_;
+
+    if (dragging_solid_dimension_grip_
+        && (tool_ == ToolMode::Select || tool_ == ToolMode::Orbit)
+        && !active_solid_dimension_grip_.isEmpty()) {
+        const QPointF mouse_delta = event->pos() - solid_dimension_drag_start_mouse_;
+        const double projected_pixels =
+            mouse_delta.x() * solid_dimension_drag_screen_direction_.x()
+            + mouse_delta.y() * solid_dimension_drag_screen_direction_.y();
+        double value = solid_dimension_drag_start_value_
+            * (1.0 + projected_pixels / solid_dimension_drag_screen_length_);
+        value = std::clamp(
+            value,
+            solid_dimension_drag_minimum_,
+            solid_dimension_drag_maximum_);
+
+        // SolidBox permits a signed extrusion height, but an exact zero has
+        // no valid solid. Keep a tiny continuous dead zone while allowing the
+        // user to drag through the base plane and reverse the direction.
+        if (active_solid_dimension_grip_ == QStringLiteral("depth")
+            && std::abs(value) < 0.01) {
+            value = value < 0.0 ? -0.01 : 0.01;
+        }
+        if (std::abs(value - solid_dimension_drag_current_value_) > 1.0e-6) {
+            solid_dimension_drag_current_value_ = value;
+            emit SolidDimensionGripChanged(
+                active_solid_dimension_operation_index_,
+                active_solid_dimension_grip_, value, false);
+        }
+        last_mouse_ = event->pos();
+        return;
+    }
+
+    if ((tool_ == ToolMode::Select || tool_ == ToolMode::Orbit)
+        && !solid_dimension_object_.tool_id.empty()) {
+        QString hovered_grip;
+        int hovered_operation_index = -1;
+        for (const SolidDimensionHit& dimension : solid_dimension_hits_) {
+            if (dimension.is_grip && dimension.rect.contains(event->pos())) {
+                hovered_grip = dimension.parameter_id;
+                if (dimension.source_index < solid_dimension_objects_.size()) {
+                    hovered_operation_index = static_cast<int>(
+                        solid_dimension_objects_[dimension.source_index].operation_index);
+                }
+                break;
+            }
+        }
+        if (hovered_grip != highlighted_solid_dimension_grip_
+            || hovered_operation_index != highlighted_solid_dimension_operation_index_) {
+            highlighted_solid_dimension_grip_ = hovered_grip;
+            highlighted_solid_dimension_operation_index_ = hovered_operation_index;
+            if (hovered_grip.isEmpty()) {
+                unsetCursor();
+            } else {
+                setCursor(Qt::OpenHandCursor);
+            }
+            update();
+        }
+    }
 
     if (dragging_sketch_handle_ && tool_ == ToolMode::Select && editing_sketch_ && document_) {
         CSmartLine* sketch = document_->GetSelectedSketch();
@@ -2117,6 +2384,25 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
 }
 
 void OpenGLViewport::mouseReleaseEvent(QMouseEvent* event) {
+    if (event->button() == Qt::LeftButton
+        && dragging_solid_dimension_grip_) {
+        dragging_solid_dimension_grip_ = false;
+        emit SolidDimensionGripChanged(
+            active_solid_dimension_operation_index_,
+            active_solid_dimension_grip_,
+            solid_dimension_drag_current_value_,
+            true);
+        active_solid_dimension_grip_.clear();
+        active_solid_dimension_operation_index_ = -1;
+        setCursor(highlighted_solid_dimension_grip_.isEmpty()
+            ? Qt::ArrowCursor
+            : Qt::OpenHandCursor);
+        emit DocumentChanged();
+        update();
+        event->accept();
+        return;
+    }
+
     if (event->button() == Qt::LeftButton
         && zoom_rect_active_
         && tool_ == ToolMode::ZoomRect) {
@@ -3224,7 +3510,14 @@ bool OpenGLViewport::HitTestDraftFaceGizmo(const QPoint& point) const {
 
 void OpenGLViewport::HandleTransformClick(const QPoint& point, bool add_to_selection) {
     if (document_->HasSelection()) {
-        const TransformAxis axis = HitTestTransformGizmo(point);
+        // Preserve the handle shown to the user.  In particular, once the
+        // central move ring is highlighted an overlapping axis must not take
+        // the press between the hover and mouse-down events.
+        const TransformAxis axis =
+            transform_operation_ == TransformOperation::Move
+                && highlighted_transform_axis_ == TransformAxis::ScreenPlane
+            ? TransformAxis::ScreenPlane
+            : HitTestTransformGizmo(point);
         if (axis != TransformAxis::None) {
             active_transform_axis_ = axis;
             highlighted_transform_axis_ = axis;
@@ -3481,7 +3774,8 @@ TransformAxis OpenGLViewport::HitTestTransformGizmo(const QPoint& point) const {
     }
 
     if (transform_operation_ == TransformOperation::Move) {
-        const float ring_radius = 0.14f * gizmo_size;
+        const float ring_radius =
+            TransformGizmoGeometry::kMoveCenterRingRadiusScale * gizmo_size;
         DomPoint ring_edge{};
         Vec3 forward{};
         Vec3 right{};
@@ -3494,7 +3788,10 @@ TransformAxis OpenGLViewport::HitTestTransformGizmo(const QPoint& point) const {
             const float mouse_dx = static_cast<float>(point.x() - center_screen.x);
             const float mouse_dy = static_cast<float>(point.y() - center_screen.y);
             const float mouse_radius_px = std::sqrt(mouse_dx * mouse_dx + mouse_dy * mouse_dy);
-            if (ring_radius_px > 1.0f && std::fabs(mouse_radius_px - ring_radius_px) <= 8.0f) {
+            // The white circle represents a free screen-plane move handle.
+            // Treat its complete interior as the handle so the three axes
+            // meeting at the center cannot steal the interaction.
+            if (ring_radius_px > 1.0f && mouse_radius_px <= ring_radius_px + 8.0f) {
                 return TransformAxis::ScreenPlane;
             }
         }
@@ -5404,6 +5701,8 @@ void OpenGLViewport::DrawSolidDimensions() {
 
     const GLboolean lighting_enabled = glIsEnabled(GL_LIGHTING);
     const GLboolean depth_test_enabled = glIsEnabled(GL_DEPTH_TEST);
+    GLint polygon_mode[2] = {GL_FILL, GL_FILL};
+    glGetIntegerv(GL_POLYGON_MODE, polygon_mode);
     glDisable(GL_LIGHTING);
     glDisable(GL_DEPTH_TEST);
     const auto vertex = [](const CPoint3d& point) {
@@ -5436,9 +5735,7 @@ void OpenGLViewport::DrawSolidDimensions() {
         if (!dimension.IsVisible()) {
             continue;
         }
-        const bool primary = !solid_dimension_primary_parameter_.isEmpty()
-            && QString::fromStdString(dimension.GetParameterId())
-                   == solid_dimension_primary_parameter_;
+        const bool primary = dimension.IsActive();
         if (primary) {
             glColor3f(0.05f, 0.62f, 1.0f);
             glLineWidth(2.5f);
@@ -5458,14 +5755,55 @@ void OpenGLViewport::DrawSolidDimensions() {
             subtract_point(geometry.dimension_end, geometry.dimension_start));
         const CPoint3d wing = normalized_point(
             subtract_point(geometry.dimension_start, geometry.source_start));
-        const double arrow_length = std::clamp(measured_length * 0.08, 0.6, 6.0);
-        const double arrow_width = arrow_length * 0.38;
+        // Keep arrowheads at a constant visual size, like Dom-3D's
+        // GetAbsoluteFromVisual(..., 15). Deriving world length from the
+        // projected dimension also works for both perspective and ortho views.
+        constexpr double kArrowLengthPixels = 15.0;
+        double arrow_length = std::clamp(measured_length * 0.08, 0.6, 6.0);
+        DomPoint arrow_start_screen{};
+        DomPoint arrow_end_screen{};
+        if (renderer_.WorldToScreen(
+                point_to_vec3(geometry.dimension_start),
+                camera_,
+                orthographic_projection_,
+                width(),
+                height(),
+                arrow_start_screen)
+            && renderer_.WorldToScreen(
+                point_to_vec3(geometry.dimension_end),
+                camera_,
+                orthographic_projection_,
+                width(),
+                height(),
+                arrow_end_screen)) {
+            const double projected_length = std::hypot(
+                static_cast<double>(arrow_end_screen.x - arrow_start_screen.x),
+                static_cast<double>(arrow_end_screen.y - arrow_start_screen.y));
+            if (projected_length > 0.5) {
+                arrow_length = measured_length
+                    * kArrowLengthPixels / projected_length;
+                // For a very short dimension turn the arrows outward, matching
+                // the legacy CDimens::DrawArrow behavior.
+                if (projected_length < kArrowLengthPixels * 2.0 + 3.0) {
+                    arrow_length = -arrow_length;
+                }
+            }
+        }
+        const double arrow_width = std::abs(arrow_length) * 0.30;
         const auto draw_arrow = [&](const CPoint3d& tip, const CPoint3d& inward) {
             const CPoint3d base = add_point(tip, scale_point(inward, arrow_length));
             line(tip, add_point(base, scale_point(wing, arrow_width)));
             line(tip, add_point(base, scale_point(wing, -arrow_width)));
         };
         draw_arrow(geometry.dimension_start, direction);
+        glEnd();
+
+        // The dimension end is the draggable handle. Draw its arrow directly
+        // in the same native OpenGL layer as the visible dimension geometry;
+        // QPainter filled primitives are not reliable on every GL driver.
+        glColor3f(1.0f, 0.05f, 0.02f);
+        glLineWidth(primary ? 4.0f : 3.0f);
+        glBegin(GL_LINES);
         draw_arrow(geometry.dimension_end, scale_point(direction, -1.0));
         glEnd();
     }
@@ -5476,6 +5814,12 @@ void OpenGLViewport::DrawSolidDimensions() {
     if (lighting_enabled) {
         glEnable(GL_LIGHTING);
     }
+
+    // The scene renderer can intentionally leave polygon mode at GL_LINE for
+    // edge display. QPainter's OpenGL backend inherits that state, which makes
+    // filled arrowheads and circular grips disappear. Screen-space overlays
+    // must always be painted with filled polygons.
+    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
@@ -5488,6 +5832,12 @@ void OpenGLViewport::DrawSolidDimensions() {
     const DisplayLengthUnit display_unit = LoadDisplayLengthUnit();
     const QString suffix = DisplayLengthUnitSuffix(display_unit);
     const QColor outline(4, 12, 22, 220);
+    struct DimensionGripDrawInfo {
+        QPointF position;
+        QString parameter_id;
+        int operation_index = -1;
+    };
+    std::vector<DimensionGripDrawInfo> dimension_grips;
     const auto project = [this](const CPoint3d& point, QPointF& result) {
         DomPoint screen{};
         if (!renderer_.WorldToScreen(
@@ -5507,9 +5857,7 @@ void OpenGLViewport::DrawSolidDimensions() {
         if (!dimension.IsVisible()) {
             continue;
         }
-        const bool primary = !solid_dimension_primary_parameter_.isEmpty()
-            && QString::fromStdString(dimension.GetParameterId())
-                   == solid_dimension_primary_parameter_;
+        const bool primary = dimension.IsActive();
         const QColor color = primary
             ? QColor(20, 145, 255)
             : QColor(225, 229, 233);
@@ -5534,7 +5882,7 @@ void OpenGLViewport::DrawSolidDimensions() {
 
         QPointF direction = dimension_end - dimension_start;
         const double screen_length = std::hypot(direction.x(), direction.y());
-        if (screen_length < 8.0) {
+        if (screen_length < 0.5) {
             continue;
         }
         direction /= screen_length;
@@ -5596,6 +5944,7 @@ void OpenGLViewport::DrawSolidDimensions() {
         painter.setPen(Qt::NoPen);
         painter.setBrush(color);
         painter.drawPolygon(first_arrow);
+        painter.setBrush(QColor(255, 45, 25));
         painter.drawPolygon(second_arrow);
 
         const QRect arrow_hit_rect = QRectF(dimension_start, dimension_end)
@@ -5607,10 +5956,38 @@ void OpenGLViewport::DrawSolidDimensions() {
              QString::fromStdString(dimension.GetParameterId()),
              dimension.GetValue(),
              false,
+             false,
              {qRound(dimension_start.x()), qRound(dimension_start.y())},
-             {qRound(dimension_end.x()), qRound(dimension_end.y())}});
+             {qRound(dimension_end.x()), qRound(dimension_end.y())},
+             dimension.GetSourceIndex()});
 
-        const QString text = QString("%1%2")
+        const bool supports_grips =
+            dimension.GetSourceIndex() < solid_dimension_objects_.size();
+        if (supports_grips) {
+            const QString parameter_id =
+                QString::fromStdString(dimension.GetParameterId());
+            const int operation_index = static_cast<int>(
+                solid_dimension_objects_[dimension.GetSourceIndex()].operation_index);
+            dimension_grips.push_back(
+                {dimension_end, parameter_id, operation_index});
+            const QRect grip_hit_rect = QRectF(
+                dimension_end - QPointF(22.0, 22.0),
+                QSizeF(44.0, 44.0)).toAlignedRect();
+            solid_dimension_hits_.push_back(
+                {grip_hit_rect,
+                 parameter_id,
+                 dimension.GetValue(),
+                 false,
+                 true,
+                 {qRound(dimension_start.x()), qRound(dimension_start.y())},
+                 {qRound(dimension_end.x()), qRound(dimension_end.y())},
+                 dimension.GetSourceIndex()});
+        }
+
+        const bool radial_dimension =
+            dimension.GetParameterId() == "radius";
+        const QString text = QString("%1%2%3")
+            .arg(radial_dimension ? QStringLiteral("R ") : QString())
             .arg(MillimetersToDisplay(dimension.GetValue(), display_unit), 0, 'f', 1)
             .arg(suffix);
         const QSize text_size = painter.fontMetrics().size(Qt::TextSingleLine, text);
@@ -5631,9 +6008,58 @@ void OpenGLViewport::DrawSolidDimensions() {
              QString::fromStdString(dimension.GetParameterId()),
              dimension.GetValue(),
              true,
+             false,
              {},
-             {}});
+             {},
+             dimension.GetSourceIndex()});
     }
+
+    // Grips are a foreground UI element. Draw them only after every dimension
+    // line, arrow and label so later dimensions cannot cover the handles.
+    for (const DimensionGripDrawInfo& grip : dimension_grips) {
+        const QPointF& position = grip.position;
+        const bool highlighted =
+            (grip.parameter_id == highlighted_solid_dimension_grip_
+             && grip.operation_index == highlighted_solid_dimension_operation_index_)
+            || (grip.parameter_id == active_solid_dimension_grip_
+                && grip.operation_index == active_solid_dimension_operation_index_);
+        const double radius = highlighted ? 18.0 : 15.0;
+
+        painter.save();
+        painter.setOpacity(1.0);
+        painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
+        painter.setPen(Qt::NoPen);
+
+        // Use opaque concentric fills instead of a QRadialGradient. Some
+        // OpenGL paint engines displayed only the gradient's tiny highlight.
+        painter.setBrush(QColor(0, 0, 0));
+        painter.drawEllipse(position, radius + 3.0, radius + 3.0);
+        painter.setBrush(QColor(245, 250, 255));
+        painter.drawEllipse(position, radius + 1.0, radius + 1.0);
+        painter.setBrush(highlighted
+                             ? QColor(0, 190, 255)
+                             : QColor(0, 92, 255));
+        painter.drawEllipse(position, radius - 1.5, radius - 1.5);
+        painter.setBrush(QColor(0, 42, 185));
+        painter.drawEllipse(
+            position + QPointF(radius * 0.22, radius * 0.24),
+            radius * 0.58,
+            radius * 0.58);
+        painter.setBrush(QColor(225, 255, 255));
+        painter.drawEllipse(
+            position - QPointF(radius * 0.30, radius * 0.34),
+            radius * 0.24,
+            radius * 0.24);
+        painter.restore();
+    }
+    painter.end();
+
+    // Submit the QPainter/OpenGL overlay before restoring scene render state.
+    // This is the OpenGL equivalent of the legacy rsFlush() call.
+    glFlush();
+
+    glPolygonMode(GL_FRONT, polygon_mode[0]);
+    glPolygonMode(GL_BACK, polygon_mode[1]);
 }
 
 void OpenGLViewport::DrawCoordinateAxisLabels() {

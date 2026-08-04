@@ -830,6 +830,8 @@ bool Dom3DProjectSerializer::Save(const QString& path,
                     xml.writeAttribute("radius2Bulge", QString::number(definition.radius2_bulge, 'g', 17));
                     xml.writeAttribute("radiusSideStraight", QString::number(definition.radius_side_straight, 'g', 17));
                     xml.writeAttribute("doorOpenAngle", QString::number(definition.door_open_angle, 'g', 17));
+                    xml.writeAttribute("leftDoorOpenAngle", QString::number(definition.left_door_open_angle, 'g', 17));
+                    xml.writeAttribute("rightDoorOpenAngle", QString::number(definition.right_door_open_angle, 'g', 17));
                     xml.writeAttribute("doorHingeSide", QString::number(definition.door_hinge_side));
                 }
             }
@@ -1220,6 +1222,20 @@ bool Dom3DProjectSerializer::Load(const QString& path,
                     }
                     if (geometry.hasAttribute("doorOpenAngle")
                         && !read_double_attr(geometry, "doorOpenAngle", definition.door_open_angle, error)) {
+                        return false;
+                    }
+                    definition.left_door_open_angle = definition.door_open_angle;
+                    definition.right_door_open_angle = definition.door_open_angle;
+                    if (geometry.hasAttribute("leftDoorOpenAngle")
+                        && !read_double_attr(
+                            geometry, "leftDoorOpenAngle",
+                            definition.left_door_open_angle, error)) {
+                        return false;
+                    }
+                    if (geometry.hasAttribute("rightDoorOpenAngle")
+                        && !read_double_attr(
+                            geometry, "rightDoorOpenAngle",
+                            definition.right_door_open_angle, error)) {
                         return false;
                     }
                     bool hinge_ok = true;

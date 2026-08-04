@@ -35,6 +35,7 @@ class QMenu;
 class QPushButton;
 class QSlider;
 class QTabBar;
+class QTimer;
 class QTreeWidget;
 class QTreeWidgetItem;
 class QToolBar;
@@ -98,6 +99,7 @@ private:
     void ShowTrimMeshTestTool();
     void ShowClassifyFaceCutTool();
     void EditSelectedParametricObject();
+    void UpdateSolidBodyDimensions();
     bool ActiveParametricObjectIsAssembly() const;
     bool TryStartLiveEdgeToolFromSelection();
     bool TryStartLivePolylineExtrudeFromSelection();
@@ -136,6 +138,9 @@ private:
     void UpdateRecentFilesMenu();
     void ClearRecentProjectFiles();
     void ShowGreetingDialog(bool force = false);
+    void StartFurnitureInteraction(unsigned long object_id);
+    void AdvanceFurnitureAnimation();
+    void RestoreFurnitureAnimationSelection();
 
 protected:
     void closeEvent(QCloseEvent* event) override;
@@ -204,6 +209,9 @@ private:
     ToolRegistry tool_registry_;
     ActiveParametricObject active_parametric_object_;
     ActiveParametricObject solid_body_dimension_object_;
+    size_t solid_body_edit_object_index_ = static_cast<size_t>(-1);
+    int solid_body_selected_operation_index_ = 0;
+    bool solid_body_all_dimensions_ = false;
     bool active_parametric_edit_existing_ = false;
     bool solid_body_edit_mode_ = false;
     bool solid_body_dimensions_modified_ = false;
@@ -211,6 +219,17 @@ private:
     bool object_color_pick_pending_ = false;
     bool low_poly_pick_pending_ = false;
     bool edge_tool_started_from_face_quick_menu_ = false;
+    QTimer* furniture_animation_timer_ = nullptr;
+    ActiveParametricObject furniture_animation_object_;
+    int furniture_animation_frame_ = 0;
+    double furniture_animation_start_value_ = 0.0;
+    double furniture_animation_end_value_ = 0.0;
+    double furniture_animation_final_drawer_ = -1.0;
+    double furniture_animation_saved_distance_ = 0.0;
+    double furniture_animation_preview_value_ = 0.0;
+    std::vector<unsigned long> furniture_animation_preview_ids_;
+    std::vector<unsigned long> furniture_animation_selection_ids_;
+    std::string furniture_animation_parameter_id_;
     std::string pending_trim_tool_id_;
     PendingGroupCommand pending_group_command_ = PendingGroupCommand::None;
     BooleanOperation last_boolean_operation_ = BooleanOperation::Union;
