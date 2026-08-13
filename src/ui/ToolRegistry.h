@@ -13,7 +13,8 @@ enum class ToolParameterType {
     Number,
     Checkbox,
     Combo,
-    Material
+    Material,
+    Graph
 };
 
 enum class ToolParameterUnit {

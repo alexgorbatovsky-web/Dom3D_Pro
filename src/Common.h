@@ -5,10 +5,10 @@
 constexpr int kPanelWidth = 280;
 constexpr int kToolbarHeight = 54;
 constexpr float kPi = 3.14159265358979323846f;
-constexpr float kDefaultSceneSize = 100.0f;
+constexpr float kDefaultSceneSize = 1000.0f;
 constexpr float kDefaultGridHalfSize = kDefaultSceneSize * 0.5f;
 constexpr float kDefaultGridStep = 5.0f;
-constexpr float kDefaultCameraDistance = 62.5f;
+constexpr float kDefaultCameraDistance = 125.0f;
 constexpr float kMinimumCameraDistance = 0.005f;
 constexpr float kMinimumOrthographicHalfHeight = 0.002f;
 constexpr float kDefaultPlanCameraDistance = kDefaultSceneSize / 0.84f;
@@ -124,6 +124,7 @@ enum class ToolMode {
     DraftFace,
     ThickSolid,
     DrawBSpline,
+    DrawSpline,
     EditPoint,
     SketchRectangle,
     SketchPolyline,
@@ -131,9 +132,15 @@ enum class ToolMode {
     SketchConvertBezier,
     SketchConvertArc,
     SketchFillet,
+    SketchConstraintHorizontal,
+    SketchConstraintVertical,
+    SketchConstraintTangentStart,
+    SketchConstraintTangentEnd,
+    SolidFillet,
     SolidBoxRectangle,
     SolidCylinderCircle,
-    MovePointToPoint
+    MovePointToPoint,
+    MeasurePointToPoint
 };
 
 enum class BooleanOperation {
@@ -175,7 +182,8 @@ enum class SolidDisplayMode {
     MeshOnly,
     SurfacesAndRaisedMesh,
     Wireframe,
-    HiddenLine
+    HiddenLine,
+    HiddenLineHatch
 };
 
 enum class MeshDisplayMode {

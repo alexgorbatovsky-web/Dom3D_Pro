@@ -5,20 +5,178 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMouseEvent>
+#include <QPainter>
+#include <QPainterPath>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QSignalBlocker>
 #include <QTimer>
+#include <QVBoxLayout>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <functional>
 
 namespace {
 constexpr int kParameterSliderSteps = 2000;
+
+class ScaleGraphEditor final : public QWidget {
+public:
+    ScaleGraphEditor(std::vector<double> values,
+                     double minimum,
+                     double maximum,
+                     QWidget* parent = nullptr)
+        : QWidget(parent),
+          values_(std::move(values)),
+          minimum_(minimum),
+          maximum_(maximum) {
+        setMinimumSize(520, 280);
+        setMouseTracking(true);
+    }
+
+    std::function<void(const std::vector<double>&)> values_changed;
+
+protected:
+    QRectF graph_rect() const {
+        return QRectF(46.0, 18.0, std::max(10, width() - 64),
+                      std::max(10, height() - 54));
+    }
+
+    QPointF point_position(int index) const {
+        const QRectF area = graph_rect();
+        const double x = values_.size() <= 1
+            ? area.left()
+            : area.left() + area.width() * index / (values_.size() - 1);
+        const double ratio = (values_[static_cast<size_t>(index)] - minimum_)
+            / std::max(1.0e-9, maximum_ - minimum_);
+        return {x, area.bottom() - area.height() * ratio};
+    }
+
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.fillRect(rect(), QColor(36, 39, 43));
+        const QRectF area = graph_rect();
+        painter.fillRect(area, QColor(48, 51, 55));
+
+        painter.setPen(QPen(QColor(78, 82, 87), 1.0));
+        for (int line = 0; line <= 10; ++line) {
+            const double x = area.left() + area.width() * line / 10.0;
+            painter.drawLine(QPointF(x, area.top()), QPointF(x, area.bottom()));
+        }
+        for (int line = 0; line <= 8; ++line) {
+            const double y = area.top() + area.height() * line / 8.0;
+            painter.drawLine(QPointF(area.left(), y), QPointF(area.right(), y));
+        }
+
+        const double one_ratio = (1.0 - minimum_)
+            / std::max(1.0e-9, maximum_ - minimum_);
+        const double one_y = area.bottom() - area.height() * one_ratio;
+        painter.setPen(QPen(QColor(88, 145, 194), 1.0, Qt::DashLine));
+        painter.drawLine(QPointF(area.left(), one_y), QPointF(area.right(), one_y));
+        painter.setPen(QColor(175, 180, 185));
+        painter.drawText(QRectF(2.0, one_y - 9.0, 40.0, 18.0),
+                         Qt::AlignRight | Qt::AlignVCenter, QStringLiteral("1.00"));
+        painter.drawText(QRectF(area.left(), area.bottom() + 8.0, area.width(), 20.0),
+                         Qt::AlignCenter, QStringLiteral("Position along guide  0 — 100%"));
+
+        if (values_.empty()) return;
+        QPainterPath curve(point_position(0));
+        for (int index = 0; index + 1 < static_cast<int>(values_.size()); ++index) {
+            const QPointF p0 = point_position(std::max(0, index - 1));
+            const QPointF p1 = point_position(index);
+            const QPointF p2 = point_position(index + 1);
+            const QPointF p3 = point_position(
+                std::min(static_cast<int>(values_.size()) - 1, index + 2));
+            const QPointF c1 = p1 + (p2 - p0) / 6.0;
+            const QPointF c2 = p2 - (p3 - p1) / 6.0;
+            curve.cubicTo(c1, c2, p2);
+        }
+        painter.setPen(QPen(QColor(222, 224, 226), 2.0));
+        painter.drawPath(curve);
+        for (int index = 0; index < static_cast<int>(values_.size()); ++index) {
+            const QPointF point = point_position(index);
+            painter.setBrush(index == active_point_ ? QColor(43, 183, 255)
+                                                     : QColor(220, 222, 224));
+            painter.setPen(QPen(QColor(24, 26, 28), 1.0));
+            painter.drawEllipse(point, 5.0, 5.0);
+            if (index == active_point_) {
+                painter.setPen(QColor(230, 234, 238));
+                painter.drawText(QRectF(point.x() - 35.0, point.y() - 27.0, 70.0, 20.0),
+                                 Qt::AlignCenter,
+                                 QString::number(values_[static_cast<size_t>(index)], 'f', 2));
+            }
+        }
+    }
+
+    void mousePressEvent(QMouseEvent* event) override {
+        if (event->button() != Qt::LeftButton) return;
+        active_point_ = -1;
+        for (int index = 0; index < static_cast<int>(values_.size()); ++index) {
+            const QPointF delta = point_position(index) - event->position();
+            if (delta.x() * delta.x() + delta.y() * delta.y() <= 144.0) {
+                active_point_ = index;
+                break;
+            }
+        }
+        if (active_point_ >= 0) {
+            apply_mouse_value(event->position().y());
+            event->accept();
+        }
+    }
+
+    void mouseMoveEvent(QMouseEvent* event) override {
+        if (active_point_ >= 0 && (event->buttons() & Qt::LeftButton)) {
+            apply_mouse_value(event->position().y());
+            event->accept();
+        }
+    }
+
+    void mouseReleaseEvent(QMouseEvent* event) override {
+        if (event->button() == Qt::LeftButton && active_point_ >= 0) {
+            apply_mouse_value(event->position().y());
+            active_point_ = -1;
+            update();
+            event->accept();
+        }
+    }
+
+    void mouseDoubleClickEvent(QMouseEvent* event) override {
+        for (int index = 0; index < static_cast<int>(values_.size()); ++index) {
+            const QPointF delta = point_position(index) - event->position();
+            if (delta.x() * delta.x() + delta.y() * delta.y() <= 144.0) {
+                values_[static_cast<size_t>(index)] = 1.0;
+                if (values_changed) values_changed(values_);
+                update();
+                event->accept();
+                return;
+            }
+        }
+    }
+
+private:
+    void apply_mouse_value(double y) {
+        const QRectF area = graph_rect();
+        const double ratio = std::clamp((area.bottom() - y) / area.height(), 0.0, 1.0);
+        values_[static_cast<size_t>(active_point_)] =
+            minimum_ + ratio * (maximum_ - minimum_);
+        if (values_changed) values_changed(values_);
+        update();
+    }
+
+    std::vector<double> values_;
+    double minimum_ = 0.05;
+    double maximum_ = 3.0;
+    int active_point_ = -1;
+};
 
 class DragValueLabel final : public QLabel {
 public:
@@ -111,15 +269,19 @@ bool IsIntegerParameter(const ToolParameter& parameter) {
     const std::string& id = parameter.id;
     return id == "qty"
         || id == "shelf_count"
-        || id == "drawer_count";
+        || id == "drawer_count"
+        || id == "spline.degree";
 }
 
 bool IsInternalPlacementParameter(const ToolParameter& parameter) {
     return parameter.id.rfind("origin.", 0) == 0
         || parameter.id.rfind("axis.", 0) == 0
+        || parameter.id.rfind("width.scale.", 0) == 0
+        || parameter.id.rfind("height.scale.", 0) == 0
         || parameter.id == "profile.id"
         || parameter.id == "section.id"
         || parameter.id == "guide.id"
+        || parameter.id.rfind("slx.", 0) == 0
         || parameter.id == "cutter.id"
         || parameter.id == "face.index"
         || parameter.id == "boolean.body_id"
@@ -172,12 +334,21 @@ bool IsSliderParameter(const ActiveParametricObject& active,
         || tool_id == "SolidSphereTool"
         || tool_id == "SolidTorusTool"
         || tool_id == "SolidPrismTool"
+        || tool_id == "SolidSketchFeature"
+        || tool_id == "SolidExtrudeTool"
+        || tool_id == "SolidSweptTool"
+        || tool_id == "SolidExtrudeFace"
+        || tool_id == "SolidDraft"
         || tool_id == "fillet_edge"
         || tool_id == "fillet_all_edges"
         || tool_id == "ChamferSolid"
         || tool_id == "ThickSolidTool"
         || tool_id == "SurfaceOfRevolution"
+        || tool_id == "SurfaceRuled"
         || tool_id == "cabinet"
+        || tool_id == "cabinet_advanced"
+        || tool_id == "cabinet_advanced_slx"
+        || tool_id == "cabinet_showcase"
         || tool_id == "table"
         || tool_id == "desk"
         || tool_id == "drawer_box";
@@ -239,6 +410,64 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
             continue;
         }
 
+        if (active_object_.tool_id == "PlaneTool" && parameter.id == "p1.x") {
+            const DisplayLengthUnit display_unit = LoadDisplayLengthUnit();
+            const double display_factor = MillimetersToDisplay(1.0, display_unit);
+            for (int point = 1; point <= 3; ++point) {
+                std::array<size_t, 3> parameter_indices{};
+                std::array<double, 3> displayed_values{};
+                int axis_index = 0;
+                for (char axis : {'x', 'y', 'z'}) {
+                    const std::string id = "p" + std::to_string(point) + "." + axis;
+                    const auto found = std::find_if(
+                        active_object_.parameters.begin(), active_object_.parameters.end(),
+                        [&id](const ToolParameter& candidate) { return candidate.id == id; });
+                    if (found == active_object_.parameters.end()) continue;
+                    parameter_indices[static_cast<size_t>(axis_index)] = static_cast<size_t>(
+                        std::distance(active_object_.parameters.begin(), found));
+                    displayed_values[static_cast<size_t>(axis_index)] =
+                        found->value * display_factor;
+                    ++axis_index;
+                }
+                auto* editor = new QLineEdit(this);
+                editor->setText(QString("%1 %2 %3")
+                    .arg(displayed_values[0], 0, 'f', 3)
+                    .arg(displayed_values[1], 0, 'f', 3)
+                    .arg(displayed_values[2], 0, 'f', 3));
+                editor->setToolTip(QString("Point %1: X Y Z (%2)")
+                    .arg(point).arg(DisplayLengthUnitSuffix(display_unit)));
+                connect(editor, &QLineEdit::editingFinished, this,
+                        [this, editor, parameter_indices, display_factor]() {
+                    QString text = editor->text();
+                    text.replace(',', '.');
+                    const QStringList values = text.split(
+                        QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+                    if (values.size() != 3) {
+                        editor->setStyleSheet("QLineEdit { background: #ffd6d6; }");
+                        return;
+                    }
+                    std::array<double, 3> parsed{};
+                    for (int axis = 0; axis < 3; ++axis) {
+                        bool ok = false;
+                        parsed[static_cast<size_t>(axis)] = values[axis].toDouble(&ok);
+                        if (!ok) {
+                            editor->setStyleSheet("QLineEdit { background: #ffd6d6; }");
+                            return;
+                        }
+                    }
+                    editor->setStyleSheet({});
+                    for (size_t axis = 0; axis < 3; ++axis) {
+                        active_object_.parameters[parameter_indices[axis]].value =
+                            parsed[axis] / display_factor;
+                    }
+                    emit ParametersChanged();
+                });
+                form_->addRow(QString("Point %1  X Y Z").arg(point), editor);
+            }
+            i += 8;
+            continue;
+        }
+
         if (parameter.type == ToolParameterType::Checkbox) {
             auto* editor = new QCheckBox(this);
             editor->setChecked(parameter.value >= 0.5);
@@ -292,6 +521,62 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
             continue;
         }
 
+        if (parameter.type == ToolParameterType::Graph) {
+            auto* edit_graph = new QPushButton(QStringLiteral("Edit…"), this);
+            edit_graph->setToolTip(QStringLiteral(
+                "Edit scale along the guide. Double-click a point to reset it to 1.0."));
+            connect(edit_graph, &QPushButton::clicked, this, [this, i]() {
+                const ToolParameter& graph_parameter =
+                    active_object_.parameters[static_cast<size_t>(i)];
+                const std::string prefix = graph_parameter.id.substr(
+                    0, graph_parameter.id.find(".graph")) + ".scale.";
+                std::vector<size_t> parameter_indices;
+                std::vector<double> original_values;
+                for (size_t point = 0; point < 5; ++point) {
+                    const std::string point_id = prefix + std::to_string(point);
+                    const auto found = std::find_if(
+                        active_object_.parameters.begin(),
+                        active_object_.parameters.end(),
+                        [&point_id](const ToolParameter& candidate) {
+                            return candidate.id == point_id;
+                        });
+                    if (found == active_object_.parameters.end()) return;
+                    parameter_indices.push_back(static_cast<size_t>(
+                        std::distance(active_object_.parameters.begin(), found)));
+                    original_values.push_back(found->value);
+                }
+
+                QDialog dialog(this);
+                dialog.setWindowTitle(QString::fromStdString(graph_parameter.label));
+                auto* layout = new QVBoxLayout(&dialog);
+                auto* graph = new ScaleGraphEditor(
+                    original_values, graph_parameter.minimum,
+                    graph_parameter.maximum, &dialog);
+                graph->values_changed = [this, parameter_indices](
+                                            const std::vector<double>& values) {
+                    for (size_t point = 0; point < parameter_indices.size(); ++point) {
+                        active_object_.parameters[parameter_indices[point]].value = values[point];
+                    }
+                    emit ParametersChanged();
+                };
+                layout->addWidget(graph);
+                auto* buttons = new QDialogButtonBox(
+                    QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+                connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+                connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+                layout->addWidget(buttons);
+                if (dialog.exec() != QDialog::Accepted) {
+                    for (size_t point = 0; point < parameter_indices.size(); ++point) {
+                        active_object_.parameters[parameter_indices[point]].value =
+                            original_values[point];
+                    }
+                    emit ParametersChanged();
+                }
+            });
+            form_->addRow(QString::fromStdString(parameter.label), edit_graph);
+            continue;
+        }
+
         constexpr double radians_to_degrees = 180.0 / 3.14159265358979323846;
         const bool solid_transform_angle = active_object_.tool_id == "SolidTransform" && parameter.id == "angle";
         const bool degree_parameter = parameter.unit == ToolParameterUnit::Angle;
@@ -331,19 +616,51 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
                         static_cast<double>(minimum + position) * display_factor);
                 };
             } else {
-                drag_label->current_position =
-                    [editor, display_factor, minimum = parameter.minimum,
-                     maximum = parameter.maximum]() {
-                        return ValueToSliderPosition(
-                            editor->value() / display_factor, minimum, maximum);
-                    };
-                drag_label->apply_position =
-                    [editor, display_factor, minimum = parameter.minimum,
-                     maximum = parameter.maximum](int position) {
-                        editor->setValue(
-                            SliderPositionToValue(position, minimum, maximum)
-                            * display_factor);
-                    };
+                // A linear parameter must drag in its declared step, not in a
+                // fraction of its full range.  The old normalized mapping made
+                // a [-1'000'000, +1'000'000] offset jump by hundreds of mm per
+                // mouse pixel.  Ten substeps preserve Shift precision.
+                const double drag_quantum = std::max(parameter.step * 0.1, 1.0e-9);
+                const double position_count =
+                    (parameter.maximum - parameter.minimum) / drag_quantum;
+                if (!UseLogarithmicSlider(parameter.minimum, parameter.maximum)
+                    && position_count >= 1.0
+                    && position_count <= static_cast<double>(std::numeric_limits<int>::max())) {
+                    const int maximum_position = static_cast<int>(
+                        std::floor(position_count + 0.5));
+                    drag_label->drag_speed = 10.0;
+                    drag_label->maximum_position = maximum_position;
+                    drag_label->current_position =
+                        [editor, display_factor, minimum = parameter.minimum,
+                         drag_quantum, maximum_position]() {
+                            return std::clamp(
+                                static_cast<int>(std::lround(
+                                    (editor->value() / display_factor - minimum)
+                                    / drag_quantum)),
+                                0, maximum_position);
+                        };
+                    drag_label->apply_position =
+                        [editor, display_factor, minimum = parameter.minimum,
+                         drag_quantum](int position) {
+                            editor->setValue(
+                                (minimum + static_cast<double>(position) * drag_quantum)
+                                * display_factor);
+                        };
+                } else {
+                    drag_label->current_position =
+                        [editor, display_factor, minimum = parameter.minimum,
+                         maximum = parameter.maximum]() {
+                            return ValueToSliderPosition(
+                                editor->value() / display_factor, minimum, maximum);
+                        };
+                    drag_label->apply_position =
+                        [editor, display_factor, minimum = parameter.minimum,
+                         maximum = parameter.maximum](int position) {
+                            editor->setValue(
+                                SliderPositionToValue(position, minimum, maximum)
+                                * display_factor);
+                        };
+                }
             }
             editor->setMinimumWidth(90);
             editor->setMaximumWidth(130);

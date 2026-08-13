@@ -68,14 +68,16 @@ public:
 	bool GetCenterAndNormal(Vec3& center, Vec3& normal) const;
 	bool GetPoint(double U, double V, CPoint8d* pnt);
 	void RenderEdges(const Color& color,
-	                 const std::vector<int>& selected_edge_indices = {}) const;
+	                 const std::vector<int>& selected_edge_indices = {},
+	                 bool draw_regular_edges = true) const;
 	void PreviewTranslate(Vec3 delta);
 	void PreviewRotate(Vec3 center, Vec3 axis, float angle);
 	void PreviewScale(Vec3 center, Vec3 axis, float factor);
 	bool HitTestEdgeScreen(DomPoint point,
 	                       const std::function<bool(Vec3, DomPoint&)>& world_to_screen,
 	                       float tolerance,
-	                       int& edge_index) const;
+	                       int& edge_index,
+	                       float* screen_distance = nullptr) const;
 	const TopoDS_Edge* GetTopoEdge(int edge_index) const;
 	bool GetEdgeEndpoints(int edge_index, Vec3& start, Vec3& end) const;
 	bool GetEdgePolylinePoints(int edge_index, std::vector<Vec3>& points) const;

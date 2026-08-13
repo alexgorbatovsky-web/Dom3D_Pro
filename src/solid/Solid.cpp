@@ -961,6 +961,7 @@ bool CSolid::DoSmooth = false;
 SolidDisplayMode CSolid::s_DisplayMode = SolidDisplayMode::SurfacesAndEdges;
 bool CSolid::s_EdgeDrawingEnabled = true;
 bool CSolid::s_SurfaceTransparencyEnabled = false;
+Color CSolid::s_HiddenLineBackgroundColor{0.055f, 0.065f, 0.080f};
 
 
 CSolid::CSolid()
@@ -1135,6 +1136,19 @@ void CSolid::SetSurfaceTransparencyEnabled(bool enabled)
 	s_SurfaceTransparencyEnabled = enabled;
 }
 
+void CSolid::SetHiddenLineBackgroundColor(const Color& color)
+{
+	s_HiddenLineBackgroundColor = {
+		std::clamp(color.r, 0.0f, 1.0f),
+		std::clamp(color.g, 0.0f, 1.0f),
+		std::clamp(color.b, 0.0f, 1.0f)};
+}
+
+Color CSolid::GetHiddenLineBackgroundColor()
+{
+	return s_HiddenLineBackgroundColor;
+}
+
 void CSolid::Alloc()
 {
 /*	Editing = false;
@@ -1189,9 +1203,11 @@ bool CSolid::HitTestEdgeScreen(DomPoint point,
                                const std::function<bool(Vec3, DomPoint&)>& world_to_screen,
                                float tolerance,
                                int& surface_index,
-                               int& edge_index) const
+                               int& edge_index,
+                               float* screen_distance) const
 {
 	bool found = false;
+	float best_distance = tolerance;
 	int best_surface = -1;
 	int best_edge = -1;
 
@@ -1201,7 +1217,11 @@ bool CSolid::HitTestEdgeScreen(DomPoint point,
 			continue;
 
 		int local_edge = -1;
-		if (surface->HitTestEdgeScreen(point, world_to_screen, tolerance, local_edge)) {
+		float local_distance = tolerance;
+		if (surface->HitTestEdgeScreen(
+				point, world_to_screen, best_distance, local_edge,
+				&local_distance)) {
+			best_distance = local_distance;
 			best_surface = i;
 			best_edge = local_edge;
 			found = true;
@@ -1211,6 +1231,8 @@ bool CSolid::HitTestEdgeScreen(DomPoint point,
 	if (found) {
 		surface_index = best_surface;
 		edge_index = best_edge;
+		if (screen_distance)
+			*screen_distance = best_distance;
 	}
 	return found;
 }
@@ -1643,6 +1665,10 @@ bool CSolid::BuldMesh(float Deflection)
 		if (!surface)
 			continue;
 		surface->InitEdges();
+		// Legacy UV boundary splines are required only by the quad-mesh builder.
+		// Keeping them out of CSolid::InitEdges avoids running the old spline
+		// code during normal OCCT triangulation of complex loft surfaces.
+		surface->InitEdges3DCoat();
 		global_len_edge_max = std::max(global_len_edge_max, surface->lenEdgeMax);
 	}
 	if (global_len_edge_max > 0.0f) {
@@ -1718,7 +1744,10 @@ void CSolid::Render3d(bool selected) const
 	const bool has_selected_subobject = !m_SelectedEdges.empty()
 		|| !m_SelectedFaceIndices.empty();
 	const bool solid_selected = selected && !has_selected_subobject;
-	const SolidDisplayMode mode = ForceWireframeDisplay()
+	const bool zebra = CMesh3D::IsZebraAnalysisTarget();
+	const SolidDisplayMode mode = zebra
+		? SolidDisplayMode::SurfacesAndEdges
+		: ForceWireframeDisplay()
 		? SolidDisplayMode::Wireframe
 		: GetDisplayMode();
 	const MeshDisplayMode mesh_mode = CMesh3D::GetDisplayMode();
@@ -1746,7 +1775,8 @@ void CSolid::Render3d(bool selected) const
 			? surface.MaterialOverride.material
 			: surface_material;
 		if (mode == SolidDisplayMode::HiddenLine) {
-			material.diffuse = {0.055f, 0.065f, 0.075f};
+			material.diffuse = CSolid::s_HiddenLineBackgroundColor;
+			material.alpha = 1.0f;
 			material.specular = 0.0f;
 			material.shininess = 4.0f;
 			material.color_texture_path.clear();
@@ -1814,7 +1844,9 @@ void CSolid::Render3d(bool selected) const
 		return;
 	}
 
-	if (mesh_mode == MeshDisplayMode::Wire) {
+	if (!zebra && mesh_mode == MeshDisplayMode::Wire
+		&& mode != SolidDisplayMode::HiddenLine
+		&& mode != SolidDisplayMode::SurfacesAndRaisedMesh) {
 		for (CSurfaceFace* surface : m_Surfaces) {
 			if (surface && surface->pMesh3D) {
 				const Color surface_color = diagnostic_surface_wire_color(*surface, solid_color);
@@ -1826,14 +1858,23 @@ void CSolid::Render3d(bool selected) const
 	}
 
 	if (draw_faces) {
+		// Selected/operation-highlighted faces are drawn in a second pass.
+		// Keep the base surface slightly behind that pass even when regular
+		// edge drawing is disabled; otherwise both passes have identical depth
+		// and GL_LESS hides the selection completely.
+		const bool offset_base_faces = draw_edges
+			|| mode == SolidDisplayMode::SurfacesAndRaisedMesh
+			|| !m_SelectedFaceIndices.empty()
+			|| !m_OperationHighlightedSurfaceIndices.empty();
 		for (CSurfaceFace* surface : m_Surfaces) {
 			if (surface && surface->pMesh3D) {
 				const Material face_material = material_for_surface(*surface);
 				surface->pMesh3D->RenderFaces(
 					solid_selected,
-					draw_edges || mode == SolidDisplayMode::SurfacesAndRaisedMesh,
+					offset_base_faces,
 					&face_material,
-					mesh_mode == MeshDisplayMode::SurfaceColored);
+					mesh_mode == MeshDisplayMode::SurfaceColored,
+					mode == SolidDisplayMode::HiddenLine);
 			}
 		}
 		for (int selected_face_index : m_SelectedFaceIndices) {
@@ -1867,13 +1908,15 @@ void CSolid::Render3d(bool selected) const
 	if (draw_mesh) {
 		for (CSurfaceFace* surface : m_Surfaces) {
 			if (surface && surface->pMesh3D) {
-				const Color surface_color = diagnostic_surface_wire_color(*surface, solid_color);
-				surface->pMesh3D->RenderWire(false, mode == SolidDisplayMode::SurfacesAndRaisedMesh, &surface_color);
+				// Let CMesh3D choose a contrasting wire color. Passing the solid
+				// object color can make the grid identical to the shaded fill.
+				surface->pMesh3D->RenderWire(
+					false, mode == SolidDisplayMode::SurfacesAndRaisedMesh, nullptr);
 			}
 		}
 	}
 
-	if (!draw_edges) {
+	if (!draw_edges && m_SelectedEdges.empty()) {
 		draw_surface_indices();
 		return;
 	}
@@ -1886,7 +1929,7 @@ void CSolid::Render3d(bool selected) const
 				if (edge_ref.first == i)
 					selected_edges.push_back(edge_ref.second);
 			}
-			surface->RenderEdges(solid_color, selected_edges);
+			surface->RenderEdges(solid_color, selected_edges, draw_edges);
 		}
 	}
 	draw_surface_indices();
@@ -2092,6 +2135,70 @@ void CSolid::Mirror(Vec3 plane_point, Vec3 plane_normal)
 	}
 }
 
+void CSolid::RenderHiddenLineDepth() const
+{
+	Material background_material;
+	background_material.diffuse = s_HiddenLineBackgroundColor;
+	background_material.alpha = 1.0f;
+	background_material.specular = 0.0f;
+	background_material.shininess = 4.0f;
+	background_material.color_texture_path.clear();
+	background_material.light_texture_path.clear();
+	background_material.bump_texture_path.clear();
+
+	for (CSurfaceFace* surface : m_Surfaces) {
+		if (surface && surface->pMesh3D) {
+			// Push the depth-only fill slightly behind its own boundary edges.
+			// Without this bias, rasterization precision can classify fragments of
+			// a visible edge as hidden and draw them with the dashed pattern.
+			surface->pMesh3D->RenderFaces(
+				false, true, &background_material, false, true);
+		}
+	}
+}
+
+void CSolid::RenderHiddenLineEdges(bool hidden) const
+{
+	const float background_luminance =
+		0.2126f * s_HiddenLineBackgroundColor.r
+		+ 0.7152f * s_HiddenLineBackgroundColor.g
+		+ 0.0722f * s_HiddenLineBackgroundColor.b;
+	const Color hidden_color = background_luminance > 0.5f
+		? Color{0.62f, 0.62f, 0.62f}
+		: Color{0.42f, 0.42f, 0.42f};
+	const Color edge_color = hidden ? hidden_color : GetColor();
+
+	glPushAttrib(GL_ENABLE_BIT | GL_DEPTH_BUFFER_BIT | GL_LINE_BIT | GL_COLOR_BUFFER_BIT);
+	glEnable(GL_DEPTH_TEST);
+	glDepthMask(GL_FALSE);
+	glDepthFunc(hidden ? GL_GREATER : GL_LEQUAL);
+	if (hidden) {
+		glEnable(GL_LINE_STIPPLE);
+		glLineStipple(1, 0x0F0F);
+	} else {
+		glDisable(GL_LINE_STIPPLE);
+	}
+
+	for (int surface_index = 0;
+		surface_index < static_cast<int>(m_Surfaces.size());
+		++surface_index) {
+		CSurfaceFace* surface = m_Surfaces[static_cast<size_t>(surface_index)];
+		if (!surface)
+			continue;
+
+		std::vector<int> selected_edges;
+		if (!hidden) {
+			for (const auto& edge_ref : m_SelectedEdges) {
+				if (edge_ref.first == surface_index)
+					selected_edges.push_back(edge_ref.second);
+			}
+		}
+		surface->RenderEdges(edge_color, selected_edges, true);
+	}
+
+	glPopAttrib();
+}
+
 bool CSolid::ApplyAffineTransform(const std::array<double, 16>& matrix)
 {
 	gp_GTrsf transform;
@@ -2200,14 +2307,42 @@ bool CSolid::GetBounds(Vec3& min_point, Vec3& max_point) const
 
 bool CSolid::ReBuldMesh()
 {
+	// Keep approximately the same visual density for models expressed in
+	// millimetres, metres, or scene-sized coordinates. BuldMesh() converts
+	// this public value to the OCC linear deflection by dividing it by ten.
+	float Deflection = 0.1f;
+	if (!m_Shape.IsNull()) {
+		Bnd_Box bounds;
+		BRepBndLib::Add(m_Shape, bounds);
+		if (!bounds.IsVoid()) {
+			Standard_Real xmin = 0.0;
+			Standard_Real ymin = 0.0;
+			Standard_Real zmin = 0.0;
+			Standard_Real xmax = 0.0;
+			Standard_Real ymax = 0.0;
+			Standard_Real zmax = 0.0;
+			bounds.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+			const double dx = xmax - xmin;
+			const double dy = ymax - ymin;
+			const double dz = zmax - zmin;
+			const double diagonal = std::sqrt(dx * dx + dy * dy + dz * dz);
+			if (std::isfinite(diagonal)) {
+				Deflection = static_cast<float>(std::clamp(diagonal * 0.01, 0.1, 1000.0));
+			}
+		}
+	}
+	return ReBuldMesh(Deflection);
+}
+
+bool CSolid::ReBuldMesh(float Deflection)
+{
+	if (!std::isfinite(Deflection) || Deflection <= 0.0f)
+		return false;
 	if (!InitSurfaces())
 		return false;
 	if (!InitEdges())
 		return false;
-	float Deflection = 1.0 / ptchDensity;
-	if (!BuldMesh(Deflection))
-		return false;
-	return true;
+	return BuldMesh(std::clamp(Deflection, 0.001f, 1000.0f));
 }
 
 bool CSolid::DefineDirTriming(CSurfaceFace* surf, CPolyline* pLine, CPoint3d& pc)

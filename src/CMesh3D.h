@@ -118,14 +118,28 @@ public:
     void RenderFaces(bool selected,
                      bool offset_fill = false,
                      const Material* material_override = nullptr,
-                     bool diagnostic_rgb = false) const;
-    void RenderWire(bool selected, bool draw_on_top = false, const Color* color_override = nullptr) const;
+                     bool diagnostic_rgb = false,
+                     bool flat_color = false) const;
+    void RenderWire(bool selected,
+                    bool draw_on_top = false,
+                    const Color* color_override = nullptr,
+                    bool hidden = false) const;
+    void RenderHiddenLineDepth(const Color& background) const;
+    void RenderHiddenLineEdges(bool hidden, const Color& background, bool selected = false) const;
     void Render2d(float center_x, float center_y, float scale) const override;
     static Material material_Defailt;
-    static float GetWireOpacity();
-    static void SetWireOpacity(float opacity);
+    static float GetSurfaceOpacity();
+    static void SetSurfaceOpacity(float opacity);
     static MeshDisplayMode GetDisplayMode();
     static void SetDisplayMode(MeshDisplayMode mode);
+    static bool IsZebraAnalysisEnabled();
+    static bool IsZebraAnalysisTarget();
+    static void SetZebraAnalysisEnabled(bool enabled);
+    static void SetZebraAnalysisTarget(bool target);
+    static void SetZebraAnalysisView(Vec3 eye,
+                                     Vec3 forward,
+                                     Vec3 up,
+                                     bool orthographic);
     bool HitTest(CurvePoint point, float tolerance) const override;
     bool HitTestMeshScreen(DomPoint point,
                            const std::function<bool(Vec3, DomPoint&, float&)>& project_world,
@@ -170,6 +184,12 @@ private:
     std::vector<UV> uvs_;
     std::vector<Vec3> normals_;
     std::vector<Face> faces_;
-    static float s_WireOpacity;
+    static float s_SurfaceOpacity;
     static MeshDisplayMode s_DisplayMode;
+    static bool s_ZebraAnalysisEnabled;
+    static bool s_ZebraAnalysisTarget;
+    static bool s_ZebraOrthographic;
+    static Vec3 s_ZebraEye;
+    static Vec3 s_ZebraForward;
+    static Vec3 s_ZebraUp;
 };

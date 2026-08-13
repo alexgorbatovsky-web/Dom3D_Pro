@@ -22,7 +22,9 @@ private:
                     size_t& vertex_offset,
                     size_t& uv_offset,
                     size_t& normal_offset,
+                    size_t& next_smoothing_group,
                     const std::string& object_name,
-                    const CSurfaceFace* surface = nullptr) const;
+                    const CSurfaceFace* surface = nullptr,
+                    bool write_object_header = true) const;
     bool ParseFaceIndex(const std::string& token, size_t vertex_count, size_t& index) const;
 };

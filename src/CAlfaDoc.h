@@ -37,6 +37,8 @@ public:
     using ObjectPtr = std::unique_ptr<CAlfaObject>;
     using ObjectList = std::vector<ObjectPtr>;
 
+    struct Snapshot;
+
     CAlfaDoc();
     ~CAlfaDoc();
 
@@ -68,6 +70,7 @@ public:
     bool CreateFrameSolid(unsigned long profile_id,
                           double width,
                           double height);
+    bool CreateWireSolid(unsigned long path_id, double radius);
     bool CreatePolyhedronSolid(unsigned long profile_id,
                                int axis_index,
                                int turns);
@@ -92,6 +95,21 @@ public:
                                  const std::function<bool(Vec3, DomPoint&)>& world_to_screen,
                                  float tolerance,
                                  SelectionAction action = SelectionAction::Replace);
+    bool FindSolidEdgeAtScreen(
+        DomPoint point,
+        const std::function<bool(Vec3, DomPoint&)>& world_to_screen,
+        float tolerance,
+        size_t& object_index,
+        int& surface_index,
+        int& edge_index,
+        float* screen_distance = nullptr) const;
+    bool FindRotationAxisLineAtScreen(
+        DomPoint point,
+        const std::function<bool(Vec3, DomPoint&)>& world_to_screen,
+        float tolerance,
+        Vec3& start,
+        Vec3& end,
+        float* screen_distance = nullptr) const;
     bool SelectSolidMeshAtScreen(DomPoint point,
                                  const std::function<bool(Vec3, DomPoint&, float&)>& project_world,
                                  SelectionAction action = SelectionAction::Replace);
@@ -174,6 +192,7 @@ public:
     bool SelectCurvePointsInScreenRect(DomRect rect,
                                        const std::function<bool(Vec3, DomPoint&)>& world_to_screen,
                                        SelectionAction action = SelectionAction::Replace);
+    bool SelectAllPointsOfSelectedCurve();
     bool SelectObjectsInScreenRect(DomRect rect,
                                    const std::function<bool(Vec3, DomPoint&)>& world_to_screen,
                                    SelectionAction action = SelectionAction::Replace);
@@ -233,12 +252,48 @@ public:
     bool RebuildTwoSketchSolid(size_t object_index);
     bool MirrorSelectedObjects(Vec3 plane_point, Vec3 plane_normal);
     bool CreateLoftSurfaceFromSelectedBSplines();
+    bool JoinSelectedSurfaces();
+    size_t CreatePlaneIntersectionCurves();
+    size_t CreateSurfaceIntersectionCurves();
+    size_t ProjectSelectedCurveToSurface(Vec3 direction);
+    size_t ExtractSelectedSurfaceEdges();
+    bool CreateRuledSurfaceFromSpline(unsigned long curve_id,
+                                      double length,
+                                      int direction_axis,
+                                      bool reverse_normal);
+    bool RebuildRuledSurface(size_t object_index,
+                             unsigned long curve_id,
+                             double length,
+                             int direction_axis,
+                             bool reverse_normal);
+    bool CreateFourSplineSurfaceFromSelection();
+    bool RebuildFourSplineSurface(size_t object_index,
+                                  unsigned long first_id,
+                                  unsigned long second_id,
+                                  unsigned long third_id,
+                                  unsigned long fourth_id);
+    bool CreateTwoRailSweepSurfaceFromSelection();
+    bool RebuildTwoRailSweepSurface(size_t object_index,
+                                    unsigned long profile_id,
+                                    unsigned long first_rail_id,
+                                    unsigned long second_rail_id);
+    bool CreateTwoRailSweepSolidFromSelection();
+    bool RebuildTwoRailSweepSolid(size_t object_index,
+                                  unsigned long profile_id,
+                                  unsigned long first_rail_id,
+                                  unsigned long second_rail_id);
     bool ReverseSelectedSurfaceNormals();
+    bool SewSelectedSurfacesToSolid(double tolerance,
+                                    std::string* error_message = nullptr,
+                                    double* used_tolerance = nullptr);
+    int RebuildVisibleObjectMeshes(float mesh_deflection);
     bool DeleteSelectedObject();
     bool DeleteSelectedPoint();
     bool MoveSelectedPoint(CurvePoint point);
     bool MoveSelectedPoint(CPoint3d point);
     bool MoveSelectedCurvePoints(Vec3 delta);
+    bool RotateSelectedCurvePoints(Vec3 center, Vec3 axis, float angle);
+    bool ScaleSelectedCurvePoints(Vec3 center, Vec3 axis, float factor);
     bool ApplyFilletToSelectedPolylinePoint(double radius);
     bool ApplyFilletToPolylinePointAtScreen(DomPoint point,
                                             const std::function<bool(Vec3, DomPoint&)>& world_to_screen,
@@ -246,6 +301,7 @@ public:
                                             double radius);
     bool GetSelectedPointPosition(CPoint3d& point) const;
     std::vector<CPoint3d> GetSelectedCurvePointPositions() const;
+    const std::vector<std::pair<size_t, size_t>>& GetSelectedCurvePoints() const;
     bool MoveSelectedObjects(Vec3 delta);
     bool RotateSelectedObjects(Vec3 center, Vec3 axis, float angle);
     bool ScaleSelectedObjects(Vec3 center, Vec3 axis, float factor);
@@ -318,6 +374,8 @@ public:
     bool DeleteMaterial(unsigned long id);
 
     size_t GetTotalPointCount() const;
+    std::shared_ptr<const Snapshot> CreateSnapshot() const;
+    bool RestoreSnapshot(const Snapshot& snapshot);
 
 private:
     struct LiveExtrudeData;

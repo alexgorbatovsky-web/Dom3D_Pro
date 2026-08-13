@@ -2,7 +2,11 @@
 
 #include "OpenGLCompat.h"
 #include "SmartLine.h"
+#include "CGroup.h"
+#include "ReferenceImage.h"
+#include "solid/Solid.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 //#include "GLU.h"
@@ -13,27 +17,40 @@ void set_color(float r, float g, float b, float a = 1.0f) {
 }
 }
 
-void CView3d::Draw(const CAlfaDoc& document, bool xy_plane_grid, bool show_grid) const {
+void CView3d::Draw(const CAlfaDoc& document,
+                   bool xy_plane_grid,
+                   bool show_grid,
+                   float grid_size,
+                   float grid_step,
+                   int grid_subdivisions) const {
     if (show_grid) {
-        DrawGrid(xy_plane_grid);
+        DrawGrid(xy_plane_grid, grid_size, grid_step, grid_subdivisions);
     }
     DrawObjects(document);
 }
 
-void CView3d::DrawGrid(bool xy_plane_grid) const {
+void CView3d::DrawGrid(bool xy_plane_grid,
+                       float grid_size,
+                       float grid_step,
+                       int grid_subdivisions) const {
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glEnable(GL_LINE_SMOOTH);
     glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
     glLineWidth(1.0f);
     glBegin(GL_LINES);
-    const float first = xy_plane_grid ? 0.0f : -kDefaultGridHalfSize;
-    const float last = xy_plane_grid ? kDefaultSceneSize : kDefaultGridHalfSize;
+    const float safe_grid_size = std::max(1.0f, grid_size);
+    const float grid_half_size = safe_grid_size * 0.5f;
+    const float first = xy_plane_grid ? 0.0f : -grid_half_size;
+    const float last = xy_plane_grid ? safe_grid_size : grid_half_size;
+    const int safe_subdivisions = std::clamp(grid_subdivisions, 1, 100);
+    const float minor_step = std::max(
+        0.000001f, grid_step / static_cast<float>(safe_subdivisions));
     const int line_count = static_cast<int>(
-        std::round((last - first) / kDefaultGridStep));
+        std::round((last - first) / minor_step));
     for (int line_index = 0; line_index <= line_count; ++line_index) {
-        const float coordinate = first + static_cast<float>(line_index) * kDefaultGridStep;
-        const bool major = line_index % 4 == 0;
+        const float coordinate = first + static_cast<float>(line_index) * minor_step;
+        const bool major = line_index % safe_subdivisions == 0;
         const float r = major ? 0.34f : 0.22f;
         const float g = major ? 0.40f : 0.27f;
         const float b = major ? 0.48f : 0.34f;
@@ -94,6 +111,22 @@ void CView3d::DrawObjects(const CAlfaDoc& document) const {
             || dynamic_cast<const CBSpline*>(&object)
             || dynamic_cast<const CSmartLine*>(&object);
     };
+    bool has_zebra_selection = false;
+    if (CMesh3D::IsZebraAnalysisEnabled()) {
+        for (size_t index : document.GetSelectedObjectIndices()) {
+            if (index >= objects.size() || !objects[index]) {
+                continue;
+            }
+            const CAlfaObject* object = objects[index].get();
+            if (dynamic_cast<const CSolid*>(object)
+                || (dynamic_cast<const CMesh3D*>(object)
+                    && !dynamic_cast<const CReferenceImage*>(object))
+                || dynamic_cast<const CGroup*>(object)) {
+                has_zebra_selection = true;
+                break;
+            }
+        }
+    }
     const auto draw_pass = [&](bool overlay) {
         for (size_t index = 0; index < objects.size(); ++index) {
             if (!objects[index]
@@ -105,12 +138,79 @@ void CView3d::DrawObjects(const CAlfaDoc& document) const {
             const bool has_selected_point = document.HasSelection()
                 && document.GetSelectedObjectIndex() == index
                 && document.HasSelectedPoint();
+            CMesh3D::SetZebraAnalysisTarget(
+                !has_zebra_selection || selected);
             objects[index]->Render3d(
                 selected, has_selected_point, document.GetSelectedPointIndex());
         }
+        CMesh3D::SetZebraAnalysisTarget(false);
     };
 
-    draw_pass(false);
+    if (!CMesh3D::IsZebraAnalysisEnabled()
+        && CSolid::GetDisplayMode() == SolidDisplayMode::HiddenLineHatch) {
+        // Hidden-line rendering must be scene-wide.  Filling and drawing one
+        // solid at a time cannot hide an edge of an earlier solid behind a
+        // later one (for example a table leg behind its top).
+        for (size_t index = 0; index < objects.size(); ++index) {
+            if (!objects[index]
+                || !document.IsObjectVisible(*objects[index])
+                || is_curve_overlay(*objects[index])) {
+                continue;
+            }
+            if (const auto* solid = dynamic_cast<const CSolid*>(objects[index].get())) {
+                solid->RenderHiddenLineDepth();
+            } else if (const auto* mesh =
+                           dynamic_cast<const CMesh3D*>(objects[index].get());
+                       mesh && !dynamic_cast<const CReferenceImage*>(mesh)) {
+                mesh->RenderHiddenLineDepth(CSolid::GetHiddenLineBackgroundColor());
+            }
+        }
+        for (const auto& object : objects) {
+            if (object && document.IsObjectVisible(*object)) {
+                if (const auto* solid = dynamic_cast<const CSolid*>(object.get())) {
+                    solid->RenderHiddenLineEdges(true);
+                } else if (const auto* mesh =
+                               dynamic_cast<const CMesh3D*>(object.get());
+                           mesh && !dynamic_cast<const CReferenceImage*>(mesh)) {
+                    mesh->RenderHiddenLineEdges(
+                        true, CSolid::GetHiddenLineBackgroundColor());
+                }
+            }
+        }
+        for (const auto& object : objects) {
+            if (object && document.IsObjectVisible(*object)) {
+                if (const auto* solid = dynamic_cast<const CSolid*>(object.get())) {
+                    solid->RenderHiddenLineEdges(false);
+                } else if (const auto* mesh =
+                               dynamic_cast<const CMesh3D*>(object.get());
+                           mesh && !dynamic_cast<const CReferenceImage*>(mesh)) {
+                    mesh->RenderHiddenLineEdges(
+                        false, CSolid::GetHiddenLineBackgroundColor());
+                }
+            }
+        }
+
+        // Draw non-solid scene helpers once, after the geometry passes.
+        for (size_t index = 0; index < objects.size(); ++index) {
+            if (!objects[index]
+                || !document.IsObjectVisible(*objects[index])
+                || is_curve_overlay(*objects[index])
+                || dynamic_cast<const CSolid*>(objects[index].get())
+                || (dynamic_cast<const CMesh3D*>(objects[index].get())
+                    && !dynamic_cast<const CReferenceImage*>(objects[index].get()))
+                || dynamic_cast<const CGroup*>(objects[index].get())) {
+                continue;
+            }
+            const bool selected = document.IsObjectSelectionHighlighted(index);
+            const bool has_selected_point = document.HasSelection()
+                && document.GetSelectedObjectIndex() == index
+                && document.HasSelectedPoint();
+            objects[index]->Render3d(
+                selected, has_selected_point, document.GetSelectedPointIndex());
+        }
+    } else {
+        draw_pass(false);
+    }
     draw_pass(true);
 }
 

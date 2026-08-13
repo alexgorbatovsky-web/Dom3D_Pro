@@ -151,15 +151,67 @@ void QtSceneRenderer::Initialize() {
     glEnable(GL_MULTISAMPLE);
 }
 
+void draw_rotation_direction_guide(Vec3 center,
+                                   Vec3 axis,
+                                   Vec3 camera_forward,
+                                   float radius,
+                                   float angle_degrees) {
+    if (std::fabs(angle_degrees) <= 0.001f) {
+        return;
+    }
+
+    Vec3 tangent{};
+    Vec3 bitangent{};
+    rotation_arc_basis(axis, camera_forward, tangent, bitangent);
+    const float direction = angle_degrees >= 0.0f ? 1.0f : -1.0f;
+    const float requested_sweep = std::fabs(angle_degrees) * 3.14159265f / 180.0f;
+    const float sweep = direction * std::clamp(requested_sweep, 0.52f, 5.76f);
+    constexpr int kSegments = 56;
+
+    set_color(1.0f, 0.86f, 0.06f, 1.0f);
+    glLineWidth(5.0f);
+    glBegin(GL_LINE_STRIP);
+    for (int i = 0; i <= kSegments; ++i) {
+        const float angle = sweep * static_cast<float>(i) / static_cast<float>(kSegments);
+        const Vec3 point = center
+            + tangent * (std::cos(angle) * radius)
+            + bitangent * (std::sin(angle) * radius);
+        glVertex3f(point.x, point.y, point.z);
+    }
+    glEnd();
+
+    const float end_angle = sweep;
+    const Vec3 tip = center
+        + tangent * (std::cos(end_angle) * radius)
+        + bitangent * (std::sin(end_angle) * radius);
+    const Vec3 travel = normalize(
+        tangent * (-std::sin(end_angle) * direction)
+        + bitangent * (std::cos(end_angle) * direction));
+    glBegin(GL_LINES);
+    draw_arrow_head(tip, travel, camera_forward, radius * 0.16f);
+    glEnd();
+}
+
+void QtSceneRenderer::SetBackgroundColor(Vec3 color) {
+    background_color_.x = std::clamp(color.x, 0.0f, 1.0f);
+    background_color_.y = std::clamp(color.y, 0.0f, 1.0f);
+    background_color_.z = std::clamp(color.z, 0.0f, 1.0f);
+}
+
 void QtSceneRenderer::Render(const CAlfaDoc& document,
                              const Camera& camera,
                              bool orthographic,
                              bool show_coordinate_axes,
                              bool show_floor_grid,
                              bool xy_plane_view,
+                             float grid_size,
+                             float grid_step,
+                             int grid_subdivisions,
                              ToolMode tool,
                              TransformOperation transform_operation,
                              TransformAxis highlighted_transform_axis,
+                             float transform_dialog_rotation_angle_degrees,
+                             Vec3 transform_dialog_rotation_axis,
                              bool highlighted_draft_face_gizmo,
                              int width,
                              int height) const {
@@ -167,15 +219,21 @@ void QtSceneRenderer::Render(const CAlfaDoc& document,
     const int viewport_height = std::max(1, height);
     glViewport(0, 0, viewport_width, viewport_height);
 
+    glEnable(GL_MULTISAMPLE);
     glEnable(GL_DEPTH_TEST);
-    glClearColor(0.055f, 0.065f, 0.080f, 1.0f);
+    glClearColor(background_color_.x,
+                 background_color_.y,
+                 background_color_.z,
+                 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
     float z_near = 0.1f;
     float z_far = 100.0f;
-    CalculateClipPlanes(document, camera, orthographic, z_near, z_far);
+    CalculateClipPlanes(
+        document, camera, orthographic, show_floor_grid, grid_size,
+        z_near, z_far);
     const float aspect = static_cast<float>(viewport_width) / viewport_height;
     if (orthographic) {
         Orthographic(camera, aspect, z_near, z_far);
@@ -192,12 +250,22 @@ void QtSceneRenderer::Render(const CAlfaDoc& document,
     qt_camera_basis(camera, orthographic, view_eye, view_forward, view_right, view_up);
     LookAt(view_eye, camera.target, view_up);
 
-    view3d_.Draw(document, xy_plane_view, show_floor_grid);
+    CMesh3D::SetZebraAnalysisView(
+        view_eye, view_forward, view_up, orthographic);
+
+    view3d_.Draw(
+        document, xy_plane_view, show_floor_grid,
+        grid_size, grid_step, grid_subdivisions);
     if (show_coordinate_axes) {
-        DrawCoordinateAxes(xy_plane_view);
+        DrawCoordinateAxes(xy_plane_view, grid_size);
     }
     if (tool == ToolMode::Transform) {
-        DrawTransformGizmo(document, camera, transform_operation, highlighted_transform_axis);
+        DrawTransformGizmo(document,
+                           camera,
+                           transform_operation,
+                           highlighted_transform_axis,
+                           transform_dialog_rotation_angle_degrees,
+                           transform_dialog_rotation_axis);
     } else if (tool == ToolMode::FaceExtrude) {
         Vec3 face_center{};
         Vec3 face_normal{};
@@ -344,7 +412,13 @@ bool QtSceneRenderer::WorldToScreen(Vec3 point, const Camera& camera, bool ortho
     return true;
 }
 
-void QtSceneRenderer::CalculateClipPlanes(const CAlfaDoc& document, const Camera& camera, bool orthographic, float& z_near, float& z_far) const {
+void QtSceneRenderer::CalculateClipPlanes(const CAlfaDoc& document,
+                                          const Camera& camera,
+                                          bool orthographic,
+                                          bool show_floor_grid,
+                                          float grid_size,
+                                          float& z_near,
+                                          float& z_far) const {
     Vec3 eye{};
     Vec3 forward{};
     Vec3 right{};
@@ -390,9 +464,13 @@ void QtSceneRenderer::CalculateClipPlanes(const CAlfaDoc& document, const Camera
 
     const float near_floor = std::clamp(
         camera.distance * 0.0001f, 0.000001f, 0.02f);
+    const float grid_far = show_floor_grid
+        ? camera.distance + std::max(1.0f, grid_size) * 4.0f
+        : 0.0f;
     if (!has_scene_bounds) {
         z_near = near_floor;
-        z_far = std::max(z_near * 1000.0f, camera.distance * 8.0f);
+        z_far = std::max(
+            {z_near * 1000.0f, camera.distance * 8.0f, grid_far});
         return;
     }
 
@@ -405,11 +483,15 @@ void QtSceneRenderer::CalculateClipPlanes(const CAlfaDoc& document, const Camera
     const float far_margin = std::max(
         {scene_extent * 0.10f, camera.distance * 0.10f, 0.01f});
     z_far = std::max(
-        {z_near * 100.0f, max_depth + far_margin, camera.distance + far_margin});
+        {z_near * 100.0f,
+         max_depth + far_margin,
+         camera.distance + far_margin,
+         grid_far});
 }
 
-void QtSceneRenderer::DrawCoordinateAxes(bool xy_plane_grid) const {
-    const float length = xy_plane_grid ? kDefaultSceneSize : kDefaultGridHalfSize;
+void QtSceneRenderer::DrawCoordinateAxes(bool xy_plane_grid, float grid_size) const {
+    const float safe_grid_size = std::max(1.0f, grid_size);
+    const float length = xy_plane_grid ? safe_grid_size : safe_grid_size * 0.5f;
     const float lift = 0.02f;
 
     glDisable(GL_DEPTH_TEST);
@@ -437,7 +519,12 @@ void QtSceneRenderer::DrawCoordinateAxes(bool xy_plane_grid) const {
     glLineWidth(1.0f);
 }
 
-void QtSceneRenderer::DrawTransformGizmo(const CAlfaDoc& document, const Camera& camera, TransformOperation operation, TransformAxis highlighted_axis) const {
+void QtSceneRenderer::DrawTransformGizmo(const CAlfaDoc& document,
+                                         const Camera& camera,
+                                         TransformOperation operation,
+                                         TransformAxis highlighted_axis,
+                                         float rotation_guide_angle_degrees,
+                                         Vec3 rotation_guide_axis) const {
     Vec3 center{};
     if (!document.GetTransformGizmoCenter(center)) {
         return;
@@ -459,6 +546,36 @@ void QtSceneRenderer::DrawTransformGizmo(const CAlfaDoc& document, const Camera&
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glEnable(GL_LINE_SMOOTH);
     glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
+
+    // The precise-rotation dialog already has a user-selected axis. Show only
+    // that axis and its signed rotation arc; the regular XYZ rotation gizmo
+    // would add unrelated handles and obscure the chosen reference line.
+    if (operation == TransformOperation::Rotate
+        && dot(rotation_guide_axis, rotation_guide_axis) > 0.000001f) {
+        const Vec3 guide_axis = normalize(rotation_guide_axis);
+        set_color(1.0f, 0.86f, 0.06f, 1.0f);
+        glLineWidth(3.2f);
+        glBegin(GL_LINES);
+        glVertex3f(center.x - guide_axis.x * size,
+                   center.y - guide_axis.y * size,
+                   center.z - guide_axis.z * size);
+        glVertex3f(center.x + guide_axis.x * size,
+                   center.y + guide_axis.y * size,
+                   center.z + guide_axis.z * size);
+        glEnd();
+        draw_rotation_direction_guide(
+            center,
+            guide_axis,
+            camera_forward,
+            size * 0.82f,
+            rotation_guide_angle_degrees);
+
+        glDisable(GL_LINE_SMOOTH);
+        glDisable(GL_BLEND);
+        glEnable(GL_DEPTH_TEST);
+        glLineWidth(1.0f);
+        return;
+    }
 
     glLineWidth(5.0f);
     glBegin(GL_LINES);
@@ -500,6 +617,16 @@ void QtSceneRenderer::DrawTransformGizmo(const CAlfaDoc& document, const Camera&
                 direction,
                 camera_forward,
                 size * TransformGizmoGeometry::kRotationArcRadiusScale);
+        }
+        if (highlighted_axis == TransformAxis::X
+            || highlighted_axis == TransformAxis::Y
+            || highlighted_axis == TransformAxis::Z) {
+            draw_rotation_direction_guide(
+                center,
+                axis_vector(highlighted_axis),
+                camera_forward,
+                size * 0.82f,
+                rotation_guide_angle_degrees);
         }
     }
 

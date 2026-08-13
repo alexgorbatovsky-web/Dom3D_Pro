@@ -2,9 +2,12 @@
 
 #include "../CadCurve3D.h"
 #include "../CBSpline.h"
+#include "../BezierSpline.h"
 #include "../CMesh3D.h"
+#include "../ReferenceImage.h"
 #include "../CGroup.h"
 #include "../CAssembled.h"
+#include "../CKitchenCabinet.h"
 #include "../CPolyline.h"
 #include "../Line2D.h"
 #include "../MaterialLibrary.h"
@@ -15,8 +18,11 @@
 #include "MaterialDrag.h"
 #include "MeasurementUnits.h"
 #include "PreferencesDialog.h"
+#include "HotkeyManagerDialog.h"
+#include "CommandSearchPopup.h"
 #include "BooleanDialog.h"
 #include "ExtrudeFaceDialog.h"
+#include "DragSpinBoxLabel.h"
 
 #include <QAction>
 #include <QActionGroup>
@@ -25,6 +31,7 @@
 #include <QApplication>
 #include <QButtonGroup>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QColorDialog>
 #include <QColor>
 #include <QCloseEvent>
@@ -35,6 +42,7 @@
 #include <QDialogButtonBox>
 #include <QDockWidget>
 #include <QDoubleSpinBox>
+#include <QStackedWidget>
 #include <QDrag>
 #include <QDragEnterEvent>
 #include <QDragMoveEvent>
@@ -70,11 +78,14 @@
 #include <QPushButton>
 #include <QRadialGradient>
 #include <QRadioButton>
+#include <QRegularExpression>
 #include <QScreen>
 #include <QSettings>
+#include <QShortcut>
 #include <QSize>
 #include <QSignalBlocker>
 #include <QSlider>
+#include <QSpinBox>
 #include <QStatusBar>
 #include <QTabBar>
 #include <QTimer>
@@ -88,14 +99,15 @@
 #include <QWidgetAction>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <set>
-#include <functional>
 #include <vector>
 
 void message_to_file(const char* text);
@@ -107,10 +119,89 @@ constexpr int kSceneTreeGroupRole = Qt::UserRole + 2;
 constexpr int kSceneTreeGroupIdRole = Qt::UserRole + 3;
 
 bool IsFurnitureAssemblyTool(const std::string& tool_id) {
-    return tool_id == "cabinet"
+    return tool_id == "chair"
+        || tool_id == "chair_simple"
+        || tool_id == "cabinet"
+        || tool_id == "cabinet_advanced"
+        || tool_id == "cabinet_advanced_slx"
+        || tool_id == "cabinet_showcase"
         || tool_id == "table"
         || tool_id == "desk"
         || tool_id == "drawer_box";
+}
+
+bool IsCabinetTool(const std::string& tool_id) {
+    return tool_id == "cabinet"
+        || tool_id == "cabinet_advanced"
+        || tool_id == "cabinet_advanced_slx"
+        || tool_id == "cabinet_showcase";
+}
+
+std::vector<unsigned long> CreateSlxFrameTemplateSketches(CAlfaDoc& document) {
+    const auto xy_sketch = [](const std::string& name) {
+        auto sketch = std::make_unique<CSmartLine>(name);
+        sketch->SetCoordinateSystem(
+            CPoint3d(0.0, 0.0, 0.0),
+            CPoint3d(1.0, 0.0, 0.0),
+            CPoint3d(0.0, 0.0, 1.0));
+        return sketch;
+    };
+
+    auto frame = xy_sketch("SLX Frame Profile");
+    frame->AddLine(std::make_unique<CLinkLine>(
+        CPoint3d(0.0, 0.0, 0.0), CPoint3d(0.0, 12.0, 0.0)));
+    frame->AddLine(std::make_unique<CLinkLine>(
+        CPoint3d(0.0, 12.0, 0.0), CPoint3d(2.0, 12.0, 0.0)));
+    frame->AddLine(std::make_unique<CLinkLine>(
+        CPoint3d(2.0, 12.0, 0.0), CPoint3d(4.0, 15.0, 0.0)));
+    frame->AddLine(std::make_unique<CBezierSpline>(
+        CPoint3d(4.0, 15.0, 0.0), CPoint3d(13.9, 20.2226, 0.0),
+        CPoint3d(41.881, 20.2226, 0.0), CPoint3d(51.3, 15.0, 0.0)));
+    frame->AddLine(std::make_unique<CBezierSpline>(
+        CPoint3d(51.3, 15.0, 0.0), CPoint3d(53.0, 17.0, 0.0),
+        CPoint3d(55.0, 17.0, 0.0), CPoint3d(57.0, 15.0, 0.0)));
+    frame->AddLine(std::make_unique<CLinkLine>(
+        CPoint3d(57.0, 15.0, 0.0), CPoint3d(60.0, 15.0, 0.0)));
+    frame->AddLine(std::make_unique<CLinkLine>(
+        CPoint3d(60.0, 15.0, 0.0), CPoint3d(60.0, 0.0, 0.0)));
+    frame->AddLine(std::make_unique<CLinkLine>(
+        CPoint3d(60.0, 0.0, 0.0), CPoint3d(0.0, 0.0, 0.0)));
+    frame->SetClosed(true);
+
+    auto panel = xy_sketch("SLX Panel Profile");
+    const double panel_x = 90.0;
+    panel->AddLine(std::make_unique<CLinkLine>(
+        CPoint3d(panel_x, 0.0, 0.0), CPoint3d(panel_x, 7.0, 0.0)));
+    panel->AddLine(std::make_unique<CBezierSpline>(
+        CPoint3d(panel_x, 7.0, 0.0), CPoint3d(panel_x + 8.0, 7.0, 0.0),
+        CPoint3d(panel_x + 24.0, 14.0, 0.0),
+        CPoint3d(panel_x + 32.6, 14.0, 0.0)));
+    panel->AddLine(std::make_unique<CLinkLine>(
+        CPoint3d(panel_x + 32.6, 14.0, 0.0),
+        CPoint3d(panel_x + 40.0, 14.0, 0.0)));
+    panel->AddLine(std::make_unique<CLinkLine>(
+        CPoint3d(panel_x + 40.0, 14.0, 0.0),
+        CPoint3d(panel_x + 40.0, 0.0, 0.0)));
+    panel->AddLine(std::make_unique<CLinkLine>(
+        CPoint3d(panel_x + 40.0, 0.0, 0.0),
+        CPoint3d(panel_x, 0.0, 0.0)));
+    panel->SetClosed(true);
+
+    std::vector<unsigned long> ids;
+    document.AddObject(std::move(frame));
+    if (CAlfaObject* added = document.GetSelectedObject()) {
+        ids.push_back(added->m_id);
+    }
+    document.AddObject(std::move(panel));
+    if (CAlfaObject* added = document.GetSelectedObject()) {
+        ids.push_back(added->m_id);
+    }
+    document.ClearSelection();
+    for (size_t index = 0; index < ids.size(); ++index) {
+        document.SelectObjectById(
+            ids[index], index == 0 ? SelectionAction::Replace : SelectionAction::Add);
+    }
+    return ids;
 }
 
 void Message_err(const char* message)
@@ -177,6 +268,23 @@ void CenterDialogOnCursor(QDialog& dialog) {
         top_left.setY(std::clamp(top_left.y(), bounds.top(), bounds.bottom() - dialog_size.height() + 1));
     }
 
+    dialog.move(top_left);
+}
+
+void PlaceDialogAtWorkspaceTopLeft(QDialog& dialog, const QWidget& workspace) {
+    dialog.adjustSize();
+
+    const QSize dialog_size = dialog.sizeHint().expandedTo(dialog.size());
+    QPoint top_left = workspace.mapToGlobal(QPoint(8, 8));
+    if (QScreen* screen = QGuiApplication::screenAt(top_left)) {
+        const QRect bounds = screen->availableGeometry();
+        top_left.setX(std::clamp(
+            top_left.x(), bounds.left(),
+            bounds.right() - dialog_size.width() + 1));
+        top_left.setY(std::clamp(
+            top_left.y(), bounds.top(),
+            bounds.bottom() - dialog_size.height() + 1));
+    }
     dialog.move(top_left);
 }
 
@@ -340,12 +448,17 @@ private:
     void RebuildSolids()
     {
         const double density = density_->value();
+        const float mesh_step = static_cast<float>(
+            1.0 / std::max(density, 0.0001));
         const bool mesh_quadro = mesh_quadro_->isChecked();
         int rebuilt = 0;
         for (CSolid* solid : Solids()) {
             solid->ptchDensity = static_cast<float>(density);
             solid->MeshQuadro = mesh_quadro;
-            if (solid->ReBuldMesh()) {
+            // Low Poly density has legacy inverse semantics: increasing
+            // Density creates more cells. Do not use the adaptive scene
+            // tessellation overload here, because it ignores this control.
+            if (solid->ReBuldMesh(mesh_step)) {
                 ++rebuilt;
             }
         }
@@ -854,7 +967,7 @@ QIcon SolidGeometryDisplayIcon(int style) {
     const QPointF front_bottom(22.0, 39.0);
     const QPointF back_bottom(22.0, 25.0);
 
-    if (style == 2 || style == 3) {
+    if (style == 2 || style == 3 || style == 5) {
         QPainterPath top_face;
         top_face.moveTo(top); top_face.lineTo(right); top_face.lineTo(front);
         top_face.lineTo(left); top_face.closeSubpath();
@@ -880,12 +993,12 @@ QIcon SolidGeometryDisplayIcon(int style) {
     painter.drawLine(left_bottom, front_bottom);
     painter.drawLine(front_bottom, right_bottom);
 
-    if (style == 0) {
+    if (style == 0 || style == 4) {
         painter.setPen(QPen(QColor(45, 55, 190), 1.15, Qt::DashLine));
         painter.drawLine(top, back_bottom);
         painter.drawLine(back_bottom, left_bottom);
         painter.drawLine(back_bottom, right_bottom);
-    } else if (style == 3) {
+    } else if (style == 3 || style == 5) {
         painter.setPen(QPen(QColor(45, 55, 190), 0.9));
         for (int i = 1; i <= 3; ++i) {
             const qreal t = static_cast<qreal>(i) / 4.0;
@@ -971,6 +1084,31 @@ QIcon ZoomRectIcon() {
     painter.setBrush(Qt::NoBrush);
     painter.drawEllipse(QRectF(8.0, 8.0, 8.0, 8.0));
     painter.drawLine(QPointF(14.3, 14.3), QPointF(19.0, 19.0));
+    painter.end();
+    return QIcon(pixmap);
+}
+
+QIcon PointDimensionIcon() {
+    QPixmap pixmap(44, 44);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    const QColor cyan(0, 170, 195);
+    painter.setPen(QPen(cyan, 2.0, Qt::SolidLine, Qt::RoundCap));
+    painter.drawLine(QPointF(7.0, 33.0), QPointF(37.0, 11.0));
+    painter.drawLine(QPointF(7.0, 33.0), QPointF(14.0, 32.0));
+    painter.drawLine(QPointF(7.0, 33.0), QPointF(9.5, 26.5));
+    painter.drawLine(QPointF(37.0, 11.0), QPointF(30.0, 12.0));
+    painter.drawLine(QPointF(37.0, 11.0), QPointF(34.5, 17.5));
+    painter.setPen(QPen(QColor(28, 34, 40), 1.0));
+    painter.setBrush(QColor(245, 248, 250));
+    painter.drawRoundedRect(QRectF(14.0, 17.0, 17.0, 10.0), 2.0, 2.0);
+    painter.setPen(QColor(20, 75, 90));
+    QFont font = painter.font();
+    font.setPixelSize(7);
+    font.setBold(true);
+    painter.setFont(font);
+    painter.drawText(QRectF(14.0, 17.0, 17.0, 10.0), Qt::AlignCenter, "123");
     painter.end();
     return QIcon(pixmap);
 }
@@ -1128,6 +1266,43 @@ QIcon SketchFilletIcon() {
     return QIcon(pixmap);
 }
 
+QIcon SketchGeometryConstraintIcon(int kind) {
+    QPixmap pixmap(44, 44);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    const QPen geometry_pen(QColor(25, 25, 25), 2.8,
+                            Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+    painter.setPen(geometry_pen);
+    if (kind == 0) {
+        painter.drawLine(QPointF(7, 22), QPointF(37, 22));
+    } else if (kind == 1) {
+        painter.drawLine(QPointF(22, 7), QPointF(22, 37));
+    } else {
+        QPainterPath curve;
+        if (kind == 2) {
+            painter.drawLine(QPointF(5, 30), QPointF(20, 22));
+            curve.moveTo(20, 22);
+            curve.cubicTo(27, 18, 30, 8, 39, 7);
+            painter.setPen(QPen(QColor(45, 170, 75), 1.3, Qt::DashLine));
+            painter.drawLine(QPointF(7, 29), QPointF(29, 18));
+        } else {
+            curve.moveTo(5, 37);
+            curve.cubicTo(8, 27, 16, 23, 22, 22);
+            painter.drawLine(QPointF(22, 22), QPointF(22, 5));
+            painter.setPen(QPen(QColor(45, 170, 75), 1.3, Qt::DashLine));
+            painter.drawLine(QPointF(22, 36), QPointF(22, 8));
+        }
+        painter.setPen(geometry_pen);
+        painter.drawPath(curve);
+        painter.setPen(QPen(QColor(165, 0, 15), 1.0));
+        painter.setBrush(QColor(255, 55, 65));
+        painter.drawEllipse(QPointF(20 + (kind == 3 ? 2 : 0), 22), 3.2, 3.2);
+    }
+    painter.end();
+    return QIcon(pixmap);
+}
+
 QIcon FrameSolidIcon() {
     QPixmap pixmap(44, 44);
     pixmap.fill(Qt::transparent);
@@ -1185,6 +1360,32 @@ QIcon BodyByTwoSketchesIcon() {
     bottom_sketch.closeSubpath();
     painter.drawPath(bottom_sketch);
 
+    painter.end();
+    return QIcon(pixmap);
+}
+
+QIcon ChairFurnitureIcon() {
+    QPixmap pixmap(44, 44);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    const QPen wood_pen(QColor(92, 48, 24), 3.2,
+                        Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+    painter.setPen(wood_pen);
+    painter.setBrush(QColor(176, 96, 45));
+    painter.drawPolygon(QPolygonF()
+        << QPointF(10.0, 23.0) << QPointF(29.0, 20.0)
+        << QPointF(36.0, 24.0) << QPointF(17.0, 28.0));
+    painter.drawLine(QPointF(11.0, 23.0), QPointF(9.0, 40.0));
+    painter.drawLine(QPointF(17.0, 28.0), QPointF(16.0, 42.0));
+    painter.drawLine(QPointF(35.0, 24.0), QPointF(34.0, 38.0));
+    painter.drawLine(QPointF(29.0, 21.0), QPointF(31.0, 5.0));
+    painter.drawLine(QPointF(10.0, 23.0), QPointF(9.0, 8.0));
+    painter.drawLine(QPointF(9.0, 8.0), QPointF(31.0, 5.0));
+    painter.setPen(QPen(QColor(113, 59, 27), 2.1,
+                        Qt::SolidLine, Qt::RoundCap));
+    painter.drawLine(QPointF(12.0, 12.0), QPointF(28.0, 10.0));
+    painter.drawLine(QPointF(12.0, 17.0), QPointF(28.0, 15.0));
     painter.end();
     return QIcon(pixmap);
 }
@@ -1368,7 +1569,10 @@ SolidOperationsDialogResult ShowSolidOperationsDialog(QWidget* parent,
 
     const std::string original_name = solid->GetName();
     QDialog dialog(parent);
-    dialog.setWindowTitle("Solid edition box");
+    dialog.setWindowTitle(
+        dynamic_cast<CSurfaceSet*>(solid)
+            ? "Surface Editor"
+            : "Solid Editor");
     dialog.setModal(false);
     dialog.setWindowModality(Qt::NonModal);
     dialog.resize(210, 300);
@@ -1377,7 +1581,7 @@ SolidOperationsDialogResult ShowSolidOperationsDialog(QWidget* parent,
     root_layout->setContentsMargins(8, 8, 8, 8);
     root_layout->setSpacing(8);
 
-    auto* undo_label = new QLabel("Undo unable", &dialog);
+    auto* undo_label = new QLabel("Operation history", &dialog);
     undo_label->setAlignment(Qt::AlignCenter);
     root_layout->addWidget(undo_label);
 
@@ -1544,12 +1748,360 @@ std::vector<ParametricParameterValue> ToFilletEdgeSavedParameters(const std::vec
     }
     return saved;
 }
+
+bool IsEditableCurve(const CAlfaObject* object) {
+    return dynamic_cast<const CPolyline*>(object)
+        || dynamic_cast<const CBSpline*>(object);
+}
+
+double CurvePointDistanceSquared(const CPoint3d& first, const CPoint3d& second) {
+    const double dx = first.x - second.x;
+    const double dy = first.y - second.y;
+    const double dz = first.z - second.z;
+    return dx * dx + dy * dy + dz * dz;
+}
+
+const std::vector<CPoint3d>* CurveControlPoints(const CAlfaObject* object) {
+    if (const auto* polyline = dynamic_cast<const CPolyline*>(object)) {
+        return &polyline->GetPoints();
+    }
+    if (const auto* spline = dynamic_cast<const CBSpline*>(object)) {
+        return &spline->GetPoints();
+    }
+    return nullptr;
+}
+
+void CopyCurveAppearance(const CAlfaObject& source, CAlfaObject& target) {
+    target.SetColor(source.GetColor());
+    target.SetMaterial(source.GetMaterial());
+    target.SetMaterialId(source.GetMaterialId());
+    target.SetGroupName(source.GetGroupName());
+    target.SetVisible(source.IsVisible());
+    target.m_LayerID = source.m_LayerID;
+    target.SetParametricDefinition(
+        source.GetParametricToolId(), source.GetParametricParameters());
+}
+
+std::unique_ptr<CAlfaObject> MakeCurvePiece(
+    const CAlfaObject& source,
+    const std::vector<CPoint3d>& points,
+    const std::vector<double>& weights,
+    const std::string& suffix) {
+    if (dynamic_cast<const CPolyline*>(&source)) {
+        auto result = std::make_unique<CPolyline>(source.GetName() + suffix);
+        for (const CPoint3d& point : points) result->AddPoint(point);
+        CopyCurveAppearance(source, *result);
+        return result;
+    }
+    const auto* source_spline = dynamic_cast<const CBSpline*>(&source);
+    if (!source_spline) return {};
+    auto result = std::make_unique<CBSpline>(source.GetName() + suffix);
+    result->SetCurveType(source_spline->GetCurveType());
+    result->SetDegree(std::min(
+        source_spline->GetDegree(), std::max(1, static_cast<int>(points.size()) - 1)));
+    for (const CPoint3d& point : points) result->AddPoint(point);
+    result->SetWeights(weights);
+    CopyCurveAppearance(source, *result);
+    return result;
+}
+
+bool ReplaceCurveGeometry(CAlfaObject& target,
+                          const std::vector<CPoint3d>& points,
+                          const std::vector<double>& weights = {}) {
+    if (auto* polyline = dynamic_cast<CPolyline*>(&target)) {
+        polyline->Clear();
+        for (const CPoint3d& point : points) polyline->AddPoint(point);
+        return points.size() >= 2;
+    }
+    if (auto* spline = dynamic_cast<CBSpline*>(&target)) {
+        spline->Clear();
+        for (const CPoint3d& point : points) spline->AddPoint(point);
+        spline->SetWeights(weights);
+        spline->SetDegree(std::min(
+            spline->GetDegree(), std::max(1, static_cast<int>(points.size()) - 1)));
+        return points.size() >= 2;
+    }
+    return false;
+}
+
+struct CurveProjection {
+    size_t segment = 0;
+    CPoint3d point;
+    double distance_squared = std::numeric_limits<double>::max();
+};
+
+CurveProjection ProjectToControlPolygon(const std::vector<CPoint3d>& points,
+                                        CPoint3d query) {
+    CurveProjection best;
+    if (points.size() < 2) return best;
+    for (size_t segment = 0; segment + 1 < points.size(); ++segment) {
+        const CPoint3d& start = points[segment];
+        const CPoint3d& end = points[segment + 1];
+        const double dx = end.x - start.x;
+        const double dy = end.y - start.y;
+        const double dz = end.z - start.z;
+        const double length_squared = dx * dx + dy * dy + dz * dz;
+        const double t = length_squared <= 1.0e-18 ? 0.0 : std::clamp(
+            ((query.x - start.x) * dx + (query.y - start.y) * dy
+             + (query.z - start.z) * dz) / length_squared,
+            0.0, 1.0);
+        const CPoint3d projected(
+            start.x + dx * t, start.y + dy * t, start.z + dz * t);
+        const double distance_squared = CurvePointDistanceSquared(projected, query);
+        if (distance_squared < best.distance_squared) {
+            best = {segment, projected, distance_squared};
+        }
+    }
+    return best;
+}
+
+std::vector<CPoint3d> CurveSamples(const CAlfaObject& object) {
+    if (const auto* polyline = dynamic_cast<const CPolyline*>(&object)) {
+        return polyline->GetRoundedPathPoints();
+    }
+    const auto* spline = dynamic_cast<const CBSpline*>(&object);
+    if (!spline) return {};
+    const int count = std::max(64, static_cast<int>(spline->GetPointCount()) * 32);
+    std::vector<CPoint3d> samples;
+    samples.reserve(static_cast<size_t>(count + 1));
+    for (int i = 0; i <= count; ++i) {
+        samples.push_back(spline->Evaluate(static_cast<float>(i) / count));
+    }
+    return samples;
+}
+
+struct SegmentPairProjection {
+    CPoint3d first;
+    CPoint3d second;
+    double distance_squared = std::numeric_limits<double>::max();
+};
+
+SegmentPairProjection ClosestSegmentPair(CPoint3d p1, CPoint3d q1,
+                                         CPoint3d p2, CPoint3d q2) {
+    const Vec3 a{static_cast<float>(p1.x), static_cast<float>(p1.y), static_cast<float>(p1.z)};
+    const Vec3 b{static_cast<float>(q1.x), static_cast<float>(q1.y), static_cast<float>(q1.z)};
+    const Vec3 c{static_cast<float>(p2.x), static_cast<float>(p2.y), static_cast<float>(p2.z)};
+    const Vec3 d{static_cast<float>(q2.x), static_cast<float>(q2.y), static_cast<float>(q2.z)};
+    const Vec3 u = b - a;
+    const Vec3 v = d - c;
+    const Vec3 w = a - c;
+    const double aa = dot(u, u);
+    const double bb = dot(u, v);
+    const double cc = dot(v, v);
+    const double dd = dot(u, w);
+    const double ee = dot(v, w);
+    const double denominator = aa * cc - bb * bb;
+    double s = denominator <= 1.0e-18 ? 0.0 : (bb * ee - cc * dd) / denominator;
+    double t = denominator <= 1.0e-18
+        ? (cc <= 1.0e-18 ? 0.0 : ee / cc)
+        : (aa * ee - bb * dd) / denominator;
+    s = std::clamp(s, 0.0, 1.0);
+    t = std::clamp(t, 0.0, 1.0);
+    // Reproject once after clamping to handle segment endpoints.
+    if (aa > 1.0e-18) s = std::clamp((bb * t - dd) / aa, 0.0, 1.0);
+    if (cc > 1.0e-18) t = std::clamp((bb * s + ee) / cc, 0.0, 1.0);
+    const CPoint3d first(
+        p1.x + (q1.x - p1.x) * s,
+        p1.y + (q1.y - p1.y) * s,
+        p1.z + (q1.z - p1.z) * s);
+    const CPoint3d second(
+        p2.x + (q2.x - p2.x) * t,
+        p2.y + (q2.y - p2.y) * t,
+        p2.z + (q2.z - p2.z) * t);
+    return {first, second, CurvePointDistanceSquared(first, second)};
+}
+
+std::vector<CPoint3d> PlanePointsFromOriginNormal(CPoint3d origin, Vec3 normal) {
+    normal = normalize(normal);
+    if (dot(normal, normal) <= 1.0e-12f) return {};
+    const Vec3 reference = std::abs(normal.z) < 0.9f
+        ? Vec3{0.0f, 0.0f, 1.0f} : Vec3{0.0f, 1.0f, 0.0f};
+    const Vec3 first_axis = normalize(cross(normal, reference));
+    const Vec3 second_axis = normalize(cross(normal, first_axis));
+    return {
+        origin,
+        CPoint3d(origin.x + first_axis.x, origin.y + first_axis.y, origin.z + first_axis.z),
+        CPoint3d(origin.x + second_axis.x, origin.y + second_axis.y, origin.z + second_axis.z)};
+}
+
+std::array<double, 4> LoadRememberedPlaneFactors() {
+    QSettings settings;
+    return {
+        settings.value("modeling/lastPlane/a", 0.0).toDouble(),
+        settings.value("modeling/lastPlane/b", 0.0).toDouble(),
+        settings.value("modeling/lastPlane/c", 1.0).toDouble(),
+        settings.value("modeling/lastPlane/d", 0.0).toDouble()};
+}
+
+void SaveRememberedPlaneFactors(const std::array<double, 4>& factors) {
+    QSettings settings;
+    settings.setValue("modeling/lastPlane/a", factors[0]);
+    settings.setValue("modeling/lastPlane/b", factors[1]);
+    settings.setValue("modeling/lastPlane/c", factors[2]);
+    settings.setValue("modeling/lastPlane/d", factors[3]);
+}
+
+std::array<double, 4> PlaneFactorsFromPoints(
+    const CPoint3d& first, const CPoint3d& second, const CPoint3d& third) {
+    Vec3 normal = normalize(cross(
+        Vec3{static_cast<float>(second.x - first.x),
+             static_cast<float>(second.y - first.y),
+             static_cast<float>(second.z - first.z)},
+        Vec3{static_cast<float>(third.x - first.x),
+             static_cast<float>(third.y - first.y),
+             static_cast<float>(third.z - first.z)}));
+    return {normal.x, normal.y, normal.z,
+            -(normal.x * first.x + normal.y * first.y + normal.z * first.z)};
+}
+
+double PlaneParameterValue(const std::vector<ToolParameter>& parameters,
+                           const char* id, double fallback) {
+    const auto found = std::find_if(parameters.begin(), parameters.end(),
+        [id](const ToolParameter& parameter) { return parameter.id == id; });
+    return found == parameters.end() ? fallback : found->value;
+}
+
+std::array<double, 4> PlaneFactorsFromParameters(
+    const std::vector<ToolParameter>& parameters) {
+    const int mode = static_cast<int>(PlaneParameterValue(parameters, "mode", 1.0));
+    if (mode == 0) return {
+        PlaneParameterValue(parameters, "a", 0.0),
+        PlaneParameterValue(parameters, "b", 0.0),
+        PlaneParameterValue(parameters, "c", 1.0),
+        PlaneParameterValue(parameters, "d", 0.0)};
+    if (mode == 1) {
+        const double x = PlaneParameterValue(parameters, "plane.origin.x", 0.0);
+        const double y = PlaneParameterValue(parameters, "plane.origin.y", 0.0);
+        const double z = PlaneParameterValue(parameters, "plane.origin.z", 0.0);
+        const double a = PlaneParameterValue(parameters, "plane.normal.x", 0.0);
+        const double b = PlaneParameterValue(parameters, "plane.normal.y", 0.0);
+        const double c = PlaneParameterValue(parameters, "plane.normal.z", 1.0);
+        return {a, b, c, -(a * x + b * y + c * z)};
+    }
+    if (mode == 2) return PlaneFactorsFromPoints(
+        CPoint3d(PlaneParameterValue(parameters, "p1.x", 0.0),
+                 PlaneParameterValue(parameters, "p1.y", 0.0),
+                 PlaneParameterValue(parameters, "p1.z", 0.0)),
+        CPoint3d(PlaneParameterValue(parameters, "p2.x", 100.0),
+                 PlaneParameterValue(parameters, "p2.y", 0.0),
+                 PlaneParameterValue(parameters, "p2.z", 0.0)),
+        CPoint3d(PlaneParameterValue(parameters, "p3.x", 0.0),
+                 PlaneParameterValue(parameters, "p3.y", 100.0),
+                 PlaneParameterValue(parameters, "p3.z", 0.0)));
+    const double offset = PlaneParameterValue(parameters, "offset", 0.0);
+    if (mode == 3) return {0.0, 0.0, 1.0, -offset};
+    if (mode == 4) return {0.0, 1.0, 0.0, -offset};
+    return {1.0, 0.0, 0.0, -offset};
+}
+
+int ShowCurveTrimPlaneMethodDialog(
+    QWidget* parent, std::array<double, 4>& factors) {
+    QDialog dialog(parent);
+    dialog.setWindowTitle("Plane box");
+    dialog.setModal(true);
+    dialog.setFixedWidth(232);
+    auto* layout = new QVBoxLayout(&dialog);
+    layout->setContentsMargins(10, 10, 10, 10);
+    layout->setSpacing(3);
+    auto* factors_group = new QGroupBox("Factors  A, B, C, D", &dialog);
+    auto* factors_layout = new QVBoxLayout(factors_group);
+    factors_layout->setContentsMargins(4, 5, 4, 5);
+    factors_layout->setSpacing(4);
+    auto* factors_editor = new QLineEdit(factors_group);
+    factors_editor->setText(QString("%1 %2 %3 %4")
+        .arg(factors[0], 0, 'f', 6)
+        .arg(factors[1], 0, 'f', 6)
+        .arg(factors[2], 0, 'f', 6)
+        .arg(factors[3], 0, 'f', 6));
+    factors_editor->setToolTip("A B C D");
+    factors_layout->addWidget(factors_editor);
+    auto* factors_ok = new QPushButton("OK", factors_group);
+    factors_layout->addWidget(factors_ok, 0, Qt::AlignHCenter);
+    layout->addWidget(factors_group);
+    QObject::connect(factors_ok, &QPushButton::clicked, &dialog,
+                     [&dialog, &factors, factors_editor]() {
+        QString text = factors_editor->text();
+        text.replace(',', '.');
+        const QStringList values = text.split(
+            QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+        if (values.size() != 4) {
+            factors_editor->setStyleSheet("QLineEdit { background: #ffd6d6; }");
+            factors_editor->setToolTip("Введите четыре числа: A B C D");
+            factors_editor->setFocus();
+            factors_editor->selectAll();
+            return;
+        }
+        std::array<double, 4> parsed{};
+        for (int index = 0; index < 4; ++index) {
+            bool ok = false;
+            parsed[static_cast<size_t>(index)] = values[index].toDouble(&ok);
+            if (!ok) {
+                factors_editor->setStyleSheet("QLineEdit { background: #ffd6d6; }");
+                factors_editor->setToolTip("Введите четыре числа: A B C D");
+                factors_editor->setFocus();
+                factors_editor->selectAll();
+                return;
+            }
+        }
+        factors = parsed;
+        dialog.done(5);
+    });
+    auto add_method = [&dialog, layout](const QString& text, int result) {
+        auto* button = new QPushButton(text, &dialog);
+        button->setMinimumWidth(210);
+        layout->addWidget(button);
+        QObject::connect(button, &QPushButton::clicked, &dialog,
+                         [&dialog, result]() { dialog.done(result); });
+    };
+    add_method("Face of Solid", 7);
+    add_method("3 Points", 1);
+    add_method("Point + Normal", 6);
+    add_method("Plane XY", 2);
+    add_method("Plane XZ", 3);
+    add_method("Plane YZ", 4);
+    auto* cancel = new QPushButton("Cancel", &dialog);
+    layout->addSpacing(7);
+    layout->addWidget(cancel, 0, Qt::AlignHCenter);
+    QObject::connect(cancel, &QPushButton::clicked, &dialog, &QDialog::reject);
+    CenterDialogOnCursor(dialog);
+    return dialog.exec();
+}
+
+bool ShowPlaneValuesDialog(QWidget* parent, const QString& title,
+                           const QStringList& labels,
+                           std::vector<double>& values) {
+    QDialog dialog(parent);
+    dialog.setWindowTitle(title);
+    auto* root = new QVBoxLayout(&dialog);
+    auto* form = new QFormLayout();
+    std::vector<QDoubleSpinBox*> editors;
+    for (int i = 0; i < labels.size(); ++i) {
+        auto* editor = new QDoubleSpinBox(&dialog);
+        editor->setRange(-1000000.0, 1000000.0);
+        editor->setDecimals(4);
+        editor->setValue(i < static_cast<int>(values.size()) ? values[i] : 0.0);
+        form->addRow(labels[i], editor);
+        editors.push_back(editor);
+    }
+    root->addLayout(form);
+    auto* buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    root->addWidget(buttons);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    CenterDialogOnCursor(dialog);
+    if (dialog.exec() != QDialog::Accepted) return false;
+    values.clear();
+    for (QDoubleSpinBox* editor : editors) values.push_back(editor->value());
+    return true;
+}
 }
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent),
       viewport_(new OpenGLViewport(this)),
-      property_panel_(new PropertyPanel(this)) {
+      property_panel_(new PropertyPanel(this)),
+      undo_redo_(document_) {
     UpdateWindowTitle();
     resize(1280, 760);
     setAcceptDrops(true);
@@ -1560,6 +2112,8 @@ MainWindow::MainWindow(QWidget* parent)
     LoadUserSettings();
     CreateActions();
     CreateDocks();
+    HotkeyManagerDialog::InitializeActions(this);
+    UpdateRecentFilesMenu();
     // Create the optional dock before restoreState(), otherwise Qt cannot
     // restore its floating/docked geometry from the previous session.
     ShowSketchPanel();
@@ -1573,6 +2127,28 @@ MainWindow::MainWindow(QWidget* parent)
             this, &MainWindow::AdvanceFurnitureAnimation);
 
     connect(viewport_, &OpenGLViewport::DocumentChanged, this, [this]() {
+        // Point transforms have their own Undo command.  Finish the current
+        // NURBS parameter transaction first, then reopen the editor after the
+        // viewport change has been recorded.
+        const bool reopen_nurbs_editor =
+            active_parametric_object_.tool_id == "NurbsParameters";
+        if (reopen_nurbs_editor) {
+            AcceptNurbsParameterChanges();
+        }
+        // A live fillet is only a preview until the property dialog is
+        // accepted. Replaying profile dependents here rebuilds a Boss-created
+        // solid from its committed operation tree and discards that preview
+        // as soon as a dimension grip is released.
+        const bool live_fillet_preview = !active_parametric_edit_existing_
+            && (active_parametric_object_.tool_id == "fillet_edge"
+                || active_parametric_object_.tool_id == "fillet_all_edges")
+            && document_.HasLiveFillet();
+        if (live_fillet_preview) {
+            RefreshSceneTree();
+            viewport_->update();
+            return;
+        }
+
         bool selected_sketch_found = false;
         for (size_t object_index : document_.GetSelectedObjectIndices()) {
             if (object_index >= document_.GetObjects().size()) {
@@ -1593,13 +2169,39 @@ MainWindow::MainWindow(QWidget* parent)
         document_.RebuildAssociativeClones();
         RefreshSceneTree();
         viewport_->update();
+        RecordDocumentChange("Viewport edit");
+        if (reopen_nurbs_editor) {
+            QTimer::singleShot(0, this, [this]() {
+                UpdateNurbsParameterEditor();
+            });
+        }
     });
     connect(viewport_, &OpenGLViewport::SelectionChanged, this, [this]() {
+        if (pending_reference_plane_face_pick_ || pending_trim_plane_face_pick_) {
+            if (CompletePendingPlaneFacePick()) return;
+        }
         if (!pending_trim_tool_id_.empty()) {
             RefreshSceneTree();
             UpdateToolAvailability();
             QTimer::singleShot(0, this, [this]() {
                 TryApplyPendingTrim();
+            });
+            return;
+        }
+        if (pending_precise_transform_ != PendingPreciseTransform::None
+            && document_.HasSelection()) {
+            const PendingPreciseTransform command = pending_precise_transform_;
+            pending_precise_transform_ = PendingPreciseTransform::None;
+            RefreshSceneTree();
+            UpdateToolAvailability();
+            QTimer::singleShot(0, this, [this, command]() {
+                if (command == PendingPreciseTransform::Move) {
+                    ShowPreciseMoveDialog();
+                } else if (command == PendingPreciseTransform::Rotate) {
+                    ShowPreciseRotateDialog();
+                } else if (command == PendingPreciseTransform::Scale) {
+                    ShowPreciseScaleDialog();
+                }
             });
             return;
         }
@@ -1609,15 +2211,6 @@ MainWindow::MainWindow(QWidget* parent)
             RefreshSceneTree();
             UpdateToolAvailability();
             return;
-        }
-        if (tool_tabs_
-            && tool_tabs_->currentIndex() >= 0
-            && tool_tabs_->tabText(tool_tabs_->currentIndex()) == "Sketch"
-            && viewport_->CurrentTool() == ToolMode::Select
-            && document_.GetSelectedSketch()
-            && viewport_->BeginEditSelectedSketch()) {
-            ShowSketchPanel();
-            UpdateActiveToolUi("NewSketch");
         }
         if (object_color_pick_pending_ && document_.HasSelection()) {
             object_color_pick_pending_ = false;
@@ -1631,6 +2224,10 @@ MainWindow::MainWindow(QWidget* parent)
                 ShowLowPolyTool();
             });
         }
+        // Selection alone must never open an editor. NURBS parameters are
+        // shown only by the explicit tool in the Curves panel.
+        const bool nurbs_parameter_editor =
+            active_parametric_object_.tool_id == "NurbsParameters";
         const bool active_edge_tool = active_parametric_object_.tool_id == "fillet_edge"
             || active_parametric_object_.tool_id == "ChamferSolid";
         if (active_edge_tool) {
@@ -1639,14 +2236,32 @@ MainWindow::MainWindow(QWidget* parent)
             TryStartLivePolylineExtrudeFromSelection();
         } else if (active_parametric_object_.tool_id == "SurfaceOfRevolution") {
             TryStartLivePolylineRevolveFromSelection();
+        } else if (active_parametric_object_.tool_id == "SurfaceRuled") {
+            // The generated surface is the live preview. Keep its parameter
+            // panel open while the user inspects/selects the result.
         } else if (active_parametric_object_.tool_id != "ThickSolidTool"
             && active_parametric_object_.tool_id != "TrimByPlane"
             && active_parametric_object_.tool_id != "TrimBySketch"
-            && active_parametric_object_.tool_id != "TrimBySurface") {
+            && active_parametric_object_.tool_id != "TrimBySurface"
+            && !nurbs_parameter_editor) {
             ClearActiveProperties();
         }
         RefreshSceneTree();
         UpdateToolAvailability();
+        const auto* reference = dynamic_cast<const CReferenceImage*>(
+            document_.GetSelectedObject());
+        const int opacity_percent = static_cast<int>(std::round(
+            (reference ? reference->GetMaterial().alpha
+                       : CMesh3D::GetSurfaceOpacity()) * 100.0f));
+        if (mesh_opacity_slider_
+            && mesh_opacity_slider_->value() != opacity_percent) {
+            const QSignalBlocker blocker(mesh_opacity_slider_);
+            mesh_opacity_slider_->setValue(opacity_percent);
+        }
+        if (mesh_opacity_value_label_) {
+            mesh_opacity_value_label_->setText(
+                QString("%1%").arg(opacity_percent));
+        }
         if (pending_group_command_ == PendingGroupCommand::Create) {
             const size_t count = document_.GetSelectedObjectCount();
             statusBar()->showMessage(count >= 2
@@ -1662,10 +2277,105 @@ MainWindow::MainWindow(QWidget* parent)
             statusBar()->showMessage("Body by Two Sketches: select exactly two closed sketches, then press Enter");
         } else if (pending_group_command_ == PendingGroupCommand::AssociativeClone) {
             statusBar()->showMessage("Associative Clone: select one solid, then press Enter");
+        } else if (pending_group_command_ == PendingGroupCommand::JoinSurfaces) {
+            statusBar()->showMessage(
+                "Join Surfaces: выбери минимум две поверхности, затем Enter");
+        } else if (pending_group_command_ == PendingGroupCommand::PlaneIntersection) {
+            statusBar()->showMessage(
+                "Plane Intersection: выберите Plane и поверхность, тело или Mesh, затем Enter");
+        } else if (pending_group_command_ == PendingGroupCommand::SurfaceIntersection) {
+            statusBar()->showMessage(
+                "Surface Intersection: выберите две поверхности, затем Enter");
+        } else if (pending_group_command_ == PendingGroupCommand::ProjectCurveToSurface) {
+            statusBar()->showMessage(
+                "Project Curve: выберите кривую и поверхность, затем Enter");
+        } else if (pending_group_command_ == PendingGroupCommand::ExtractSurfaceEdge) {
+            statusBar()->showMessage(
+                "Extract Edge: выберите кромки поверхности или тела, затем Enter");
+        } else if (pending_group_command_ == PendingGroupCommand::FourSplineSurface) {
+            statusBar()->showMessage("Surface by 4 Splines: выбери четыре граничных сплайна, затем Enter");
+        } else if (pending_group_command_ == PendingGroupCommand::TwoRailSweepSurface) {
+            statusBar()->showMessage("Sweep Surface (2 Rails): выбери профиль и две направляющие, затем Enter");
+        } else if (pending_group_command_ == PendingGroupCommand::TwoRailSweepSolid) {
+            statusBar()->showMessage("Sweep Solid (2 Rails): выбери закрытый Sketch и две направляющие, затем Enter");
         }
     });
+    connect(viewport_, &OpenGLViewport::Point3DPicked, this, [this](CPoint3d point) {
+        if (plane_three_point_pick_active_) {
+            AppendPlaneThreePointPick(point);
+            return;
+        }
+        if (pending_curve_edit_command_ != CurveEditCommand::None) {
+            CompleteCurveEditPoint(point);
+            return;
+        }
+        if (spatial_curve_kind_ != SpatialCurveKind::None) {
+            AppendSpatialCurvePoint(point);
+            return;
+        }
+        const Vec3 value{static_cast<float>(point.x),
+                         static_cast<float>(point.y),
+                         static_cast<float>(point.z)};
+        if (pending_transform_point_pick_ == PendingTransformPointPick::ScaleBasePoint) {
+            precise_scale_base_point_ = value;
+            precise_scale_base_point_ready_ = true;
+            pending_transform_point_pick_ = PendingTransformPointPick::None;
+            QTimer::singleShot(0, this, [this]() { ShowPreciseScaleDialog(); });
+        } else if (pending_transform_point_pick_ == PendingTransformPointPick::RotationPivot) {
+            pending_transform_point_pick_ = PendingTransformPointPick::None;
+            viewport_->SetRotationPivot(point);
+            statusBar()->showMessage(
+                QString("Pivot of Rotation: X %1, Y %2, Z %3")
+                    .arg(point.x, 0, 'f', 3)
+                    .arg(point.y, 0, 'f', 3)
+                    .arg(point.z, 0, 'f', 3),
+                2200);
+        }
+    });
+    connect(viewport_, &OpenGLViewport::Point3DPickFinished,
+            this, &MainWindow::FinishSpatialCurve);
+    connect(viewport_, &OpenGLViewport::Point3DPickCloseRequested,
+            this, &MainWindow::CloseSpatialCurve);
+    connect(viewport_, &OpenGLViewport::RotationAxisPicked,
+            this, [this](CPoint3d start, CPoint3d end) {
+        precise_rotate_axis_start_ = {
+            static_cast<float>(start.x),
+            static_cast<float>(start.y),
+            static_cast<float>(start.z)};
+        precise_rotate_axis_end_ = {
+            static_cast<float>(end.x),
+            static_cast<float>(end.y),
+            static_cast<float>(end.z)};
+        precise_rotate_axis_ready_ = true;
+        QTimer::singleShot(0, this, [this]() { ShowPreciseRotateDialog(); });
+    });
+    connect(viewport_, &OpenGLViewport::RotationAxisPickCanceled,
+            this, [this]() {
+        precise_rotate_axis_ready_ = false;
+        statusBar()->showMessage("Rotate canceled", 1400);
+    });
+    connect(viewport_, &OpenGLViewport::Point3DPickCanceled, this, [this]() {
+        if (plane_three_point_pick_active_) {
+            CancelPlaneThreePointPick("Plane: выбор трёх точек отменён");
+            return;
+        }
+        if (pending_curve_edit_command_ != CurveEditCommand::None) {
+            CancelCurveEditCommand("Curve edit canceled");
+            return;
+        }
+        if (spatial_curve_kind_ != SpatialCurveKind::None) {
+            CancelSpatialCurve();
+            return;
+        }
+        pending_transform_point_pick_ = PendingTransformPointPick::None;
+        precise_rotate_axis_ready_ = false;
+        precise_scale_base_point_ready_ = false;
+        statusBar()->showMessage("Point 3D canceled", 1400);
+    });
     connect(viewport_, &OpenGLViewport::SelectionConfirmed, this, [this]() {
-        if (pending_group_command_ == PendingGroupCommand::Create) {
+        if (pending_curve_edit_command_ != CurveEditCommand::None) {
+            PrepareCurveEditCommandSelection();
+        } else if (pending_group_command_ == PendingGroupCommand::Create) {
             CreateSelectedGroup();
         } else if (pending_group_command_ == PendingGroupCommand::Ungroup) {
             UngroupSelectedGroup();
@@ -1675,11 +2385,45 @@ MainWindow::MainWindow(QWidget* parent)
             CreateBodyFromTwoSketches();
         } else if (pending_group_command_ == PendingGroupCommand::AssociativeClone) {
             CreateAssociativeClone();
+        } else if (pending_group_command_ == PendingGroupCommand::JoinSurfaces) {
+            JoinSelectedSurfaces();
+        } else if (pending_group_command_ == PendingGroupCommand::PlaneIntersection) {
+            CreatePlaneIntersection();
+        } else if (pending_group_command_ == PendingGroupCommand::SurfaceIntersection) {
+            CreateSurfaceIntersection();
+        } else if (pending_group_command_ == PendingGroupCommand::ProjectCurveToSurface) {
+            ProjectCurveToSurface();
+        } else if (pending_group_command_ == PendingGroupCommand::ExtractSurfaceEdge) {
+            ExtractSurfaceEdge();
+        } else if (pending_group_command_ == PendingGroupCommand::FourSplineSurface) {
+            CreateFourSplineSurface();
+        } else if (pending_group_command_ == PendingGroupCommand::TwoRailSweepSurface) {
+            CreateTwoRailSweepSurface();
+        } else if (pending_group_command_ == PendingGroupCommand::TwoRailSweepSolid) {
+            CreateTwoRailSweepSolid();
         }
     });
     connect(viewport_, &OpenGLViewport::SelectionCommandCanceled, this, [this]() {
-        if (!pending_trim_tool_id_.empty()) {
+        if (pending_curve_edit_command_ != CurveEditCommand::None) {
+            CancelCurveEditCommand("Curve edit canceled");
+        } else if (!pending_trim_tool_id_.empty()) {
             CancelPendingTrim("Trim command canceled");
+        } else if (pending_group_command_ == PendingGroupCommand::JoinSurfaces) {
+            CancelPendingGroupCommand("Join Surfaces: отменено");
+        } else if (pending_group_command_ == PendingGroupCommand::PlaneIntersection) {
+            CancelPendingGroupCommand("Plane Intersection: отменено");
+        } else if (pending_group_command_ == PendingGroupCommand::SurfaceIntersection) {
+            CancelPendingGroupCommand("Surface Intersection: отменено");
+        } else if (pending_group_command_ == PendingGroupCommand::ProjectCurveToSurface) {
+            CancelPendingGroupCommand("Project Curve: отменено");
+        } else if (pending_group_command_ == PendingGroupCommand::ExtractSurfaceEdge) {
+            CancelPendingGroupCommand("Extract Edge: отменено");
+        } else if (pending_group_command_ == PendingGroupCommand::FourSplineSurface) {
+            CancelPendingGroupCommand("Surface by 4 Splines: отменено");
+        } else if (pending_group_command_ == PendingGroupCommand::TwoRailSweepSurface) {
+            CancelPendingGroupCommand("Sweep Surface (2 Rails): отменено");
+        } else if (pending_group_command_ == PendingGroupCommand::TwoRailSweepSolid) {
+            CancelPendingGroupCommand("Sweep Solid (2 Rails): отменено");
         } else {
             CancelPendingGroupCommand("Group command canceled");
         }
@@ -1901,10 +2645,12 @@ MainWindow::MainWindow(QWidget* parent)
         QAction* fillet = menu.addAction(ToolIcon("fillet_edge"), "Fillet");
         QAction* chamfer = menu.addAction(ToolIcon("ChamferSolid"), "Chamfer");
         menu.addSeparator();
-        QAction* extrude = menu.addAction(ToolIcon("SolidExtrudeFace"), "Extrude");
-        QAction* offset = menu.addAction(ToolIcon("SolidOffsetFace"), "Offset");
-        QAction* draft = menu.addAction(ToolIcon("SolidDraft"), "Draft");
-        QAction* selected = menu.exec(global_position);
+            QAction* extrude = menu.addAction(ToolIcon("SolidExtrudeFace"), "Extrude");
+            QAction* offset = menu.addAction(ToolIcon("SolidOffsetFace"), "Offset");
+            QAction* draft = menu.addAction(ToolIcon("SolidDraft"), "Draft");
+            menu.addSeparator();
+            QAction* edit_texture = menu.addAction(EditTextureIcon(), "Edit Texture");
+            QAction* selected = menu.exec(global_position);
         if (selected == fillet || selected == chamfer) {
             // SetSelectionMode performs the Face -> Edges conversion itself.
             // Converting here first would leave no selected face for that
@@ -1928,10 +2674,12 @@ MainWindow::MainWindow(QWidget* parent)
             ActivateParametricTool("SolidExtrudeFace");
         } else if (selected == offset) {
             ActivateParametricTool("SolidOffsetFace");
-        } else if (selected == draft) {
-            ActivateParametricTool("SolidDraft");
-        }
-    });
+            } else if (selected == draft) {
+                ActivateParametricTool("SolidDraft");
+            } else if (selected == edit_texture) {
+                ShowSurfaceTextureEditor();
+            }
+        });
     connect(viewport_, &OpenGLViewport::ObjectQuickMenuRequested,
             this,
             [this](const QPoint& global_position) {
@@ -1944,6 +2692,36 @@ MainWindow::MainWindow(QWidget* parent)
         QAction* move = menu.addAction(ToolIcon("move"), "Move");
         QAction* rotate = menu.addAction(ToolIcon("rotate"), "Rotate");
         QAction* scale = menu.addAction(ToolIcon("scale"), "Scale");
+        menu.addSeparator();
+        QAction* move_point_to_point = menu.addAction("P2P");
+        menu.addSeparator();
+        QAction* rotate_plus_90 = menu.addAction(ToolIcon("rotate"), "Rotate 90°");
+        QAction* rotate_minus_90 = menu.addAction(ToolIcon("rotate"), "Rotate -90°");
+
+        QTimer dismiss_timer(&menu);
+        dismiss_timer.setInterval(50);
+        connect(&dismiss_timer, &QTimer::timeout, &menu, [&menu]() {
+            if (!menu.isVisible()) {
+                return;
+            }
+            const QRect bounds = menu.frameGeometry();
+            const QPoint cursor = QCursor::pos();
+            const int dx = cursor.x() < bounds.left()
+                ? bounds.left() - cursor.x()
+                : cursor.x() > bounds.right()
+                    ? cursor.x() - bounds.right()
+                    : 0;
+            const int dy = cursor.y() < bounds.top()
+                ? bounds.top() - cursor.y()
+                : cursor.y() > bounds.bottom()
+                    ? cursor.y() - bounds.bottom()
+                    : 0;
+            const int dismiss_distance = menu.width();
+            if (dx * dx + dy * dy > dismiss_distance * dismiss_distance) {
+                menu.close();
+            }
+        });
+        dismiss_timer.start();
         QAction* selected = menu.exec(global_position);
         if (selected == move) {
             BeginTransformTool(TransformOperation::Move);
@@ -1951,15 +2729,75 @@ MainWindow::MainWindow(QWidget* parent)
             BeginTransformTool(TransformOperation::Rotate);
         } else if (selected == scale) {
             BeginTransformTool(TransformOperation::Scale);
+        } else if (selected == move_point_to_point) {
+            viewport_->BeginMovePointToPoint();
+        } else if (selected == rotate_plus_90 || selected == rotate_minus_90) {
+            Vec3 center{};
+            if (!document_.GetSelectionCenter(center)) {
+                statusBar()->showMessage("Cannot determine the object center", 1800);
+                return;
+            }
+            const float angle = selected == rotate_plus_90
+                ? kPi * 0.5f
+                : -kPi * 0.5f;
+            if (viewport_->ApplyPreciseRotate(center, {0.0f, 0.0f, 1.0f}, angle)) {
+                RefreshSceneTree();
+                statusBar()->showMessage(
+                    selected == rotate_plus_90
+                        ? "Object rotated 90° around Z"
+                        : "Object rotated -90° around Z",
+                    1800);
+            }
         }
     });
     connect(viewport_, &OpenGLViewport::FilesDropped, this, [this](const QStringList& paths) {
         HandleDroppedFiles(paths);
     });
+    connect(viewport_, &OpenGLViewport::ViewportPopupMenuRequested,
+            this, &MainWindow::ShowViewportPopupMenu);
     connect(viewport_, &OpenGLViewport::StatusTextChanged, this, [this](const QString& text) {
         statusBar()->showMessage(text);
     });
+    connect(viewport_, &OpenGLViewport::PointToPointMeasurementFinished,
+            this, [this](double distance_mm) {
+        QTimer::singleShot(0, this, [this, distance_mm]() {
+            const DisplayLengthUnit unit = LoadDisplayLengthUnit();
+            QMessageBox message(QMessageBox::Question,
+                                "The information",
+                                QString("Distance = %1 %2")
+                                    .arg(MillimetersToDisplay(distance_mm, unit),
+                                         0, 'f', 3)
+                                    .arg(DisplayLengthUnitSuffix(unit)),
+                                QMessageBox::NoButton,
+                                this);
+            QPushButton* repeat = message.addButton(
+                "Repeat", QMessageBox::AcceptRole);
+            QPushButton* cancel = message.addButton(
+                "Cancel", QMessageBox::RejectRole);
+            message.setDefaultButton(repeat);
+            message.exec();
+            if (message.clickedButton() == repeat) {
+                viewport_->BeginMeasurePointToPoint();
+                UpdateActiveToolUi("MeasurePointToPoint");
+            } else {
+                Q_UNUSED(cancel);
+                viewport_->SetTool(ToolMode::Select);
+                statusBar()->showMessage(
+                    "Point-to-Point Dimension completed", 1400);
+            }
+        });
+    });
     connect(viewport_, &OpenGLViewport::ToolModeChanged, this, [this](ToolMode tool) {
+        if (tool != ToolMode::SketchFillet
+            && sketch_fillet_dialog_
+            && sketch_fillet_dialog_->isVisible()) {
+            sketch_fillet_dialog_->hide();
+        }
+        if (tool != ToolMode::DrawSpline
+            && draw_spline_dialog_
+            && draw_spline_dialog_->isVisible()) {
+            draw_spline_dialog_->hide();
+        }
         if (tool != ToolMode::Select && pending_group_command_ != PendingGroupCommand::None) {
             pending_group_command_ = PendingGroupCommand::None;
             viewport_->SetSelectionConfirmationMode(false);
@@ -1974,18 +2812,25 @@ MainWindow::MainWindow(QWidget* parent)
             UpdateActiveToolUi("PolylineCurve");
         } else if (tool == ToolMode::DrawBSpline) {
             UpdateActiveToolUi("BSplineCurve");
+        } else if (tool == ToolMode::DrawSpline) {
+            UpdateActiveToolUi("DrawSpline");
         } else if (tool == ToolMode::EditPoint) {
             UpdateActiveToolUi("EditPoint");
         } else if (tool == ToolMode::SketchRectangle
                    || tool == ToolMode::SketchPolyline
                    || tool == ToolMode::SketchBezier
                    || tool == ToolMode::SketchConvertBezier
-                   || tool == ToolMode::SketchConvertArc) {
+                   || tool == ToolMode::SketchConvertArc
+                   || tool == ToolMode::SketchFillet) {
             UpdateActiveToolUi("NewSketch");
+        } else if (tool == ToolMode::SolidFillet) {
+            UpdateActiveToolUi(active_parametric_object_.tool_id);
         } else if (tool == ToolMode::SolidBoxRectangle) {
             UpdateActiveToolUi("SolidBox");
         } else if (tool == ToolMode::SolidCylinderCircle) {
             UpdateActiveToolUi("SolidCylinder");
+        } else if (tool == ToolMode::MeasurePointToPoint) {
+            UpdateActiveToolUi("MeasurePointToPoint");
         }
     });
     connect(viewport_, &OpenGLViewport::SolidBoxRectangleFinished, this, [this](std::vector<ToolParameter> parameters) {
@@ -2030,8 +2875,36 @@ MainWindow::MainWindow(QWidget* parent)
     });
     connect(property_panel_, &PropertyPanel::ParametersChanged, this, [this]() {
         active_parametric_object_ = property_panel_->ActiveObject();
+        if (active_parametric_object_.tool_id == "NurbsParameters") {
+            ApplyNurbsParameterChanges();
+            return;
+        }
+        if (active_parametric_object_.tool_id == "PlaneTool") {
+            const auto mode = std::find_if(
+                active_parametric_object_.parameters.begin(),
+                active_parametric_object_.parameters.end(),
+                [](const ToolParameter& parameter) { return parameter.id == "mode"; });
+            if (mode != active_parametric_object_.parameters.end()
+                && static_cast<int>(mode->value) == 2
+                && !plane_three_point_method_selected_) {
+                plane_three_point_method_selected_ = true;
+                BeginPlaneThreePointPick();
+            } else if (mode != active_parametric_object_.parameters.end()
+                       && static_cast<int>(mode->value) != 2) {
+                plane_three_point_method_selected_ = false;
+                if (plane_three_point_pick_active_) {
+                    CancelPlaneThreePointPick();
+                }
+            }
+            const std::array<double, 4> factors =
+                PlaneFactorsFromParameters(active_parametric_object_.parameters);
+            if (factors[0] * factors[0] + factors[1] * factors[1]
+                    + factors[2] * factors[2] > 1.0e-18) {
+                SaveRememberedPlaneFactors(factors);
+            }
+        }
         bool corrected_corner_single_door = false;
-        if (active_parametric_object_.tool_id == "cabinet") {
+        if (IsCabinetTool(active_parametric_object_.tool_id)) {
             ToolParameter* body_type = nullptr;
             ToolParameter* facade_type = nullptr;
             for (ToolParameter& parameter : active_parametric_object_.parameters) {
@@ -2168,7 +3041,7 @@ MainWindow::MainWindow(QWidget* parent)
         // A new cabinet is created only after OK.  Parameter changes merely
         // update the dialog; editing an existing cabinet keeps live rebuild.
         if (!active_parametric_edit_existing_
-            && active_parametric_object_.tool_id == "cabinet") {
+            && IsCabinetTool(active_parametric_object_.tool_id)) {
             if (corrected_corner_single_door) {
                 statusBar()->showMessage(
                     "Corner cabinet supports only Double Door", 3000);
@@ -2278,7 +3151,7 @@ void MainWindow::StartFurnitureInteraction(unsigned long object_id) {
             continue;
         }
         const std::string& tool_id = candidate->GetParametricToolId();
-        if (tool_id == "cabinet" || tool_id == "desk"
+        if (IsCabinetTool(tool_id) || tool_id == "desk"
             || tool_id == "drawer_box") {
             assembly_index = index;
             assembly = candidate;
@@ -2313,8 +3186,9 @@ void MainWindow::StartFurnitureInteraction(unsigned long object_id) {
     furniture_animation_final_drawer_ = -1.0;
     furniture_animation_saved_distance_ = 0.0;
     furniture_animation_preview_value_ = 0.0;
+    furniture_animation_preview_rotation_sign_ = 0.0f;
     furniture_animation_preview_ids_.clear();
-    if (animation.tool_id == "cabinet") {
+    if (IsCabinetTool(animation.tool_id)) {
         const std::string& facade_name = clicked_object->GetName();
         if (facade_name.find("Facade") == std::string::npos) {
             return;
@@ -2341,6 +3215,52 @@ void MainWindow::StartFurnitureInteraction(unsigned long object_id) {
         }
         furniture_animation_start_value_ = angle->value;
         furniture_animation_end_value_ = angle->value > 1.0 ? 0.0 : 90.0;
+
+        const auto* cabinet = dynamic_cast<const CKitchenCabinet*>(assembly);
+        KitchenCabinetDoorAnimation door_animation;
+        if (cabinet
+            && cabinet->GetDoorAnimation(facade_name, &door_animation)) {
+            const auto& matrix = cabinet->GetAssemblyTransform();
+            const Vec3 local_center = door_animation.hinge;
+            furniture_animation_preview_center_ = {
+                static_cast<float>(matrix[0] * local_center.x
+                    + matrix[1] * local_center.y
+                    + matrix[2] * local_center.z + matrix[3]),
+                static_cast<float>(matrix[4] * local_center.x
+                    + matrix[5] * local_center.y
+                    + matrix[6] * local_center.z + matrix[7]),
+                static_cast<float>(matrix[8] * local_center.x
+                    + matrix[9] * local_center.y
+                    + matrix[10] * local_center.z + matrix[11])};
+            furniture_animation_preview_axis_ = normalize({
+                static_cast<float>(matrix[2]),
+                static_cast<float>(matrix[6]),
+                static_cast<float>(matrix[10])});
+            furniture_animation_preview_rotation_sign_ =
+                door_animation.angle_sign;
+
+            const bool left_door =
+                facade_name.find("Left Facade") != std::string::npos;
+            const bool right_door =
+                facade_name.find("Right Facade") != std::string::npos;
+            for (unsigned long child_id : cabinet->GetElementIds()) {
+                const CAlfaObject* child = document_.FindObjectById(child_id);
+                if (!child) {
+                    continue;
+                }
+                const std::string& child_name = child->GetName();
+                const bool same_door = left_door
+                    ? child_name.find("Left Facade") != std::string::npos
+                    : right_door
+                        ? child_name.find("Right Facade") != std::string::npos
+                        : child_name.find("Facade") != std::string::npos;
+                if (same_door) {
+                    furniture_animation_preview_ids_.push_back(child_id);
+                }
+            }
+            furniture_animation_preview_value_ =
+                furniture_animation_start_value_;
+        }
     } else {
         const std::string& name = clicked_object->GetName();
         const auto digit = std::find_if(name.begin(), name.end(), [](unsigned char ch) {
@@ -2402,7 +3322,7 @@ void MainWindow::StartFurnitureInteraction(unsigned long object_id) {
     furniture_animation_frame_ = 0;
     furniture_animation_timer_->start();
     statusBar()->showMessage(
-        furniture_animation_object_.tool_id == "cabinet"
+        IsCabinetTool(furniture_animation_object_.tool_id)
             ? "Door animation"
             : "Drawer animation");
 }
@@ -2429,7 +3349,10 @@ void MainWindow::AdvanceFurnitureAnimation() {
         return;
     }
 
-    constexpr int frame_count = 20;
+    // Ten eased frames keep the animation responsive. Door frames now rotate
+    // their ready meshes and edges; the exact parametric solid is rebuilt only
+    // once, after the animation reaches its final position.
+    constexpr int frame_count = 10;
     ++furniture_animation_frame_;
     const double time = std::clamp(
         static_cast<double>(furniture_animation_frame_) / frame_count,
@@ -2455,7 +3378,27 @@ void MainWindow::AdvanceFurnitureAnimation() {
         return;
     }
     animated_parameter->value = value;
-    if (furniture_animation_final_drawer_ >= 0.0
+    const bool door_mesh_preview =
+        IsCabinetTool(furniture_animation_object_.tool_id)
+        && std::fabs(furniture_animation_preview_rotation_sign_) > 0.5f
+        && !furniture_animation_preview_ids_.empty();
+    if (door_mesh_preview) {
+        constexpr double degrees_to_radians =
+            3.14159265358979323846 / 180.0;
+        const float delta_angle = static_cast<float>(
+            (value - furniture_animation_preview_value_)
+            * furniture_animation_preview_rotation_sign_
+            * degrees_to_radians);
+        for (unsigned long id : furniture_animation_preview_ids_) {
+            if (auto* solid = dynamic_cast<CSolid*>(document_.FindObjectById(id))) {
+                solid->PreviewRotate(
+                    furniture_animation_preview_center_,
+                    furniture_animation_preview_axis_,
+                    delta_angle);
+            }
+        }
+        furniture_animation_preview_value_ = value;
+    } else if (furniture_animation_final_drawer_ >= 0.0
         && !furniture_animation_preview_ids_.empty()) {
         const float delta = static_cast<float>(
             furniture_animation_preview_value_ - value);
@@ -2484,6 +3427,9 @@ void MainWindow::AdvanceFurnitureAnimation() {
         }
         tool_registry_.Rebuild(furniture_animation_object_, document_);
         RestoreFurnitureAnimationSelection();
+    } else if (door_mesh_preview) {
+        tool_registry_.Rebuild(furniture_animation_object_, document_);
+        RestoreFurnitureAnimationSelection();
     }
     furniture_animation_timer_->stop();
 
@@ -2497,13 +3443,14 @@ void MainWindow::AdvanceFurnitureAnimation() {
     RefreshSceneTree();
     viewport_->update();
     statusBar()->showMessage(
-        furniture_animation_object_.tool_id == "cabinet"
+        IsCabinetTool(furniture_animation_object_.tool_id)
             ? (furniture_animation_end_value_ > 0.0
                 ? "Door opened" : "Door closed")
             : (furniture_animation_final_drawer_ > 0.0
                 ? "Drawer opened" : "Drawer closed"),
         1400);
     furniture_animation_object_ = {};
+    furniture_animation_preview_rotation_sign_ = 0.0f;
     furniture_animation_preview_ids_.clear();
     furniture_animation_selection_ids_.clear();
 }
@@ -2602,6 +3549,15 @@ void MainWindow::CreateActions() {
         return action;
     };
 
+    undo_action_ = add_action("&Undo", QKeySequence::Undo,
+                              [this]() { UndoDocumentChange(); });
+    redo_action_ = add_action("&Redo", QKeySequence::Redo,
+                              [this]() { RedoDocumentChange(); });
+    edit_menu->addAction(undo_action_);
+    edit_menu->addAction(redo_action_);
+    edit_menu->addSeparator();
+    UpdateUndoRedoActions();
+
     file_menu->addAction(add_action("&New", QKeySequence::New, [this]() { NewProject(); }));
     file_menu->addAction(add_action("&Open...", QKeySequence::Open, [this]() { OpenProject(); }));
     recent_files_menu_ = file_menu->addMenu("Open &Recent");
@@ -2609,11 +3565,156 @@ void MainWindow::CreateActions() {
     file_menu->addAction(add_action("Save &As...", QKeySequence::SaveAs, [this]() { SaveProjectAs(); }));
     file_menu->addSeparator();
     file_menu->addAction(add_action("&Preferences...", {}, [this]() { ShowPreferences(); }));
+    file_menu->addAction(add_action("&Hot Keys...", {}, [this]() {
+        HotkeyManagerDialog dialog(this, this);
+        dialog.exec();
+    }));
     file_menu->addSeparator();
     file_menu->addAction(add_action("&Import...", QKeySequence(Qt::CTRL | Qt::Key_I), [this]() { ImportFile(); }));
     file_menu->addAction(add_action("&Export...", QKeySequence(Qt::CTRL | Qt::Key_E), [this]() { ExportFile(); }));
     file_menu->addSeparator();
     file_menu->addAction(add_action("E&xit", QKeySequence::Quit, [this]() { close(); }));
+
+    view_menu->addAction("Update Scene", this, [this]() {
+        viewport_->RefreshSurfaceMeshQuality();
+    });
+    auto* reference_image_menu = view_menu->addMenu("Add Ref image");
+    reference_image_menu->addAction("Ref image for X-axis", this, [this]() {
+        AddReferenceImage(ReferenceImageAxis::X);
+    });
+    reference_image_menu->addAction("Ref image for Y-axis", this, [this]() {
+        AddReferenceImage(ReferenceImageAxis::Y);
+    });
+    reference_image_menu->addAction("Ref image for Z-axis", this, [this]() {
+        AddReferenceImage(ReferenceImageAxis::Z);
+    });
+    auto* grid_density_menu = view_menu->addMenu("Grid Density");
+    auto* grid_density_group = new QActionGroup(this);
+    grid_density_group->setExclusive(true);
+    QAction* custom_grid_action = nullptr;
+    const auto add_grid_density_action =
+        [this, grid_density_menu, grid_density_group, &custom_grid_action](
+            const QString& text, const QString& mode) {
+            auto* action = grid_density_menu->addAction(text);
+            action->setCheckable(true);
+            action->setData(mode);
+            grid_density_group->addAction(action);
+            if (mode == "custom") {
+                custom_grid_action = action;
+            }
+            connect(action, &QAction::triggered, this, [this, mode]() {
+                QSettings settings("Dom3D", "Dom3D_Pro");
+                settings.setValue("view/gridDensityMode", mode);
+                viewport_->ReloadModelingPreferences();
+                statusBar()->showMessage(
+                    QString("Grid Density: %1").arg(mode), 1400);
+            });
+            return action;
+        };
+    add_grid_density_action("Small", "small");
+    add_grid_density_action("Medium", "medium");
+    add_grid_density_action("Large", "large");
+    add_grid_density_action("Custom", "custom");
+    {
+        QSettings settings("Dom3D", "Dom3D_Pro");
+        const QString current_mode = settings.value(
+            "view/gridDensityMode", QStringLiteral("medium")).toString();
+        for (QAction* action : grid_density_group->actions()) {
+            action->setChecked(action->data().toString() == current_mode);
+        }
+    }
+    grid_density_menu->addSeparator();
+    grid_density_menu->addAction("Customize Grid...", this,
+        [this, custom_grid_action]() {
+            QSettings settings("Dom3D", "Dom3D_Pro");
+            const DisplayLengthUnit unit = LoadDisplayLengthUnit();
+
+            QDialog dialog(this);
+            dialog.setWindowTitle("Customize Grid");
+            dialog.setModal(true);
+            dialog.setMinimumWidth(420);
+
+            auto* description = new QLabel(
+                "Set custom grid parameters. They are used when the Custom density is selected.",
+                &dialog);
+            description->setWordWrap(true);
+
+            auto* grid_step = new QDoubleSpinBox(&dialog);
+            grid_step->setDecimals(unit == DisplayLengthUnit::Inches ? 4 : 3);
+            grid_step->setRange(
+                MillimetersToDisplay(0.001, unit),
+                MillimetersToDisplay(1000000.0, unit));
+            grid_step->setSingleStep(
+                MillimetersToDisplay(unit == DisplayLengthUnit::Inches ? 1.27 : 10.0, unit));
+            grid_step->setSuffix(" " + DisplayLengthUnitSuffix(unit));
+            grid_step->setValue(MillimetersToDisplay(
+                settings.value("view/customGridStep", 100.0).toDouble(), unit));
+
+            auto* subdivisions = new QSpinBox(&dialog);
+            subdivisions->setRange(1, 100);
+            subdivisions->setValue(settings.value(
+                "view/customGridSubdivisions", 2).toInt());
+
+            auto* division_count = new QSpinBox(&dialog);
+            division_count->setRange(1, 1000);
+            division_count->setValue(settings.value(
+                "view/customGridDivisionCount", 10).toInt());
+
+            auto* form = new QFormLayout();
+            form->addRow("Grid Step", grid_step);
+            form->addRow("Grid Subdivisions", subdivisions);
+            form->addRow("Division Number", division_count);
+
+            auto* buttons = new QDialogButtonBox(
+                QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+            connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+            connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+            auto* layout = new QVBoxLayout(&dialog);
+            layout->addWidget(description);
+            layout->addLayout(form);
+            layout->addWidget(buttons);
+
+            if (dialog.exec() != QDialog::Accepted) {
+                return;
+            }
+            settings.setValue(
+                "view/customGridStep",
+                DisplayToMillimeters(grid_step->value(), unit));
+            settings.setValue(
+                "view/customGridSubdivisions", subdivisions->value());
+            settings.setValue(
+                "view/customGridDivisionCount", division_count->value());
+            settings.setValue("view/gridDensityMode", "custom");
+            if (custom_grid_action) {
+                custom_grid_action->setChecked(true);
+            }
+            viewport_->ReloadModelingPreferences();
+            statusBar()->showMessage("Custom grid parameters applied", 1600);
+        });
+    auto* zebra_analysis_action = view_menu->addAction("Zebra Analysis");
+    zebra_analysis_action->setCheckable(true);
+    {
+        QSettings settings;
+        const bool enabled =
+            settings.value("view/zebraAnalysis", false).toBool();
+        CMesh3D::SetZebraAnalysisEnabled(enabled);
+        zebra_analysis_action->setChecked(enabled);
+    }
+    connect(
+        zebra_analysis_action, &QAction::toggled, this,
+        [this](bool enabled) {
+            CMesh3D::SetZebraAnalysisEnabled(enabled);
+            QSettings settings;
+            settings.setValue("view/zebraAnalysis", enabled);
+            viewport_->update();
+            statusBar()->showMessage(
+                enabled
+                    ? "Zebra Analysis: selected object, or all visible bodies when nothing is selected"
+                    : "Zebra Analysis disabled",
+                2400);
+        });
+    view_menu->addSeparator();
 
     auto* solid_display_menu = view_menu->addMenu("Solid Display");
     auto* solid_display_group = new QActionGroup(this);
@@ -2632,7 +3733,21 @@ void MainWindow::CreateActions() {
     mesh_only_action_ = add_solid_display_action("Mesh Only", SolidDisplayMode::MeshOnly);
     surfaces_wire_action_ = add_solid_display_action("Surfaces and Raised Mesh", SolidDisplayMode::SurfacesAndRaisedMesh);
     solid_wireframe_action_ = add_solid_display_action("Wireframe", SolidDisplayMode::Wireframe);
-    solid_hidden_line_action_ = add_solid_display_action("Hidden Line", SolidDisplayMode::HiddenLine);
+    solid_hidden_line_action_ = add_solid_display_action("Hidden Lines", SolidDisplayMode::HiddenLine);
+    solid_hidden_line_hatch_action_ = add_solid_display_action("Hidden Lines Hatch", SolidDisplayMode::HiddenLineHatch);
+    view_menu->addAction("BackGround Color...", this, [this]() {
+        QSettings settings;
+        QColor current(
+            settings.value("view/backgroundColor", QStringLiteral("#0e1114")).toString());
+        if (!current.isValid()) current = QColor(QStringLiteral("#0e1114"));
+        const QColor chosen = QColorDialog::getColor(
+            current, this, QStringLiteral("Background Color"));
+        if (!chosen.isValid()) return;
+        settings.setValue(
+            "view/backgroundColor", chosen.name(QColor::HexRgb));
+        viewport_->SetBackgroundColor(chosen);
+        statusBar()->showMessage("Background color changed", 1400);
+    });
     auto* toggle_wire_shaded_action = view_menu->addAction("Wired / Shaded", this, [this]() {
         ToggleWireShadedDisplay();
     });
@@ -2692,6 +3807,9 @@ void MainWindow::CreateActions() {
     auto* move_action = add_action("Move", QKeySequence(Qt::Key_M), [this]() { BeginTransformTool(TransformOperation::Move); });
     auto* rotate_action = add_action("Rotate", {}, [this]() { BeginTransformTool(TransformOperation::Rotate); });
     auto* scale_action = add_action("Scale", {}, [this]() { BeginTransformTool(TransformOperation::Scale); });
+    auto* precise_move_action = add_action("Move with Dialog...", {}, [this]() { ShowPreciseMoveDialog(); });
+    auto* precise_rotate_action = add_action("Rotate with Dialog...", {}, [this]() { ShowPreciseRotateDialog(); });
+    auto* precise_scale_action = add_action("Scale with Dialog...", {}, [this]() { ShowPreciseScaleDialog(); });
     auto* new_sketch_action = add_action("New Sketch", {}, [this]() { BeginNewSketch(); });
     auto* duplicate_action = add_action("Make Object/Group Copy", {}, [this]() { DuplicateSelectedObject(); });
     duplicate_action->setToolTip("Make a copy of the selected object or whole group and move it");
@@ -2727,7 +3845,17 @@ void MainWindow::CreateActions() {
     auto* assembly_action = add_action("Create Assembly", {}, [this]() { CreateSelectedAssembly(); });
     auto* two_sketch_action = add_action("Body by Two Sketches", {}, [this]() { CreateBodyFromTwoSketches(); });
     auto* point_move_action = add_action("Move Point to Point", {}, [this]() { viewport_->BeginMovePointToPoint(); });
+    auto* point_dimension_action = add_action(
+        "Point-to-Point Dimension", {}, [this]() {
+            ClearActiveProperties();
+            viewport_->BeginMeasurePointToPoint();
+        });
+    point_dimension_action->setIcon(PointDimensionIcon());
     auto* linked_clone_action = add_action("Associative Clone", {}, [this]() { CreateAssociativeClone(); });
+    auto* find_command_action = add_action(
+        "Find Command...", QKeySequence(Qt::CTRL | Qt::Key_F), [this]() {
+            CommandSearchPopup::Show(this);
+        });
     RegisterToolAction(orbit_action, "orbit");
     RegisterToolAction(select_action, "select");
     RegisterToolAction(zoom_rect_action, "zoom_rect");
@@ -2737,6 +3865,9 @@ void MainWindow::CreateActions() {
     RegisterToolAction(move_action, "move");
     RegisterToolAction(rotate_action, "rotate");
     RegisterToolAction(scale_action, "scale");
+    RegisterToolAction(precise_move_action, "move_dialog");
+    RegisterToolAction(precise_rotate_action, "rotate_dialog");
+    RegisterToolAction(precise_scale_action, "scale_dialog");
     RegisterToolAction(new_sketch_action, "NewSketch");
 
     tools_menu->addAction(material_editor_action);
@@ -2747,7 +3878,9 @@ void MainWindow::CreateActions() {
     tools_menu->addAction(assembly_action);
     tools_menu->addAction(two_sketch_action);
     tools_menu->addAction(point_move_action);
+    tools_menu->addAction(point_dimension_action);
     tools_menu->addAction(linked_clone_action);
+    tools_menu->addAction(find_command_action);
     tools_menu->addSeparator();
     tools_menu->addAction(orbit_action);
     tools_menu->addAction(select_action);
@@ -2758,6 +3891,10 @@ void MainWindow::CreateActions() {
     tools_menu->addAction(move_action);
     tools_menu->addAction(rotate_action);
     tools_menu->addAction(scale_action);
+    tools_menu->addSeparator();
+    tools_menu->addAction(precise_move_action);
+    tools_menu->addAction(precise_rotate_action);
+    tools_menu->addAction(precise_scale_action);
     tools_menu->addAction(mirror_action);
     tools_menu->addAction(new_sketch_action);
     tools_menu->addSeparator();
@@ -2861,14 +3998,15 @@ void MainWindow::CreateActions() {
     opacity_label->setStyleSheet("QLabel { padding-left: 6px; padding-right: 2px; }");
     main_toolbar_->addWidget(opacity_label);
     mesh_opacity_slider_ = new QSlider(Qt::Horizontal, main_toolbar_);
-    mesh_opacity_slider_->setToolTip("Mesh line opacity");
-    mesh_opacity_slider_->setRange(5, 100);
+    mesh_opacity_slider_->setToolTip(
+        "Opacity of the selected reference image or mesh surfaces");
+    mesh_opacity_slider_->setRange(0, 100);
     mesh_opacity_slider_->setSingleStep(1);
     mesh_opacity_slider_->setPageStep(5);
     mesh_opacity_slider_->setFixedWidth(96);
-    mesh_opacity_slider_->setValue(static_cast<int>(std::round(CMesh3D::GetWireOpacity() * 100.0f)));
+    mesh_opacity_slider_->setValue(static_cast<int>(std::round(CMesh3D::GetSurfaceOpacity() * 100.0f)));
     connect(mesh_opacity_slider_, &QSlider::valueChanged, this, [this](int value) {
-        SetMeshWireOpacity(static_cast<float>(value) / 100.0f);
+        SetMeshSurfaceOpacity(static_cast<float>(value) / 100.0f);
     });
     main_toolbar_->addWidget(mesh_opacity_slider_);
     mesh_opacity_value_label_ = new QLabel(QString("%1%").arg(mesh_opacity_slider_->value()), main_toolbar_);
@@ -2895,7 +4033,6 @@ void MainWindow::CreateActions() {
     });
     main_toolbar_->addWidget(draw_edges_button);
     UpdateActiveToolUi(active_tool_key_);
-    UpdateRecentFilesMenu();
 }
 
 void MainWindow::CreateVerticalToolBar() {
@@ -3031,7 +4168,8 @@ void MainWindow::CreateVerticalToolBar() {
         std::function<void()> apply;
     };
     const auto add_display_flyout = [this](int initial_index,
-                                           const std::vector<DisplayChoice>& choices)
+                                           const std::vector<DisplayChoice>& choices,
+                                           int hidden_choice_index)
                                            -> QToolButton* {
         if (choices.empty()) {
             return nullptr;
@@ -3071,6 +4209,9 @@ void MainWindow::CreateVerticalToolBar() {
         row->setContentsMargins(4, 3, 4, 3);
         row->setSpacing(4);
         for (int index = 0; index < static_cast<int>(choices.size()); ++index) {
+            if (index == hidden_choice_index) {
+                continue;
+            }
             const DisplayChoice& choice = choices[static_cast<size_t>(index)];
             auto* child = new QToolButton(panel);
             child->setToolTip(choice.title);
@@ -3141,6 +4282,12 @@ void MainWindow::CreateVerticalToolBar() {
     add_direct_button("Move Point to Point", "MovePointToPoint", QIcon(), "P2P", [this]() {
         viewport_->BeginMovePointToPoint();
     });
+    add_direct_button(
+        "Point-to-Point Dimension", "MeasurePointToPoint",
+        PointDimensionIcon(), "Dim", [this]() {
+            ClearActiveProperties();
+            viewport_->BeginMeasurePointToPoint();
+        });
     add_direct_button("Associative Clone", "AssociativeClone", QIcon(), "LnC", [this]() {
         CreateAssociativeClone();
     });
@@ -3165,6 +4312,15 @@ void MainWindow::CreateVerticalToolBar() {
     add_direct_button("Scale", "scale", ToolIcon("scale"), "Sc", [this]() {
         BeginTransformTool(TransformOperation::Scale);
     });
+    add_direct_button("Move with Dialog", "move_dialog", QIcon(), "MD", [this]() {
+        ShowPreciseMoveDialog();
+    }, false);
+    add_direct_button("Rotate with Dialog", "rotate_dialog", QIcon(), "RD", [this]() {
+        ShowPreciseRotateDialog();
+    }, false);
+    add_direct_button("Scale with Dialog", "scale_dialog", QIcon(), "SD", [this]() {
+        ShowPreciseScaleDialog();
+    }, false);
     add_direct_button("Material Editor", "MaterialEditor", MaterialEditorIcon(), "Mat", [this]() {
         ShowMaterialEditor(has_selected_library_material_ ? &selected_library_material_ : nullptr);
     }, false);
@@ -3181,27 +4337,34 @@ void MainWindow::CreateVerticalToolBar() {
 
     vertical_toolbar_->addSeparator();
 
-    int solid_display_index = 2;
+    int solid_display_index = 3;
     if (CSolid::GetDisplayMode() == SolidDisplayMode::Wireframe) {
         solid_display_index = 0;
     } else if (CSolid::GetDisplayMode() == SolidDisplayMode::HiddenLine) {
         solid_display_index = 1;
-    } else if (CSolid::GetDisplayMode() == SolidDisplayMode::MeshOnly
-               || CSolid::GetDisplayMode() == SolidDisplayMode::SurfacesAndRaisedMesh) {
-        solid_display_index = 3;
+    } else if (CSolid::GetDisplayMode() == SolidDisplayMode::HiddenLineHatch) {
+        solid_display_index = 2;
+    } else if (CSolid::GetDisplayMode() == SolidDisplayMode::SurfacesAndRaisedMesh) {
+        solid_display_index = 4;
+    } else if (CSolid::GetDisplayMode() == SolidDisplayMode::MeshOnly) {
+        solid_display_index = 5;
     }
     QToolButton* solid_display_button = add_display_flyout(
         solid_display_index,
         {
             {"Wireframe", SolidGeometryDisplayIcon(0),
              [this]() { SetSolidDisplayMode(SolidDisplayMode::Wireframe); }},
-            {"Hidden Line", SolidGeometryDisplayIcon(1),
+            {"Hidden Lines", SolidGeometryDisplayIcon(1),
              [this]() { SetSolidDisplayMode(SolidDisplayMode::HiddenLine); }},
+            {"Hidden Lines Hatch", SolidGeometryDisplayIcon(4),
+             [this]() { SetSolidDisplayMode(SolidDisplayMode::HiddenLineHatch); }},
             {"Surfaces and Edges", SolidGeometryDisplayIcon(2),
              [this]() { SetSolidDisplayMode(SolidDisplayMode::SurfacesAndEdges); }},
+            {"Surfaces and Raised Mesh", SolidGeometryDisplayIcon(5),
+             [this]() { SetSolidDisplayMode(SolidDisplayMode::SurfacesAndRaisedMesh); }},
             {"Mesh", SolidGeometryDisplayIcon(3),
              [this]() { SetSolidDisplayMode(SolidDisplayMode::MeshOnly); }}
-        });
+        }, 3);
 
     int surface_display_index = 0;
     if (CMesh3D::GetDisplayMode() == MeshDisplayMode::SurfaceGray) {
@@ -3213,10 +4376,11 @@ void MainWindow::CreateVerticalToolBar() {
         const SolidDisplayMode solid_mode = CSolid::GetDisplayMode();
         if (solid_mode == SolidDisplayMode::Wireframe
             || solid_mode == SolidDisplayMode::HiddenLine
+            || solid_mode == SolidDisplayMode::HiddenLineHatch
             || solid_mode == SolidDisplayMode::MeshOnly) {
             SetSolidDisplayMode(SolidDisplayMode::SurfacesAndEdges);
             if (solid_display_button) {
-                solid_display_button->setProperty("selectedDisplayIndex", 2);
+                solid_display_button->setProperty("selectedDisplayIndex", 3);
                 solid_display_button->setIcon(SolidGeometryDisplayIcon(2));
                 solid_display_button->setToolTip("Surfaces and Edges");
             }
@@ -3238,7 +4402,7 @@ void MainWindow::CreateVerticalToolBar() {
              [activate_surface_display]() {
                  activate_surface_display(MeshDisplayMode::SurfaceColored);
              }}
-        });
+        }, -1);
 
     vertical_toolbar_->addSeparator();
 
@@ -3706,6 +4870,23 @@ void MainWindow::AddToolButton(QGridLayout* layout, QWidget* parent, const std::
     } else if (key == "MeshFillContour") {
         button->setIcon(QIcon());
         button->setText("Fill");
+    } else if (key == "DrawSpline") {
+        button->setIcon(ToolIcon(key));
+        button->setText("Draw");
+    } else if (key == "CurveJoin") {
+        button->setIcon(QIcon()); button->setText("Join");
+    } else if (key == "CurveSplit") {
+        button->setIcon(QIcon()); button->setText("Split");
+    } else if (key == "CurveExtend") {
+        button->setIcon(QIcon()); button->setText("Extend");
+    } else if (key == "CurveTrimByPlane") {
+        button->setIcon(QIcon()); button->setText("Trim P");
+    } else if (key == "CurveSimplifyByPoint") {
+        button->setIcon(QIcon()); button->setText("Split P");
+    } else if (key == "CurveReverse") {
+        button->setIcon(QIcon()); button->setText("Reverse");
+    } else if (key == "NurbsParametersTool") {
+        button->setIcon(QIcon()); button->setText("NURBS P");
     }
     connect(button, &QPushButton::clicked, this, [this, key]() { ActivateParametricTool(key); });
     layout->addWidget(button, row, column);
@@ -3797,6 +4978,9 @@ void MainWindow::RefreshSceneTree() {
         }
         if (dynamic_cast<const CCadCurve3D*>(&object)) {
             return QString("CAD Curve");
+        }
+        if (dynamic_cast<const CReferenceImage*>(&object)) {
+            return QString("Reference Image");
         }
         if (dynamic_cast<const CMesh3D*>(&object)) {
             return QString("Mesh");
@@ -4018,6 +5202,8 @@ void MainWindow::SetTool(ToolMode tool, const QString& status_text) {
         UpdateActiveToolUi("PolylineCurve");
     } else if (tool == ToolMode::DrawBSpline) {
         UpdateActiveToolUi("BSplineCurve");
+    } else if (tool == ToolMode::DrawSpline) {
+        UpdateActiveToolUi("DrawSpline");
     } else if (tool == ToolMode::EditPoint) {
         UpdateActiveToolUi("EditPoint");
     } else if (tool == ToolMode::SketchRectangle
@@ -4051,6 +5237,9 @@ void MainWindow::SetSolidDisplayMode(SolidDisplayMode mode) {
     if (solid_hidden_line_action_) {
         solid_hidden_line_action_->setChecked(mode == SolidDisplayMode::HiddenLine);
     }
+    if (solid_hidden_line_hatch_action_) {
+        solid_hidden_line_hatch_action_->setChecked(mode == SolidDisplayMode::HiddenLineHatch);
+    }
     QSettings settings;
     settings.setValue("view/solidDisplayMode", static_cast<int>(mode));
 
@@ -4063,6 +5252,8 @@ void MainWindow::SetSolidDisplayMode(SolidDisplayMode mode) {
         message = "Solid display: wireframe";
     } else if (mode == SolidDisplayMode::HiddenLine) {
         message = "Solid display: hidden lines removed";
+    } else if (mode == SolidDisplayMode::HiddenLineHatch) {
+        message = "Solid display: hidden lines hatch";
     }
     viewport_->update();
     statusBar()->showMessage(message, 1400);
@@ -4097,9 +5288,29 @@ void MainWindow::SetMeshDisplayMode(MeshDisplayMode mode) {
     statusBar()->showMessage(message, 1200);
 }
 
-void MainWindow::SetMeshWireOpacity(float opacity) {
-    CMesh3D::SetWireOpacity(opacity);
-    const int percent = static_cast<int>(std::round(CMesh3D::GetWireOpacity() * 100.0f));
+void MainWindow::SetMeshSurfaceOpacity(float opacity) {
+    opacity = std::clamp(opacity, 0.0f, 1.0f);
+    if (auto* reference =
+            dynamic_cast<CReferenceImage*>(document_.GetSelectedObject())) {
+        Material material = reference->GetMaterial();
+        material.alpha = opacity;
+        reference->SetMaterial(material);
+        const int percent = static_cast<int>(std::round(opacity * 100.0f));
+        if (mesh_opacity_slider_ && mesh_opacity_slider_->value() != percent) {
+            const QSignalBlocker blocker(mesh_opacity_slider_);
+            mesh_opacity_slider_->setValue(percent);
+        }
+        if (mesh_opacity_value_label_) {
+            mesh_opacity_value_label_->setText(QString("%1%").arg(percent));
+        }
+        viewport_->update();
+        statusBar()->showMessage(
+            QString("Reference image opacity: %1%").arg(percent), 900);
+        return;
+    }
+
+    CMesh3D::SetSurfaceOpacity(opacity);
+    const int percent = static_cast<int>(std::round(CMesh3D::GetSurfaceOpacity() * 100.0f));
     if (mesh_opacity_slider_ && mesh_opacity_slider_->value() != percent) {
         const QSignalBlocker blocker(mesh_opacity_slider_);
         mesh_opacity_slider_->setValue(percent);
@@ -4109,7 +5320,7 @@ void MainWindow::SetMeshWireOpacity(float opacity) {
     }
 
     QSettings settings;
-    settings.setValue("view/meshWireOpacity", CMesh3D::GetWireOpacity());
+    settings.setValue("view/meshSurfaceOpacity", CMesh3D::GetSurfaceOpacity());
     viewport_->update();
     statusBar()->showMessage(QString("Mesh opacity: %1%").arg(percent), 900);
 }
@@ -4517,9 +5728,1396 @@ void MainWindow::ChangeSelectedObjectLayer() {
         }
     }
     document_.SetWorkLayer(original_work_layer);
+    if (changed > 0) {
+        RecordDocumentChange("Change layer");
+    }
     RefreshSceneTree();
     viewport_->update();
     statusBar()->showMessage(QString("Layer changed for %1 object(s)").arg(changed), 1200);
+}
+
+QString MainWindow::SpatialCurvePrompt() const {
+    QString curve_name;
+    switch (spatial_curve_kind_) {
+    case SpatialCurveKind::Polyline:
+        curve_name = "Polyline 3D";
+        break;
+    case SpatialCurveKind::BSpline:
+        curve_name = "B-Spline 3D";
+        break;
+    case SpatialCurveKind::Bezier:
+        curve_name = "Bezier 3D";
+        break;
+    case SpatialCurveKind::Nurbs:
+        curve_name = "NURBS 3D";
+        break;
+    case SpatialCurveKind::None:
+        return {};
+    }
+    if (spatial_curve_kind_ == SpatialCurveKind::Bezier)
+        return QString("Bezier 3D: выберите узел (%1); C — замкнуть, Enter — завершить, Esc — отменить")
+            .arg(spatial_curve_point_count_);
+    return QString("%1: выберите Point3D (%2); C — замкнуть, Enter — завершить, Esc — отменить")
+        .arg(curve_name)
+        .arg(spatial_curve_point_count_);
+}
+
+void MainWindow::BeginSpatialCurve(SpatialCurveKind kind) {
+    if (kind == SpatialCurveKind::None) {
+        return;
+    }
+    if (spatial_curve_kind_ != SpatialCurveKind::None) {
+        CancelSpatialCurve();
+    }
+
+    ClearActiveProperties();
+    spatial_curve_kind_ = kind;
+    spatial_curve_object_id_ = 0;
+    spatial_curve_point_count_ = 0;
+    spatial_curve_interpolation_points_.clear();
+    undo_redo_.BeginChange();
+
+    switch (kind) {
+    case SpatialCurveKind::Polyline:
+        UpdateActiveToolUi("PolylineCurve");
+        break;
+    case SpatialCurveKind::BSpline:
+        UpdateActiveToolUi("BSplineCurve");
+        break;
+    case SpatialCurveKind::Bezier:
+        UpdateActiveToolUi("BezierCurve3D");
+        break;
+    case SpatialCurveKind::Nurbs:
+        UpdateActiveToolUi("NurbsCurve3D");
+        break;
+    case SpatialCurveKind::None:
+        break;
+    }
+    viewport_->BeginPick3DPoint(SpatialCurvePrompt());
+}
+
+void MainWindow::AppendSpatialCurvePoint(CPoint3d point) {
+    if (spatial_curve_kind_ == SpatialCurveKind::None) {
+        return;
+    }
+
+    // Picking the first node again is the mouse equivalent of the C command.
+    // Point3D picking snaps to an existing node, while the small relative
+    // tolerance also covers coordinates restored from serialized projects.
+    if (spatial_curve_point_count_ >= 3 && spatial_curve_object_id_ != 0) {
+        const size_t index = document_.FindObjectIndexById(spatial_curve_object_id_);
+        const auto& objects = document_.GetObjects();
+        const CPoint3d* first = nullptr;
+        if (index < objects.size() && objects[index]) {
+            if (const auto* polyline = dynamic_cast<const CPolyline*>(objects[index].get())) {
+                if (!polyline->GetPoints().empty()) first = &polyline->GetPoints().front();
+            } else if (const auto* spline = dynamic_cast<const CBSpline*>(objects[index].get())) {
+                if (!spline->GetPoints().empty()) first = &spline->GetPoints().front();
+            }
+        }
+        if (first) {
+            const double dx = point.x - first->x;
+            const double dy = point.y - first->y;
+            const double dz = point.z - first->z;
+            const double coordinate_scale = std::max(
+                {1.0, std::abs(first->x), std::abs(first->y), std::abs(first->z)});
+            if (std::sqrt(dx * dx + dy * dy + dz * dz)
+                <= coordinate_scale * 1.0e-7) {
+                CloseSpatialCurve();
+                return;
+            }
+        }
+    }
+
+    if (spatial_curve_object_id_ == 0) {
+        if (spatial_curve_kind_ == SpatialCurveKind::Polyline) {
+            auto curve = std::make_unique<CPolyline>("Polyline 3D");
+            curve->AddPoint(point);
+            curve->SetParametricDefinition("PolylineCurve", {});
+            document_.AddObject(std::move(curve));
+        } else {
+            std::string name;
+            std::string tool_id;
+            SplineCurveType curve_type = SplineCurveType::BSpline;
+            if (spatial_curve_kind_ == SpatialCurveKind::Bezier) {
+                name = "Bezier 3D";
+                tool_id = "BezierCurve3D";
+                curve_type = SplineCurveType::Bezier;
+            } else if (spatial_curve_kind_ == SpatialCurveKind::Nurbs) {
+                name = "NURBS 3D";
+                tool_id = "NurbsCurve3D";
+                curve_type = SplineCurveType::Nurbs;
+            } else {
+                name = "B-Spline 3D";
+                tool_id = "BSplineCurve";
+            }
+            auto curve = std::make_unique<CBSpline>(name);
+            curve->SetCurveType(curve_type);
+            curve->SetDegree(3);
+            if (spatial_curve_kind_ == SpatialCurveKind::Bezier) {
+                spatial_curve_interpolation_points_.push_back(point);
+                curve->SetBezierInterpolationPoints(
+                    spatial_curve_interpolation_points_);
+            } else {
+                curve->AddPoint(point);
+            }
+            curve->SetParametricDefinition(tool_id, {});
+            document_.AddObject(std::move(curve));
+        }
+        const auto& objects = document_.GetObjects();
+        if (!objects.empty() && objects.back()) {
+            spatial_curve_object_id_ = objects.back()->m_id;
+        }
+    } else {
+        const size_t index = document_.FindObjectIndexById(spatial_curve_object_id_);
+        auto& objects = document_.GetObjects();
+        if (index >= objects.size() || !objects[index]) {
+            CancelSpatialCurve();
+            return;
+        }
+        if (auto* polyline = dynamic_cast<CPolyline*>(objects[index].get())) {
+            polyline->AddPoint(point);
+        } else if (auto* spline = dynamic_cast<CBSpline*>(objects[index].get())) {
+            if (spatial_curve_kind_ == SpatialCurveKind::Bezier) {
+                spatial_curve_interpolation_points_.push_back(point);
+                spline->SetBezierInterpolationPoints(
+                    spatial_curve_interpolation_points_);
+            } else {
+                spline->AddPoint(point);
+            }
+        }
+    }
+
+    ++spatial_curve_point_count_;
+    RefreshSceneTree();
+    viewport_->update();
+    QTimer::singleShot(0, this, [this]() {
+        if (spatial_curve_kind_ != SpatialCurveKind::None) {
+            viewport_->BeginPick3DPoint(SpatialCurvePrompt());
+        }
+    });
+}
+
+void MainWindow::FinishSpatialCurve() {
+    if (spatial_curve_kind_ == SpatialCurveKind::None) {
+        return;
+    }
+    if (spatial_curve_point_count_ < 2) {
+        CancelSpatialCurve();
+        statusBar()->showMessage("3D curve: нужно не менее двух точек", 2200);
+        return;
+    }
+
+    const SpatialCurveKind completed_kind = spatial_curve_kind_;
+    if (completed_kind != SpatialCurveKind::Polyline) {
+        const size_t index = document_.FindObjectIndexById(spatial_curve_object_id_);
+        auto& objects = document_.GetObjects();
+        if (index < objects.size()) {
+            if (auto* spline = dynamic_cast<CBSpline*>(objects[index].get())) {
+                spline->SetDegree(completed_kind == SpatialCurveKind::Bezier
+                    ? 3
+                    : static_cast<int>(
+                        std::min<size_t>(3, spatial_curve_point_count_ - 1)));
+            }
+        }
+    }
+
+    QString name;
+    switch (completed_kind) {
+    case SpatialCurveKind::Polyline: name = "Polyline 3D"; break;
+    case SpatialCurveKind::BSpline: name = "B-Spline 3D"; break;
+    case SpatialCurveKind::Bezier: name = "Bezier 3D"; break;
+    case SpatialCurveKind::Nurbs: name = "NURBS 3D"; break;
+    case SpatialCurveKind::None: break;
+    }
+    spatial_curve_kind_ = SpatialCurveKind::None;
+    spatial_curve_object_id_ = 0;
+    spatial_curve_point_count_ = 0;
+    spatial_curve_interpolation_points_.clear();
+    undo_redo_.CommitChange(QString("Create %1").arg(name).toStdString());
+    UpdateUndoRedoActions();
+    viewport_->SetTool(ToolMode::Select);
+    UpdateActiveToolUi("select");
+    RefreshSceneTree();
+    viewport_->update();
+    statusBar()->showMessage(QString("%1 создана").arg(name), 1800);
+}
+
+void MainWindow::CloseSpatialCurve() {
+    if (spatial_curve_kind_ == SpatialCurveKind::None) return;
+    if (spatial_curve_point_count_ < 3 || spatial_curve_object_id_ == 0) {
+        statusBar()->showMessage(
+            "3D curve: для замыкания нужно не менее трёх точек", 2200);
+        viewport_->BeginPick3DPoint(SpatialCurvePrompt());
+        return;
+    }
+
+    const SpatialCurveKind kind = spatial_curve_kind_;
+    const size_t index = document_.FindObjectIndexById(spatial_curve_object_id_);
+    auto& objects = document_.GetObjects();
+    bool closed = false;
+    if (index < objects.size() && objects[index]) {
+        if (auto* polyline = dynamic_cast<CPolyline*>(objects[index].get())) {
+            closed = polyline->Close();
+        } else if (auto* spline = dynamic_cast<CBSpline*>(objects[index].get())) {
+            if (kind == SpatialCurveKind::Bezier
+                && !spatial_curve_interpolation_points_.empty()) {
+                spline->SetClosedBezierInterpolationPoints(
+                    spatial_curve_interpolation_points_);
+                ++spatial_curve_point_count_;
+            }
+            closed = spline->Close();
+        }
+    }
+    if (!closed) {
+        statusBar()->showMessage("3D curve: не удалось замкнуть кривую", 2200);
+        viewport_->BeginPick3DPoint(SpatialCurvePrompt());
+        return;
+    }
+
+    FinishSpatialCurve();
+    const QString name = kind == SpatialCurveKind::Polyline ? "Polyline 3D"
+        : kind == SpatialCurveKind::BSpline ? "B-Spline 3D"
+        : kind == SpatialCurveKind::Bezier ? "Bezier 3D" : "NURBS 3D";
+    statusBar()->showMessage(QString("%1 замкнута").arg(name), 1800);
+}
+
+void MainWindow::CancelSpatialCurve() {
+    if (spatial_curve_kind_ == SpatialCurveKind::None) {
+        return;
+    }
+    if (spatial_curve_object_id_ != 0) {
+        const size_t index = document_.FindObjectIndexById(spatial_curve_object_id_);
+        auto& objects = document_.GetObjects();
+        if (index < objects.size()) {
+            objects.erase(objects.begin() + static_cast<std::ptrdiff_t>(index));
+        }
+    }
+    document_.ClearSelection();
+    undo_redo_.CancelChange();
+    spatial_curve_kind_ = SpatialCurveKind::None;
+    spatial_curve_object_id_ = 0;
+    spatial_curve_point_count_ = 0;
+    spatial_curve_interpolation_points_.clear();
+    UpdateUndoRedoActions();
+    viewport_->SetTool(ToolMode::Select);
+    UpdateActiveToolUi("select");
+    RefreshSceneTree();
+    viewport_->update();
+    statusBar()->showMessage("Создание 3D curve отменено", 1600);
+}
+
+void MainWindow::BeginCurveEditCommand(CurveEditCommand command) {
+    ClearActiveProperties();
+    CancelCurveEditCommand();
+    pending_curve_edit_command_ = command;
+    viewport_->SetSelectionMode(SelectionMode::Object);
+    viewport_->SetTool(ToolMode::Select);
+    viewport_->SetSelectionConfirmationMode(false);
+    if (PrepareCurveEditCommandSelection()) return;
+
+    viewport_->SetSelectionConfirmationMode(true);
+    QString prompt;
+    switch (command) {
+    case CurveEditCommand::Join:
+        prompt = "Join: выберите две или больше однотипных кривых, затем Enter";
+        break;
+    case CurveEditCommand::Split:
+        prompt = "Split: выберите две пересекающиеся кривые, затем Enter";
+        break;
+    case CurveEditCommand::Extend:
+        prompt = "Extend: выберите одну незамкнутую кривую, затем Enter";
+        break;
+    case CurveEditCommand::TrimByPlane:
+        prompt = "Trim by Plane: выберите кривую (Plane необязательна), затем Enter";
+        break;
+    case CurveEditCommand::SimplifyByPoint:
+        prompt = "Split by Point: выберите одну кривую, затем Enter";
+        break;
+    case CurveEditCommand::Reverse:
+        prompt = "Reverse: выберите одну или несколько кривых, затем Enter";
+        break;
+    case CurveEditCommand::None:
+        return;
+    }
+    statusBar()->showMessage(prompt);
+}
+
+bool MainWindow::PrepareCurveEditCommandSelection() {
+    if (pending_curve_edit_command_ == CurveEditCommand::None) return false;
+    const auto& objects = document_.GetObjects();
+    std::vector<size_t> curves;
+    size_t plane_count = 0;
+    for (size_t index : document_.GetSelectedObjectIndices()) {
+        if (index >= objects.size() || !objects[index]) continue;
+        if (IsEditableCurve(objects[index].get())) curves.push_back(index);
+        if (objects[index]->GetParametricToolId() == "PlaneTool") ++plane_count;
+    }
+
+    switch (pending_curve_edit_command_) {
+    case CurveEditCommand::Join:
+        if (curves.size() < 2) return false;
+        if (!JoinSelectedCurves()) return false;
+        CancelCurveEditCommand("Join: curves joined");
+        return true;
+    case CurveEditCommand::Reverse:
+        if (curves.empty()) return false;
+        if (!ReverseSelectedCurves()) return false;
+        CancelCurveEditCommand("Reverse: direction changed");
+        return true;
+    case CurveEditCommand::Split:
+        if (curves.size() != 2) return false;
+        break;
+    case CurveEditCommand::TrimByPlane:
+        if (curves.size() != 1 || plane_count > 1) return false;
+        pending_curve_trim_plane_points_.clear();
+        if (plane_count == 0) {
+            std::array<double, 4> remembered_factors = LoadRememberedPlaneFactors();
+            const int method = ShowCurveTrimPlaneMethodDialog(this, remembered_factors);
+            if (method == QDialog::Rejected) {
+                CancelCurveEditCommand("Trim by Plane: отменено");
+                return true;
+            }
+            if (method == 7) {
+                pending_trim_plane_face_pick_ = true;
+                pending_trim_plane_curve_id_ = objects[curves.front()]->m_id;
+                viewport_->SetSelectionConfirmationMode(false);
+                viewport_->SetTool(ToolMode::Select);
+                viewport_->SetSelectionMode(SelectionMode::Face);
+                statusBar()->showMessage(
+                    "Trim by Plane — Face of Solid: выберите плоскую грань тела");
+                return true;
+            } else if (method == 2) {
+                pending_curve_trim_plane_points_ = {
+                    CPoint3d(0, 0, 0), CPoint3d(1, 0, 0), CPoint3d(0, 1, 0)};
+                SaveRememberedPlaneFactors({0.0, 0.0, 1.0, 0.0});
+            } else if (method == 3) {
+                pending_curve_trim_plane_points_ = {
+                    CPoint3d(0, 0, 0), CPoint3d(1, 0, 0), CPoint3d(0, 0, 1)};
+                SaveRememberedPlaneFactors({0.0, 1.0, 0.0, 0.0});
+            } else if (method == 4) {
+                pending_curve_trim_plane_points_ = {
+                    CPoint3d(0, 0, 0), CPoint3d(0, 1, 0), CPoint3d(0, 0, 1)};
+                SaveRememberedPlaneFactors({1.0, 0.0, 0.0, 0.0});
+            } else if (method == 5) {
+                const double squared = remembered_factors[0] * remembered_factors[0]
+                    + remembered_factors[1] * remembered_factors[1]
+                    + remembered_factors[2] * remembered_factors[2];
+                if (squared <= 1.0e-18) {
+                    statusBar()->showMessage("Plane: нормаль A, B, C не может быть нулевой", 2600);
+                    return false;
+                }
+                SaveRememberedPlaneFactors(remembered_factors);
+                pending_curve_trim_plane_points_ = PlanePointsFromOriginNormal(
+                    CPoint3d(-remembered_factors[0] * remembered_factors[3] / squared,
+                             -remembered_factors[1] * remembered_factors[3] / squared,
+                             -remembered_factors[2] * remembered_factors[3] / squared),
+                    Vec3{static_cast<float>(remembered_factors[0]),
+                         static_cast<float>(remembered_factors[1]),
+                         static_cast<float>(remembered_factors[2])});
+            } else if (method == 6) {
+                std::vector<double> values{0.0, 0.0, 0.0, 0.0, 0.0, 1.0};
+                if (!ShowPlaneValuesDialog(
+                        this, "Point + Normal", {"Point X", "Point Y", "Point Z",
+                        "Normal X", "Normal Y", "Normal Z"}, values)) {
+                    CancelCurveEditCommand("Trim by Plane: отменено");
+                    return true;
+                }
+                pending_curve_trim_plane_points_ = PlanePointsFromOriginNormal(
+                    CPoint3d(values[0], values[1], values[2]),
+                    Vec3{static_cast<float>(values[3]), static_cast<float>(values[4]),
+                         static_cast<float>(values[5])});
+                if (pending_curve_trim_plane_points_.empty()) {
+                    statusBar()->showMessage("Plane: нормаль не может быть нулевой", 2600);
+                    return false;
+                }
+                const CPoint3d& origin = pending_curve_trim_plane_points_[0];
+                SaveRememberedPlaneFactors({
+                    values[3], values[4], values[5],
+                    -(values[3] * origin.x + values[4] * origin.y + values[5] * origin.z)});
+            }
+        }
+        break;
+    case CurveEditCommand::Extend:
+    case CurveEditCommand::SimplifyByPoint:
+        if (curves.size() != 1) return false;
+        break;
+    case CurveEditCommand::None:
+        return false;
+    }
+
+    viewport_->SetSelectionConfirmationMode(false);
+    QString prompt;
+    if (pending_curve_edit_command_ == CurveEditCommand::Split) {
+        prompt = "Split: укажите нужное пересечение";
+    } else if (pending_curve_edit_command_ == CurveEditCommand::Extend) {
+        prompt = "Extend: укажите конец кривой";
+    } else if (pending_curve_edit_command_ == CurveEditCommand::TrimByPlane) {
+        prompt = plane_count == 1 || pending_curve_trim_plane_points_.size() == 3
+            ? "Trim by Plane: укажите часть кривой, которую оставить"
+            : "Trim by Plane — Point 1 of 3: задайте временную плоскость";
+    } else {
+        prompt = "Split by Point: укажите точку разреза";
+    }
+    if (pending_curve_edit_command_ == CurveEditCommand::TrimByPlane
+        && (plane_count == 1 || pending_curve_trim_plane_points_.size() == 3)) {
+        viewport_->BeginPick3DPointOnObject(
+            objects[curves.front()]->m_id, prompt + "; Esc — отменить");
+    } else {
+        viewport_->BeginPick3DPoint(prompt + "; Esc — отменить");
+    }
+    return true;
+}
+
+void MainWindow::CompleteCurveEditPoint(CPoint3d point) {
+    bool changed = false;
+    QString message;
+    switch (pending_curve_edit_command_) {
+    case CurveEditCommand::Split:
+        changed = SplitSelectedCurves(point);
+        message = changed ? "Split: curves divided" : "Split: пересечение не найдено";
+        break;
+    case CurveEditCommand::Extend:
+        changed = ExtendSelectedCurve(point);
+        message = changed ? "Extend: curve extended" : "Extend: operation canceled";
+        break;
+    case CurveEditCommand::TrimByPlane:
+        {
+        bool has_plane_object = false;
+        for (size_t index : document_.GetSelectedObjectIndices()) {
+            if (index < document_.GetObjects().size()
+                && document_.GetObjects()[index]
+                && document_.GetObjects()[index]->GetParametricToolId() == "PlaneTool") {
+                has_plane_object = true;
+                break;
+            }
+        }
+        if (!has_plane_object && pending_curve_trim_plane_points_.size() < 3) {
+            pending_curve_trim_plane_points_.push_back(point);
+            viewport_->SetPointPickMarkers(pending_curve_trim_plane_points_);
+            if (pending_curve_trim_plane_points_.size() == 3) {
+                const CPoint3d& first = pending_curve_trim_plane_points_[0];
+                const CPoint3d& second = pending_curve_trim_plane_points_[1];
+                const CPoint3d& third = pending_curve_trim_plane_points_[2];
+                const Vec3 a{static_cast<float>(second.x - first.x),
+                             static_cast<float>(second.y - first.y),
+                             static_cast<float>(second.z - first.z)};
+                const Vec3 b{static_cast<float>(third.x - first.x),
+                             static_cast<float>(third.y - first.y),
+                             static_cast<float>(third.z - first.z)};
+                const Vec3 normal = cross(a, b);
+                if (dot(normal, normal) <= 1.0e-12f) {
+                    pending_curve_trim_plane_points_.pop_back();
+                    viewport_->SetPointPickMarkers(pending_curve_trim_plane_points_);
+                    statusBar()->showMessage(
+                        "Trim by Plane: третья точка не должна лежать на прямой", 2400);
+                    viewport_->BeginPick3DPoint(
+                        "Trim by Plane — Point 3 of 3: выберите точку вне прямой");
+                    return;
+                }
+                SaveRememberedPlaneFactors(PlaneFactorsFromPoints(
+                    first, second, third));
+                for (size_t index : document_.GetSelectedObjectIndices()) {
+                    if (index < document_.GetObjects().size()
+                        && IsEditableCurve(document_.GetObjects()[index].get())) {
+                        viewport_->BeginPick3DPointOnObject(
+                            document_.GetObjects()[index]->m_id,
+                            "Trim by Plane: кликните по части выбранной кривой, которую оставить");
+                        break;
+                    }
+                }
+            } else {
+                viewport_->BeginPick3DPoint(
+                    QString("Trim by Plane — Point %1 of 3: задайте временную плоскость")
+                        .arg(pending_curve_trim_plane_points_.size() + 1));
+            }
+            return;
+        }
+        changed = TrimSelectedCurveByPlane(point);
+        if (!changed) {
+            for (size_t index : document_.GetSelectedObjectIndices()) {
+                if (index < document_.GetObjects().size()
+                    && IsEditableCurve(document_.GetObjects()[index].get())) {
+                    viewport_->BeginPick3DPointOnObject(
+                        document_.GetObjects()[index]->m_id,
+                        "Trim by Plane: выберите другую часть этой Polyline или Esc");
+                    break;
+                }
+            }
+            return;
+        }
+        message = "Trim by Plane: curve trimmed";
+        break;
+        }
+    case CurveEditCommand::SimplifyByPoint:
+        changed = SimplifySelectedCurveByPoint(point);
+        message = changed ? "Split by Point: two curve pieces created" : "Split by Point: нельзя разрезать в конце кривой";
+        break;
+    default:
+        break;
+    }
+    CancelCurveEditCommand(message);
+}
+
+void MainWindow::CancelCurveEditCommand(const QString& message) {
+    pending_curve_edit_command_ = CurveEditCommand::None;
+    pending_curve_trim_plane_points_.clear();
+    pending_trim_plane_face_pick_ = false;
+    pending_trim_plane_curve_id_ = 0;
+    if (viewport_) viewport_->ClearPointPickMarkers();
+    if (viewport_) viewport_->SetSelectionConfirmationMode(false);
+    if (!message.isEmpty()) statusBar()->showMessage(message, 2200);
+}
+
+bool MainWindow::ReverseSelectedCurves() {
+    undo_redo_.BeginChange();
+    bool changed = false;
+    std::vector<unsigned long> changed_ids;
+    for (size_t index : document_.GetSelectedObjectIndices()) {
+        if (index >= document_.GetObjects().size()) continue;
+        if (auto* polyline = dynamic_cast<CPolyline*>(
+                document_.GetObjects()[index].get())) {
+            polyline->Revers();
+            changed = true;
+            changed_ids.push_back(polyline->m_id);
+        } else if (auto* spline = dynamic_cast<CBSpline*>(
+                       document_.GetObjects()[index].get())) {
+            spline->Reverse();
+            changed = true;
+            changed_ids.push_back(spline->m_id);
+        }
+    }
+    if (!changed) {
+        undo_redo_.CancelChange();
+        return false;
+    }
+    for (unsigned long id : changed_ids) {
+        tool_registry_.ReplayProfileDependents(id, document_);
+    }
+    undo_redo_.CommitChange("Reverse curves");
+    UpdateUndoRedoActions();
+    RefreshSceneTree();
+    viewport_->update();
+    return true;
+}
+
+bool MainWindow::JoinSelectedCurves() {
+    std::vector<size_t> indices;
+    for (size_t index : document_.GetSelectedObjectIndices()) {
+        if (index < document_.GetObjects().size()
+            && IsEditableCurve(document_.GetObjects()[index].get())) {
+            indices.push_back(index);
+        }
+    }
+    if (indices.size() < 2) return false;
+    auto& objects = document_.GetObjects();
+    const bool polyline_family = dynamic_cast<CPolyline*>(objects[indices[0]].get());
+    const auto* first_spline = dynamic_cast<CBSpline*>(objects[indices[0]].get());
+    for (size_t index : indices) {
+        if (polyline_family != static_cast<bool>(dynamic_cast<CPolyline*>(objects[index].get()))) {
+            statusBar()->showMessage("Join: Polyline и spline нельзя соединять в одну кривую", 2600);
+            return false;
+        }
+        const auto* spline = dynamic_cast<CBSpline*>(objects[index].get());
+        if (first_spline && (!spline
+            || spline->GetCurveType() != first_spline->GetCurveType())) {
+            statusBar()->showMessage("Join: типы сплайнов должны совпадать", 2600);
+            return false;
+        }
+    }
+
+    std::vector<CPoint3d> joined = *CurveControlPoints(objects[indices[0]].get());
+    std::vector<double> joined_weights = first_spline
+        ? first_spline->GetWeights() : std::vector<double>{};
+    std::set<size_t> remaining(indices.begin() + 1, indices.end());
+    constexpr double tolerance_squared = 1.0;
+    while (!remaining.empty()) {
+        size_t best_index = *remaining.begin();
+        int best_mode = -1;
+        double best_distance = std::numeric_limits<double>::max();
+        for (size_t index : remaining) {
+            const auto* candidate = CurveControlPoints(objects[index].get());
+            if (!candidate || candidate->size() < 2) continue;
+            const double distances[4] = {
+                CurvePointDistanceSquared(joined.back(), candidate->front()),
+                CurvePointDistanceSquared(joined.back(), candidate->back()),
+                CurvePointDistanceSquared(joined.front(), candidate->back()),
+                CurvePointDistanceSquared(joined.front(), candidate->front())};
+            for (int mode = 0; mode < 4; ++mode) {
+                if (distances[mode] < best_distance) {
+                    best_distance = distances[mode];
+                    best_index = index;
+                    best_mode = mode;
+                }
+            }
+        }
+        if (best_mode < 0 || best_distance > tolerance_squared) {
+            statusBar()->showMessage("Join: концы кривых должны совпадать (допуск 1 мм)", 2600);
+            return false;
+        }
+        std::vector<CPoint3d> next = *CurveControlPoints(objects[best_index].get());
+        std::vector<double> next_weights;
+        if (const auto* spline = dynamic_cast<CBSpline*>(objects[best_index].get())) {
+            next_weights = spline->GetWeights();
+        }
+        if (best_mode == 1 || best_mode == 3) {
+            std::reverse(next.begin(), next.end());
+            std::reverse(next_weights.begin(), next_weights.end());
+        }
+        if (best_mode <= 1) {
+            joined.insert(joined.end(), next.begin() + 1, next.end());
+            if (!joined_weights.empty()) joined_weights.insert(
+                joined_weights.end(), next_weights.begin() + 1, next_weights.end());
+        } else {
+            next.pop_back();
+            next.insert(next.end(), joined.begin(), joined.end());
+            joined.swap(next);
+            if (!joined_weights.empty()) {
+                next_weights.pop_back();
+                next_weights.insert(next_weights.end(), joined_weights.begin(), joined_weights.end());
+                joined_weights.swap(next_weights);
+            }
+        }
+        remaining.erase(best_index);
+    }
+
+    undo_redo_.BeginChange();
+    const unsigned long retained_curve_id = objects[indices[0]]->m_id;
+    ReplaceCurveGeometry(*objects[indices[0]], joined, joined_weights);
+    std::sort(indices.begin() + 1, indices.end(), std::greater<size_t>());
+    for (auto it = indices.begin() + 1; it != indices.end(); ++it) {
+        objects.erase(objects.begin() + static_cast<CAlfaDoc::ObjectList::difference_type>(*it));
+    }
+    document_.ClearSelection();
+    tool_registry_.ReplayProfileDependents(retained_curve_id, document_);
+    undo_redo_.CommitChange("Join curves");
+    UpdateUndoRedoActions();
+    RefreshSceneTree();
+    viewport_->update();
+    return true;
+}
+
+bool MainWindow::SimplifySelectedCurveByPoint(CPoint3d split_point) {
+    size_t object_index = document_.GetObjects().size();
+    for (size_t index : document_.GetSelectedObjectIndices()) {
+        if (index < document_.GetObjects().size()
+            && IsEditableCurve(document_.GetObjects()[index].get())) {
+            if (object_index != document_.GetObjects().size()) return false;
+            object_index = index;
+        }
+    }
+    auto& objects = document_.GetObjects();
+    if (object_index >= objects.size()) return false;
+    CAlfaObject& source = *objects[object_index];
+    const auto* source_points = CurveControlPoints(&source);
+    if (!source_points || source_points->size() < 3) return false;
+
+    std::vector<CPoint3d> points = *source_points;
+    std::vector<double> weights;
+    if (const auto* spline = dynamic_cast<const CBSpline*>(&source)) {
+        weights = spline->GetWeights();
+        weights.resize(points.size(), 1.0);
+    }
+    CurveProjection projection = ProjectToControlPolygon(points, split_point);
+    if (projection.segment == 0
+        && CurvePointDistanceSquared(projection.point, points.front()) < 1.0e-10) return false;
+    if (projection.segment + 2 == points.size()
+        && CurvePointDistanceSquared(projection.point, points.back()) < 1.0e-10) return false;
+
+    size_t split_index = projection.segment + 1;
+    if (CurvePointDistanceSquared(projection.point, points[projection.segment]) < 1.0e-10) {
+        split_index = projection.segment;
+    } else if (CurvePointDistanceSquared(
+                   projection.point, points[projection.segment + 1]) < 1.0e-10) {
+        split_index = projection.segment + 1;
+    } else {
+        points.insert(points.begin() + static_cast<std::ptrdiff_t>(split_index), projection.point);
+        if (!weights.empty()) {
+            const double weight = 0.5 * (weights[projection.segment]
+                                       + weights[projection.segment + 1]);
+            weights.insert(weights.begin() + static_cast<std::ptrdiff_t>(split_index), weight);
+        }
+    }
+    if (split_index == 0 || split_index + 1 >= points.size()) return false;
+
+    const std::vector<CPoint3d> first_points(points.begin(), points.begin() + split_index + 1);
+    const std::vector<CPoint3d> second_points(points.begin() + split_index, points.end());
+    const std::vector<double> first_weights = weights.empty() ? std::vector<double>{}
+        : std::vector<double>(weights.begin(), weights.begin() + split_index + 1);
+    const std::vector<double> second_weights = weights.empty() ? std::vector<double>{}
+        : std::vector<double>(weights.begin() + split_index, weights.end());
+    std::unique_ptr<CAlfaObject> second = MakeCurvePiece(
+        source, second_points, second_weights, " Part 2");
+    if (!second) return false;
+
+    undo_redo_.BeginChange();
+    const unsigned long source_id = source.m_id;
+    source.SetName(source.GetName() + " Part 1");
+    ReplaceCurveGeometry(source, first_points, first_weights);
+    document_.AddObject(std::move(second));
+    tool_registry_.ReplayProfileDependents(source_id, document_);
+    undo_redo_.CommitChange("Split curve by point");
+    UpdateUndoRedoActions();
+    RefreshSceneTree();
+    viewport_->update();
+    return true;
+}
+
+bool MainWindow::SplitSelectedCurves(CPoint3d near_point) {
+    std::vector<size_t> indices;
+    for (size_t index : document_.GetSelectedObjectIndices()) {
+        if (index < document_.GetObjects().size()
+            && IsEditableCurve(document_.GetObjects()[index].get())) indices.push_back(index);
+    }
+    if (indices.size() != 2) return false;
+    auto& objects = document_.GetObjects();
+    const std::vector<CPoint3d> first_samples = CurveSamples(*objects[indices[0]]);
+    const std::vector<CPoint3d> second_samples = CurveSamples(*objects[indices[1]]);
+    if (first_samples.size() < 2 || second_samples.size() < 2) return false;
+
+    CPoint3d intersection;
+    double best_score = std::numeric_limits<double>::max();
+    double best_separation = std::numeric_limits<double>::max();
+    for (size_t first = 0; first + 1 < first_samples.size(); ++first) {
+        for (size_t second = 0; second + 1 < second_samples.size(); ++second) {
+            const SegmentPairProjection pair = ClosestSegmentPair(
+                first_samples[first], first_samples[first + 1],
+                second_samples[second], second_samples[second + 1]);
+            if (pair.distance_squared > 1.0) continue;
+            const CPoint3d middle(
+                0.5 * (pair.first.x + pair.second.x),
+                0.5 * (pair.first.y + pair.second.y),
+                0.5 * (pair.first.z + pair.second.z));
+            const double score = CurvePointDistanceSquared(middle, near_point);
+            if (score < best_score) {
+                best_score = score;
+                best_separation = pair.distance_squared;
+                intersection = middle;
+            }
+        }
+    }
+    if (best_separation > 1.0) return false;
+
+    // Split the higher index first so adding the second half cannot invalidate
+    // the other selected object's index.
+    std::sort(indices.begin(), indices.end(), std::greater<size_t>());
+    undo_redo_.BeginChange();
+    bool split_any = false;
+    std::vector<unsigned long> changed_ids;
+    for (size_t object_index : indices) {
+        CAlfaObject& source = *objects[object_index];
+        const unsigned long source_id = source.m_id;
+        std::vector<CPoint3d> points = *CurveControlPoints(&source);
+        std::vector<double> weights;
+        if (const auto* spline = dynamic_cast<const CBSpline*>(&source)) {
+            weights = spline->GetWeights();
+            weights.resize(points.size(), 1.0);
+        }
+        CurveProjection projection = ProjectToControlPolygon(points, intersection);
+        size_t split_index = projection.segment + 1;
+        points.insert(points.begin() + static_cast<std::ptrdiff_t>(split_index), intersection);
+        if (!weights.empty()) weights.insert(
+            weights.begin() + static_cast<std::ptrdiff_t>(split_index),
+            0.5 * (weights[projection.segment] + weights[projection.segment + 1]));
+        if (split_index == 0 || split_index + 1 >= points.size()) continue;
+        const std::vector<CPoint3d> first_points(points.begin(), points.begin() + split_index + 1);
+        const std::vector<CPoint3d> second_points(points.begin() + split_index, points.end());
+        const std::vector<double> first_weights = weights.empty() ? std::vector<double>{}
+            : std::vector<double>(weights.begin(), weights.begin() + split_index + 1);
+        const std::vector<double> second_weights = weights.empty() ? std::vector<double>{}
+            : std::vector<double>(weights.begin() + split_index, weights.end());
+        std::unique_ptr<CAlfaObject> second_piece = MakeCurvePiece(
+            source, second_points, second_weights, " Part 2");
+        source.SetName(source.GetName() + " Part 1");
+        ReplaceCurveGeometry(source, first_points, first_weights);
+        document_.AddObject(std::move(second_piece));
+        changed_ids.push_back(source_id);
+        split_any = true;
+    }
+    if (!split_any) {
+        undo_redo_.CancelChange();
+        return false;
+    }
+    for (unsigned long id : changed_ids) {
+        tool_registry_.ReplayProfileDependents(id, document_);
+    }
+    undo_redo_.CommitChange("Split curves");
+    UpdateUndoRedoActions();
+    RefreshSceneTree();
+    viewport_->update();
+    return true;
+}
+
+bool MainWindow::ExtendSelectedCurve(CPoint3d endpoint_hint) {
+    CAlfaObject* curve = nullptr;
+    for (size_t index : document_.GetSelectedObjectIndices()) {
+        if (index < document_.GetObjects().size()
+            && IsEditableCurve(document_.GetObjects()[index].get())) {
+            if (curve) return false;
+            curve = document_.GetObjects()[index].get();
+        }
+    }
+    const auto* points = CurveControlPoints(curve);
+    if (!curve || !points || points->size() < 2) return false;
+    const bool at_start = CurvePointDistanceSquared(endpoint_hint, points->front())
+        <= CurvePointDistanceSquared(endpoint_hint, points->back());
+    bool ok = false;
+    const double distance = QInputDialog::getDouble(
+        this, "Extend Curve", "Length, mm:", 10.0, 0.001, 1000000.0, 3, &ok);
+    if (!ok) return false;
+
+    undo_redo_.BeginChange();
+    bool changed = false;
+    if (auto* polyline = dynamic_cast<CPolyline*>(curve)) {
+        const size_t endpoint = at_start ? 0 : polyline->GetPointCount() - 1;
+        const size_t neighbor = at_start ? 1 : polyline->GetPointCount() - 2;
+        CPoint3d point = polyline->GetPoints()[endpoint];
+        const CPoint3d& adjacent = polyline->GetPoints()[neighbor];
+        const double dx = point.x - adjacent.x;
+        const double dy = point.y - adjacent.y;
+        const double dz = point.z - adjacent.z;
+        const double length = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (length > 1.0e-12 && !polyline->IsClosed()) {
+            point.x += dx * distance / length;
+            point.y += dy * distance / length;
+            point.z += dz * distance / length;
+            changed = polyline->SetPoint(endpoint, point);
+        }
+    } else if (auto* spline = dynamic_cast<CBSpline*>(curve)) {
+        changed = spline->ExtendEndpoint(at_start, distance);
+    }
+    if (!changed) {
+        undo_redo_.CancelChange();
+        return false;
+    }
+    tool_registry_.ReplayProfileDependents(curve->m_id, document_);
+    undo_redo_.CommitChange("Extend curve");
+    UpdateUndoRedoActions();
+    RefreshSceneTree();
+    viewport_->update();
+    return true;
+}
+
+bool MainWindow::TrimSelectedCurveByPlane(CPoint3d keep_point) {
+    size_t curve_index = document_.GetObjects().size();
+    const CAlfaObject* plane = nullptr;
+    for (size_t index : document_.GetSelectedObjectIndices()) {
+        if (index >= document_.GetObjects().size()) continue;
+        CAlfaObject* object = document_.GetObjects()[index].get();
+        if (IsEditableCurve(object)) curve_index = index;
+        if (object && object->GetParametricToolId() == "PlaneTool") plane = object;
+    }
+    auto& objects = document_.GetObjects();
+    if (curve_index >= objects.size()) return false;
+    if (!plane && pending_curve_trim_plane_points_.size() != 3) return false;
+
+    const auto value = [plane](const char* id, double fallback) {
+        if (!plane) return fallback;
+        const auto& parameters = plane->GetParametricParameters();
+        const auto found = std::find_if(parameters.begin(), parameters.end(),
+            [id](const ParametricParameterValue& parameter) {
+                return parameter.id == id;
+            });
+        return found == parameters.end() ? fallback : found->value;
+    };
+    CPoint3d origin;
+    Vec3 normal{};
+    const int mode = plane ? static_cast<int>(value("mode", 1.0)) : -1;
+    if (!plane) {
+        const CPoint3d& first = pending_curve_trim_plane_points_[0];
+        const CPoint3d& second = pending_curve_trim_plane_points_[1];
+        const CPoint3d& third = pending_curve_trim_plane_points_[2];
+        origin = first;
+        normal = cross(
+            Vec3{static_cast<float>(second.x - first.x),
+                 static_cast<float>(second.y - first.y),
+                 static_cast<float>(second.z - first.z)},
+            Vec3{static_cast<float>(third.x - first.x),
+                 static_cast<float>(third.y - first.y),
+                 static_cast<float>(third.z - first.z)});
+    } else if (mode == 0) {
+        const double a = value("a", 0.0), b = value("b", 0.0);
+        const double c = value("c", 1.0), d = value("d", 0.0);
+        const double squared = a * a + b * b + c * c;
+        if (squared <= 1.0e-18) return false;
+        origin = CPoint3d(-a * d / squared, -b * d / squared, -c * d / squared);
+        normal = {static_cast<float>(a), static_cast<float>(b), static_cast<float>(c)};
+    } else if (mode == 1) {
+        origin = CPoint3d(value("plane.origin.x", 0.0),
+                          value("plane.origin.y", 0.0),
+                          value("plane.origin.z", 0.0));
+        normal = {static_cast<float>(value("plane.normal.x", 0.0)),
+                  static_cast<float>(value("plane.normal.y", 0.0)),
+                  static_cast<float>(value("plane.normal.z", 1.0))};
+    } else if (mode == 2) {
+        const Vec3 first{static_cast<float>(value("p1.x", 0.0)),
+                         static_cast<float>(value("p1.y", 0.0)),
+                         static_cast<float>(value("p1.z", 0.0))};
+        const Vec3 second{static_cast<float>(value("p2.x", 100.0)),
+                          static_cast<float>(value("p2.y", 0.0)),
+                          static_cast<float>(value("p2.z", 0.0))};
+        const Vec3 third{static_cast<float>(value("p3.x", 0.0)),
+                         static_cast<float>(value("p3.y", 100.0)),
+                         static_cast<float>(value("p3.z", 0.0))};
+        origin = CPoint3d(first.x, first.y, first.z);
+        normal = cross(second - first, third - first);
+    } else {
+        const double offset = value("offset", 0.0);
+        if (mode == 3) { origin = CPoint3d(0.0, 0.0, offset); normal = {0, 0, 1}; }
+        else if (mode == 4) { origin = CPoint3d(0.0, offset, 0.0); normal = {0, 1, 0}; }
+        else { origin = CPoint3d(offset, 0.0, 0.0); normal = {1, 0, 0}; }
+    }
+    normal = normalize(normal);
+    if (dot(normal, normal) <= 1.0e-12f) return false;
+    const auto signed_distance = [&](const CPoint3d& point) {
+        return (point.x - origin.x) * normal.x
+             + (point.y - origin.y) * normal.y
+             + (point.z - origin.z) * normal.z;
+    };
+    CAlfaObject& source = *objects[curve_index];
+    const std::vector<CPoint3d> side_samples = CurveSamples(source);
+    const CurveProjection side_projection =
+        ProjectToControlPolygon(side_samples, keep_point);
+    const CPoint3d side_point = side_samples.size() >= 2
+        ? side_projection.point : keep_point;
+    const double keep_sign = signed_distance(side_point);
+    if (std::abs(keep_sign) <= 1.0e-9) return false;
+
+    const std::vector<CPoint3d> points = *CurveControlPoints(&source);
+    if (points.size() < 2) return false;
+    bool has_positive_side = false;
+    bool has_negative_side = false;
+    for (const CPoint3d& point : points) {
+        const double distance = signed_distance(point);
+        has_positive_side = has_positive_side || distance > 1.0e-9;
+        has_negative_side = has_negative_side || distance < -1.0e-9;
+    }
+    if (!has_positive_side || !has_negative_side) return false;
+    std::vector<double> weights;
+    if (const auto* spline = dynamic_cast<const CBSpline*>(&source)) {
+        weights = spline->GetWeights();
+        weights.resize(points.size(), 1.0);
+    }
+    std::vector<std::vector<CPoint3d>> pieces;
+    std::vector<std::vector<double>> piece_weights;
+    std::vector<CPoint3d> current;
+    std::vector<double> current_weights;
+    const auto inside = [keep_sign](double distance) {
+        return keep_sign > 0.0 ? distance >= -1.0e-9 : distance <= 1.0e-9;
+    };
+    for (size_t i = 0; i + 1 < points.size(); ++i) {
+        const double first_distance = signed_distance(points[i]);
+        const double second_distance = signed_distance(points[i + 1]);
+        const bool first_inside = inside(first_distance);
+        const bool second_inside = inside(second_distance);
+        if (first_inside && current.empty()) {
+            current.push_back(points[i]);
+            if (!weights.empty()) current_weights.push_back(weights[i]);
+        }
+        if (first_inside != second_inside) {
+            const double t = first_distance / (first_distance - second_distance);
+            const CPoint3d crossing(
+                points[i].x + (points[i + 1].x - points[i].x) * t,
+                points[i].y + (points[i + 1].y - points[i].y) * t,
+                points[i].z + (points[i + 1].z - points[i].z) * t);
+            const double crossing_weight = weights.empty() ? 1.0
+                : weights[i] + (weights[i + 1] - weights[i]) * t;
+            current.push_back(crossing);
+            if (!weights.empty()) current_weights.push_back(crossing_weight);
+            if (first_inside) {
+                if (current.size() >= 2) {
+                    pieces.push_back(current);
+                    piece_weights.push_back(current_weights);
+                }
+                current.clear();
+                current_weights.clear();
+            }
+        }
+        if (second_inside) {
+            if (current.empty() && !first_inside) {
+                const double t = first_distance / (first_distance - second_distance);
+                current.emplace_back(
+                    points[i].x + (points[i + 1].x - points[i].x) * t,
+                    points[i].y + (points[i + 1].y - points[i].y) * t,
+                    points[i].z + (points[i + 1].z - points[i].z) * t);
+                if (!weights.empty()) current_weights.push_back(
+                    weights[i] + (weights[i + 1] - weights[i]) * t);
+            }
+            current.push_back(points[i + 1]);
+            if (!weights.empty()) current_weights.push_back(weights[i + 1]);
+        }
+    }
+    if (current.size() >= 2) {
+        pieces.push_back(current);
+        piece_weights.push_back(current_weights);
+    }
+    if (pieces.empty()) return false;
+    std::vector<std::unique_ptr<CAlfaObject>> additional;
+    for (size_t piece = 1; piece < pieces.size(); ++piece) {
+        additional.push_back(MakeCurvePiece(
+            source, pieces[piece], piece_weights[piece],
+            " Trim " + std::to_string(piece + 1)));
+    }
+    undo_redo_.BeginChange();
+    ReplaceCurveGeometry(source, pieces.front(), piece_weights.front());
+    for (auto& object : additional) document_.AddObject(std::move(object));
+    tool_registry_.ReplayProfileDependents(source.m_id, document_);
+    undo_redo_.CommitChange("Trim curve by plane");
+    UpdateUndoRedoActions();
+    RefreshSceneTree();
+    viewport_->update();
+    return true;
+}
+
+void MainWindow::BeginPlaneThreePointPick() {
+    if (active_parametric_object_.tool_id != "PlaneTool") return;
+    plane_three_point_picks_.clear();
+    viewport_->ClearPointPickMarkers();
+    plane_three_point_pick_active_ = true;
+    viewport_->BeginPick3DPoint("Plane — Point 1 of 3: выберите первую точку");
+}
+
+void MainWindow::AppendPlaneThreePointPick(CPoint3d point) {
+    if (!plane_three_point_pick_active_
+        || active_parametric_object_.tool_id != "PlaneTool") return;
+    plane_three_point_picks_.push_back(point);
+    viewport_->SetPointPickMarkers(plane_three_point_picks_);
+    if (plane_three_point_picks_.size() == 3) {
+        const CPoint3d& first = plane_three_point_picks_[0];
+        const CPoint3d& second = plane_three_point_picks_[1];
+        const CPoint3d& third = plane_three_point_picks_[2];
+        const Vec3 first_edge{static_cast<float>(second.x - first.x),
+                              static_cast<float>(second.y - first.y),
+                              static_cast<float>(second.z - first.z)};
+        const Vec3 second_edge{static_cast<float>(third.x - first.x),
+                               static_cast<float>(third.y - first.y),
+                               static_cast<float>(third.z - first.z)};
+        if (dot(cross(first_edge, second_edge), cross(first_edge, second_edge))
+            <= 1.0e-12f) {
+            plane_three_point_picks_.pop_back();
+            viewport_->SetPointPickMarkers(plane_three_point_picks_);
+            statusBar()->showMessage(
+                "Plane: три точки не должны лежать на одной прямой", 2600);
+            viewport_->BeginPick3DPoint(
+                "Plane — Point 3 of 3: выберите точку вне прямой");
+            return;
+        }
+    }
+
+    const size_t point_index = plane_three_point_picks_.size() - 1;
+    const CPoint3d& picked = plane_three_point_picks_.back();
+    const std::string prefix = "p" + std::to_string(point_index + 1) + ".";
+    for (ToolParameter& parameter : active_parametric_object_.parameters) {
+        if (parameter.id == prefix + "x") parameter.value = picked.x;
+        else if (parameter.id == prefix + "y") parameter.value = picked.y;
+        else if (parameter.id == prefix + "z") parameter.value = picked.z;
+    }
+    property_panel_->SetActiveObject(active_parametric_object_);
+    tool_registry_.Rebuild(active_parametric_object_, document_);
+    if (active_parametric_object_.object_index < document_.GetObjects().size()
+        && document_.GetObjects()[active_parametric_object_.object_index]) {
+        tool_registry_.ReplayAllTrimDependents(
+            document_,
+            document_.GetObjects()[active_parametric_object_.object_index]->m_id);
+    }
+    RefreshSceneTree();
+    viewport_->update();
+
+    if (plane_three_point_picks_.size() < 3) {
+        const size_t next = plane_three_point_picks_.size() + 1;
+        viewport_->BeginPick3DPoint(
+            QString("Plane — Point %1 of 3: выберите точку").arg(next));
+        return;
+    }
+    SaveRememberedPlaneFactors(PlaneFactorsFromPoints(
+        plane_three_point_picks_[0],
+        plane_three_point_picks_[1],
+        plane_three_point_picks_[2]));
+    plane_three_point_pick_active_ = false;
+    viewport_->ClearPointPickMarkers();
+    statusBar()->showMessage(
+        "Plane: плоскость построена по трём точкам; поля доступны для точной правки",
+        3000);
+}
+
+void MainWindow::CancelPlaneThreePointPick(const QString& message) {
+    plane_three_point_pick_active_ = false;
+    plane_three_point_picks_.clear();
+    if (viewport_) viewport_->ClearPointPickMarkers();
+    if (!message.isEmpty()) statusBar()->showMessage(message, 2200);
+}
+
+bool MainWindow::CompletePendingPlaneFacePick() {
+    Vec3 center{};
+    Vec3 x_axis{};
+    Vec3 y_axis{};
+    Vec3 normal{};
+    unsigned long body_id = 0;
+    int face_index = -1;
+    if (!document_.HasSelectedSolidFace()) {
+        return false;
+    }
+    if (!document_.GetSelectedSolidFaceSketchPlane(
+            center, x_axis, y_axis, normal, body_id, face_index)) {
+        statusBar()->showMessage(
+            "Face of Solid: выберите плоскую грань тела", 2500);
+        return true;
+    }
+    normal = normalize(normal);
+    if (dot(normal, normal) <= 1.0e-12f) return false;
+    const CPoint3d origin(center.x, center.y, center.z);
+    const std::array<double, 4> factors{
+        normal.x, normal.y, normal.z,
+        -(normal.x * center.x + normal.y * center.y + normal.z * center.z)};
+    SaveRememberedPlaneFactors(factors);
+
+    if (pending_trim_plane_face_pick_) {
+        const unsigned long curve_id = pending_trim_plane_curve_id_;
+        pending_trim_plane_face_pick_ = false;
+        pending_trim_plane_curve_id_ = 0;
+        pending_curve_trim_plane_points_ = PlanePointsFromOriginNormal(origin, normal);
+        // SetSelectionMode clears the current selection.  Switch out of Face
+        // mode before restoring the curve; otherwise the restored Polyline is
+        // immediately deselected and the following trim has no source object.
+        viewport_->SetSelectionMode(SelectionMode::Object);
+        document_.ClearSelection();
+        document_.SelectObjectById(curve_id, SelectionAction::Replace);
+        viewport_->BeginPick3DPointOnObject(
+            curve_id,
+            "Trim by Plane: кликните по части выбранной кривой, которую оставить");
+        RefreshSceneTree();
+        viewport_->update();
+        return true;
+    }
+
+    if (!pending_reference_plane_face_pick_) return false;
+    pending_reference_plane_face_pick_ = false;
+    // Face -> Object clears selection, so perform it before creating the
+    // parametric plane that becomes the active object.
+    viewport_->SetSelectionMode(SelectionMode::Object);
+    const ToolDefinition* definition = tool_registry_.Find("PlaneTool");
+    if (!definition) return true;
+    std::vector<ToolParameter> parameters = definition->defaults;
+    const auto set_value = [&parameters](const char* id, double value) {
+        const auto found = std::find_if(parameters.begin(), parameters.end(),
+            [id](const ToolParameter& parameter) { return parameter.id == id; });
+        if (found != parameters.end()) found->value = value;
+    };
+    set_value("mode", 1.0);
+    set_value("plane.origin.x", center.x);
+    set_value("plane.origin.y", center.y);
+    set_value("plane.origin.z", center.z);
+    set_value("plane.normal.x", normal.x);
+    set_value("plane.normal.y", normal.y);
+    set_value("plane.normal.z", normal.z);
+    active_parametric_object_ = tool_registry_.CreateParametricObject(
+        "PlaneTool", document_, parameters);
+    active_parametric_edit_existing_ = false;
+    if (!active_parametric_object_.tool_id.empty()) {
+        property_panel_->SetActiveObject(active_parametric_object_);
+        ShowPropertyPanelAtCursor("Plane");
+    }
+    UpdateActiveToolUi("PlaneTool");
+    RefreshSceneTree();
+    viewport_->update();
+    statusBar()->showMessage("Plane: создана по грани тела; OK — принять");
+    return true;
+}
+
+bool MainWindow::UpdateNurbsParameterEditor() {
+    const size_t object_index = document_.GetSelectedObjectIndex();
+    auto& objects = document_.GetObjects();
+    auto* spline = document_.HasSelection() && object_index < objects.size()
+        ? dynamic_cast<CBSpline*>(objects[object_index].get()) : nullptr;
+    if (!spline || spline->GetCurveType() != SplineCurveType::Nurbs) {
+        if (active_parametric_object_.tool_id == "NurbsParameters") {
+            CancelNurbsParameterChanges();
+        }
+        return false;
+    }
+
+    if (active_parametric_object_.tool_id != "NurbsParameters"
+        || nurbs_parameter_object_id_ != spline->m_id) {
+        ClearActiveProperties();
+        nurbs_parameter_object_id_ = spline->m_id;
+        nurbs_parameter_original_degree_ = spline->GetDegree();
+        nurbs_parameter_original_weights_ = spline->GetWeights();
+        nurbs_parameter_original_knots_ = spline->GetKnots();
+        nurbs_parameters_modified_ = false;
+        undo_redo_.BeginChange();
+    }
+
+    std::vector<size_t> selected_points;
+    for (const auto& selected : document_.GetSelectedCurvePoints()) {
+        if (selected.first == object_index
+            && selected.second < spline->GetPointCount()) {
+            selected_points.push_back(selected.second);
+        }
+    }
+
+    const int maximum_degree = std::max(
+        1, static_cast<int>(spline->GetPointCount()) - 1);
+    std::vector<ToolParameter> parameters{
+        {"spline.degree", "Degree", static_cast<double>(spline->GetDegree()),
+         1.0, static_cast<double>(maximum_degree), 1.0}
+    };
+    if (!selected_points.empty()) {
+        const std::vector<double>& weights = spline->GetWeights();
+        const double first_weight = selected_points.front() < weights.size()
+            ? weights[selected_points.front()] : 1.0;
+        nurbs_parameter_displayed_weight_ = first_weight;
+        const bool mixed = std::any_of(
+            selected_points.begin(), selected_points.end(),
+            [&weights, first_weight](size_t point_index) {
+                const double weight = point_index < weights.size()
+                    ? weights[point_index] : 1.0;
+                return std::abs(weight - first_weight) > 1.0e-9;
+            });
+        const std::string label = "Weight (" + std::to_string(selected_points.size())
+            + (mixed ? ", mixed)" : ")");
+        parameters.push_back(
+            {"spline.weight", label, first_weight, 0.01, 1000.0, 0.01});
+    }
+
+    active_parametric_object_ = {
+        "NurbsParameters", object_index, 0, std::move(parameters)};
+    active_parametric_edit_existing_ = true;
+    property_panel_->SetActiveObject(active_parametric_object_);
+    if (!properties_dock_->isVisible()) {
+        ShowPropertyPanelAtCursor("NURBS");
+    } else {
+        properties_dock_->setWindowTitle("NURBS Parameters");
+    }
+    statusBar()->showMessage(selected_points.empty()
+        ? "NURBS: задайте Degree или выделите контрольные точки для Weight"
+        : QString("NURBS: Weight применяется к %1 выбранным точкам; OK — принять")
+              .arg(selected_points.size()));
+    return true;
+}
+
+void MainWindow::ApplyNurbsParameterChanges() {
+    const size_t object_index = document_.FindObjectIndexById(
+        nurbs_parameter_object_id_);
+    auto& objects = document_.GetObjects();
+    auto* spline = object_index < objects.size()
+        ? dynamic_cast<CBSpline*>(objects[object_index].get()) : nullptr;
+    if (!spline || spline->GetCurveType() != SplineCurveType::Nurbs) {
+        return;
+    }
+
+    const auto parameter_value = [this](const char* id, double fallback) {
+        const auto found = std::find_if(
+            active_parametric_object_.parameters.begin(),
+            active_parametric_object_.parameters.end(),
+            [id](const ToolParameter& parameter) { return parameter.id == id; });
+        return found == active_parametric_object_.parameters.end()
+            ? fallback : found->value;
+    };
+
+    const int degree = static_cast<int>(std::lround(
+        parameter_value("spline.degree", spline->GetDegree())));
+    if (degree != spline->GetDegree()) {
+        spline->SetDegree(degree);
+        nurbs_parameters_modified_ = true;
+    }
+
+    const auto weight_parameter = std::find_if(
+        active_parametric_object_.parameters.begin(),
+        active_parametric_object_.parameters.end(),
+        [](const ToolParameter& parameter) {
+            return parameter.id == "spline.weight";
+        });
+    size_t changed_weight_count = 0;
+    if (weight_parameter != active_parametric_object_.parameters.end()
+        && std::abs(weight_parameter->value
+                    - nurbs_parameter_displayed_weight_) > 1.0e-9) {
+        for (const auto& selected : document_.GetSelectedCurvePoints()) {
+            if (selected.first != object_index
+                || selected.second >= spline->GetPointCount()) {
+                continue;
+            }
+            const std::vector<double>& weights = spline->GetWeights();
+            const double old_weight = selected.second < weights.size()
+                ? weights[selected.second] : 1.0;
+            if (std::abs(old_weight - weight_parameter->value) <= 1.0e-9) {
+                continue;
+            }
+            spline->SetWeight(selected.second, weight_parameter->value);
+            ++changed_weight_count;
+            nurbs_parameters_modified_ = true;
+        }
+        nurbs_parameter_displayed_weight_ = weight_parameter->value;
+    }
+
+    tool_registry_.ReplayProfileDependents(spline->m_id, document_);
+    RefreshSceneTree();
+    viewport_->update();
+    statusBar()->showMessage(changed_weight_count > 0
+        ? QString("NURBS: Weight %1 применён к %2 точкам")
+              .arg(weight_parameter->value, 0, 'f', 3)
+              .arg(changed_weight_count)
+        : QString("NURBS: Degree %1").arg(spline->GetDegree()));
+}
+
+void MainWindow::AcceptNurbsParameterChanges() {
+    if (active_parametric_object_.tool_id != "NurbsParameters") {
+        return;
+    }
+    if (nurbs_parameters_modified_) {
+        undo_redo_.CommitChange("Edit NURBS parameters");
+    } else {
+        undo_redo_.CancelChange();
+    }
+    nurbs_parameter_object_id_ = 0;
+    nurbs_parameter_original_weights_.clear();
+    nurbs_parameter_original_knots_.clear();
+    nurbs_parameter_displayed_weight_ = 1.0;
+    nurbs_parameters_modified_ = false;
+    active_parametric_object_ = {};
+    active_parametric_edit_existing_ = false;
+    property_panel_->Clear();
+    if (properties_dock_) {
+        properties_dock_->hide();
+    }
+    UpdateUndoRedoActions();
+    RefreshSceneTree();
+    viewport_->update();
+    statusBar()->showMessage("NURBS parameters accepted", 1400);
+}
+
+void MainWindow::CancelNurbsParameterChanges() {
+    if (active_parametric_object_.tool_id != "NurbsParameters") {
+        return;
+    }
+    const size_t object_index = document_.FindObjectIndexById(
+        nurbs_parameter_object_id_);
+    auto& objects = document_.GetObjects();
+    auto* spline = object_index < objects.size()
+        ? dynamic_cast<CBSpline*>(objects[object_index].get()) : nullptr;
+    if (spline) {
+        spline->SetDegree(nurbs_parameter_original_degree_);
+        spline->SetWeights(nurbs_parameter_original_weights_);
+        if (!nurbs_parameter_original_knots_.empty()) {
+            spline->SetKnots(nurbs_parameter_original_knots_);
+        }
+        tool_registry_.ReplayProfileDependents(spline->m_id, document_);
+    }
+    undo_redo_.CancelChange();
+    nurbs_parameter_object_id_ = 0;
+    nurbs_parameter_original_weights_.clear();
+    nurbs_parameter_original_knots_.clear();
+    nurbs_parameter_displayed_weight_ = 1.0;
+    nurbs_parameters_modified_ = false;
+    active_parametric_object_ = {};
+    active_parametric_edit_existing_ = false;
+    property_panel_->Clear();
+    if (properties_dock_) {
+        properties_dock_->hide();
+    }
+    UpdateUndoRedoActions();
+    RefreshSceneTree();
+    viewport_->update();
+    statusBar()->showMessage("NURBS parameter changes canceled", 1400);
 }
 
 void MainWindow::CreateSelectedGroup() {
@@ -4536,6 +7134,7 @@ void MainWindow::CreateSelectedGroup() {
         statusBar()->showMessage("Create Group: could not create group", 1600);
         return;
     }
+    RecordDocumentChange("Create group");
     pending_group_command_ = PendingGroupCommand::None;
     viewport_->SetSelectionConfirmationMode(false);
     viewport_->SetTool(ToolMode::Select);
@@ -4556,6 +7155,7 @@ void MainWindow::UngroupSelectedGroup() {
         statusBar()->showMessage("UnGroup: select a group, then press Enter");
         return;
     }
+    RecordDocumentChange("Ungroup");
     pending_group_command_ = PendingGroupCommand::None;
     viewport_->SetSelectionConfirmationMode(false);
     viewport_->SetTool(ToolMode::Select);
@@ -4575,6 +7175,7 @@ void MainWindow::CreateSelectedAssembly() {
         statusBar()->showMessage("Create Assembly: select at least two objects, then press Enter");
         return;
     }
+    RecordDocumentChange("Create assembly");
     pending_group_command_ = PendingGroupCommand::None;
     viewport_->SetSelectionConfirmationMode(false);
     viewport_->SetTool(ToolMode::Select);
@@ -4592,6 +7193,7 @@ void MainWindow::CreateBodyFromTwoSketches() {
         statusBar()->showMessage("Body by Two Sketches: select exactly two closed sketches, then press Enter");
         return;
     }
+    RecordDocumentChange("Body by two sketches");
     pending_group_command_ = PendingGroupCommand::None;
     viewport_->SetSelectionConfirmationMode(false);
     viewport_->SetTool(ToolMode::Select);
@@ -4609,12 +7211,237 @@ void MainWindow::CreateAssociativeClone() {
         statusBar()->showMessage("Associative Clone: select one solid, then press Enter");
         return;
     }
+    RecordDocumentChange("Associative clone");
     pending_group_command_ = PendingGroupCommand::None;
     viewport_->SetSelectionConfirmationMode(false);
     viewport_->update();
     RefreshSceneTree();
     viewport_->BeginMovePointToPoint();
     statusBar()->showMessage("Associative clone created. Pick source point, then target point");
+}
+
+void MainWindow::CreateTwoRailSweepSurface() {
+    if (!document_.CreateTwoRailSweepSurfaceFromSelection()) {
+        pending_group_command_ = PendingGroupCommand::TwoRailSweepSurface;
+        viewport_->SetTool(ToolMode::Select);
+        viewport_->SetSelectionMode(SelectionMode::Object);
+        viewport_->SetSelectionConfirmationMode(true);
+        UpdateActiveToolUi("SurfaceSweepTwoRails");
+        statusBar()->showMessage(
+            "Sweep Surface (2 Rails): выбери профиль первым и две открытые направляющие, затем Enter");
+        return;
+    }
+    RecordDocumentChange("Two-rail sweep surface");
+    pending_group_command_ = PendingGroupCommand::None;
+    viewport_->SetSelectionConfirmationMode(false);
+    viewport_->SetTool(ToolMode::Select);
+    UpdateActiveToolUi("select");
+    RefreshSceneTree();
+    viewport_->update();
+    statusBar()->showMessage("Sweep Surface (2 Rails) создана", 1600);
+}
+
+void MainWindow::JoinSelectedSurfaces() {
+    const bool enough_surfaces_selected =
+        document_.GetSelectedObjectCount() >= 2;
+    if (!document_.JoinSelectedSurfaces()) {
+        if (enough_surfaces_selected) {
+            pending_group_command_ = PendingGroupCommand::None;
+            viewport_->SetSelectionConfirmationMode(false);
+            viewport_->SetTool(ToolMode::Select);
+            UpdateActiveToolUi("select");
+            statusBar()->showMessage(
+                "Join: не удалось построить переход с непрерывностью G2",
+                2600);
+            return;
+        }
+        pending_group_command_ = PendingGroupCommand::JoinSurfaces;
+        viewport_->SetTool(ToolMode::Select);
+        viewport_->SetSelectionMode(SelectionMode::Object);
+        viewport_->SetSelectionConfirmationMode(true);
+        UpdateActiveToolUi("SurfaceJoin");
+        statusBar()->showMessage(
+            "Join Surfaces: выбери минимум две поверхности, затем Enter");
+        return;
+    }
+
+    RecordDocumentChange("Join surfaces");
+    pending_group_command_ = PendingGroupCommand::None;
+    viewport_->SetSelectionConfirmationMode(false);
+    viewport_->SetTool(ToolMode::Select);
+    UpdateActiveToolUi("select");
+    RefreshSceneTree();
+    viewport_->update();
+    statusBar()->showMessage("Поверхности объединены", 1600);
+}
+
+void MainWindow::CreatePlaneIntersection() {
+    const size_t created = document_.CreatePlaneIntersectionCurves();
+    if (created == 0) {
+        pending_group_command_ = PendingGroupCommand::PlaneIntersection;
+        viewport_->SetTool(ToolMode::Select);
+        viewport_->SetSelectionMode(SelectionMode::Object);
+        viewport_->SetSelectionConfirmationMode(true);
+        UpdateActiveToolUi("PlaneIntersection");
+        statusBar()->showMessage(
+            "Plane Intersection: выберите Plane и поверхность, тело или Mesh, затем Enter");
+        return;
+    }
+    RecordDocumentChange("Plane intersection curves");
+    pending_group_command_ = PendingGroupCommand::None;
+    viewport_->SetSelectionConfirmationMode(false);
+    viewport_->SetTool(ToolMode::Select);
+    UpdateActiveToolUi("select");
+    RefreshSceneTree();
+    viewport_->update();
+    statusBar()->showMessage(
+        QString("Plane Intersection: создано кривых — %1").arg(created), 1800);
+}
+
+void MainWindow::CreateSurfaceIntersection() {
+    const size_t created = document_.CreateSurfaceIntersectionCurves();
+    if (created == 0) {
+        pending_group_command_ = PendingGroupCommand::SurfaceIntersection;
+        viewport_->SetTool(ToolMode::Select);
+        viewport_->SetSelectionMode(SelectionMode::Object);
+        viewport_->SetSelectionConfirmationMode(true);
+        UpdateActiveToolUi("SurfaceIntersection");
+        statusBar()->showMessage(
+            "Surface Intersection: выберите две пересекающиеся поверхности, затем Enter");
+        return;
+    }
+    RecordDocumentChange("Surface intersection curves");
+    pending_group_command_ = PendingGroupCommand::None;
+    viewport_->SetSelectionConfirmationMode(false);
+    viewport_->SetTool(ToolMode::Select);
+    UpdateActiveToolUi("select");
+    RefreshSceneTree();
+    viewport_->update();
+    statusBar()->showMessage(
+        QString("Surface Intersection: создано кривых — %1").arg(created), 1800);
+}
+
+void MainWindow::ProjectCurveToSurface() {
+    const auto& objects = document_.GetObjects();
+    size_t curve_count = 0;
+    size_t surface_count = 0;
+    for (size_t index : document_.GetSelectedObjectIndices()) {
+        if (index >= objects.size() || !objects[index]) continue;
+        if (dynamic_cast<const CSurfaceSet*>(objects[index].get())) {
+            ++surface_count;
+        } else if (IsEditableCurve(objects[index].get())
+                   || dynamic_cast<const CCadCurve3D*>(objects[index].get())
+                   || dynamic_cast<const CSmartLine*>(objects[index].get())) {
+            ++curve_count;
+        }
+    }
+    if (curve_count != 1 || surface_count != 1) {
+        pending_group_command_ = PendingGroupCommand::ProjectCurveToSurface;
+        viewport_->SetTool(ToolMode::Select);
+        viewport_->SetSelectionMode(SelectionMode::Object);
+        viewport_->SetSelectionConfirmationMode(true);
+        UpdateActiveToolUi("ProjectCurveToSurface");
+        statusBar()->showMessage(
+            "Project Curve: выберите одну кривую и одну поверхность, затем Enter");
+        return;
+    }
+
+    std::vector<double> values{0.0, 0.0, 1.0};
+    if (!ShowPlaneValuesDialog(
+            this, "Projection Direction", {"Vector X", "Vector Y", "Vector Z"},
+            values)) {
+        CancelPendingGroupCommand("Project Curve: отменено");
+        return;
+    }
+    const Vec3 direction{static_cast<float>(values[0]),
+                         static_cast<float>(values[1]),
+                         static_cast<float>(values[2])};
+    const size_t created = document_.ProjectSelectedCurveToSurface(direction);
+    if (created == 0) {
+        pending_group_command_ = PendingGroupCommand::None;
+        viewport_->SetSelectionConfirmationMode(false);
+        UpdateActiveToolUi("select");
+        statusBar()->showMessage(
+            "Project Curve: проекция по этому вектору не пересекает поверхность",
+            2600);
+        return;
+    }
+    RecordDocumentChange("Project curve to surface");
+    pending_group_command_ = PendingGroupCommand::None;
+    viewport_->SetSelectionConfirmationMode(false);
+    viewport_->SetTool(ToolMode::Select);
+    UpdateActiveToolUi("select");
+    RefreshSceneTree();
+    viewport_->update();
+    statusBar()->showMessage(
+        QString("Project Curve: создано кривых — %1").arg(created), 1800);
+}
+
+void MainWindow::ExtractSurfaceEdge() {
+    const size_t created = document_.ExtractSelectedSurfaceEdges();
+    if (created == 0) {
+        pending_group_command_ = PendingGroupCommand::ExtractSurfaceEdge;
+        viewport_->SetTool(ToolMode::Select);
+        viewport_->SetSelectionMode(SelectionMode::Edge);
+        viewport_->SetSelectionConfirmationMode(true);
+        UpdateActiveToolUi("ExtractSurfaceEdge");
+        statusBar()->showMessage(
+            "Extract Edge: выберите одну или несколько кромок поверхности или тела, затем Enter");
+        return;
+    }
+    RecordDocumentChange("Extract surface edges");
+    pending_group_command_ = PendingGroupCommand::None;
+    viewport_->SetSelectionConfirmationMode(false);
+    viewport_->SetTool(ToolMode::Select);
+    UpdateActiveToolUi("select");
+    RefreshSceneTree();
+    viewport_->update();
+    statusBar()->showMessage(
+        QString("Extract Edge: создано кривых — %1").arg(created), 1800);
+}
+
+void MainWindow::CreateFourSplineSurface() {
+    if (!document_.CreateFourSplineSurfaceFromSelection()) {
+        pending_group_command_ = PendingGroupCommand::FourSplineSurface;
+        viewport_->SetTool(ToolMode::Select);
+        viewport_->SetSelectionMode(SelectionMode::Object);
+        viewport_->SetSelectionConfirmationMode(true);
+        UpdateActiveToolUi("SurfaceFourSplines");
+        statusBar()->showMessage(
+            "Surface by 4 Splines: выбери четыре соединённые открытые кривые, затем Enter");
+        return;
+    }
+    RecordDocumentChange("Four-spline surface");
+    pending_group_command_ = PendingGroupCommand::None;
+    viewport_->SetSelectionConfirmationMode(false);
+    viewport_->SetTool(ToolMode::Select);
+    UpdateActiveToolUi("select");
+    RefreshSceneTree();
+    viewport_->update();
+    statusBar()->showMessage("Surface by 4 Splines создана", 1600);
+}
+
+void MainWindow::CreateTwoRailSweepSolid() {
+    if (!document_.CreateTwoRailSweepSolidFromSelection()) {
+        pending_group_command_ = PendingGroupCommand::TwoRailSweepSolid;
+        viewport_->SetTool(ToolMode::Select);
+        viewport_->SetSelectionMode(SelectionMode::Object);
+        viewport_->SetSelectionConfirmationMode(true);
+        UpdateActiveToolUi("SolidSweepTwoRails");
+        statusBar()->showMessage(
+            "Sweep Solid (2 Rails): выбери закрытый Sketch-сечение и две открытые направляющие, затем Enter");
+        return;
+    }
+    RecordDocumentChange("Two-rail sweep solid");
+    pending_group_command_ = PendingGroupCommand::None;
+    viewport_->SetSelectionConfirmationMode(false);
+    viewport_->SetTool(ToolMode::Select);
+    UpdateActiveToolUi("select");
+    RefreshSceneTree();
+    viewport_->update();
+    statusBar()->showMessage(
+        "Sweep Solid (2 Rails) создан: ширина следует направляющим, толщина постоянна",
+        2200);
 }
 
 void MainWindow::CancelPendingGroupCommand(const QString& status_text) {
@@ -4750,11 +7577,11 @@ void MainWindow::ShowSurfaceTextureEditor() {
         fit_to_surface->setChecked(current.texture_fit_to_surface);
         rotation->setSuffix(QString::fromUtf8("°"));
 
-        form->addRow("Offset U", offset_u);
-        form->addRow("Offset V", offset_v);
-        form->addRow("Scale U", scale_u);
-        form->addRow("Scale V", scale_v);
-        form->addRow("Rotate", rotation);
+        form->addRow(new DragSpinBoxLabel("Offset U", offset_u, &dialog), offset_u);
+        form->addRow(new DragSpinBoxLabel("Offset V", offset_v, &dialog), offset_v);
+        form->addRow(new DragSpinBoxLabel("Scale U", scale_u, &dialog), scale_u);
+        form->addRow(new DragSpinBoxLabel("Scale V", scale_v, &dialog), scale_v);
+        form->addRow(new DragSpinBoxLabel("Rotate", rotation, &dialog), rotation);
         form->addRow(rotate_90);
         form->addRow(fit_to_surface);
 
@@ -4870,11 +7697,11 @@ void MainWindow::ShowSurfaceTextureEditor() {
     fit_to_surface->setChecked(current.fit_to_surface);
     rotation->setSuffix(QString::fromUtf8("°"));
 
-    form->addRow("Offset U", offset_u);
-    form->addRow("Offset V", offset_v);
-    form->addRow("Scale U", scale_u);
-    form->addRow("Scale V", scale_v);
-    form->addRow("Rotate", rotation);
+    form->addRow(new DragSpinBoxLabel("Offset U", offset_u, &dialog), offset_u);
+    form->addRow(new DragSpinBoxLabel("Offset V", offset_v, &dialog), offset_v);
+    form->addRow(new DragSpinBoxLabel("Scale U", scale_u, &dialog), scale_u);
+    form->addRow(new DragSpinBoxLabel("Scale V", scale_v, &dialog), scale_v);
+    form->addRow(new DragSpinBoxLabel("Rotate", rotation, &dialog), rotation);
     form->addRow(rotate_90);
     form->addRow(fit_to_surface);
 
@@ -4947,6 +7774,7 @@ void MainWindow::SaveMaterialToDocument(const Material& material) {
             }
         }
     }
+    RecordDocumentChange("Save material");
     viewport_->update();
     statusBar()->showMessage(QString("Material saved: %1").arg(QString::fromStdString(saved.name)), 1400);
 }
@@ -4957,6 +7785,7 @@ void MainWindow::ApplyMaterialToSelection(const Material& material) {
         const Material& document_material = document_.UpsertMaterial(material);
         const int face_count = static_cast<int>(solid->GetSelectedFaceIndices().size());
         solid->SetSelectedSurfaceMaterial(document_material);
+        RecordDocumentChange("Apply material");
         viewport_->update();
         statusBar()->showMessage(QString("Material applied to %1 surface(s)").arg(face_count), 1400);
         return;
@@ -4978,6 +7807,9 @@ void MainWindow::ApplyMaterialToSelection(const Material& material) {
         }
     }
 
+    if (applied > 0) {
+        RecordDocumentChange("Apply material");
+    }
     RefreshSceneTree();
     viewport_->update();
     statusBar()->showMessage(QString("Material applied to %1 object(s)").arg(applied), 1400);
@@ -5003,6 +7835,805 @@ void MainWindow::BeginTransformTool(TransformOperation operation) {
         statusBar()->showMessage(QString("Transform: %1. Drag X/Y/Z gizmo axis.").arg(operation_name));
     } else {
         statusBar()->showMessage(QString("Transform: %1. Select an object, then drag X/Y/Z gizmo axis.").arg(operation_name));
+    }
+}
+
+void MainWindow::ShowViewportPopupMenu(const QPoint& global_position) {
+    QMenu menu(this);
+
+    QAction* stop = menu.addAction("Stop");
+    stop->setEnabled(viewport_->CurrentTool() != ToolMode::Select
+        || !active_parametric_object_.tool_id.empty());
+    connect(stop, &QAction::triggered, this, [this]() {
+        if (!active_parametric_object_.tool_id.empty()) {
+            CancelActiveProperties();
+        } else {
+            SetTool(ToolMode::Select, "Select objects");
+        }
+    });
+
+    QAction* rotation_pivot = menu.addAction("Pivot of Rotation");
+    rotation_pivot->setCheckable(true);
+    rotation_pivot->setChecked(viewport_->HasRotationPivot());
+    connect(rotation_pivot, &QAction::triggered, this, [this](bool enabled) {
+        if (!enabled) {
+            pending_transform_point_pick_ = PendingTransformPointPick::None;
+            viewport_->ClearRotationPivot();
+            statusBar()->showMessage("Pivot of Rotation disabled", 1400);
+            return;
+        }
+        pending_transform_point_pick_ = PendingTransformPointPick::RotationPivot;
+        viewport_->BeginPick3DPoint(
+            "Pivot of Rotation: pick a 3D point in the scene");
+    });
+
+    menu.addAction("Update Scene", this, [this]() {
+        viewport_->RefreshSurfaceMeshQuality();
+    });
+
+    menu.addSeparator();
+    menu.addAction("All Scene", this, [this]() {
+        viewport_->FitToDocument();
+        statusBar()->showMessage("All scene fitted", 1400);
+    });
+    menu.addAction("Zoom", this, [this]() {
+        SetTool(ToolMode::ZoomRect, "Zoom By Rect: drag the area to enlarge");
+    });
+    menu.addAction("View to Clipboard", this, [this]() {
+        QGuiApplication::clipboard()->setImage(viewport_->grabFramebuffer());
+        statusBar()->showMessage("View copied to clipboard", 1400);
+    });
+
+    QMenu* polygon_view = menu.addMenu("Polygon View");
+    auto* display_group = new QActionGroup(polygon_view);
+    display_group->setExclusive(true);
+    const auto add_display_mode = [this, polygon_view, display_group](
+                                      const QString& label, SolidDisplayMode mode) {
+        QAction* action = polygon_view->addAction(label);
+        action->setCheckable(true);
+        action->setChecked(CSolid::GetDisplayMode() == mode);
+        display_group->addAction(action);
+        connect(action, &QAction::triggered, this, [this, mode]() {
+            SetSolidDisplayMode(mode);
+        });
+    };
+    add_display_mode("Surfaces and Edges", SolidDisplayMode::SurfacesAndEdges);
+    add_display_mode("Wireframe", SolidDisplayMode::Wireframe);
+    add_display_mode("Mesh Only", SolidDisplayMode::MeshOnly);
+    add_display_mode("Hidden Lines", SolidDisplayMode::HiddenLine);
+
+    QAction* worktop = menu.addAction("Worktop / XY Plane");
+    worktop->setCheckable(true);
+    worktop->setChecked(viewport_->IsXYPlaneViewEnabled());
+    connect(worktop, &QAction::toggled, this, [this](bool enabled) {
+        SetXYPlaneViewEnabled(enabled);
+    });
+
+    menu.addSeparator();
+    QAction* edit = menu.addAction("Edit");
+    edit->setEnabled(document_.HasSelection());
+    connect(edit, &QAction::triggered, this, [this]() {
+        if (document_.GetSelectedSketch()) {
+            int sketch_tab_index = -1;
+            if (tool_tabs_) {
+                for (int index = 0; index < tool_tabs_->count(); ++index) {
+                    if (tool_tabs_->tabText(index) == "Sketch") {
+                        sketch_tab_index = index;
+                        break;
+                    }
+                }
+            }
+
+            if (tool_tabs_ && sketch_tab_index >= 0
+                && tool_tabs_->currentIndex() != sketch_tab_index) {
+                // The currentChanged handler runs the same scenario as a
+                // manual click on the Sketch tab.
+                tool_tabs_->setCurrentIndex(sketch_tab_index);
+                return;
+            }
+
+            if (viewport_->BeginEditSelectedSketch()) {
+                ShowSketchPanel();
+                UpdateActiveToolUi("NewSketch");
+                viewport_->update();
+                statusBar()->showMessage("Sketch edit panel opened", 1200);
+            }
+            return;
+        }
+        EditSelectedParametricObject();
+    });
+
+    QAction* edit_texture = menu.addAction(EditTextureIcon(), "Edit Texture");
+    edit_texture->setEnabled(
+        document_.HasSelectedSolidFace() || document_.GetSelectedMesh() != nullptr);
+    connect(edit_texture, &QAction::triggered, this, [this]() {
+        ShowSurfaceTextureEditor();
+    });
+
+    menu.exec(global_position);
+}
+
+void MainWindow::ShowPreciseMoveDialog() {
+    if (!document_.HasSelection()) {
+        pending_precise_transform_ = PendingPreciseTransform::Move;
+        viewport_->SetSelectionMode(SelectionMode::Object);
+        viewport_->SetTool(ToolMode::Select);
+        UpdateActiveToolUi("move_dialog");
+        statusBar()->showMessage("Move: pick an object in the scene", 0);
+        return;
+    }
+
+    if (precise_move_dialog_) {
+        precise_move_dialog_->show();
+        precise_move_dialog_->raise();
+        precise_move_dialog_->activateWindow();
+        viewport_->BeginMovePointToPoint(true);
+        viewport_->setFocus();
+        return;
+    }
+
+    ClearActiveProperties();
+    UpdateActiveToolUi("move_dialog");
+
+    auto* command_dialog = new QDialog(this, Qt::Tool);
+    precise_move_dialog_ = command_dialog;
+    command_dialog->setAttribute(Qt::WA_DeleteOnClose, true);
+    command_dialog->setWindowTitle("Direction and Distance");
+    command_dialog->setModal(false);
+    command_dialog->setFixedWidth(240);
+    auto* command_root = new QVBoxLayout(command_dialog);
+    command_root->setContentsMargins(6, 5, 6, 6);
+    command_root->setSpacing(4);
+
+    QDoubleSpinBox* lengths[3]{};
+    const char* names[] = {
+        "Length Along an axis X",
+        "Length Along an axis Y",
+        "Length Along an axis Z"};
+    const char* positive_names[] = {"+X", "+Y", "+Z"};
+    const char* negative_names[] = {"−X", "−Y", "−Z"};
+    const Vec3 directions[] = {
+        {1.0f, 0.0f, 0.0f},
+        {0.0f, 1.0f, 0.0f},
+        {0.0f, 0.0f, 1.0f}
+    };
+
+    const auto apply_axis_move = [this](Vec3 axis, double distance) {
+        const Vec3 delta = axis * static_cast<float>(distance);
+        if (viewport_->ApplyPreciseMove(delta)) {
+            RefreshSceneTree();
+            statusBar()->showMessage(
+                QString("Moved: ΔX %1, ΔY %2, ΔZ %3 mm")
+                    .arg(delta.x, 0, 'f', 3)
+                    .arg(delta.y, 0, 'f', 3)
+                    .arg(delta.z, 0, 'f', 3),
+                1400);
+        }
+        viewport_->BeginMovePointToPoint(true);
+    };
+
+    for (int i = 0; i < 3; ++i) {
+        auto* group = new QGroupBox(names[i], command_dialog);
+        auto* row = new QHBoxLayout(group);
+        row->setContentsMargins(6, 4, 6, 4);
+        row->setSpacing(4);
+        lengths[i] = new QDoubleSpinBox(group);
+        lengths[i]->setRange(0.0, 1000000.0);
+        lengths[i]->setDecimals(3);
+        lengths[i]->setSingleStep(1.0);
+        lengths[i]->setSuffix(" mm");
+        lengths[i]->setValue(100.0);
+        lengths[i]->setKeyboardTracking(false);
+        lengths[i]->setFixedWidth(116);
+        row->addWidget(lengths[i]);
+        auto* positive_button = new QPushButton(positive_names[i], group);
+        auto* negative_button = new QPushButton(negative_names[i], group);
+        positive_button->setFixedWidth(36);
+        negative_button->setFixedWidth(36);
+        row->addWidget(positive_button);
+        row->addWidget(negative_button);
+        connect(positive_button, &QPushButton::clicked, command_dialog,
+                [apply_axis_move, directions, lengths, i]() {
+            apply_axis_move(directions[i], lengths[i]->value());
+        });
+        connect(negative_button, &QPushButton::clicked, command_dialog,
+                [apply_axis_move, directions, lengths, i]() {
+            apply_axis_move(directions[i], -lengths[i]->value());
+        });
+        command_root->addWidget(group);
+    }
+
+    auto* two_points = new QPushButton("To enter 2 Points", command_dialog);
+    two_points->setFixedHeight(22);
+    command_root->addWidget(two_points);
+    connect(two_points, &QPushButton::clicked, command_dialog, [this]() {
+        BeginMoveTwoPointEntry();
+    });
+
+    auto* button_row = new QHBoxLayout();
+    button_row->setContentsMargins(0, 2, 0, 0);
+    button_row->setSpacing(10);
+    auto* ok_button = new QPushButton("OK", command_dialog);
+    auto* cancel_button = new QPushButton("Cancel", command_dialog);
+    ok_button->setFixedSize(78, 24);
+    cancel_button->setFixedSize(78, 24);
+    ok_button->setDefault(true);
+    ok_button->setAutoDefault(true);
+    button_row->addStretch(1);
+    button_row->addWidget(ok_button);
+    button_row->addWidget(cancel_button);
+    button_row->addStretch(1);
+    command_root->addLayout(button_row);
+    connect(ok_button, &QPushButton::clicked,
+            command_dialog, &QDialog::close);
+    connect(cancel_button, &QPushButton::clicked,
+            command_dialog, &QDialog::close);
+
+    const auto bind_enter_to_ok = [command_dialog, ok_button](int key) {
+        auto* shortcut = new QShortcut(QKeySequence(key), command_dialog);
+        shortcut->setContext(Qt::WidgetWithChildrenShortcut);
+        QObject::connect(shortcut, &QShortcut::activated,
+                         command_dialog, [ok_button]() {
+            ok_button->click();
+        });
+    };
+    bind_enter_to_ok(Qt::Key_Return);
+    bind_enter_to_ok(Qt::Key_Enter);
+    connect(command_dialog, &QObject::destroyed, this, [this]() {
+        precise_move_dialog_ = nullptr;
+        if (viewport_->CurrentTool() == ToolMode::MovePointToPoint) {
+            viewport_->SetTool(ToolMode::Select);
+        }
+        UpdateActiveToolUi("select");
+        statusBar()->showMessage("Move command completed", 1200);
+    });
+
+    PlaceDialogAtWorkspaceTopLeft(*command_dialog, *viewport_);
+    command_dialog->show();
+    command_dialog->raise();
+    command_dialog->activateWindow();
+    viewport_->BeginMovePointToPoint(true);
+    viewport_->setFocus();
+    statusBar()->showMessage("Move: pick two points in the scene or use an axis button", 0);
+    return;
+
+#if 0
+    ClearActiveProperties();
+    UpdateActiveToolUi("move_dialog");
+
+    QDialog dlg(this);
+    dlg.setWindowTitle("Move — Direction and Distance");
+    dlg.setModal(true);
+    auto* root = new QVBoxLayout(&dlg);
+    root->setContentsMargins(12, 10, 12, 12);
+
+    auto make_length = [&dlg](double value = 0.0) {
+        auto* spin = new QDoubleSpinBox(&dlg);
+        spin->setRange(-1000000.0, 1000000.0);
+        spin->setDecimals(3);
+        spin->setSingleStep(1.0);
+        spin->setSuffix(" mm");
+        spin->setValue(value);
+        spin->setKeyboardTracking(false);
+        return spin;
+    };
+
+    auto* mode = new QComboBox(&dlg);
+    mode->addItem("Axis and distance");
+    mode->addItem("From point to point");
+    root->addWidget(mode);
+
+    auto* pages = new QStackedWidget(&dlg);
+    root->addWidget(pages);
+
+    auto* axis_page = new QWidget(pages);
+    auto* axis_layout = new QGridLayout(axis_page);
+    auto* axis = new QComboBox(axis_page);
+    axis->addItems({"X", "Y", "Z"});
+    auto* distance = make_length(100.0);
+    distance->setParent(axis_page);
+    auto* positive = new QPushButton("+", axis_page);
+    auto* negative = new QPushButton("−", axis_page);
+    axis_layout->addWidget(new QLabel("Axis", axis_page), 0, 0);
+    axis_layout->addWidget(axis, 0, 1, 1, 2);
+    axis_layout->addWidget(new QLabel("Distance", axis_page), 1, 0);
+    axis_layout->addWidget(distance, 1, 1);
+    axis_layout->addWidget(positive, 1, 2);
+    axis_layout->addWidget(negative, 1, 3);
+    pages->addWidget(axis_page);
+
+    auto* points_page = new QWidget(pages);
+    auto* points_layout = new QVBoxLayout(points_page);
+    auto* point_hint = new QLabel(
+        "After pressing OK, pick the source point and then the target point "
+        "directly in the 3D scene.", points_page);
+    point_hint->setWordWrap(true);
+    points_layout->addWidget(point_hint);
+    auto* point_mode_label = new QLabel("3D snaps and visible object vertices are used.", points_page);
+    point_mode_label->setStyleSheet("QLabel { color: #707070; }");
+    point_mode_label->setWordWrap(true);
+    points_layout->addWidget(point_mode_label);
+    points_layout->addStretch(1);
+    pages->addWidget(points_page);
+
+    connect(mode, qOverload<int>(&QComboBox::currentIndexChanged), pages, &QStackedWidget::setCurrentIndex);
+    connect(positive, &QPushButton::clicked, &dlg, [distance]() {
+        distance->setValue(std::fabs(distance->value()));
+    });
+    connect(negative, &QPushButton::clicked, &dlg, [distance]() {
+        distance->setValue(-std::fabs(distance->value()));
+    });
+
+    Vec3 guide_center{};
+    document_.GetTransformGizmoCenter(guide_center);
+    const auto update_guide = [this, axis, guide_center]() {
+        const TransformAxis selected_axis = axis->currentIndex() == 0
+            ? TransformAxis::X
+            : axis->currentIndex() == 1 ? TransformAxis::Y : TransformAxis::Z;
+        viewport_->SetTransformDialogGuide(TransformOperation::Move, selected_axis, guide_center);
+    };
+    connect(axis, qOverload<int>(&QComboBox::currentIndexChanged), &dlg, [update_guide](int) { update_guide(); });
+    update_guide();
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    root->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+    const bool accepted = dlg.exec() == QDialog::Accepted;
+    viewport_->ClearTransformDialogGuide();
+    if (!accepted) {
+        return;
+    }
+
+    if (mode->currentIndex() == 1) {
+        viewport_->BeginMovePointToPoint();
+        viewport_->setFocus();
+        UpdateActiveToolUi("MovePointToPoint");
+        statusBar()->showMessage("Move: pick the source point in the 3D scene", 0);
+        return;
+    }
+
+    Vec3 delta{};
+    const float value = static_cast<float>(distance->value());
+    if (axis->currentIndex() == 0) delta.x = value;
+    else if (axis->currentIndex() == 1) delta.y = value;
+    else delta.z = value;
+
+    if (viewport_->ApplyPreciseMove(delta)) {
+        RefreshSceneTree();
+        statusBar()->showMessage(
+            QString("Moved: ΔX %1 mm, ΔY %2 mm, ΔZ %3 mm")
+                .arg(delta.x, 0, 'f', 3).arg(delta.y, 0, 'f', 3).arg(delta.z, 0, 'f', 3),
+            2200);
+    }
+#endif
+}
+
+void MainWindow::BeginMoveTwoPointEntry() {
+    if (!precise_move_dialog_ || !document_.HasSelection()) {
+        return;
+    }
+
+    struct PointEntryState {
+        Vec3 source{};
+        int stage = 0;
+        std::shared_ptr<std::function<void()>> show_next;
+    };
+    auto state = std::make_shared<PointEntryState>();
+    state->show_next = std::make_shared<std::function<void()>>();
+
+    *state->show_next = [this, state]() {
+        if (!precise_move_dialog_) {
+            *state->show_next = {};
+            return;
+        }
+
+        const bool plane_xy = viewport_->IsXYPlaneViewEnabled();
+        auto* dialog = new QDialog(precise_move_dialog_, Qt::Tool);
+        dialog->setAttribute(Qt::WA_DeleteOnClose, true);
+        dialog->setWindowTitle(plane_xy ? "2D Point modeling — On Plane XY"
+                                        : "3D Point modeling");
+        dialog->setFixedWidth(245);
+        auto* root = new QVBoxLayout(dialog);
+        root->setContentsMargins(12, 10, 12, 12);
+        root->setSpacing(8);
+        auto* point_title = new QLabel(
+            state->stage == 0 ? "Source point" : "Target point", dialog);
+        point_title->setStyleSheet("QLabel { font-weight: 600; }");
+        root->addWidget(point_title);
+
+        auto* coordinates = new QGridLayout();
+        coordinates->setHorizontalSpacing(0);
+        coordinates->setVerticalSpacing(3);
+        const char* names[] = {"X", "Y", "Z"};
+        const int count = plane_xy ? 2 : 3;
+        for (int i = 0; i < count; ++i) {
+            auto* label = new QLabel(names[i], dialog);
+            label->setAlignment(Qt::AlignCenter);
+            coordinates->addWidget(label, 0, i);
+        }
+        auto* coordinate_entry = new QLineEdit(dialog);
+        coordinate_entry->setAlignment(Qt::AlignCenter);
+        coordinate_entry->setText(
+            plane_xy ? "0.0000   0.0000"
+                     : "0.0000   0.0000   0.0000");
+        coordinate_entry->setToolTip(
+            plane_xy
+                ? "Enter X and Y separated by spaces, commas, or semicolons"
+                : "Enter X, Y, and Z separated by spaces, commas, or semicolons");
+        coordinate_entry->setStyleSheet(
+            "QLineEdit { font-family: Consolas, 'Courier New', monospace;"
+            " padding: 3px 5px; }");
+        coordinates->addWidget(coordinate_entry, 1, 0, 1, count);
+        root->addLayout(coordinates);
+
+        auto* error_label = new QLabel(dialog);
+        error_label->setStyleSheet("QLabel { color: #c62828; }");
+        error_label->setWordWrap(true);
+        error_label->hide();
+        root->addWidget(error_label);
+
+        auto* ok_button = new QPushButton("OK", dialog);
+        ok_button->setFixedWidth(82);
+        root->addWidget(ok_button, 0, Qt::AlignHCenter);
+
+        auto* mode = new QGroupBox("Mode", dialog);
+        auto* mode_layout = new QVBoxLayout(mode);
+        mode_layout->setContentsMargins(10, 7, 10, 8);
+        auto* smart = new QRadioButton(
+            plane_xy ? "Smart — On Plane XY" : "Smart 3D snapping", mode);
+        smart->setChecked(true);
+        mode_layout->addWidget(smart);
+        root->addWidget(mode);
+
+        auto* cancel_button = new QPushButton("Cancel", dialog);
+        cancel_button->setFixedWidth(82);
+        root->addWidget(cancel_button, 0, Qt::AlignHCenter);
+
+        auto dialog_handled = std::make_shared<bool>(false);
+        const auto complete_point = [this, dialog, state, dialog_handled](Vec3 point) {
+            *dialog_handled = true;
+            dialog->close();
+            if (state->stage == 0) {
+                state->source = point;
+                state->stage = 1;
+                QTimer::singleShot(0, this, [state]() {
+                    if (*state->show_next) {
+                        (*state->show_next)();
+                    }
+                });
+                return;
+            }
+
+            const Vec3 delta = point - state->source;
+            if (viewport_->ApplyPreciseMove(delta)) {
+                RefreshSceneTree();
+                statusBar()->showMessage(
+                    QString("Moved by two points: ΔX %1, ΔY %2, ΔZ %3 mm")
+                        .arg(delta.x, 0, 'f', 3)
+                        .arg(delta.y, 0, 'f', 3)
+                        .arg(delta.z, 0, 'f', 3),
+                    1600);
+            }
+            *state->show_next = {};
+            viewport_->BeginMovePointToPoint(true);
+        };
+        connect(viewport_, &OpenGLViewport::Point3DPicked, dialog,
+                [complete_point, plane_xy](CPoint3d point) {
+            complete_point({
+                static_cast<float>(point.x),
+                static_cast<float>(point.y),
+                plane_xy ? 0.0f : static_cast<float>(point.z)});
+        });
+        connect(viewport_, &OpenGLViewport::Point3DPickCanceled,
+                dialog, [dialog, state, dialog_handled]() {
+            *dialog_handled = true;
+            *state->show_next = {};
+            dialog->close();
+        });
+        connect(cancel_button, &QPushButton::clicked, dialog,
+                [this, dialog, state, dialog_handled]() {
+            *dialog_handled = true;
+            *state->show_next = {};
+            dialog->close();
+            viewport_->BeginMovePointToPoint(true);
+        });
+        connect(dialog, &QObject::destroyed, this,
+                [this, state, dialog_handled]() {
+            if (*dialog_handled) {
+                return;
+            }
+            *state->show_next = {};
+            viewport_->BeginMovePointToPoint(true);
+        });
+        const auto submit_coordinates = [coordinate_entry, error_label,
+                                         plane_xy, complete_point]() {
+            QString normalized = coordinate_entry->text().trimmed();
+            normalized.replace(',', ' ');
+            normalized.replace(';', ' ');
+            const QStringList parts = normalized.split(' ', Qt::SkipEmptyParts);
+            const int expected_count = plane_xy ? 2 : 3;
+            if (parts.size() != expected_count) {
+                error_label->setText(
+                    plane_xy ? "Enter two coordinates: X Y"
+                             : "Enter three coordinates: X Y Z");
+                error_label->show();
+                coordinate_entry->setFocus();
+                coordinate_entry->selectAll();
+                return;
+            }
+            double parsed[3]{};
+            for (int i = 0; i < expected_count; ++i) {
+                bool valid = false;
+                parsed[i] = parts[i].toDouble(&valid);
+                if (!valid || !std::isfinite(parsed[i])) {
+                    error_label->setText("Coordinates must be valid numbers");
+                    error_label->show();
+                    coordinate_entry->setFocus();
+                    coordinate_entry->selectAll();
+                    return;
+                }
+            }
+            complete_point({
+                static_cast<float>(parsed[0]),
+                static_cast<float>(parsed[1]),
+                plane_xy ? 0.0f : static_cast<float>(parsed[2])});
+        };
+        connect(ok_button, &QPushButton::clicked, dialog, submit_coordinates);
+        connect(coordinate_entry, &QLineEdit::returnPressed,
+                dialog, submit_coordinates);
+
+        PlaceDialogAtWorkspaceTopLeft(*dialog, *viewport_);
+        dialog->show();
+        dialog->raise();
+        dialog->activateWindow();
+        viewport_->BeginPick3DPoint(
+            state->stage == 0
+                ? (plane_xy ? "GetPoint2D: pick the source point on Plane XY"
+                            : "GetPoint3D: pick the source point")
+                : (plane_xy ? "GetPoint2D: pick the target point on Plane XY"
+                            : "GetPoint3D: pick the target point"));
+    };
+
+    (*state->show_next)();
+}
+
+void MainWindow::ShowPreciseRotateDialog() {
+    if (!document_.HasSelection()) {
+        pending_precise_transform_ = PendingPreciseTransform::Rotate;
+        viewport_->SetSelectionMode(SelectionMode::Object);
+        viewport_->SetTool(ToolMode::Select);
+        UpdateActiveToolUi("rotate_dialog");
+        statusBar()->showMessage("Rotate: pick an object in the scene", 0);
+        return;
+    }
+
+    if (precise_rotate_dialog_) {
+        precise_rotate_dialog_->show();
+        precise_rotate_dialog_->raise();
+        precise_rotate_dialog_->activateWindow();
+        viewport_->setFocus();
+        return;
+    }
+
+    if (!precise_rotate_axis_ready_) {
+        viewport_->BeginPickRotationAxis();
+        UpdateActiveToolUi("rotate_dialog");
+        return;
+    }
+
+    ClearActiveProperties();
+    UpdateActiveToolUi("rotate_dialog");
+    const Vec3 center = precise_rotate_axis_start_;
+    const Vec3 direction = normalize(
+        precise_rotate_axis_end_ - precise_rotate_axis_start_);
+
+    auto* dialog = new QDialog(this, Qt::Tool);
+    precise_rotate_dialog_ = dialog;
+    dialog->setAttribute(Qt::WA_DeleteOnClose, true);
+    dialog->setWindowTitle("Rotation of Object");
+    dialog->setModal(false);
+    auto* root = new QVBoxLayout(dialog);
+    root->setContentsMargins(12, 10, 12, 12);
+
+    auto* quick = new QHBoxLayout();
+    auto* plus_90 = new QPushButton("+90°", dialog);
+    auto* minus_90 = new QPushButton("−90°", dialog);
+    auto* angle_180 = new QPushButton("180°", dialog);
+    quick->addWidget(plus_90);
+    quick->addWidget(minus_90);
+    quick->addWidget(angle_180);
+    root->addLayout(quick);
+
+    auto* axis_label = new QLabel(
+        QString("Axis:  (%1, %2, %3)  →  (%4, %5, %6)")
+            .arg(precise_rotate_axis_start_.x, 0, 'f', 3)
+            .arg(precise_rotate_axis_start_.y, 0, 'f', 3)
+            .arg(precise_rotate_axis_start_.z, 0, 'f', 3)
+            .arg(precise_rotate_axis_end_.x, 0, 'f', 3)
+            .arg(precise_rotate_axis_end_.y, 0, 'f', 3)
+            .arg(precise_rotate_axis_end_.z, 0, 'f', 3),
+        dialog);
+    axis_label->setWordWrap(true);
+    root->addWidget(axis_label);
+
+    auto* form = new QFormLayout();
+    auto* angle = new QDoubleSpinBox(dialog);
+    angle->setRange(-36000.0, 36000.0);
+    angle->setDecimals(3);
+    angle->setSingleStep(5.0);
+    angle->setSuffix(QString::fromUtf8("°"));
+    angle->setValue(90.0);
+    angle->setKeyboardTracking(true);
+    form->addRow("Angle", angle);
+    root->addLayout(form);
+
+    const auto update_guide = [this, angle, center, direction]() {
+        viewport_->SetTransformDialogGuide(
+            TransformOperation::Rotate,
+            TransformAxis::None,
+            center,
+            static_cast<float>(angle->value()),
+            direction);
+    };
+    connect(angle, qOverload<double>(&QDoubleSpinBox::valueChanged), dialog,
+            [update_guide](double) { update_guide(); });
+    connect(plus_90, &QPushButton::clicked, dialog,
+            [angle]() { angle->setValue(90.0); });
+    connect(minus_90, &QPushButton::clicked, dialog,
+            [angle]() { angle->setValue(-90.0); });
+    connect(angle_180, &QPushButton::clicked, dialog,
+            [angle]() { angle->setValue(180.0); });
+    update_guide();
+
+    auto* hint = new QLabel(
+        "The yellow arrow shows the positive rotation direction.", dialog);
+    hint->setWordWrap(true);
+    root->addWidget(hint);
+    auto* buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, dialog);
+    root->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, dialog,
+            [this, dialog, angle, center, direction]() {
+        const float degrees = static_cast<float>(angle->value());
+        if (viewport_->ApplyPreciseRotate(
+                center, direction, degrees * 3.14159265f / 180.0f)) {
+            RefreshSceneTree();
+            statusBar()->showMessage(
+                QString("Rotated %1° around the selected axis")
+                    .arg(degrees, 0, 'f', 3), 2200);
+        }
+        dialog->close();
+    });
+    connect(buttons, &QDialogButtonBox::rejected,
+            dialog, &QDialog::close);
+    connect(dialog, &QObject::destroyed, this, [this]() {
+        precise_rotate_dialog_ = nullptr;
+        precise_rotate_axis_ready_ = false;
+        viewport_->ClearTransformDialogGuide();
+        viewport_->SetTool(ToolMode::Select);
+        UpdateActiveToolUi("select");
+    });
+
+    CenterDialogOnCursor(*dialog);
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
+    viewport_->setFocus();
+}
+
+void MainWindow::ShowPreciseScaleDialog() {
+    if (!document_.HasSelection()) {
+        pending_precise_transform_ = PendingPreciseTransform::Scale;
+        viewport_->SetSelectionMode(SelectionMode::Object);
+        viewport_->SetTool(ToolMode::Select);
+        UpdateActiveToolUi("scale_dialog");
+        statusBar()->showMessage("Scale: pick an object in the scene", 0);
+        return;
+    }
+
+    if (!precise_scale_base_point_ready_) {
+        pending_transform_point_pick_ = PendingTransformPointPick::ScaleBasePoint;
+        viewport_->BeginPick3DPoint("Scale: pick the base point in the 3D scene");
+        UpdateActiveToolUi("scale_dialog");
+        return;
+    }
+
+    ClearActiveProperties();
+    UpdateActiveToolUi("scale_dialog");
+
+    const Vec3 center = precise_scale_base_point_;
+    Vec3 bounds_min{};
+    Vec3 bounds_max{};
+    document_.GetSelectionBounds(bounds_min, bounds_max);
+    const Vec3 size = bounds_max - bounds_min;
+
+    QDialog dlg(this);
+    dlg.setWindowTitle("Scale Dialog");
+    dlg.setModal(true);
+    auto* root = new QVBoxLayout(&dlg);
+    root->setContentsMargins(12, 10, 12, 12);
+
+    const char* axis_names[] = {"X", "Y", "Z"};
+    auto* base_point_label = new QLabel(
+        QString("Base point: X %1 mm   Y %2 mm   Z %3 mm")
+            .arg(center.x, 0, 'f', 3)
+            .arg(center.y, 0, 'f', 3)
+            .arg(center.z, 0, 'f', 3),
+        &dlg);
+    root->addWidget(base_point_label);
+
+    auto* size_label = new QLabel(
+        QString("Current size: X %1 mm   Y %2 mm   Z %3 mm")
+            .arg(size.x, 0, 'f', 3).arg(size.y, 0, 'f', 3).arg(size.z, 0, 'f', 3),
+        &dlg);
+    root->addWidget(size_label);
+
+    auto* mode = new QComboBox(&dlg);
+    mode->addItem("Uniform coefficient");
+    mode->addItem("Independent X / Y / Z coefficients");
+    root->addWidget(mode);
+
+    auto* pages = new QStackedWidget(&dlg);
+    auto* uniform_page = new QWidget(pages);
+    auto* uniform_form = new QFormLayout(uniform_page);
+    auto* uniform_factor = new QDoubleSpinBox(uniform_page);
+    uniform_factor->setRange(0.001, 1000.0);
+    uniform_factor->setDecimals(4);
+    uniform_factor->setSingleStep(0.1);
+    uniform_factor->setValue(1.0);
+    uniform_form->addRow("K", uniform_factor);
+    pages->addWidget(uniform_page);
+
+    auto* xyz_page = new QWidget(pages);
+    auto* xyz_form = new QFormLayout(xyz_page);
+    QDoubleSpinBox* factors[3]{};
+    for (int i = 0; i < 3; ++i) {
+        factors[i] = new QDoubleSpinBox(xyz_page);
+        factors[i]->setRange(0.001, 1000.0);
+        factors[i]->setDecimals(4);
+        factors[i]->setSingleStep(0.1);
+        factors[i]->setValue(1.0);
+        xyz_form->addRow(QString("K%1").arg(axis_names[i]), factors[i]);
+    }
+    pages->addWidget(xyz_page);
+    root->addWidget(pages);
+    connect(mode, qOverload<int>(&QComboBox::currentIndexChanged), pages, &QStackedWidget::setCurrentIndex);
+
+    const auto update_guide = [this, mode, center]() {
+        viewport_->SetTransformDialogGuide(
+            TransformOperation::Scale,
+            mode->currentIndex() == 0 ? TransformAxis::UniformScale : TransformAxis::X,
+            center);
+    };
+    connect(mode, qOverload<int>(&QComboBox::currentIndexChanged), &dlg, [update_guide](int) { update_guide(); });
+    update_guide();
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    root->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+    const bool accepted = dlg.exec() == QDialog::Accepted;
+    const bool uniform = mode->currentIndex() == 0;
+    const float factor_x = static_cast<float>(uniform ? uniform_factor->value() : factors[0]->value());
+    const float factor_y = static_cast<float>(uniform ? uniform_factor->value() : factors[1]->value());
+    const float factor_z = static_cast<float>(uniform ? uniform_factor->value() : factors[2]->value());
+    viewport_->ClearTransformDialogGuide();
+    precise_scale_base_point_ready_ = false;
+    if (!accepted) {
+        return;
+    }
+
+    if (viewport_->ApplyPreciseScale(center, factor_x, factor_y, factor_z, uniform)) {
+        RefreshSceneTree();
+        statusBar()->showMessage(
+            uniform
+                ? QString("Uniform scale: K = %1").arg(factor_x, 0, 'f', 4)
+                : QString("Scale: Kx %1, Ky %2, Kz %3")
+                    .arg(factor_x, 0, 'f', 4).arg(factor_y, 0, 'f', 4).arg(factor_z, 0, 'f', 4),
+            2200);
     }
 }
 
@@ -5203,43 +8834,120 @@ void MainWindow::BeginNewSketch() {
 }
 
 void MainWindow::BeginSketchFillet() {
-    QDialog dlg(this);
-    dlg.setWindowTitle("Fillets Box");
-    dlg.setModal(true);
+    if (!sketch_fillet_dialog_) {
+        sketch_fillet_dialog_ = new QDialog(this, Qt::Tool);
+        sketch_fillet_dialog_->setWindowTitle("Fillets Box");
+        sketch_fillet_dialog_->setModal(false);
+        sketch_fillet_dialog_->setAttribute(Qt::WA_DeleteOnClose, false);
 
-    auto* layout = new QGridLayout(&dlg);
-    layout->setContentsMargins(12, 10, 12, 12);
-    layout->setHorizontalSpacing(12);
-    layout->setVerticalSpacing(10);
+        auto* layout = new QGridLayout(sketch_fillet_dialog_);
+        layout->setContentsMargins(12, 10, 12, 12);
+        layout->setHorizontalSpacing(12);
+        layout->setVerticalSpacing(10);
 
-    auto* radius_label = new QLabel("Fillet", &dlg);
-    auto* radius_edit = new QLineEdit("10", &dlg);
-    radius_edit->selectAll();
-    layout->addWidget(radius_label, 0, 0);
-    layout->addWidget(radius_edit, 0, 1);
+        auto* radius_label = new QLabel("Fillet", sketch_fillet_dialog_);
+        sketch_fillet_radius_spin_ = new QDoubleSpinBox(sketch_fillet_dialog_);
+        sketch_fillet_radius_spin_->setRange(0.001, 1000000.0);
+        sketch_fillet_radius_spin_->setDecimals(3);
+        sketch_fillet_radius_spin_->setValue(10.0);
+        sketch_fillet_radius_spin_->setKeyboardTracking(true);
+        sketch_fillet_radius_spin_->setSuffix(" mm");
+        layout->addWidget(radius_label, 0, 0);
+        layout->addWidget(sketch_fillet_radius_spin_, 0, 1);
 
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
-    layout->addWidget(buttons, 1, 0, 1, 2);
-    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
-
-    if (dlg.exec() != QDialog::Accepted) {
-        statusBar()->showMessage("Sketch Fillet canceled", 800);
-        return;
+        auto* buttons = new QDialogButtonBox(
+            QDialogButtonBox::Cancel, sketch_fillet_dialog_);
+        layout->addWidget(buttons, 1, 0, 1, 2);
+        connect(buttons, &QDialogButtonBox::rejected,
+                sketch_fillet_dialog_, &QDialog::reject);
+        connect(sketch_fillet_dialog_, &QDialog::rejected, this, [this]() {
+            if (viewport_->CurrentTool() == ToolMode::SketchFillet) {
+                viewport_->SetTool(ToolMode::Select);
+                statusBar()->showMessage("Sketch Fillet canceled", 800);
+            }
+        });
+        connect(sketch_fillet_radius_spin_,
+                qOverload<double>(&QDoubleSpinBox::valueChanged),
+                viewport_, &OpenGLViewport::SetSketchFilletRadius);
     }
 
-    bool ok = false;
-    const double radius = radius_edit->text().toDouble(&ok);
-    if (!ok || radius <= 0.0) {
-        QMessageBox::warning(this, "Fillets Box", "Radius must be positive.");
-        statusBar()->showMessage("Sketch Fillet: bad radius", 1200);
-        return;
-    }
-
+    const double radius = sketch_fillet_radius_spin_->value();
     viewport_->BeginSketchFillet(radius);
-    viewport_->setFocus();
-    UpdateActiveToolUi("NewSketch");
-    statusBar()->showMessage(QString("Sketch Fillet R=%1: укажите вершину полилинии").arg(radius, 0, 'f', 2));
+    sketch_fillet_dialog_->show();
+    sketch_fillet_dialog_->raise();
+    sketch_fillet_dialog_->activateWindow();
+    sketch_fillet_radius_spin_->setFocus();
+    sketch_fillet_radius_spin_->selectAll();
+    UpdateActiveToolUi("CurveFillets");
+    statusBar()->showMessage(QString("Fillets R=%1: укажите вершину кривой").arg(radius, 0, 'f', 2));
+}
+
+void MainWindow::BeginDrawSpline() {
+    if (spatial_curve_kind_ != SpatialCurveKind::None) {
+        CancelSpatialCurve();
+    }
+    ClearActiveProperties();
+    viewport_->SetTool(ToolMode::DrawSpline);
+    UpdateActiveToolUi("DrawSpline");
+    ShowDrawSplineDialog();
+    viewport_->setFocus(Qt::OtherFocusReason);
+    statusBar()->showMessage(
+        "Draw Spline: удерживайте левую кнопку и нарисуйте кривую; Esc — завершить");
+}
+
+void MainWindow::ShowDrawSplineDialog() {
+    if (!draw_spline_dialog_) {
+        draw_spline_dialog_ = new QDialog(this, Qt::Tool);
+        draw_spline_dialog_->setWindowTitle("Draw Spline");
+        draw_spline_dialog_->setModal(false);
+        draw_spline_dialog_->setFixedWidth(330);
+
+        auto* layout = new QHBoxLayout(draw_spline_dialog_);
+        layout->setContentsMargins(10, 8, 10, 8);
+        layout->setSpacing(8);
+        layout->addWidget(new QLabel("Simplification", draw_spline_dialog_));
+
+        draw_spline_simplification_slider_ = new QSlider(
+            Qt::Horizontal, draw_spline_dialog_);
+        draw_spline_simplification_slider_->setRange(0, 100);
+        draw_spline_simplification_slider_->setSingleStep(1);
+        draw_spline_simplification_slider_->setPageStep(10);
+        draw_spline_simplification_slider_->setValue(
+            QSettings().value("tools/drawSplineSimplification", 50).toInt());
+        draw_spline_simplification_slider_->setToolTip(
+            "0% keeps more captured points; 100% creates the simplest curve");
+        layout->addWidget(draw_spline_simplification_slider_, 1);
+
+        draw_spline_simplification_value_ = new QLabel(draw_spline_dialog_);
+        draw_spline_simplification_value_->setMinimumWidth(38);
+        draw_spline_simplification_value_->setAlignment(
+            Qt::AlignRight | Qt::AlignVCenter);
+        layout->addWidget(draw_spline_simplification_value_);
+
+        connect(draw_spline_simplification_slider_, &QSlider::valueChanged,
+                this, [this](int value) {
+            draw_spline_simplification_value_->setText(
+                QString("%1%").arg(value));
+            QSettings().setValue("tools/drawSplineSimplification", value);
+            viewport_->SetDrawSplineSimplification(value);
+        });
+        connect(draw_spline_dialog_, &QDialog::rejected, this, [this]() {
+            if (viewport_->CurrentTool() == ToolMode::DrawSpline) {
+                viewport_->SetTool(ToolMode::Select);
+                UpdateActiveToolUi("select");
+                statusBar()->showMessage("Draw Spline завершён", 1200);
+            }
+        });
+    }
+
+    const int value = draw_spline_simplification_slider_->value();
+    draw_spline_simplification_value_->setText(QString("%1%").arg(value));
+    viewport_->SetDrawSplineSimplification(value);
+    const QPoint position = viewport_->mapToGlobal(QPoint(18, 18));
+    draw_spline_dialog_->move(position);
+    draw_spline_dialog_->show();
+    draw_spline_dialog_->raise();
+    draw_spline_dialog_->activateWindow();
 }
 
 void MainWindow::ShowSketchPanel() {
@@ -5343,6 +9051,37 @@ void MainWindow::ShowSketchPanel() {
             }
             grid->addWidget(button, placeholder.row, placeholder.column);
         }
+
+        auto* constraints = new QGroupBox("Geometry constraints", panel);
+        auto* constraints_grid = new QGridLayout(constraints);
+        constraints_grid->setContentsMargins(6, 8, 6, 6);
+        constraints_grid->setSpacing(6);
+        const struct {
+            const char* tooltip;
+            int kind;
+            void (OpenGLViewport::*begin)();
+        } constraint_tools[] = {
+            {"Horizontal", 0, &OpenGLViewport::BeginSketchConstraintHorizontal},
+            {"Vertical", 1, &OpenGLViewport::BeginSketchConstraintVertical},
+            {"Tangent to previous segment", 2, &OpenGLViewport::BeginSketchConstraintTangentStart},
+            {"Tangent to next segment", 3, &OpenGLViewport::BeginSketchConstraintTangentEnd}
+        };
+        for (int index = 0; index < 4; ++index) {
+            const auto& constraint = constraint_tools[index];
+            auto* button = new QPushButton(constraints);
+            button->setObjectName(QString("SketchConstraintButton%1").arg(index));
+            button->setToolTip(constraint.tooltip);
+            button->setIcon(SketchGeometryConstraintIcon(constraint.kind));
+            button->setIconSize(QSize(44, 44));
+            button->setFixedSize(58, 58);
+            connect(button, &QPushButton::clicked, this,
+                    [this, begin = constraint.begin]() {
+                        (viewport_->*begin)();
+                        viewport_->setFocus();
+                    });
+            constraints_grid->addWidget(button, index / 2, index % 2);
+        }
+        root->addWidget(constraints);
 
         root->addStretch(1);
 
@@ -5451,9 +9190,108 @@ void MainWindow::CancelPendingTrim(const QString& status_text) {
 }
 
 void MainWindow::ActivateParametricTool(const std::string& tool_id) {
+    const bool curve_edit_tool = tool_id == "CurveJoin"
+        || tool_id == "CurveSplit"
+        || tool_id == "CurveExtend"
+        || tool_id == "CurveTrimByPlane"
+        || tool_id == "CurveSimplifyByPoint"
+        || tool_id == "CurveReverse";
+    if (pending_curve_edit_command_ != CurveEditCommand::None
+        && !curve_edit_tool) {
+        CancelCurveEditCommand();
+    }
     active_parametric_edit_existing_ = false;
     if (tool_id != "SolidLowPoly") {
         low_poly_pick_pending_ = false;
+    }
+    if (tool_id == "PlaneTool") {
+        ClearActiveProperties();
+        std::array<double, 4> factors = LoadRememberedPlaneFactors();
+        const int method = ShowCurveTrimPlaneMethodDialog(this, factors);
+        if (method == QDialog::Rejected) {
+            UpdateActiveToolUi("select");
+            statusBar()->showMessage("Plane: отменено", 1200);
+            return;
+        }
+        const ToolDefinition* definition = tool_registry_.Find("PlaneTool");
+        if (!definition) return;
+        std::vector<ToolParameter> parameters = definition->defaults;
+        const auto set_value = [&parameters](const char* id, double value) {
+            const auto found = std::find_if(parameters.begin(), parameters.end(),
+                [id](const ToolParameter& parameter) { return parameter.id == id; });
+            if (found != parameters.end()) found->value = value;
+        };
+        bool pick_three_points = false;
+        if (method == 7) {
+            pending_reference_plane_face_pick_ = true;
+            viewport_->SetTool(ToolMode::Select);
+            viewport_->SetSelectionMode(SelectionMode::Face);
+            UpdateActiveToolUi(tool_id);
+            statusBar()->showMessage(
+                "Plane — Face of Solid: выберите плоскую грань тела");
+            return;
+        } else if (method == 1) {
+            set_value("mode", 2.0);
+            pick_three_points = true;
+        } else if (method == 2) {
+            set_value("mode", 3.0);
+            set_value("offset", 0.0);
+            factors = {0.0, 0.0, 1.0, 0.0};
+        } else if (method == 3) {
+            set_value("mode", 4.0);
+            set_value("offset", 0.0);
+            factors = {0.0, 1.0, 0.0, 0.0};
+        } else if (method == 4) {
+            set_value("mode", 5.0);
+            set_value("offset", 0.0);
+            factors = {1.0, 0.0, 0.0, 0.0};
+        } else if (method == 5) {
+            if (factors[0] * factors[0] + factors[1] * factors[1]
+                    + factors[2] * factors[2] <= 1.0e-18) {
+                statusBar()->showMessage("Plane: нормаль A, B, C не может быть нулевой", 2600);
+                return;
+            }
+            set_value("mode", 0.0);
+            set_value("a", factors[0]); set_value("b", factors[1]);
+            set_value("c", factors[2]); set_value("d", factors[3]);
+        } else if (method == 6) {
+            std::vector<double> values{0.0, 0.0, 0.0, 0.0, 0.0, 1.0};
+            if (!ShowPlaneValuesDialog(this, "Point + Normal",
+                    {"Point X", "Point Y", "Point Z", "Normal X", "Normal Y", "Normal Z"},
+                    values)) {
+                UpdateActiveToolUi("select");
+                return;
+            }
+            if (values[3] * values[3] + values[4] * values[4]
+                    + values[5] * values[5] <= 1.0e-18) {
+                statusBar()->showMessage("Plane: нормаль не может быть нулевой", 2600);
+                return;
+            }
+            set_value("mode", 1.0);
+            set_value("plane.origin.x", values[0]);
+            set_value("plane.origin.y", values[1]);
+            set_value("plane.origin.z", values[2]);
+            set_value("plane.normal.x", values[3]);
+            set_value("plane.normal.y", values[4]);
+            set_value("plane.normal.z", values[5]);
+            factors = {values[3], values[4], values[5],
+                       -(values[3] * values[0] + values[4] * values[1] + values[5] * values[2])};
+        }
+        if (!pick_three_points) SaveRememberedPlaneFactors(factors);
+        active_parametric_object_ = tool_registry_.CreateParametricObject(
+            "PlaneTool", document_, parameters);
+        if (active_parametric_object_.tool_id.empty()) return;
+        active_parametric_edit_existing_ = false;
+        plane_three_point_method_selected_ = pick_three_points;
+        property_panel_->SetActiveObject(active_parametric_object_);
+        ShowPropertyPanelAtCursor("Plane");
+        viewport_->SetTool(ToolMode::Select);
+        UpdateActiveToolUi(tool_id);
+        RefreshSceneTree();
+        viewport_->update();
+        if (pick_three_points) BeginPlaneThreePointPick();
+        else statusBar()->showMessage("Plane: плоскость создана; OK — принять");
+        return;
     }
     if (tool_id == "SolidBox") {
         BeginSolidBox();
@@ -5484,6 +9322,41 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         CreateBodyFromTwoSketches();
         return;
     }
+    if (tool_id == "SolidSweepTwoRails") {
+        ClearActiveProperties();
+        CreateTwoRailSweepSolid();
+        return;
+    }
+    if (tool_id == "SewingFaceTool") {
+        ClearActiveProperties();
+        viewport_->SetTool(ToolMode::Select);
+        viewport_->SetSelectionMode(SelectionMode::Object);
+
+        QSettings settings;
+        const double tolerance = std::clamp(
+            settings.value("preferences/modeling/tolerance", 0.02).toDouble(),
+            1.0e-6, 1000.0);
+        double used_tolerance = tolerance;
+        std::string error_message;
+        if (!document_.SewSelectedSurfacesToSolid(
+                tolerance, &error_message, &used_tolerance)) {
+            UpdateActiveToolUi("select");
+            statusBar()->showMessage(
+                QString("Sewing Faces: %1")
+                    .arg(QString::fromStdString(error_message)),
+                3200);
+            return;
+        }
+
+        RefreshSceneTree();
+        UpdateActiveToolUi("select");
+        viewport_->update();
+        statusBar()->showMessage(
+            QString("Sewing Faces: solid created (tolerance %1 mm)")
+                .arg(used_tolerance, 0, 'g', 6),
+            2200);
+        return;
+    }
 
     if (tool_id == "TrimByPlane"
         || tool_id == "TrimBySketch"
@@ -5499,24 +9372,84 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
     }
 
     if (tool_id == "PolylineCurve") {
-        ClearActiveProperties();
-        document_.CreatePolyline();
-        viewport_->SetTool(ToolMode::DrawCurve);
-        UpdateActiveToolUi(tool_id);
-        RefreshSceneTree();
-        viewport_->update();
-        statusBar()->showMessage("Polyline: click in viewport to add 3D points");
+        BeginSpatialCurve(SpatialCurveKind::Polyline);
         return;
     }
 
     if (tool_id == "BSplineCurve") {
-        ClearActiveProperties();
-        document_.CreateBSpline();
-        viewport_->SetTool(ToolMode::DrawBSpline);
-        UpdateActiveToolUi(tool_id);
-        RefreshSceneTree();
-        viewport_->update();
-        statusBar()->showMessage("B-Spline: click in viewport to add 3D control points");
+        BeginSpatialCurve(SpatialCurveKind::BSpline);
+        return;
+    }
+
+    if (tool_id == "DrawSpline") {
+        BeginDrawSpline();
+        return;
+    }
+
+    if (tool_id == "BezierCurve3D") {
+        BeginSpatialCurve(SpatialCurveKind::Bezier);
+        return;
+    }
+
+    if (tool_id == "NurbsCurve3D") {
+        BeginSpatialCurve(SpatialCurveKind::Nurbs);
+        return;
+    }
+
+    if (tool_id == "PlaneIntersection") {
+        CreatePlaneIntersection();
+        return;
+    }
+    if (tool_id == "SurfaceIntersection") {
+        CreateSurfaceIntersection();
+        return;
+    }
+    if (tool_id == "ProjectCurveToSurface") {
+        ProjectCurveToSurface();
+        return;
+    }
+    if (tool_id == "ExtractSurfaceEdge") {
+        ExtractSurfaceEdge();
+        return;
+    }
+
+    if (tool_id == "NurbsParametersTool") {
+        if (active_parametric_object_.tool_id != "NurbsParameters") {
+            ClearActiveProperties();
+        }
+        if (UpdateNurbsParameterEditor()) {
+            UpdateActiveToolUi(tool_id);
+        } else {
+            statusBar()->showMessage(
+                "NURBS Parameters: выберите NURBS-кривую и нужные контрольные точки",
+                3000);
+            UpdateActiveToolUi("select");
+        }
+        return;
+    }
+
+    if (tool_id == "CurveJoin") {
+        BeginCurveEditCommand(CurveEditCommand::Join);
+        return;
+    }
+    if (tool_id == "CurveSplit") {
+        BeginCurveEditCommand(CurveEditCommand::Split);
+        return;
+    }
+    if (tool_id == "CurveExtend") {
+        BeginCurveEditCommand(CurveEditCommand::Extend);
+        return;
+    }
+    if (tool_id == "CurveTrimByPlane") {
+        BeginCurveEditCommand(CurveEditCommand::TrimByPlane);
+        return;
+    }
+    if (tool_id == "CurveSimplifyByPoint") {
+        BeginCurveEditCommand(CurveEditCommand::SimplifyByPoint);
+        return;
+    }
+    if (tool_id == "CurveReverse") {
+        BeginCurveEditCommand(CurveEditCommand::Reverse);
         return;
     }
 
@@ -5546,6 +9479,12 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         last_boolean_operation_ = BooleanOperationFromDialog(dlg.SelectedOperation());
         viewport_->BeginBooleanTool(last_boolean_operation_);
         UpdateActiveToolUi("boolean");
+        return;
+    }
+
+    if (tool_id == "CurveFillets") {
+        ClearActiveProperties();
+        BeginSketchFillet();
         return;
     }
 
@@ -5724,6 +9663,41 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         UpdateActiveToolUi(tool_id);
         viewport_->update();
         statusBar()->showMessage("Frame: задайте Width и Height, затем нажмите OK");
+        return;
+    }
+
+    if (tool_id == "SolidWireTool") {
+        ClearActiveProperties();
+        CAlfaObject* path = document_.GetSelectedObject();
+        const bool supported = dynamic_cast<CPolyline*>(path)
+            || dynamic_cast<CSmartLine*>(path)
+            || dynamic_cast<CBSpline*>(path);
+        const bool closed = (dynamic_cast<CSmartLine*>(path) && dynamic_cast<CSmartLine*>(path)->IsClosed())
+            || (dynamic_cast<CBSpline*>(path) && dynamic_cast<CBSpline*>(path)->IsClosed());
+        if (!path || !supported || closed) {
+            statusBar()->showMessage("Wire: выделите открытую Polyline, Sketch или B-Spline", 2200);
+            UpdateActiveToolUi("select");
+            return;
+        }
+        constexpr double default_radius = 10.0;
+        document_.EnsureObjectId(*path);
+        if (!document_.CreateWireSolid(path->m_id, default_radius)) {
+            statusBar()->showMessage("Wire: не удалось построить трубу. Проверьте радиусы изгибов", 2200);
+            UpdateActiveToolUi("select");
+            return;
+        }
+        active_parametric_edit_existing_ = false;
+        CAlfaObject* wire = document_.GetSelectedObject();
+        if (!wire) return;
+        active_parametric_object_ = tool_registry_.ActiveObjectFromDocument(
+            document_.GetSelectedObjectIndex(), *wire, 0, &document_);
+        property_panel_->SetActiveObject(active_parametric_object_);
+        ShowPropertyPanelAtCursor("Wire");
+        RefreshSceneTree();
+        viewport_->SetTool(ToolMode::Select);
+        UpdateActiveToolUi(tool_id);
+        viewport_->update();
+        statusBar()->showMessage("Wire: задайте радиус трубы, затем нажмите OK");
         return;
     }
 
@@ -5912,6 +9886,12 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         return;
     }
 
+    if (tool_id == "SurfaceFourSplines") {
+        ClearActiveProperties();
+        CreateFourSplineSurface();
+        return;
+    }
+
     if (tool_id == "SurfaceLoft") {
         ClearActiveProperties();
         viewport_->SetTool(ToolMode::Select);
@@ -5976,6 +9956,12 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
 
     if (tool_id == "fillet_edge" || tool_id == "fillet_all_edges") {
         ClearActiveProperties();
+        if (tool_id == "fillet_edge" && !document_.HasSelectedSolidEdge()) {
+            UpdateActiveToolUi("select");
+            viewport_->SetTool(ToolMode::Select);
+            statusBar()->showMessage("Fillet: сначала выберите кромку тела");
+            return;
+        }
         if (tool_id == "fillet_all_edges" && !document_.GetSelectedSolid()) {
             UpdateActiveToolUi("select");
             viewport_->SetTool(ToolMode::Select);
@@ -5992,18 +9978,22 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         const bool all_edges = tool_id == "fillet_all_edges";
         property_panel_->SetActiveObject(active_parametric_object_);
         ShowPropertyPanelAtCursor(tool_id == "fillet_edge" ? "Fillet Edge" : "Fillet All Edges");
-        viewport_->SetTool(ToolMode::Select);
+        viewport_->SetTool(ToolMode::SolidFillet);
         if (tool_id == "fillet_edge") {
             viewport_->SetSelectionMode(SelectionMode::Edge);
         }
         UpdateActiveToolUi(tool_id);
 
         const bool should_start_now = all_edges || document_.HasSelectedSolidEdge();
+        if (all_edges) {
+            undo_redo_.BeginChange();
+        }
         const bool started = all_edges
             ? document_.BeginLiveFilletSelectedEdges(all_edges)
             : TryStartLiveEdgeToolFromSelection();
         if (should_start_now && (!started || !document_.HasLiveFillet())) {
             document_.CancelLiveFillet();
+            undo_redo_.CancelChange();
             active_parametric_object_ = {};
             UpdateActiveToolUi("select");
             viewport_->SetTool(ToolMode::Select);
@@ -6012,6 +10002,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         }
         if (all_edges && !document_.UpdateLiveFillet(active_parametric_object_.parameters[0].value)) {
             document_.CancelLiveFillet();
+            undo_redo_.CancelChange();
             active_parametric_object_ = {};
             UpdateActiveToolUi("select");
             viewport_->SetTool(ToolMode::Select);
@@ -6019,6 +10010,12 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
             return;
         }
         if (document_.HasLiveFillet()) {
+            if (CSolid* solid = document_.GetSelectedSolid()) {
+                solid->ClearSelectedEdge();
+                solid->ClearSelectedFace();
+            }
+            document_.SetObjectSelectionHighlightHidden(
+                document_.GetSelectedObjectIndex(), true);
             viewport_->SetSolidDimensionEdit(
                 active_parametric_object_, QStringLiteral("radius"));
         }
@@ -6030,13 +10027,15 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         return;
     }
 
-    if (tool_id == "cabinet") {
+    if (IsCabinetTool(tool_id)) {
         const ToolDefinition* cabinet_tool = tool_registry_.Find(tool_id);
         std::vector<ToolParameter> parameters = cabinet_tool
             ? cabinet_tool->defaults
             : std::vector<ToolParameter>{};
         QSettings settings;
-        settings.beginGroup("tools/cabinet/parameters");
+        settings.beginGroup(
+            QStringLiteral("tools/%1/parameters")
+                .arg(QString::fromStdString(tool_id)));
         for (ToolParameter& parameter : parameters) {
             const QString key = QString::fromStdString(parameter.id);
             if (settings.contains(key)) {
@@ -6047,6 +10046,91 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
             }
         }
         settings.endGroup();
+
+        if (tool_id == "cabinet_advanced_slx") {
+            std::vector<CSmartLine*> sketches;
+            for (size_t index : document_.GetSelectedObjectIndices()) {
+                if (index >= document_.GetObjects().size()) {
+                    continue;
+                }
+                if (auto* sketch = dynamic_cast<CSmartLine*>(
+                        document_.GetObjects()[index].get())) {
+                    sketches.push_back(sketch);
+                }
+            }
+            if (sketches.empty()) {
+                const std::vector<unsigned long> template_ids =
+                    CreateSlxFrameTemplateSketches(document_);
+                RefreshSceneTree();
+                viewport_->FitToDocument();
+                viewport_->update();
+                statusBar()->showMessage(
+                    template_ids.size() == 2
+                        ? "SLX: созданы эскизы Frame Profile и Panel Profile — сохрани или измени их"
+                        : "SLX: не удалось создать шаблоны профилей",
+                    6000);
+                return;
+            }
+            for (CSmartLine* sketch : sketches) {
+                document_.EnsureObjectId(*sketch);
+            }
+            const auto set_sketch_id = [&](const std::string& id, unsigned long value) {
+                const auto parameter = std::find_if(
+                    parameters.begin(), parameters.end(),
+                    [&](const ToolParameter& candidate) { return candidate.id == id; });
+                if (parameter != parameters.end()) {
+                    parameter->value = static_cast<double>(value);
+                }
+            };
+            const auto facade_style = std::find_if(
+                parameters.begin(), parameters.end(),
+                [](const ToolParameter& parameter) {
+                    return parameter.id == "facade_style";
+                });
+            // Never inherit object IDs from an earlier SLX run.
+            set_sketch_id("slx.profile.id", 0);
+            set_sketch_id("slx.panel.id", 0);
+            for (size_t contour = 0; contour < 8; ++contour) {
+                set_sketch_id(
+                    "slx.contour." + std::to_string(contour + 1) + ".id", 0);
+            }
+
+            if (sketches.size() == 2) {
+                if (!sketches[0]->IsClosed() || !sketches[1]->IsClosed()) {
+                    statusBar()->showMessage(
+                        "SLX Frame: профиль рамки и профиль филёнки должны быть замкнуты",
+                        5000);
+                    return;
+                }
+                // Two sketches can be used either as Frame Profile + Panel
+                // Profile or as two Milled contours.  Populate both sets;
+                // the facade style selected in the dialog decides which set
+                // the builder consumes.
+                set_sketch_id("slx.profile.id", sketches[0]->m_id);
+                set_sketch_id("slx.panel.id", sketches[1]->m_id);
+                set_sketch_id("slx.contour.1.id", sketches[0]->m_id);
+                set_sketch_id("slx.contour.2.id", sketches[1]->m_id);
+                if (facade_style != parameters.end()) {
+                    facade_style->value = 1.0;
+                }
+            } else {
+                if (facade_style != parameters.end()) {
+                    facade_style->value = 3.0;
+                }
+                const size_t contour_count = std::min<size_t>(8, sketches.size());
+                for (size_t contour = 0; contour < contour_count; ++contour) {
+                    if (!sketches[contour]->IsClosed()) {
+                        statusBar()->showMessage(
+                            "SLX Milled: все контуры фрезеровки должны быть замкнуты",
+                            4500);
+                        return;
+                    }
+                    set_sketch_id(
+                        "slx.contour." + std::to_string(contour + 1) + ".id",
+                        sketches[contour]->m_id);
+                }
+            }
+        }
         ToolParameter* body_type = nullptr;
         ToolParameter* facade_type = nullptr;
         for (ToolParameter& parameter : parameters) {
@@ -6064,12 +10148,68 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         active_parametric_object_ = tool_registry_.PrepareParametricObject(
             tool_id, document_, parameters);
     } else {
+        if (IsFurnitureAssemblyTool(tool_id)) {
+            undo_redo_.BeginChange();
+        }
         active_parametric_object_ = tool_registry_.Activate(tool_id, document_);
+        if (IsFurnitureAssemblyTool(tool_id)
+            && active_parametric_object_.tool_id.empty()) {
+            undo_redo_.CancelChange();
+        }
+    }
+
+    if (tool_id == "SurfaceSweepTwoRails") {
+        ClearActiveProperties();
+        CreateTwoRailSweepSurface();
+        return;
+    }
+
+    if (tool_id == "SurfaceJoin") {
+        ClearActiveProperties();
+        JoinSelectedSurfaces();
+        return;
+    }
+
+    if (tool_id == "SurfaceRuled") {
+        ClearActiveProperties();
+        auto* spline = document_.GetSelectedBSpline();
+        if (!spline || spline->GetPointCount() < 2) {
+            UpdateActiveToolUi("select");
+            statusBar()->showMessage(
+                "Ruled Surface: выбери одну гладкую кривую (не Polyline)", 2200);
+            return;
+        }
+        document_.EnsureObjectId(*spline);
+        const ToolDefinition* definition = tool_registry_.Find(tool_id);
+        std::vector<ToolParameter> parameters = definition
+            ? definition->defaults : std::vector<ToolParameter>{};
+        for (ToolParameter& parameter : parameters) {
+            if (parameter.id == "profile.id") {
+                parameter.value = static_cast<double>(spline->m_id);
+            }
+        }
+        active_parametric_object_ = tool_registry_.CreateParametricObject(
+            tool_id, document_, parameters);
+        if (active_parametric_object_.tool_id.empty()) {
+            UpdateActiveToolUi("select");
+            statusBar()->showMessage("Ruled Surface: не удалось создать поверхность", 2000);
+            return;
+        }
+        property_panel_->SetActiveObject(active_parametric_object_);
+        ShowPropertyPanelAtCursor("Ruled Surface");
+        viewport_->SetTool(ToolMode::Select);
+        viewport_->SetSelectionMode(SelectionMode::Object);
+        UpdateActiveToolUi(tool_id);
+        RefreshSceneTree();
+        viewport_->update();
+        statusBar()->showMessage(
+            "Ruled Surface: настрой Length, Direction и Reverse Normal; OK оставит результат");
+        return;
     }
     if (!active_parametric_object_.tool_id.empty()) {
         property_panel_->SetActiveObject(active_parametric_object_);
         ShowPropertyPanelAtCursor(QString::fromStdString(tool_registry_.LabelFor(tool_id)));
-        if (ActiveParametricObjectIsAssembly() || tool_id == "cabinet"
+        if (ActiveParametricObjectIsAssembly() || IsCabinetTool(tool_id)
             || tool_id == "SolidBeamTool" || tool_id == "SolidBox" || tool_id == "SolidCylinder" || tool_id == "SolidSphereTool"
             || tool_id == "SolidTorusTool" || tool_id == "SolidPrismTool") {
             document_.ClearSelection();
@@ -6085,7 +10225,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         IsFurnitureAssemblyTool(active_parametric_object_.tool_id)
             ? ToolMode::Orbit
             : ToolMode::Select);
-    if ((tool_id == "table" || tool_id == "desk" || tool_id == "drawer_box")
+    if ((tool_id == "chair" || tool_id == "chair_simple" || tool_id == "table" || tool_id == "desk" || tool_id == "drawer_box")
         && !active_parametric_object_.tool_id.empty()) {
         viewport_->FitToDocument();
     }
@@ -6118,12 +10258,17 @@ void MainWindow::ShowLowPolyTool() {
         return;
     }
 
+    const SolidDisplayMode previous_display_mode = CSolid::GetDisplayMode();
+    SetSolidDisplayMode(SolidDisplayMode::SurfacesAndRaisedMesh);
+
     low_poly_pick_pending_ = false;
     ClearActiveProperties();
     viewport_->SetTool(ToolMode::Select);
     viewport_->SetSelectionMode(SelectionMode::Object);
     UpdateActiveToolUi("SolidLowPoly");
-    connect(dialog, &QDialog::finished, this, [this]() {
+    connect(dialog, &QDialog::finished, this,
+            [this, previous_display_mode]() {
+        SetSolidDisplayMode(previous_display_mode);
         low_poly_pick_pending_ = false;
         ClearActiveProperties();
         viewport_->SetTool(ToolMode::Orbit);
@@ -6506,6 +10651,7 @@ void MainWindow::EditSelectedParametricObject() {
             }
             document_.SetObjectSelectionHighlightHidden(edited_object_index, true);
             viewport_->update();
+            undo_redo_.BeginChange();
             const SolidOperationsDialogResult operation_action = ShowSolidOperationsDialog(
                 this,
                 document_,
@@ -6551,6 +10697,7 @@ void MainWindow::EditSelectedParametricObject() {
                         tool_registry_.Rebuild(initial_object, document_);
                     }
                 }
+                undo_redo_.CancelChange();
                 finish_solid_edit();
                 return;
             }
@@ -6558,6 +10705,8 @@ void MainWindow::EditSelectedParametricObject() {
                 solid->SetName(operation_action.object_name);
             }
             if (operation_action.action == SolidOperationsDialogAction::Accept) {
+                undo_redo_.CommitChange("Edit solid");
+                UpdateUndoRedoActions();
                 finish_solid_edit();
                 statusBar()->showMessage("Solid changes accepted", 1200);
                 return;
@@ -6566,13 +10715,17 @@ void MainWindow::EditSelectedParametricObject() {
                 const size_t object_index = document_.GetSelectedObjectIndex();
                 if (!solid->RemoveParametricOperation(static_cast<size_t>(operation_action.operation_index))
                     || !tool_registry_.ReplayOperations(object_index, document_)) {
+                    undo_redo_.CancelChange();
                     statusBar()->showMessage("Operation delete failed", 1400);
                     return;
                 }
+                undo_redo_.CommitChange("Delete solid operation");
+                UpdateUndoRedoActions();
                 finish_solid_edit();
                 statusBar()->showMessage("Operation deleted", 1200);
                 return;
             }
+            undo_redo_.CancelChange();
             operation_index = static_cast<size_t>(operation_action.operation_index);
             reopen_solid_editor_after_properties_ = true;
         }
@@ -6597,7 +10750,17 @@ void MainWindow::EditSelectedParametricObject() {
     if (ActiveParametricObjectIsAssembly()) {
         viewport_->SetTool(ToolMode::Orbit);
     } else if (viewport_->CurrentTool() != ToolMode::Orbit) {
-        viewport_->SetTool(ToolMode::Select);
+        const bool editing_fillet = active_parametric_object_.tool_id == "fillet_edge"
+            || active_parametric_object_.tool_id == "fillet_all_edges";
+        viewport_->SetTool(editing_fillet ? ToolMode::SolidFillet : ToolMode::Select);
+        if (editing_fillet) {
+            if (CSolid* solid = document_.GetSelectedSolid()) {
+                solid->ClearSelectedEdge();
+                solid->ClearSelectedFace();
+            }
+            document_.SetObjectSelectionHighlightHidden(
+                document_.GetSelectedObjectIndex(), true);
+        }
     }
     UpdateActiveToolUi(active_parametric_object_.tool_id);
     statusBar()->showMessage(QString("%1 parameters").arg(tool_label), 1200);
@@ -6620,13 +10783,21 @@ bool MainWindow::TryStartLiveEdgeToolFromSelection() {
             return false;
         }
         const double radius = active_parametric_object_.parameters.empty() ? 2.0 : active_parametric_object_.parameters[0].value;
+        undo_redo_.BeginChange();
         if (!document_.BeginLiveFilletSelectedEdges(false) || !document_.UpdateLiveFillet(radius)) {
             document_.CancelLiveFillet();
+            undo_redo_.CancelChange();
             statusBar()->showMessage("Fillet: операция не выполнена");
             return false;
         }
         viewport_->SetSolidDimensionEdit(
             active_parametric_object_, QStringLiteral("radius"));
+        if (CSolid* solid = document_.GetSelectedSolid()) {
+            solid->ClearSelectedEdge();
+            solid->ClearSelectedFace();
+        }
+        document_.SetObjectSelectionHighlightHidden(
+            document_.GetSelectedObjectIndex(), true);
         RefreshSceneTree();
         viewport_->update();
         statusBar()->showMessage("Fillet: меняй Radius, OK оставит результат");
@@ -6642,8 +10813,10 @@ bool MainWindow::TryStartLiveEdgeToolFromSelection() {
             return false;
         }
         const double distance = active_parametric_object_.parameters.empty() ? 2.0 : active_parametric_object_.parameters[0].value;
+        undo_redo_.BeginChange();
         if (!document_.BeginLiveChamferSelectedEdges() || !document_.UpdateLiveChamfer(distance)) {
             document_.CancelLiveChamfer();
+            undo_redo_.CancelChange();
             statusBar()->showMessage("Chamfer: операция не выполнена");
             return false;
         }
@@ -6714,11 +10887,30 @@ bool MainWindow::TryStartLivePolylineRevolveFromSelection() {
 }
 
 void MainWindow::ClearActiveProperties() {
-    if (!active_parametric_edit_existing_
-        && (active_parametric_object_.tool_id == "fillet_edge" || active_parametric_object_.tool_id == "fillet_all_edges")) {
-        document_.CancelLiveFillet();
+    if (spatial_curve_kind_ != SpatialCurveKind::None) {
+        CancelSpatialCurve();
+    }
+    if (active_parametric_object_.tool_id == "PlaneTool") {
+        CancelPlaneThreePointPick();
+        plane_three_point_method_selected_ = false;
+        pending_reference_plane_face_pick_ = false;
+    }
+    if (active_parametric_object_.tool_id == "NurbsParameters") {
+        CancelNurbsParameterChanges();
+        return;
+    }
+    const bool fillet_properties = active_parametric_object_.tool_id == "fillet_edge"
+        || active_parametric_object_.tool_id == "fillet_all_edges";
+    if (fillet_properties) {
+        if (!active_parametric_edit_existing_) {
+            document_.CancelLiveFillet();
+            undo_redo_.CancelChange();
+        }
+        document_.SetObjectSelectionHighlightHidden(
+            document_.GetSelectedObjectIndex(), false);
     } else if (active_parametric_object_.tool_id == "ChamferSolid") {
         document_.CancelLiveChamfer();
+        undo_redo_.CancelChange();
     } else if (active_parametric_object_.tool_id == "ThickSolidTool") {
         document_.CancelLiveThickSolid();
     } else if (active_parametric_object_.tool_id == "SolidExtrudeTool"
@@ -6737,19 +10929,28 @@ void MainWindow::ClearActiveProperties() {
 }
 
 void MainWindow::AcceptActiveProperties() {
+    if (active_parametric_object_.tool_id == "NurbsParameters") {
+        AcceptNurbsParameterChanges();
+        return;
+    }
     bool created_cabinet = false;
+    const bool created_ruled_surface =
+        !active_parametric_edit_existing_
+        && active_parametric_object_.tool_id == "SurfaceRuled";
     if (!active_parametric_edit_existing_
-        && active_parametric_object_.tool_id == "cabinet"
+        && IsCabinetTool(active_parametric_object_.tool_id)
         && active_parametric_object_.object_index
                >= document_.GetObjects().size()) {
         statusBar()->showMessage("Cabinet: построение сборки...");
         QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+        undo_redo_.BeginChange();
         ActiveParametricObject created =
             tool_registry_.CreateParametricObject(
-                "cabinet",
+                active_parametric_object_.tool_id,
                 document_,
                 active_parametric_object_.parameters);
         if (created.tool_id.empty()) {
+            undo_redo_.CancelChange();
             statusBar()->showMessage(
                 "Cabinet: не удалось построить сборку", 2500);
             return;
@@ -6830,6 +11031,7 @@ void MainWindow::AcceptActiveProperties() {
             || active_parametric_object_.tool_id == "SurfaceOfRevolution"
             || active_parametric_object_.tool_id == "SolidSweptTool"
             || active_parametric_object_.tool_id == "SolidFrameTool"
+            || active_parametric_object_.tool_id == "SolidWireTool"
             || active_parametric_object_.tool_id == "SolidPolyhedronTool"
             || active_parametric_object_.tool_id == "TrimByPlane"
             || active_parametric_object_.tool_id == "TrimBySketch"
@@ -6874,6 +11076,8 @@ void MainWindow::AcceptActiveProperties() {
                                               created_surface_indices);
             }
         }
+        undo_redo_.CommitChange(all_edges ? "Fillet all edges" : "Fillet edge");
+        UpdateUndoRedoActions();
         const bool restore_face_selection =
             edge_tool_started_from_face_quick_menu_;
         edge_tool_started_from_face_quick_menu_ = false;
@@ -6905,6 +11109,8 @@ void MainWindow::AcceptActiveProperties() {
                                           ToFilletEdgeSavedParameters(active_parametric_object_.parameters, edge_refs),
                                           created_surface_indices);
         }
+        undo_redo_.CommitChange("Chamfer");
+        UpdateUndoRedoActions();
         const bool restore_face_selection =
             edge_tool_started_from_face_quick_menu_;
         edge_tool_started_from_face_quick_menu_ = false;
@@ -6973,14 +11179,27 @@ void MainWindow::AcceptActiveProperties() {
     }
 
     if (!active_parametric_edit_existing_
-        && active_parametric_object_.tool_id == "cabinet") {
+        && IsCabinetTool(active_parametric_object_.tool_id)) {
         QSettings settings;
-        settings.beginGroup("tools/cabinet/parameters");
+        settings.beginGroup(
+            QStringLiteral("tools/%1/parameters")
+                .arg(QString::fromStdString(active_parametric_object_.tool_id)));
         for (const ToolParameter& parameter : active_parametric_object_.parameters) {
             settings.setValue(
                 QString::fromStdString(parameter.id), parameter.value);
         }
         settings.endGroup();
+    }
+
+    if (!active_parametric_edit_existing_
+        && IsFurnitureAssemblyTool(active_parametric_object_.tool_id)) {
+        undo_redo_.CommitChange(
+            "Create " + tool_registry_.LabelFor(active_parametric_object_.tool_id));
+        UpdateUndoRedoActions();
+    }
+
+    if (created_ruled_surface) {
+        RecordDocumentChange("Create ruled surface");
     }
 
     active_parametric_object_ = {};
@@ -7001,6 +11220,12 @@ void MainWindow::AcceptActiveProperties() {
 }
 
 void MainWindow::CancelActiveProperties() {
+    if (active_parametric_object_.tool_id == "NurbsParameters") {
+        CancelNurbsParameterChanges();
+        return;
+    }
+    const bool canceling_new_furniture = !active_parametric_edit_existing_
+        && IsFurnitureAssemblyTool(active_parametric_object_.tool_id);
     if (active_parametric_object_.transient
         && (active_parametric_object_.tool_id == "TrimByPlane"
             || active_parametric_object_.tool_id == "TrimBySketch"
@@ -7018,6 +11243,7 @@ void MainWindow::CancelActiveProperties() {
 
     if (active_parametric_object_.tool_id == "fillet_edge" || active_parametric_object_.tool_id == "fillet_all_edges") {
         document_.CancelLiveFillet();
+        undo_redo_.CancelChange();
         const bool restore_face_selection =
             edge_tool_started_from_face_quick_menu_;
         edge_tool_started_from_face_quick_menu_ = false;
@@ -7035,6 +11261,7 @@ void MainWindow::CancelActiveProperties() {
 
     if (active_parametric_object_.tool_id == "ChamferSolid") {
         document_.CancelLiveChamfer();
+        undo_redo_.CancelChange();
         const bool restore_face_selection =
             edge_tool_started_from_face_quick_menu_;
         edge_tool_started_from_face_quick_menu_ = false;
@@ -7117,6 +11344,11 @@ void MainWindow::CancelActiveProperties() {
         }
     }
 
+    if (canceling_new_furniture) {
+        undo_redo_.CancelChange();
+        UpdateUndoRedoActions();
+    }
+
     ClearActiveProperties();
     RefreshSceneTree();
     viewport_->update();
@@ -7128,11 +11360,18 @@ void MainWindow::ShowPropertyPanelAtCursor(const QString& title) {
         return;
     }
 
-    properties_dock_->setWindowTitle(title + " Parameters");
+    properties_dock_->setWindowTitle(
+        active_parametric_object_.tool_id == "SurfaceRuled"
+            ? title
+            : title + " Parameters");
     properties_dock_->setFloating(true);
+    const bool plane_tool = active_parametric_object_.tool_id == "PlaneTool";
+    const bool plane_three_points = plane_tool
+        && static_cast<int>(PlaneParameterValue(
+            active_parametric_object_.parameters, "mode", 1.0)) == 2;
     properties_dock_->resize(
-        active_parametric_object_.tool_id == "PlaneTool" ? 330 : 300,
-        active_parametric_object_.tool_id == "PlaneTool" ? 420 : 180);
+        plane_tool ? 330 : 300,
+        plane_three_points ? 250 : (plane_tool ? 420 : 180));
     properties_dock_->move(QCursor::pos() + QPoint(18, 18));
     properties_dock_->show();
     properties_dock_->raise();
@@ -7216,23 +11455,44 @@ QIcon MainWindow::ToolIcon(const std::string& key) const {
         icon_key = "BooleanSolid";
     } else if (icon_key == "fillet_edge" || icon_key == "fillet_all_edges") {
         icon_key = "FilletSolid";
-    } else if (icon_key == "PolylineCurve" || icon_key == "BSplineCurve") {
+    } else if (icon_key == "PolylineCurve" || icon_key == "BSplineCurve"
+               || icon_key == "DrawSpline"
+               || icon_key == "BezierCurve3D" || icon_key == "NurbsCurve3D") {
         icon_key = "curve";
     } else if (icon_key == "EditPoint") {
         icon_key = "select";
+    } else if (icon_key == "CurveFillets") {
+        return SketchFilletIcon();
     } else if (icon_key == "NewSketch") {
         return NewSketchIcon();
     } else if (icon_key == "SurfaceLoft") {
         return LoftSurfaceIcon();
+    } else if (icon_key == "SurfaceRuled") {
+        return LoftSurfaceIcon();
+    } else if (icon_key == "SurfaceSweepTwoRails") {
+        return QIcon(":/icons/SurfaceSweepTwoRails.png");
+    } else if (icon_key == "SurfaceFourSplines") {
+        return QIcon(":/icons/SurfaceFourSplines.svg");
+    } else if (icon_key == "SurfaceJoin") {
+        return LoftSurfaceIcon();
+    } else if (icon_key == "SolidSweepTwoRails") {
+        icon_key = "SolidSweptTool";
     } else if (icon_key == "SurfaceReverseNormals") {
         return ReverseNormalsIcon();
     } else if (icon_key == "SolidFrameTool") {
         return FrameSolidIcon();
+    } else if (icon_key == "SolidWireTool") {
+        icon_key = "SolidSweptTool";
     } else if (icon_key == "SolidTwoSketches") {
         return BodyByTwoSketchesIcon();
+    } else if (icon_key == "chair" || icon_key == "chair_simple") {
+        return ChairFurnitureIcon();
     } else if (icon_key == "table" || icon_key == "desk") {
         return TableFurnitureIcon();
-    } else if (icon_key == "drawer_box") {
+    } else if (icon_key == "drawer_box"
+               || icon_key == "cabinet_advanced"
+               || icon_key == "cabinet_advanced_slx"
+               || icon_key == "cabinet_showcase") {
         icon_key = "cabinet";
     } else if (icon_key == "PlaneTool") {
         icon_key = "SurfaceOfRevolution";
@@ -7244,6 +11504,8 @@ QIcon MainWindow::ToolIcon(const std::string& key) const {
 
 void MainWindow::NewProject() {
     document_.Clear();
+    undo_redo_.Reset();
+    UpdateUndoRedoActions();
     project_path_.clear();
     ClearActiveProperties();
     RefreshSceneTree();
@@ -7358,6 +11620,8 @@ void MainWindow::OpenProjectFromPath(const QString& path) {
     }
 
     project_path_ = path.toStdString();
+    undo_redo_.Reset();
+    UpdateUndoRedoActions();
     UpdateWindowTitle();
     RememberLastDialogDir(path);
     AddRecentProjectFile(path);
@@ -7448,6 +11712,64 @@ void MainWindow::ShowPreferences() {
     if (dialog.exec() == QDialog::Accepted) {
         statusBar()->showMessage("Preferences applied", 1400);
     }
+}
+
+void MainWindow::AddReferenceImage(ReferenceImageAxis axis) {
+    const QString path = QFileDialog::getOpenFileName(
+        this,
+        "Add Reference Image",
+        LastDialogDir(),
+        "Raster images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp);;All files (*.*)");
+    if (path.isEmpty()) {
+        return;
+    }
+
+    const QImage bitmap(path);
+    if (bitmap.isNull() || bitmap.width() <= 0 || bitmap.height() <= 0) {
+        QMessageBox::warning(
+            this, "Reference Image",
+            QString("Cannot read image:\n%1").arg(path));
+        return;
+    }
+
+    constexpr float kInitialLongSide = 1000.0f;
+    const float aspect = static_cast<float>(bitmap.width())
+        / static_cast<float>(bitmap.height());
+    const float width = aspect >= 1.0f
+        ? kInitialLongSide : kInitialLongSide * aspect;
+    const float height = aspect >= 1.0f
+        ? kInitialLongSide / aspect : kInitialLongSide;
+    std::unique_ptr<CReferenceImage> image = CReferenceImage::Create(
+        QFileInfo(path).absoluteFilePath().toStdString(), axis, width, height);
+    if (!image) {
+        QMessageBox::warning(
+            this, "Reference Image", "Could not create the image plane.");
+        return;
+    }
+
+    const QString axis_name = axis == ReferenceImageAxis::X
+        ? "X" : axis == ReferenceImageAxis::Y ? "Y" : "Z";
+    image->SetName(QString("Ref %1 [%2]")
+        .arg(QFileInfo(path).completeBaseName(), axis_name).toStdString());
+    Material material = image->GetMaterial();
+    material.id = 0;
+    material.name = QString("Reference: %1")
+        .arg(QFileInfo(path).fileName()).toStdString();
+    image->SetMaterial(material);
+    image->SetMaterialId(0);
+    document_.AddObject(std::move(image));
+    RecordDocumentChange("Add reference image");
+
+    RememberLastDialogDir(path);
+    ClearActiveProperties();
+    RefreshSceneTree();
+    viewport_->FitToDocument();
+    BeginTransformTool(TransformOperation::Move);
+    SetMeshSurfaceOpacity(1.0f);
+    statusBar()->showMessage(
+        QString("Reference image added for %1-axis; use Gizmo to transform it")
+            .arg(axis_name),
+        2600);
 }
 
 void MainWindow::ImportFile() {
@@ -7671,6 +11993,8 @@ void MainWindow::DuplicateSelectedObject() {
         return;
     }
 
+    RecordDocumentChange("Duplicate object");
+
     RefreshSceneTree();
     viewport_->update();
     BeginTransformTool(TransformOperation::Move);
@@ -7722,6 +12046,7 @@ void MainWindow::MirrorSelectedObject() {
         statusBar()->showMessage("Mirror: could not create mirrored copy", 1800);
         return;
     }
+    RecordDocumentChange("Mirror object");
     RefreshSceneTree();
     viewport_->update();
     statusBar()->showMessage("Mirrored object/group copy created", 1800);
@@ -7733,7 +12058,7 @@ void MainWindow::LoadUserSettings() {
     recent_project_files_ = settings.value("files/recentProjects").toStringList();
     const int solid_display_mode = settings.value("view/solidDisplayMode", static_cast<int>(SolidDisplayMode::SurfacesAndEdges)).toInt();
     if (solid_display_mode >= static_cast<int>(SolidDisplayMode::SurfacesAndEdges)
-        && solid_display_mode <= static_cast<int>(SolidDisplayMode::HiddenLine)) {
+        && solid_display_mode <= static_cast<int>(SolidDisplayMode::HiddenLineHatch)) {
         CSolid::SetDisplayMode(static_cast<SolidDisplayMode>(solid_display_mode));
     }
     const int mesh_display_mode = settings.value("view/meshDisplayMode", static_cast<int>(MeshDisplayMode::SurfaceGray)).toInt();
@@ -7746,7 +12071,9 @@ void MainWindow::LoadUserSettings() {
                 ? MeshDisplayMode::SurfaceMaterial
                 : saved_mode);
     }
-    CMesh3D::SetWireOpacity(settings.value("view/meshWireOpacity", 0.76).toFloat());
+    const QVariant legacy_mesh_opacity = settings.value("view/meshWireOpacity", 1.0);
+    CMesh3D::SetSurfaceOpacity(
+        settings.value("view/meshSurfaceOpacity", legacy_mesh_opacity).toFloat());
     CSolid::SetEdgeDrawingEnabled(settings.value("view/drawSolidEdges", true).toBool());
     CSolid::SetSurfaceTransparencyEnabled(settings.value("view/solidSurfaceTransparency", false).toBool());
     viewport_->SetOrthographicProjection(settings.value("view/orthographicProjection", false).toBool());
@@ -8009,10 +12336,74 @@ void MainWindow::ShowGreetingDialog(bool force) {
 }
 
 void MainWindow::DeleteSelected() {
+    if (active_parametric_object_.tool_id == "NurbsParameters") {
+        AcceptNurbsParameterChanges();
+    }
+    undo_redo_.BeginChange();
     if (document_.DeleteSelectedPoint() || document_.DeleteSelectedObject()) {
+        undo_redo_.CommitChange("Delete selected");
+        UpdateUndoRedoActions();
         ClearActiveProperties();
         RefreshSceneTree();
         viewport_->update();
+    } else {
+        undo_redo_.CancelChange();
+    }
+}
+
+void MainWindow::RecordDocumentChange(const std::string& command_name) {
+    undo_redo_.RecordChange(command_name);
+    UpdateUndoRedoActions();
+}
+
+void MainWindow::UndoDocumentChange() {
+    if (active_parametric_object_.tool_id == "NurbsParameters") {
+        CancelNurbsParameterChanges();
+    }
+    const std::string name = undo_redo_.UndoName();
+    if (!undo_redo_.Undo()) {
+        return;
+    }
+    ClearActiveProperties();
+    RefreshSceneTree();
+    viewport_->update();
+    UpdateUndoRedoActions();
+    statusBar()->showMessage(
+        name.empty() ? "Undo" : QString("Undo: %1").arg(QString::fromStdString(name)),
+        1400);
+}
+
+void MainWindow::RedoDocumentChange() {
+    if (active_parametric_object_.tool_id == "NurbsParameters") {
+        CancelNurbsParameterChanges();
+    }
+    const std::string name = undo_redo_.RedoName();
+    if (!undo_redo_.Redo()) {
+        return;
+    }
+    ClearActiveProperties();
+    RefreshSceneTree();
+    viewport_->update();
+    UpdateUndoRedoActions();
+    statusBar()->showMessage(
+        name.empty() ? "Redo" : QString("Redo: %1").arg(QString::fromStdString(name)),
+        1400);
+}
+
+void MainWindow::UpdateUndoRedoActions() {
+    if (undo_action_) {
+        const std::string name = undo_redo_.UndoName();
+        undo_action_->setText(name.empty()
+            ? "&Undo"
+            : QString("&Undo %1").arg(QString::fromStdString(name)));
+        undo_action_->setEnabled(undo_redo_.CanUndo());
+    }
+    if (redo_action_) {
+        const std::string name = undo_redo_.RedoName();
+        redo_action_->setText(name.empty()
+            ? "&Redo"
+            : QString("&Redo %1").arg(QString::fromStdString(name)));
+        redo_action_->setEnabled(undo_redo_.CanRedo());
     }
 }
 
@@ -8021,6 +12412,7 @@ void MainWindow::PopulateToolsPanelForTab(int tab_index) {
         return;
     }
 
+    viewport_->EndDirectCurveEdit();
     ClearActiveProperties();
     tool_buttons_.erase(
         std::remove_if(tool_buttons_.begin(), tool_buttons_.end(), [](QAbstractButton* button) {
@@ -8038,20 +12430,84 @@ void MainWindow::PopulateToolsPanelForTab(int tab_index) {
     tools_dock_->setWindowTitle(tab);
     tools_dock_->setVisible(tab == "Architecture" || tab == "Furniture" || tab == "Surfaces" || tab == "Solid" || tab == "Curves" || tab == "Mesh 3D");
 
+    if (tab == "Curves") {
+        const auto add_curve_section =
+            [this](const QString& title,
+                   const QString& settings_key,
+                   const std::vector<std::string>& ids,
+                   int row) {
+                auto* section = new QWidget(tools_panel_);
+                auto* section_layout = new QVBoxLayout(section);
+                section_layout->setContentsMargins(0, 0, 0, 2);
+                section_layout->setSpacing(3);
+
+                QSettings settings;
+                const bool expanded = settings.value(settings_key, true).toBool();
+                auto* header = new QToolButton(section);
+                header->setText(title);
+                header->setCheckable(true);
+                header->setChecked(expanded);
+                header->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+                header->setArrowType(expanded ? Qt::DownArrow : Qt::RightArrow);
+                header->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+                header->setStyleSheet(
+                    "QToolButton { text-align: left; font-weight: 600; padding: 3px; "
+                    "border: 1px solid #9b9b9b; background: #e9e9e9; }"
+                    "QToolButton:hover { background: #dceaff; }");
+                section_layout->addWidget(header);
+
+                auto* content = new QWidget(section);
+                auto* grid = new QGridLayout(content);
+                grid->setContentsMargins(5, 3, 0, 4);
+                grid->setHorizontalSpacing(5);
+                grid->setVerticalSpacing(5);
+                for (size_t index = 0; index < ids.size(); ++index) {
+                    AddToolButton(grid, content, ids[index],
+                                  static_cast<int>(index / 2),
+                                  static_cast<int>(index % 2));
+                }
+                content->setVisible(expanded);
+                section_layout->addWidget(content);
+                connect(header, &QToolButton::toggled, section,
+                        [header, content, settings_key](bool checked) {
+                            header->setArrowType(
+                                checked ? Qt::DownArrow : Qt::RightArrow);
+                            content->setVisible(checked);
+                            QSettings settings;
+                            settings.setValue(settings_key, checked);
+                        });
+                tools_layout_->addWidget(section, row, 0, 1, 2);
+            };
+
+        add_curve_section(
+            "Create Curves", "tools/curves/createExpanded",
+            {"PolylineCurve", "BSplineCurve", "DrawSpline", "BezierCurve3D", "NurbsCurve3D",
+             "PlaneIntersection", "SurfaceIntersection", "ProjectCurveToSurface",
+             "ExtractSurfaceEdge"}, 0);
+        add_curve_section(
+            "Edit Curves", "tools/curves/editExpanded",
+            {"EditPoint", "NurbsParametersTool", "CurveFillets", "CurveJoin", "CurveSplit",
+             "CurveExtend", "CurveTrimByPlane", "CurveSimplifyByPoint",
+             "CurveReverse"}, 1);
+        tools_layout_->setRowStretch(2, 1);
+        UpdateActiveToolUi(active_tool_key_);
+        return;
+    }
+
     std::vector<std::string> tool_ids;
     if (tab == "Architecture") {
         tool_ids = {"stair", "window", "door"};
     } else if (tab == "Furniture") {
-        tool_ids = {"cabinet", "table", "desk", "drawer_box"};
-    } else if (tab == "Curves") {
-        tool_ids = {"PolylineCurve", "BSplineCurve", "EditPoint"};
+        tool_ids = {"chair_simple", "chair", "cabinet", "cabinet_advanced",
+                    "cabinet_showcase", "cabinet_advanced_slx",
+                    "table", "desk", "drawer_box"};
     } else if (tab == "Mesh 3D") {
         tool_ids = {"MeshFillContour", "SolidLowPoly", "TrimMeshTest", "ClassifyFaceCut"};
     } else if (tab == "Surfaces") {
-        tool_ids = {"PlaneTool", "SurfaceLoft", "SurfaceReverseNormals", "SurfaceOfRevolution"};
+        tool_ids = {"PlaneTool", "SurfaceRuled", "SurfaceLoft", "SurfaceSweepTwoRails", "SurfaceFourSplines", "SurfaceJoin", "SurfaceReverseNormals", "SurfaceOfRevolution"};
     } else if (tab == "Solid") {
         // единый boolean-инструмент вместо трёх отдельных
-        tool_ids = {"SolidBeamTool", "SolidBox", "SolidCylinder", "SolidSphereTool", "SolidTorusTool", "SolidPrismTool", "SolidExtrudeTool", "SolidTwoSketches", "SolidSketchFeature", "SolidSweptTool", "SolidFrameTool", "SolidPolyhedronTool", "TrimByPlane", "TrimBySketch", "TrimBySurface", "SurfaceOfRevolution", "boolean", "fillet_edge", "fillet_all_edges", "ChamferSolid", "SolidExtrudeFace", "SolidOffsetFace", "SolidDraft", "ThickSolidTool"};
+        tool_ids = {"SolidBeamTool", "SolidBox", "SolidCylinder", "SolidSphereTool", "SolidTorusTool", "SolidPrismTool", "SolidExtrudeTool", "SolidTwoSketches", "SolidSketchFeature", "SolidSweptTool", "SolidSweepTwoRails", "SolidFrameTool", "SolidWireTool", "SolidPolyhedronTool", "TrimByPlane", "TrimBySketch", "TrimBySurface", "SurfaceOfRevolution", "boolean", "fillet_edge", "fillet_all_edges", "ChamferSolid", "SolidExtrudeFace", "SolidOffsetFace", "SolidDraft", "ThickSolidTool"};
     }
 
     int index = 0;
@@ -8070,7 +12526,15 @@ void MainWindow::PopulateToolsPanelForTab(int tab_index) {
             {"SolidTransform", "Solid Transform"}
         };
         for (const auto& placeholder : placeholders) {
-            AddPlaceholderButton(tools_layout_, tools_panel_, placeholder.first, placeholder.second, index / 2, index % 2);
+            if (placeholder.first == "SewingFaceTool") {
+                AddToolButton(
+                    tools_layout_, tools_panel_,
+                    placeholder.first.toStdString(), index / 2, index % 2);
+            } else {
+                AddPlaceholderButton(
+                    tools_layout_, tools_panel_, placeholder.first,
+                    placeholder.second, index / 2, index % 2);
+            }
             ++index;
         }
     } else if (tab == "Surfaces") {

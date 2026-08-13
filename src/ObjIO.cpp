@@ -9,6 +9,8 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
+#include <limits>
 #include <map>
 #include <set>
 #include <sstream>
@@ -17,6 +19,10 @@
 #include <vector>
 
 namespace {
+constexpr double kMillimetersToMeters = 0.001;
+constexpr double kMetersToMillimeters = 1000.0;
+constexpr char kDom3DObjMeterUnits[] = "# Dom3D Pro units: meters";
+
 struct ObjFaceVertex {
     size_t vertex = 0;
     size_t uv = 0;
@@ -172,7 +178,7 @@ std::string export_texture(const std::string& source,
     while (std::filesystem::exists(destination, ec)) {
         ec.clear();
         if (std::filesystem::equivalent(source_path, destination, ec) && !ec) {
-            return (texture_directory.filename() / destination.filename()).generic_string();
+            return destination.filename().generic_string();
         }
         destination = texture_directory
             / (material_name + "_" + role + "_" + std::to_string(suffix++) + extension.string());
@@ -180,8 +186,7 @@ std::string export_texture(const std::string& source,
     ec.clear();
     std::filesystem::copy_file(
         source_path, destination, std::filesystem::copy_options::overwrite_existing, ec);
-    return ec ? source_path.generic_string()
-              : (texture_directory.filename() / destination.filename()).generic_string();
+    return ec ? source_path.generic_string() : destination.filename().generic_string();
 }
 
 void write_mtl_material(std::ostream& stream,
@@ -392,6 +397,7 @@ bool ObjIO::Import(const std::string& path, std::vector<std::unique_ptr<CMesh3D>
     ObjMeshPart* current = &parts.back();
     std::string current_object_name = current->name;
     std::string current_material_name;
+    double vertex_scale = 1.0;
     const std::filesystem::path obj_path(path);
     const auto start_part = [&]() -> ObjMeshPart* {
         if (current->faces.empty()) {
@@ -404,6 +410,10 @@ bool ObjIO::Import(const std::string& path, std::vector<std::unique_ptr<CMesh3D>
     };
     std::string line;
     while (std::getline(file, line)) {
+        if (line == kDom3DObjMeterUnits) {
+            vertex_scale = kMetersToMillimeters;
+            continue;
+        }
         std::istringstream line_stream(line);
         std::string keyword;
         line_stream >> keyword;
@@ -414,6 +424,9 @@ bool ObjIO::Import(const std::string& path, std::vector<std::unique_ptr<CMesh3D>
                 error = "OBJ file has an invalid vertex.";
                 return false;
             }
+            vertex.x = static_cast<float>(vertex.x * vertex_scale);
+            vertex.y = static_cast<float>(vertex.y * vertex_scale);
+            vertex.z = static_cast<float>(vertex.z * vertex_scale);
             vertices.push_back(vertex);
         } else if (keyword == "vt") {
             UV uv{};
@@ -522,8 +535,9 @@ bool ObjIO::Import(const std::string& path, std::vector<std::unique_ptr<CMesh3D>
 bool ObjIO::Export(const std::string& path, const CAlfaDoc& document, std::string& error) const {
     const std::filesystem::path obj_path(path);
     const std::filesystem::path mtl_path = obj_path.parent_path() / (obj_path.stem().string() + ".mtl");
-    const std::filesystem::path texture_directory =
-        obj_path.parent_path() / (obj_identifier(obj_path.stem().string(), "obj") + "_textures");
+    // Fusion resolves OBJ textures most reliably when OBJ, MTL and image files
+    // are placed side by side. Unique material/role names avoid collisions.
+    const std::filesystem::path texture_directory = obj_path.parent_path();
 
     std::ofstream file(obj_path);
     if (!file) {
@@ -536,12 +550,15 @@ bool ObjIO::Export(const std::string& path, const CAlfaDoc& document, std::strin
         return false;
     }
 
+    file << std::setprecision(std::numeric_limits<double>::max_digits10);
     file << "# Dom3D Pro OBJ export\n";
+    file << kDom3DObjMeterUnits << "\n";
     file << "mtllib " << mtl_path.filename().generic_string() << "\n\n";
     material_file << "# Dom3D Pro material library\n\n";
     size_t vertex_offset = 0;
     size_t uv_offset = 0;
     size_t normal_offset = 0;
+    size_t next_smoothing_group = 1;
     size_t mesh_count = 0;
     std::set<std::string> used_material_names;
     std::map<std::string, std::string> exported_materials;
@@ -571,6 +588,7 @@ bool ObjIO::Export(const std::string& path, const CAlfaDoc& document, std::strin
                             vertex_offset,
                             uv_offset,
                             normal_offset,
+                            next_smoothing_group,
                             mesh->GetName())) {
                 error = "Could not write mesh data.";
                 return false;
@@ -586,6 +604,7 @@ bool ObjIO::Export(const std::string& path, const CAlfaDoc& document, std::strin
 
         const Material solid_material = solid->GetMaterial();
         const std::string solid_material_name = export_material(solid_material, solid->GetName());
+        file << "o " << obj_identifier(solid->GetName(), "Solid") << "\n";
         for (int surface_index = 0; surface_index < solid->GetNumSurfaces(); ++surface_index) {
             const CSurfaceFace* surface = solid->GetSurfaceFace(surface_index);
             if (!surface || !surface->pMesh3D) {
@@ -608,8 +627,10 @@ bool ObjIO::Export(const std::string& path, const CAlfaDoc& document, std::strin
                             vertex_offset,
                             uv_offset,
                             normal_offset,
+                            next_smoothing_group,
                             surface_name,
-                            surface)) {
+                            surface,
+                            false)) {
                 error = "Could not write surface mesh data.";
                 return false;
             }
@@ -636,13 +657,19 @@ bool ObjIO::ExportMesh(std::ostream& stream,
                        size_t& vertex_offset,
                        size_t& uv_offset,
                        size_t& normal_offset,
+                       size_t& next_smoothing_group,
                        const std::string& object_name,
-                       const CSurfaceFace* surface) const {
-    stream << "o " << obj_identifier(object_name, "Object") << "\n";
+                       const CSurfaceFace* surface,
+                       bool write_object_header) const {
+    stream << (write_object_header ? "o " : "g ")
+           << obj_identifier(object_name, "Object") << "\n";
     stream << "usemtl " << material_name << "\n";
 
     for (const Vec3& vertex : mesh.GetVertices()) {
-        stream << "v " << vertex.x << " " << vertex.y << " " << vertex.z << "\n";
+        stream << "v "
+               << static_cast<double>(vertex.x) * kMillimetersToMeters << " "
+               << static_cast<double>(vertex.y) * kMillimetersToMeters << " "
+               << static_cast<double>(vertex.z) * kMillimetersToMeters << "\n";
     }
 
     const bool has_uvs = mesh.GetUVs().size() == mesh.GetVertices().size();
@@ -677,9 +704,32 @@ bool ObjIO::ExportMesh(std::ostream& stream,
         }
     }
 
+    std::map<int, size_t> source_smoothing_groups;
+    size_t mesh_smoothing_group = 0;
+    size_t active_smoothing_group = 0;
     for (const CMesh3D::Face& face : mesh.GetFaces()) {
         if (face.deleted || face.corners.size() < 3) {
             continue;
+        }
+
+        size_t smoothing_group = 0;
+        if (!surface && face.sourceFaceId >= 0) {
+            auto [group, inserted] = source_smoothing_groups.emplace(
+                face.sourceFaceId, next_smoothing_group);
+            if (inserted) {
+                ++next_smoothing_group;
+            }
+            smoothing_group = group->second;
+        } else {
+            if (mesh_smoothing_group == 0) {
+                mesh_smoothing_group = next_smoothing_group++;
+            }
+            smoothing_group = mesh_smoothing_group;
+        }
+
+        if (smoothing_group != active_smoothing_group) {
+            stream << "s " << smoothing_group << "\n";
+            active_smoothing_group = smoothing_group;
         }
 
         stream << "f";

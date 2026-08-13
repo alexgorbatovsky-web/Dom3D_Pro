@@ -74,12 +74,15 @@ set(DOM3D_SOURCES
     src/CGroup.cpp
     src/CAssembled.cpp
     src/CFacadeFurniture.cpp
+    src/solid/FacadeFrameShapeBuilder.cpp
     src/CFurnitureAssemblies.cpp
     src/CFurnitureDrawer.cpp
     src/CKitchenCabinet.cpp
     src/CAlfaDoc.cpp
+    src/UndoRedo.cpp
     src/ExtrudeShapeBuilder.cpp
     src/CMesh3D.cpp
+    src/ReferenceImage.cpp
     src/FillContour.cpp
     src/Line2D.cpp
     src/Net.cpp
@@ -91,6 +94,7 @@ set(DOM3D_SOURCES
     src/Dom3DProjectSerializer.cpp
     src/CadCurve3D.cpp
     src/IgesIO.cpp
+    src/IgesShapeCollector.cpp
     src/ObjIO.cpp
     src/ProjectIO.cpp
     src/StepIO.cpp
@@ -118,6 +122,8 @@ set(DOM3D_SOURCES
     src/ui/MaterialSphereBrowser.cpp
     src/ui/OpenGLViewport.cpp
     src/ui/PreferencesDialog.cpp
+    src/ui/HotkeyManagerDialog.cpp
+    src/ui/CommandSearchPopup.cpp
     src/ui/PropertyPanel.cpp
     src/ui/QtSceneRenderer.cpp
     src/ui/ToolRegistry.cpp
@@ -146,9 +152,11 @@ set(DOM3D_SOURCES
 
 set(DOM3D_HEADERS
     src/CAlfaObject.h
+    src/IgesShapeCollector.h
     src/CGroup.h
     src/CAssembled.h
     src/CFacadeFurniture.h
+    src/solid/FacadeFrameShapeBuilder.h
     src/CFurnitureAssemblies.h
     src/CFurnitureDrawer.h
     src/CKitchenCabinet.h
@@ -156,6 +164,7 @@ set(DOM3D_HEADERS
     src/MaterialLibrary.h
     src/FurnitureMaterialFactory.h
     src/CAlfaDoc.h
+    src/UndoRedo.h
     src/ExtrudeShapeBuilder.h
     src/Common.h
     src/CMesh3D.h
@@ -197,6 +206,8 @@ set(DOM3D_HEADERS
     src/ui/MaterialSphereBrowser.h
     src/ui/OpenGLViewport.h
     src/ui/PreferencesDialog.h
+    src/ui/HotkeyManagerDialog.h
+    src/ui/CommandSearchPopup.h
     src/ui/PropertyPanel.h
     src/ui/QtSceneRenderer.h
     src/ui/ToolRegistry.h
@@ -225,6 +236,8 @@ set(DOM3D_SKETCH_SOURCES
     src/Dimens.h
     src/Constraint.cpp
     src/Constraint.h
+    src/ConstraintBezierTangent.cpp
+    src/ConstraintBezierTangent.h
     src/ConstraintHorLine.cpp
     src/ConstraintHorLine.h
     src/ConstraintVertLine.cpp
@@ -245,6 +258,9 @@ set(DOM3D_SKETCH_SOURCES
     src/SketchProfileBuilder.h
     src/SweptSolidBuilder.cpp
     src/SweptSolidBuilder.h
+    src/TwoRailSweepSurfaceBuilder.cpp
+    src/FourSplineSurfaceBuilder.cpp
+    src/TwoRailSweepSurfaceBuilder.h
 )
 
 # Remaining legacy sketch sources stay visible in the IDE while they are
@@ -365,6 +381,87 @@ if(MSVC)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(FourSplineSurfaceBuilderTests
+        tests/FourSplineSurfaceBuilderTests.cpp
+        src/FourSplineSurfaceBuilder.cpp
+    )
+    target_compile_features(FourSplineSurfaceBuilderTests PRIVATE cxx_std_17)
+    target_include_directories(FourSplineSurfaceBuilderTests PRIVATE
+        src
+        "${DOM3D_OPENCASCADE_INCLUDE_DIR}"
+    )
+    target_link_directories(FourSplineSurfaceBuilderTests PRIVATE
+        "${DOM3D_OPENCASCADE_LIBRARY_DIR}"
+    )
+    target_link_libraries(FourSplineSurfaceBuilderTests PRIVATE
+        Qt6::Core
+        ${DOM3D_OPENCASCADE_LIBS}
+    )
+    if(MSVC)
+        target_compile_options(FourSplineSurfaceBuilderTests PRIVATE
+            /W4
+            /permissive-
+            "/FI${CMAKE_CURRENT_SOURCE_DIR}/src/legacy_compat.h"
+        )
+    endif()
+    add_test(NAME FourSplineSurfaceBuilderTests
+             COMMAND FourSplineSurfaceBuilderTests)
+    set_tests_properties(FourSplineSurfaceBuilderTests PROPERTIES
+        ENVIRONMENT "PATH=${DOM3D_OPENCASCADE_BINARY_DIR};$ENV{PATH}"
+    )
+
+    add_executable(FourSplineSurfaceComparison
+        tests/FourSplineSurfaceComparison.cpp
+        src/FourSplineSurfaceBuilder.cpp
+    )
+    target_compile_features(FourSplineSurfaceComparison PRIVATE cxx_std_17)
+    target_include_directories(FourSplineSurfaceComparison PRIVATE
+        src
+        "${DOM3D_OPENCASCADE_INCLUDE_DIR}"
+    )
+    target_link_directories(FourSplineSurfaceComparison PRIVATE
+        "${DOM3D_OPENCASCADE_LIBRARY_DIR}"
+    )
+    target_link_libraries(FourSplineSurfaceComparison PRIVATE
+        Qt6::Core
+        ${DOM3D_OPENCASCADE_LIBS}
+    )
+    if(MSVC)
+        target_compile_options(FourSplineSurfaceComparison PRIVATE
+            /W4
+            /permissive-
+            "/FI${CMAKE_CURRENT_SOURCE_DIR}/src/legacy_compat.h"
+        )
+    endif()
+
+    add_executable(IgesShapeCollectorTests
+        tests/IgesShapeCollectorTests.cpp
+        src/IgesShapeCollector.cpp
+    )
+    target_compile_features(IgesShapeCollectorTests PRIVATE cxx_std_17)
+    target_include_directories(IgesShapeCollectorTests PRIVATE
+        src
+        "${DOM3D_OPENCASCADE_INCLUDE_DIR}"
+    )
+    target_link_directories(IgesShapeCollectorTests PRIVATE
+        "${DOM3D_OPENCASCADE_LIBRARY_DIR}"
+    )
+    target_link_libraries(IgesShapeCollectorTests PRIVATE
+        Qt6::Core
+        ${DOM3D_OPENCASCADE_LIBS}
+    )
+    if(MSVC)
+        target_compile_options(IgesShapeCollectorTests PRIVATE
+            /W4
+            /permissive-
+            "/FI${CMAKE_CURRENT_SOURCE_DIR}/src/legacy_compat.h"
+        )
+    endif()
+    add_test(NAME IgesShapeCollectorTests COMMAND IgesShapeCollectorTests)
+    set_tests_properties(IgesShapeCollectorTests PROPERTIES
+        ENVIRONMENT "PATH=${DOM3D_OPENCASCADE_BINARY_DIR};$ENV{PATH}"
+    )
+
     add_executable(SketchGeometryTests
         tests/SketchGeometryTests.cpp
         src/BezierSpline.cpp
@@ -386,6 +483,48 @@ if(BUILD_TESTING)
         )
     endif()
     add_test(NAME SketchGeometryTests COMMAND SketchGeometryTests)
+
+    add_executable(SketchProfileBuilderTests
+        tests/SketchProfileBuilderTests.cpp
+        src/CAlfaObject.cpp
+        src/BezierSpline.cpp
+        src/Constraint.cpp
+        src/ConstraintBezierTangent.cpp
+        src/ConstraintHorLine.cpp
+        src/ConstraintVertLine.cpp
+        src/ExtrudeShapeBuilder.cpp
+        src/Fillet.cpp
+        src/LinkLine.cpp
+        src/LinkLineHor.cpp
+        src/LinkLineVert.cpp
+        src/SketchArcLine.cpp
+        src/SketchProfileBuilder.cpp
+        src/SmartLine.cpp
+    )
+    target_compile_features(SketchProfileBuilderTests PRIVATE cxx_std_17)
+    target_include_directories(SketchProfileBuilderTests PRIVATE
+        src
+        "${DOM3D_OPENCASCADE_INCLUDE_DIR}"
+    )
+    target_link_directories(SketchProfileBuilderTests PRIVATE
+        "${DOM3D_OPENCASCADE_LIBRARY_DIR}"
+    )
+    target_link_libraries(SketchProfileBuilderTests PRIVATE
+        Qt6::Core
+        OpenGL::GL
+        ${DOM3D_OPENCASCADE_LIBS}
+    )
+    if(MSVC)
+        target_compile_options(SketchProfileBuilderTests PRIVATE
+            /W4
+            /permissive-
+            "/FI${CMAKE_CURRENT_SOURCE_DIR}/src/legacy_compat.h"
+        )
+    endif()
+    add_test(NAME SketchProfileBuilderTests COMMAND SketchProfileBuilderTests)
+    set_tests_properties(SketchProfileBuilderTests PROPERTIES
+        ENVIRONMENT "PATH=${DOM3D_OPENCASCADE_BINARY_DIR};$ENV{PATH}"
+    )
 
     add_executable(ExtrudeShapeBuilderTests
         tests/ExtrudeShapeBuilderTests.cpp
@@ -525,6 +664,52 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME PolyhedronShapeBuilderTests COMMAND PolyhedronShapeBuilderTests)
     set_tests_properties(PolyhedronShapeBuilderTests PROPERTIES
+        ENVIRONMENT "PATH=${DOM3D_OPENCASCADE_BINARY_DIR};$ENV{PATH}"
+    )
+
+    add_executable(FacadeFrameShapeBuilderTests
+        tests/FacadeFrameShapeBuilderTests.cpp
+        src/solid/FacadeFrameShapeBuilder.cpp
+    )
+    target_compile_features(FacadeFrameShapeBuilderTests PRIVATE cxx_std_17)
+    target_include_directories(FacadeFrameShapeBuilderTests PRIVATE
+        src
+        "${DOM3D_OPENCASCADE_INCLUDE_DIR}"
+    )
+    target_link_directories(FacadeFrameShapeBuilderTests PRIVATE "${DOM3D_OPENCASCADE_LIBRARY_DIR}")
+    target_link_libraries(FacadeFrameShapeBuilderTests PRIVATE Qt6::Core ${DOM3D_OPENCASCADE_LIBS})
+    if(MSVC)
+        target_compile_options(FacadeFrameShapeBuilderTests PRIVATE
+            /W4
+            /permissive-
+            "/FI${CMAKE_CURRENT_SOURCE_DIR}/src/legacy_compat.h"
+        )
+    endif()
+    add_test(NAME FacadeFrameShapeBuilderTests COMMAND FacadeFrameShapeBuilderTests)
+    set_tests_properties(FacadeFrameShapeBuilderTests PROPERTIES
+        ENVIRONMENT "PATH=${DOM3D_OPENCASCADE_BINARY_DIR};$ENV{PATH}"
+    )
+
+    add_executable(TwoRailSweepSurfaceBuilderTests
+        tests/TwoRailSweepSurfaceBuilderTests.cpp
+        src/TwoRailSweepSurfaceBuilder.cpp
+    )
+    target_compile_features(TwoRailSweepSurfaceBuilderTests PRIVATE cxx_std_17)
+    target_include_directories(TwoRailSweepSurfaceBuilderTests PRIVATE
+        src
+        "${DOM3D_OPENCASCADE_INCLUDE_DIR}"
+    )
+    target_link_directories(TwoRailSweepSurfaceBuilderTests PRIVATE "${DOM3D_OPENCASCADE_LIBRARY_DIR}")
+    target_link_libraries(TwoRailSweepSurfaceBuilderTests PRIVATE Qt6::Core ${DOM3D_OPENCASCADE_LIBS})
+    if(MSVC)
+        target_compile_options(TwoRailSweepSurfaceBuilderTests PRIVATE
+            /W4
+            /permissive-
+            "/FI${CMAKE_CURRENT_SOURCE_DIR}/src/legacy_compat.h"
+        )
+    endif()
+    add_test(NAME TwoRailSweepSurfaceBuilderTests COMMAND TwoRailSweepSurfaceBuilderTests)
+    set_tests_properties(TwoRailSweepSurfaceBuilderTests PROPERTIES
         ENVIRONMENT "PATH=${DOM3D_OPENCASCADE_BINARY_DIR};$ENV{PATH}"
     )
 endif()

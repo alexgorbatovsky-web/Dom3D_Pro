@@ -89,8 +89,12 @@ public:
 	static void SetEdgeDrawingEnabled(bool enabled);
 	static bool IsSurfaceTransparencyEnabled();
 	static void SetSurfaceTransparencyEnabled(bool enabled);
+	static void SetHiddenLineBackgroundColor(const Color& color);
+	static Color GetHiddenLineBackgroundColor();
 
 	void Render3d(bool selected) const override;
+	void RenderHiddenLineDepth() const;
+	void RenderHiddenLineEdges(bool hidden) const;
 	void Render2d(float center_x, float center_y, float scale) const override;
 	bool HitTest(CurvePoint point, float tolerance) const override;
 	bool Save(std::ostream& stream) const override;
@@ -139,7 +143,8 @@ public:
 	                       const std::function<bool(Vec3, DomPoint&)>& world_to_screen,
 	                       float tolerance,
 	                       int& surface_index,
-	                       int& edge_index) const;
+	                       int& edge_index,
+	                       float* screen_distance = nullptr) const;
 	bool HitTestMeshScreen(DomPoint point,
 	                       const std::function<bool(Vec3, DomPoint&, float&)>& project_world,
 	                       float& depth) const;
@@ -185,6 +190,7 @@ public:
 	bool InitSurfaces();
 	bool BuldMesh(float Deflection);
 	bool ReBuldMesh();
+	bool ReBuldMesh(float Deflection);
 	bool DefineDirTriming(CSurfaceFace* surf, CPolyline* pLine, CPoint3d& pc);
 
 
@@ -211,6 +217,7 @@ static	int NumReadFile;
 	static SolidDisplayMode s_DisplayMode;
 	static bool s_EdgeDrawingEnabled;
 	static bool s_SurfaceTransparencyEnabled;
+	static Color s_HiddenLineBackgroundColor;
 	bool MeshQuadroX;
 	float AngDeflection;
 	bool m_IsParametric;

@@ -8,6 +8,7 @@
 #include "../Point3d.h"
 
 #include <QOpenGLWidget>
+#include <QColor>
 #include <QString>
 #include <QStringList>
 
@@ -30,7 +31,17 @@ public:
 
     void SetDocument(CAlfaDoc* document);
     void SetTool(ToolMode tool);
+    void SetDrawSplineSimplification(int percent);
     void SetTransformOperation(TransformOperation operation);
+    bool ApplyPreciseMove(Vec3 delta);
+    bool ApplyPreciseRotate(Vec3 center, Vec3 axis, float angle_radians);
+    bool ApplyPreciseScale(Vec3 center, float factor_x, float factor_y, float factor_z, bool uniform);
+    void SetTransformDialogGuide(TransformOperation operation,
+                                 TransformAxis axis,
+                                 Vec3 center,
+                                 float rotation_angle_degrees = 0.0f,
+                                 Vec3 custom_rotation_axis = {});
+    void ClearTransformDialogGuide();
     void BeginFaceExtrudeTool(double taper_angle_degrees = 0.0);
     void BeginDraftFaceTool();
     void BeginThickSolidTool(double thickness);
@@ -45,6 +56,9 @@ public:
     void SetOrthographicProjection(bool enabled);
     Camera GetCamera() const;
     void SetCamera(const Camera& camera);
+    void SetRotationPivot(CPoint3d point);
+    void ClearRotationPivot();
+    bool HasRotationPivot() const;
     void SetXYView();
     OrbitMode GetOrbitMode() const;
     void SetOrbitMode(OrbitMode mode);
@@ -54,7 +68,9 @@ public:
     void SetCoordinateAxesVisible(bool visible);
     bool IsFloorGridVisible() const;
     void SetFloorGridVisible(bool visible);
+    void SetBackgroundColor(const QColor& color);
     void ReloadModelingPreferences();
+    void RefreshSurfaceMeshQuality();
     void BeginMaterialPaint(const Material& material);
     void BeginMaterialPick();
     void CancelMaterialInteraction();
@@ -68,12 +84,18 @@ public:
                            unsigned long body_id,
                            int face_index);
     bool BeginEditSelectedSketch();
+    void EndDirectCurveEdit();
     void SetSketchRectangleTool();
     void SetSketchPolylineTool();
     void SetSketchBezierTool();
     void BeginSketchConvertLineToBezier();
     void BeginSketchConvertLineToArc();
     void BeginSketchFillet(double radius);
+    void BeginSketchConstraintHorizontal();
+    void BeginSketchConstraintVertical();
+    void BeginSketchConstraintTangentStart();
+    void BeginSketchConstraintTangentEnd();
+    void SetSketchFilletRadius(double radius);
     void BeginSolidBoxRectangle(SketchPlane plane);
     void BeginSolidBoxFaceSelection();
     void BeginSolidCylinderCircle(SketchPlane plane);
@@ -86,7 +108,13 @@ public:
         size_t primary_operation_index);
     void ClearSolidDimensionEdit();
     void BeginPickXYPoint();
-    void BeginMovePointToPoint();
+    void BeginPick3DPoint(const QString& prompt = {});
+    void BeginPick3DPointOnObject(unsigned long object_id, const QString& prompt = {});
+    void SetPointPickMarkers(const std::vector<CPoint3d>& points);
+    void ClearPointPickMarkers();
+    void BeginPickRotationAxis();
+    void BeginMovePointToPoint(bool repeat = false);
+    void BeginMeasurePointToPoint();
     void EndSketch();
     void DrawFPS();
     void UpdateFPS();
@@ -101,6 +129,12 @@ signals:
     void MaterialPicked(const Material& material);
     void ToolModeChanged(ToolMode tool);
     void XYPointPicked(CPoint3d point);
+    void Point3DPicked(CPoint3d point);
+    void Point3DPickFinished();
+    void Point3DPickCloseRequested();
+    void Point3DPickCanceled();
+    void RotationAxisPicked(CPoint3d start, CPoint3d end);
+    void RotationAxisPickCanceled();
     void SolidBoxRectangleFinished(std::vector<ToolParameter> parameters);
     void SolidCylinderCircleFinished(std::vector<ToolParameter> parameters);
     void SketchFaceSelectionFinished(bool selected);
@@ -109,8 +143,10 @@ signals:
     void EdgeQuickMenuRequested(QPoint global_position);
     void FaceQuickMenuRequested(QPoint global_position);
     void ObjectQuickMenuRequested(QPoint global_position);
+    void ViewportPopupMenuRequested(QPoint global_position);
     void ObjectDoubleClicked();
     void FurnitureInteractionRequested(unsigned long object_id);
+    void PointToPointMeasurementFinished(double distance_mm);
     void FilesDropped(const QStringList& paths);
 
 protected:
@@ -140,6 +176,11 @@ private:
     void SelectAt(const QPoint& point, SelectionAction action);
     void DrawCurveAt(const QPoint& point);
     void DrawBSplineAt(const QPoint& point);
+    void BeginDrawSplineStroke(const QPoint& point);
+    void AppendDrawSplineStroke(const QPoint& point);
+    void UpdateDrawSplinePreview();
+    void FinishDrawSplineStroke();
+    void CancelDrawSplineStroke();
     void HandleSketchRectangleClick(const QPoint& point);
     void HandleSketchPolylineClick(const QPoint& point);
     void HandleSketchBezierClick(const QPoint& point);
@@ -148,16 +189,22 @@ private:
     void HandleSolidBoxRectangleClick(const QPoint& point);
     void HandleSolidCylinderCircleClick(const QPoint& point);
     void HandleSketchFilletClick(const QPoint& point);
+    void HandleSketchConstraintClick(const QPoint& point);
     bool ScreenToSketchPlane(const QPoint& point, CPoint3d& result) const;
     bool SnapCreationPoint(const QPoint& point,
                            CPoint3d& result,
                            bool require_sketch_plane) const;
+    bool PickModelingPoint(const QPoint& point, CPoint3d& result) const;
+    bool HitTestRotationAxisLine(
+        const QPoint& point, Vec3& start, Vec3& end) const;
+    void DrawRotationAxisPickPreview();
     bool SnapSketchGridPoint(const QPoint& point,
                              Vec3 origin,
                              Vec3 u_axis,
                              Vec3 v_axis,
                              CPoint3d& result,
                              float& best_distance) const;
+    void RestoreDefaultToolCursor();
     void SetCreationSnapCursor(bool snapped);
     std::vector<CPoint3d> SketchRectanglePoints(const CPoint3d& first, const CPoint3d& second) const;
     CPoint3d AlignSketchPolylinePoint(const CPoint3d& point) const;
@@ -170,6 +217,7 @@ private:
     std::vector<ToolParameter> SolidCylinderParametersFromCircle(const CPoint3d& center, const CPoint3d& radius_point) const;
     void DrawSketchRectanglePreview();
     void DrawSolidCylinderCirclePreview();
+    void DrawSketchFilletRadiusPreview();
     void DrawSketchPolylinePreview();
     void DrawSketchBezierPreview();
     void HandleBooleanClick(const QPoint& point);
@@ -184,6 +232,7 @@ private:
     void HandleThickSolidClick(const QPoint& point);
     void HandleTransformClick(const QPoint& point, bool add_to_selection);
     void HandleMovePointToPointClick(const QPoint& point);
+    void HandleMeasurePointToPointClick(const QPoint& point);
     void HandleTransformDrag(const QPoint& point, Qt::KeyboardModifiers modifiers);
     void CommitTransformDrag();
     TransformAxis HitTestTransformGizmo(const QPoint& point) const;
@@ -197,7 +246,11 @@ private:
     bool ScreenToPlaneY(const QPoint& point, double y, CPoint3d& result) const;
     bool ScreenToViewPlane(const QPoint& point, Vec3 plane_point, CPoint3d& result) const;
     void DrawCurveRubberBand();
+    void DrawSplinePreview();
     void DrawSelectedCurvePointHandles();
+    void UpdateHoveredSolidEdge(const QPoint& point);
+    void ClearHoveredSolidEdge();
+    void DrawHoveredSolidEdge();
     void DrawEditPointSelectionRect();
     void DrawSelectRubberBandRect();
     void DrawZoomRubberBandRect();
@@ -206,6 +259,8 @@ private:
     float DistanceToScreenSegment(DomPoint point, DomPoint start, DomPoint end) const;
     void DrawCoordinateAxisLabels();
     void DrawSolidDimensions();
+    void DrawPointToPointMeasurement();
+    void DrawPointPickMarkers();
     bool ApplyMaterialDrop(const QPoint& point, const Material& material);
     CAlfaObject* FindObjectForMaterialAt(const QPoint& point);
 
@@ -218,17 +273,23 @@ private:
     CAlfaDoc* document_ = nullptr;
     QtSceneRenderer renderer_;
     Camera camera_;
+    Vec3 rotation_pivot_previous_target_{};
+    bool rotation_pivot_enabled_ = false;
     ToolMode tool_ = ToolMode::Orbit;
     TransformOperation transform_operation_ = TransformOperation::Move;
     BooleanOperation boolean_operation_ = BooleanOperation::Union;
     SelectionMode selection_mode_ = SelectionMode::Object;
     TransformAxis highlighted_transform_axis_ = TransformAxis::None;
     TransformAxis active_transform_axis_ = TransformAxis::None;
+    float transform_dialog_rotation_angle_degrees_ = 0.0f;
+    Vec3 transform_dialog_rotation_axis_{};
     QPoint last_mouse_;
     bool orbiting_ = false;
     bool alt_orbiting_ = false;
     bool panning_ = false;
     bool zooming_ = false;
+    QPoint right_button_press_{};
+    bool right_button_dragged_ = false;
     bool xy_plane_view_enabled_ = false;
     bool dragging_transform_ = false;
     bool dragging_face_extrude_ = false;
@@ -236,13 +297,21 @@ private:
     bool editing_polyline_ = false;
     bool editing_sketch_ = false;
     bool dragging_polyline_point_ = false;
+    bool curve_point_drag_changed_ = false;
+    unsigned long direct_curve_edit_object_id_ = 0;
     bool dragging_sketch_handle_ = false;
+    bool sketch_drag_changed_ = false;
     SketchHandleKind active_sketch_handle_kind_ = SketchHandleKind::None;
     size_t active_sketch_handle_index_ = 0;
     SketchHandleKind highlighted_sketch_handle_kind_ = SketchHandleKind::None;
     size_t highlighted_sketch_handle_index_ = 0;
     bool curve_preview_valid_ = false;
     CPoint3d curve_preview_point_{};
+    bool drawing_spline_stroke_ = false;
+    int draw_spline_simplification_ = 50;
+    std::vector<QPoint> draw_spline_screen_points_;
+    std::vector<CPoint3d> draw_spline_raw_points_;
+    std::vector<CPoint3d> draw_spline_preview_points_;
     double polyline_drag_plane_y_ = 0.0;
     Vec3 curve_point_drag_anchor_{};
     Vec3 curve_point_drag_plane_point_{};
@@ -254,9 +323,16 @@ private:
     bool zoom_rect_active_ = false;
     bool selection_confirmation_mode_ = false;
     bool picking_xy_point_ = false;
+    bool picking_3d_point_ = false;
+    unsigned long point_pick_object_id_ = 0;
+    bool picking_rotation_axis_ = false;
+    bool rotation_axis_hover_valid_ = false;
+    Vec3 rotation_axis_hover_start_{};
+    Vec3 rotation_axis_hover_end_{};
     enum class MovePointStage { SelectObjects, PickSource, PickTarget };
     MovePointStage move_point_stage_ = MovePointStage::SelectObjects;
     CPoint3d move_point_source_{};
+    bool move_point_repeat_ = false;
     SelectionAction edit_point_selection_action_ = SelectionAction::Replace;
     SelectionAction rect_selection_action_ = SelectionAction::Replace;
     QPoint edit_point_selection_start_;
@@ -267,6 +343,10 @@ private:
     QPoint zoom_rect_current_;
     bool highlighted_draft_face_gizmo_ = false;
     bool highlighted_polyline_handle_ = false;
+    bool hovering_furniture_handle_ = false;
+    size_t hovered_edge_object_index_ = static_cast<size_t>(-1);
+    int hovered_edge_surface_index_ = -1;
+    int hovered_edge_index_ = -1;
     Vec3 face_extrude_center_{};
     Vec3 face_extrude_normal_{};
     float face_extrude_distance_ = 0.0f;
@@ -277,6 +357,8 @@ private:
     double draft_face_start_mouse_angle_ = 0.0;
     double thick_solid_thickness_ = 1.0;
     double sketch_fillet_radius_ = 1.0;
+    bool sketch_fillet_preview_valid_ = false;
+    CPoint3d sketch_fillet_preview_center_{};
     bool transform_drag_has_preview_ = false;
     Vec3 transform_drag_center_{};
     Vec3 transform_drag_axis_{};
@@ -288,6 +370,10 @@ private:
     bool orthographic_projection_ = false;
     bool show_coordinate_axes_ = true;
     bool show_floor_grid_ = true;
+    float grid_size_ = kDefaultSceneSize;
+    float grid_step_ = 100.0f;
+    int grid_subdivisions_ = 4;
+    int grid_division_count_ = 10;
     bool material_drag_active_ = false;
     bool sketch_active_ = false;
     bool sketch_waiting_for_face_ = false;
@@ -304,6 +390,13 @@ private:
     bool snapping_enabled_ = true;
     int capture_distance_pixels_ = 6;
     bool creation_snap_active_ = false;
+    bool measurement_waiting_for_second_point_ = false;
+    bool measurement_visible_ = false;
+    bool measurement_preview_valid_ = false;
+    CPoint3d measurement_start_{};
+    CPoint3d measurement_end_{};
+    CPoint3d measurement_preview_{};
+    std::vector<CPoint3d> point_pick_markers_;
     QPoint material_drag_pos_;
     QString sketch_name_;
     Vec3 sketch_origin_{};

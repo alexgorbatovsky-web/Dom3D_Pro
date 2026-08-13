@@ -43,6 +43,8 @@
         <file alias="SolidTransform.png">icons/SolidTransform.png</file>
         <file alias="SplitRings.png">icons/SplitRings.png</file>
         <file alias="SurfaceOfRevolution.png">icons/SurfaceOfRevolution.png</file>
+        <file alias="SurfaceSweepTwoRails.png">icons/SurfaceSweepTwoRails.png</file>
+        <file alias="SurfaceFourSplines.svg">icons/SurfaceFourSplines.svg</file>
         <file alias="ThickSolidTool.png">icons/ThickSolidTool.png</file>
         <file alias="TrimByPlane.png">icons/TrimByPlane.png</file>
         <file alias="TrimBySketch.png">icons/TrimBySketch.png</file>

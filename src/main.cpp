@@ -10,7 +10,7 @@ int main(int argc, char* argv[]) {
     format.setVersion(2, 1);
     format.setProfile(QSurfaceFormat::CompatibilityProfile);
     format.setDepthBufferSize(24);
-    format.setSamples(4);
+    format.setSamples(8);
     format.setSwapBehavior(QSurfaceFormat::DoubleBuffer);
     format.setSwapInterval(0);   // <-- off VSync
     QSurfaceFormat::setDefaultFormat(format);

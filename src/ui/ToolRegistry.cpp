@@ -48,6 +48,8 @@
 #include <BRepOffsetAPI_DraftAngle.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
 #include <BRepOffsetAPI_ThruSections.hxx>
+#include <BRepOffsetAPI_MakePipeShell.hxx>
+#include <BRepTools.hxx>
 #include <GeomAbs_SurfaceType.hxx>
 #include <GProp_GProps.hxx>
 #include <gp_Ax1.hxx>
@@ -72,6 +74,13 @@
 #include <memory>
 
 namespace {
+bool is_cabinet_tool(const std::string& id) {
+    return id == "cabinet"
+        || id == "cabinet_advanced"
+        || id == "cabinet_advanced_slx"
+        || id == "cabinet_showcase";
+}
+
 double param(const std::vector<ToolParameter>& parameters, const char* id, double fallback) {
     for (const ToolParameter& parameter : parameters) {
         if (parameter.id == id) {
@@ -450,7 +459,7 @@ void fit_texture_to_broad_faces(CAlfaObject& object) {
 }
 
 void assign_furniture_materials(
-    const CAlfaDoc& document,
+    CAlfaDoc& document,
     std::vector<std::unique_ptr<CAlfaObject>>& parts,
     const std::vector<ToolParameter>& parameters,
     const std::string& tool_id) {
@@ -470,7 +479,10 @@ void assign_furniture_materials(
         }
         const std::string& name = part->GetName();
         const bool is_facade = name.find("Facade") != std::string::npos;
-        const bool is_hardware = name.find("Handle") != std::string::npos
+        const bool is_round_handle_face =
+            name.find("Facade Handle Face") != std::string::npos;
+        const bool is_hardware = (name.find("Handle") != std::string::npos
+                                  && !is_round_handle_face)
             || name.find("Guide") != std::string::npos
             || (name.find("Leg") != std::string::npos && tool_id == "drawer_box");
         const bool is_table_top = tool_id == "table" && name == "Table Top";
@@ -480,7 +492,15 @@ void assign_furniture_materials(
             : is_facade ? facade
             : body;
         assign_material(*part, selected_material);
-        const bool sheet_furniture_part = tool_id != "table" && !is_hardware;
+        if (name.find("Showcase Glass") != std::string::npos) {
+            FurnitureMaterialFactory::SetMaterial(
+                document, part.get(), "Glass");
+        } else if (name.find("Stained Glass Wire") != std::string::npos) {
+            FurnitureMaterialFactory::SetMaterial(
+                document, part.get(), "Gold");
+        }
+        const bool sheet_furniture_part = tool_id != "table"
+            && tool_id != "chair" && !is_hardware;
         if (sheet_furniture_part
             && selected_material
             && !selected_material->color_texture_path.empty()) {
@@ -1451,12 +1471,23 @@ bool rebuild_swept_base(CAlfaDoc& document,
     const double delta_x = param(parameters, "dx", 0.0);
     const double delta_y = param(parameters, "dy", 0.0);
     const double angle_degrees = param(parameters, "angle", 0.0);
+    std::vector<double> width_scales;
+    std::vector<double> height_scales;
+    width_scales.reserve(5);
+    height_scales.reserve(5);
+    for (int point = 0; point < 5; ++point) {
+        const std::string width_id = "width.scale." + std::to_string(point);
+        const std::string height_id = "height.scale." + std::to_string(point);
+        width_scales.push_back(param(parameters, width_id.c_str(), 1.0));
+        height_scales.push_back(param(parameters, height_id.c_str(), 1.0));
+    }
     if (!old_solid || !section || !guide) {
         return false;
     }
 
     TopoDS_Shape shape = BuildSweptSolidShape(
-        *section, *guide, transition_mode, delta_x, delta_y, angle_degrees);
+        *section, *guide, transition_mode, delta_x, delta_y, angle_degrees,
+        width_scales, height_scales);
     if (shape.IsNull()) {
         return false;
     }
@@ -2066,6 +2097,120 @@ void rebuild_box(CAlfaDoc& document,
     replace_selected_mesh(document, object_index, make_box(name, width, height, depth, -width * 0.5f, 0.0f, -depth * 0.5f, color));
 }
 
+bool sketch_wire(const CSmartLine& sketch, TopoDS_Wire& wire) {
+    if (!sketch.IsClosed()) {
+        return BuildOpenSketchProfileWire(sketch, wire);
+    }
+    TopoDS_Face face;
+    Vec3 normal{};
+    if (!BuildSketchProfileFace(sketch, face, normal)) {
+        return false;
+    }
+    wire = BRepTools::OuterWire(face);
+    return !wire.IsNull();
+}
+
+TopoDS_Shape slx_sweep(const CSmartLine& section,
+                       const CSmartLine& contour) {
+    TopoDS_Wire section_wire;
+    TopoDS_Wire contour_wire;
+    if (!sketch_wire(section, section_wire)
+        || !sketch_wire(contour, contour_wire)
+        || !contour.IsClosed()) {
+        return {};
+    }
+    try {
+        BRepOffsetAPI_MakePipeShell sweep(contour_wire);
+        sweep.SetTransitionMode(BRepBuilderAPI_RoundCorner);
+        sweep.Add(section_wire, false, false);
+        if (!sweep.IsReady()) {
+            return {};
+        }
+        sweep.Build();
+        if (!sweep.IsDone()) {
+            return {};
+        }
+        sweep.MakeSolid();
+        return sweep.Shape();
+    } catch (const Standard_Failure&) {
+        return {};
+    }
+}
+
+void apply_slx_facade_features(
+    CAlfaDoc& document,
+    const std::vector<ToolParameter>& parameters,
+    std::vector<std::unique_ptr<CAlfaObject>>& parts) {
+    // Frame consumes only slx.profile.id + slx.panel.id while the cabinet
+    // parts are being built.  Running the legacy contour sweep afterwards
+    // used the same sketches a second time, twisted them around a closed
+    // path and made cabinet creation need tens of seconds.
+    const int facade_style = static_cast<int>(
+        std::lround(param(parameters, "facade_style", 0.0)));
+    if (facade_style != static_cast<int>(KitchenCabinetFacadeStyle::Milled)) {
+        return;
+    }
+
+    const auto sketch_by_parameter = [&](const char* id) -> const CSmartLine* {
+        const unsigned long object_id = static_cast<unsigned long>(
+            std::max(0.0, param(parameters, id, 0.0)));
+        return dynamic_cast<const CSmartLine*>(document.FindObjectById(object_id));
+    };
+    const CSmartLine* milling_profile = sketch_by_parameter("slx.profile.id");
+    const CSmartLine* panel_profile = sketch_by_parameter("slx.panel.id");
+    if (!milling_profile || !panel_profile) {
+        return;
+    }
+
+    std::vector<const CSmartLine*> contours;
+    for (int index = 1; index <= 8; ++index) {
+        const std::string id = "slx.contour." + std::to_string(index) + ".id";
+        const CSmartLine* contour = sketch_by_parameter(id.c_str());
+        if (contour && contour->IsClosed()) {
+            contours.push_back(contour);
+        }
+    }
+    if (contours.empty()) {
+        return;
+    }
+
+    std::vector<TopoDS_Shape> milling_sweeps;
+    milling_sweeps.reserve(contours.size());
+    for (const CSmartLine* contour : contours) {
+        TopoDS_Shape sweep = slx_sweep(*milling_profile, *contour);
+        if (!sweep.IsNull()) {
+            milling_sweeps.push_back(std::move(sweep));
+        }
+    }
+    const TopoDS_Shape panel_sweep = slx_sweep(*panel_profile, *contours.front());
+
+    for (std::unique_ptr<CAlfaObject>& part : parts) {
+        auto* solid = dynamic_cast<CSolid*>(part.get());
+        if (!solid
+            || part->GetName().find("Facade") == std::string::npos
+            || part->GetName().find("Handle") != std::string::npos) {
+            continue;
+        }
+        TopoDS_Shape result = solid->m_Shape;
+        for (const TopoDS_Shape& cutter : milling_sweeps) {
+            BRepAlgoAPI_Cut cut(result, cutter);
+            cut.Build();
+            if (cut.IsDone()) {
+                result = cut.Shape();
+            }
+        }
+        if (!panel_sweep.IsNull()) {
+            BRepAlgoAPI_Fuse fuse(result, panel_sweep);
+            fuse.Build();
+            if (fuse.IsDone()) {
+                result = fuse.Shape();
+            }
+        }
+        solid->m_Shape = std::move(result);
+        solid->ReBuldMesh();
+    }
+}
+
 KitchenCabinetDefinition kitchen_cabinet_definition(
     const std::vector<ToolParameter>& parameters) {
     KitchenCabinetDefinition definition;
@@ -2075,16 +2220,22 @@ KitchenCabinetDefinition kitchen_cabinet_definition(
         static_cast<int>(param(parameters, "facade_type", 2.0)), 0, 2));
     definition.facade_style = static_cast<KitchenCabinetFacadeStyle>(std::clamp(
         static_cast<int>(param(parameters, "facade_style", 0.0)), 0, 4));
+    definition.showcase_fill = static_cast<KitchenCabinetShowcaseFill>(std::clamp(
+        static_cast<int>(param(parameters, "showcase_fill", 0.0)), 0, 3));
     definition.shelf_count = std::clamp(
         static_cast<int>(param(parameters, "shelf_count", 2.0)), 0, 100);
     definition.door_open_angle = std::clamp(
         param(parameters, "door_open_angle", 0.0), 0.0, 180.0);
     definition.left_door_open_angle = std::clamp(
-        param(parameters, "left_door_open_angle", 0.0), 0.0, 180.0);
+        param(parameters, "left_door_open_angle", definition.door_open_angle),
+        0.0, 180.0);
     definition.right_door_open_angle = std::clamp(
-        param(parameters, "right_door_open_angle", 0.0), 0.0, 180.0);
+        param(parameters, "right_door_open_angle", definition.door_open_angle),
+        0.0, 180.0);
     definition.door_hinge_side = std::clamp(
         static_cast<int>(param(parameters, "door_hinge_side", 0.0)), 0, 1);
+    definition.handle_orientation = std::clamp(
+        static_cast<int>(param(parameters, "handle_orientation", 0.0)), 0, 1);
     definition.width = std::max(1.0, param(parameters, "width", 600.0));
     definition.depth = std::max(1.0, param(parameters, "depth", 560.0));
     definition.height = std::max(1.0, param(parameters, "height", 720.0));
@@ -2131,10 +2282,23 @@ void create_kitchen_cabinet(CAlfaDoc& document,
                             const std::vector<ToolParameter>& parameters) {
     FurnitureMaterialFactory::EnsureStandardMaterials(document);
     const KitchenCabinetDefinition definition = kitchen_cabinet_definition(parameters);
-    auto parts = CKitchenCabinet::BuildParts(definition);
+    const auto slx_sketch = [&](const char* id) -> const CSmartLine* {
+        const unsigned long object_id = static_cast<unsigned long>(
+            std::max(0.0, param(parameters, id, 0.0)));
+        return dynamic_cast<const CSmartLine*>(document.FindObjectById(object_id));
+    };
+    const CSmartLine* frame_profile =
+        definition.facade_style == KitchenCabinetFacadeStyle::Frame
+            ? slx_sketch("slx.profile.id") : nullptr;
+    const CSmartLine* panel_profile =
+        definition.facade_style == KitchenCabinetFacadeStyle::Frame
+            ? slx_sketch("slx.panel.id") : nullptr;
+    auto parts = CKitchenCabinet::BuildParts(
+        definition, frame_profile, panel_profile);
     if (parts.empty()) {
         return;
     }
+    apply_slx_facade_features(document, parameters, parts);
     assign_furniture_materials(document, parts, parameters, "cabinet");
     std::vector<unsigned long> ids;
     ids.reserve(parts.size());
@@ -2160,43 +2324,132 @@ void rebuild_kitchen_cabinet(CAlfaDoc& document,
         return;
     }
     const KitchenCabinetDefinition definition = kitchen_cabinet_definition(parameters);
-    auto replacements = CKitchenCabinet::BuildParts(definition);
+    const auto slx_sketch = [&](const char* id) -> const CSmartLine* {
+        const unsigned long object_id = static_cast<unsigned long>(
+            std::max(0.0, param(parameters, id, 0.0)));
+        return dynamic_cast<const CSmartLine*>(document.FindObjectById(object_id));
+    };
+    const CSmartLine* frame_profile =
+        definition.facade_style == KitchenCabinetFacadeStyle::Frame
+            ? slx_sketch("slx.profile.id") : nullptr;
+    const CSmartLine* panel_profile =
+        definition.facade_style == KitchenCabinetFacadeStyle::Frame
+            ? slx_sketch("slx.panel.id") : nullptr;
+    auto replacements = CKitchenCabinet::BuildParts(
+        definition, frame_profile, panel_profile);
     if (replacements.empty()) {
         return;
     }
+    apply_slx_facade_features(document, parameters, replacements);
     assign_furniture_materials(document, replacements, parameters, "cabinet");
     const unsigned long cabinet_id = cabinet->m_id;
     const std::vector<unsigned long> old_ids = cabinet->GetElementIds();
+
+    struct ExistingCabinetPart {
+        unsigned long id = 0;
+        size_t object_index = 0;
+        std::string name;
+        bool used = false;
+    };
+    std::vector<ExistingCabinetPart> existing_parts;
+    existing_parts.reserve(old_ids.size());
+    std::vector<unsigned long> facade_material_ids;
+    for (unsigned long id : old_ids) {
+        const size_t part_index = document.FindObjectIndexById(id);
+        if (part_index >= objects.size() || !objects[part_index]) {
+            continue;
+        }
+        const CAlfaObject& part = *objects[part_index];
+        existing_parts.push_back({id, part_index, part.GetName(), false});
+        const bool round_handle_face =
+            part.GetName().find("Facade Handle Face") != std::string::npos;
+        if (part.GetName().find("Facade") != std::string::npos
+            && (part.GetName().find("Handle") == std::string::npos
+                || round_handle_face)
+            && part.GetMaterialId() != 0) {
+            facade_material_ids.push_back(part.GetMaterialId());
+        }
+    }
+
+    Material shared_handle_material;
+    unsigned long shared_handle_material_id = 0;
+    bool has_shared_handle_material = false;
+    for (const ExistingCabinetPart& existing : existing_parts) {
+        const CAlfaObject& part = *objects[existing.object_index];
+        if (existing.name.find("Handle") == std::string::npos
+            || existing.name.find("Facade Handle Face") != std::string::npos
+            || part.GetMaterialId() == 0
+            || std::find(facade_material_ids.begin(), facade_material_ids.end(),
+                         part.GetMaterialId()) != facade_material_ids.end()) {
+            continue;
+        }
+        shared_handle_material = part.GetMaterial();
+        shared_handle_material_id = part.GetMaterialId();
+        has_shared_handle_material = true;
+        break;
+    }
+
     std::vector<unsigned long> new_ids;
     new_ids.reserve(replacements.size());
-    const size_t common_count = std::min(old_ids.size(), replacements.size());
-    for (size_t i = 0; i < common_count; ++i) {
-        const size_t part_index = document.FindObjectIndexById(old_ids[i]);
-        if (part_index >= objects.size() || !objects[part_index]) {
-            return;
+    for (auto& replacement : replacements) {
+        if (!replacement) {
+            continue;
         }
-        CAlfaObject& old_part = *objects[part_index];
-        replacements[i]->m_id = old_part.m_id;
-        replacements[i]->m_LayerID = old_part.m_LayerID;
-        if (replacements[i]->GetMaterialId() == 0) {
-            replacements[i]->SetMaterial(old_part.GetMaterial());
-            replacements[i]->SetMaterialId(old_part.GetMaterialId());
+        auto existing = std::find_if(
+            existing_parts.begin(), existing_parts.end(),
+            [&replacement](const ExistingCabinetPart& candidate) {
+                return !candidate.used
+                    && candidate.name == replacement->GetName();
+            });
+        if (existing == existing_parts.end()) {
+            if (has_shared_handle_material
+                && replacement->GetName().find("Handle") != std::string::npos
+                && replacement->GetName().find("Facade Handle Face")
+                    == std::string::npos
+                && replacement->GetMaterialId() == 0) {
+                replacement->SetMaterial(shared_handle_material);
+                replacement->SetMaterialId(shared_handle_material_id);
+            }
+            document.AddObject(std::move(replacement));
+            if (CAlfaObject* added = document.GetSelectedObject()) {
+                new_ids.push_back(added->m_id);
+            }
+            continue;
         }
-        copy_solid_surface_appearance(old_part, *replacements[i]);
-        replacements[i]->SetVisible(old_part.IsVisible());
-        objects[part_index] = std::move(replacements[i]);
-        new_ids.push_back(old_ids[i]);
+
+        existing->used = true;
+        CAlfaObject& old_part = *objects[existing->object_index];
+        replacement->m_id = old_part.m_id;
+        replacement->m_LayerID = old_part.m_LayerID;
+        if (replacement->GetMaterialId() == 0) {
+            replacement->SetMaterial(old_part.GetMaterial());
+            replacement->SetMaterialId(old_part.GetMaterialId());
+        }
+        copy_solid_surface_appearance(old_part, *replacement);
+        replacement->SetVisible(old_part.IsVisible());
+
+        const bool handle_has_facade_material =
+            replacement->GetName().find("Handle") != std::string::npos
+            && replacement->GetName().find("Facade Handle Face")
+                == std::string::npos
+            && std::find(facade_material_ids.begin(), facade_material_ids.end(),
+                         replacement->GetMaterialId()) != facade_material_ids.end();
+        if (has_shared_handle_material && handle_has_facade_material) {
+            replacement->SetMaterial(shared_handle_material);
+            replacement->SetMaterialId(shared_handle_material_id);
+            if (auto* solid = dynamic_cast<CSolid*>(replacement.get())) {
+                for (int surface = 0; surface < solid->GetNumSurfaces(); ++surface) {
+                    solid->ClearSurfaceMaterial(surface);
+                }
+            }
+        }
+
+        objects[existing->object_index] = std::move(replacement);
+        new_ids.push_back(existing->id);
     }
-    for (size_t i = common_count; i < old_ids.size(); ++i) {
-        const size_t part_index = document.FindObjectIndexById(old_ids[i]);
-        if (part_index < objects.size()) {
-            objects[part_index].reset();
-        }
-    }
-    for (size_t i = common_count; i < replacements.size(); ++i) {
-        document.AddObject(std::move(replacements[i]));
-        if (CAlfaObject* added = document.GetSelectedObject()) {
-            new_ids.push_back(added->m_id);
+    for (const ExistingCabinetPart& existing : existing_parts) {
+        if (!existing.used && existing.object_index < objects.size()) {
+            objects[existing.object_index].reset();
         }
     }
     cabinet = cabinet_index < objects.size()
@@ -2207,6 +2460,35 @@ void rebuild_kitchen_cabinet(CAlfaDoc& document,
     cabinet->SetElementIds(std::move(new_ids));
     cabinet->SetDefinition(definition);
     document.SelectObjectById(cabinet_id);
+}
+
+std::vector<ToolParameter> showcase_cabinet_parameters(
+    const std::vector<ToolParameter>& parameters) {
+    std::vector<ToolParameter> result = parameters;
+    result.push_back({
+        "body_type", "Body Type", 0.0, 0.0, 6.0, 1.0});
+    result.push_back({
+        "facade_style", "Facade Style", 2.0, 0.0, 4.0, 1.0});
+    result.push_back({
+        "facade_type", "Facade Type",
+        std::clamp(param(parameters, "showcase_facade_type", 0.0), 0.0, 1.0) + 1.0,
+        0.0, 2.0, 1.0});
+    return result;
+}
+
+void create_showcase_cabinet(
+    CAlfaDoc& document,
+    const std::vector<ToolParameter>& parameters) {
+    create_kitchen_cabinet(
+        document, showcase_cabinet_parameters(parameters));
+}
+
+void rebuild_showcase_cabinet(
+    CAlfaDoc& document,
+    size_t cabinet_index,
+    const std::vector<ToolParameter>& parameters) {
+    rebuild_kitchen_cabinet(
+        document, cabinet_index, showcase_cabinet_parameters(parameters));
 }
 
 DeskDefinition desk_definition(const std::vector<ToolParameter>& parameters) {
@@ -2314,6 +2596,273 @@ void rebuild_desk(CAlfaDoc& document,
     }
     assembly->SetElementIds(std::move(new_ids));
     document.SelectObjectById(assembly_id);
+}
+
+bool rebuild_wire_base(CAlfaDoc& document,
+                       size_t object_index,
+                       const std::vector<ToolParameter>& parameters) {
+    auto& objects = document.GetObjects();
+    if (object_index >= objects.size() || !objects[object_index]) return false;
+    const auto* old_solid = dynamic_cast<const CSolid*>(objects[object_index].get());
+    const unsigned long path_id = static_cast<unsigned long>(
+        std::max(0.0, param(parameters, "profile.id", 0.0)));
+    const CAlfaObject* path = document.FindObjectById(path_id);
+    const bool supported = dynamic_cast<const CPolyline*>(path)
+        || dynamic_cast<const CSmartLine*>(path)
+        || dynamic_cast<const CBSpline*>(path);
+    const double radius = param(parameters, "radius", 10.0);
+    if (!old_solid || !path || !supported) return false;
+    TopoDS_Shape shape = BuildWireSolidShape(*path, radius);
+    if (shape.IsNull()) return false;
+    auto solid = std::make_unique<CSolid>(shape);
+    solid->m_id = old_solid->m_id;
+    solid->SetName(old_solid->GetName());
+    solid->SetColor(old_solid->GetColor());
+    solid->SetMaterial(old_solid->GetMaterial());
+    solid->SetMaterialId(old_solid->GetMaterialId());
+    solid->SetGroupName(old_solid->GetGroupName());
+    solid->SetVisible(old_solid->IsVisible());
+    solid->m_LayerID = old_solid->m_LayerID;
+    solid->CopyOperationTreeFrom(*old_solid);
+    if (!solid->ReBuldMesh()) return false;
+    objects[object_index] = std::move(solid);
+    return true;
+}
+
+ChairDefinition chair_definition(
+    const std::vector<ToolParameter>& parameters) {
+    ChairDefinition result;
+    result.back_style = std::clamp(
+        static_cast<int>(param(parameters, "back_style", 0.0)), 0, 2);
+    result.back_member_count = std::clamp(
+        static_cast<int>(param(parameters, "back_member_count", 5.0)), 1, 12);
+    result.width = std::max(280.0, param(parameters, "width", 430.0));
+    result.depth = std::max(280.0, param(parameters, "depth", 480.0));
+    result.seat_height = std::max(
+        250.0, param(parameters, "seat_height", 470.0));
+    result.total_height = std::max(
+        result.seat_height + 180.0,
+        param(parameters, "total_height", 980.0));
+    result.seat_thickness = std::clamp(
+        param(parameters, "seat_thickness", 25.0), 8.0,
+        result.seat_height * 0.25);
+    result.seat_edge_radius = std::clamp(
+        param(parameters, "seat_edge_radius", 8.0), 0.0,
+        result.seat_thickness * 0.45);
+    result.seat_back_curve = std::clamp(
+        param(parameters, "seat_back_curve", 55.0),
+        -result.depth * 0.45, result.depth * 0.45);
+    result.leg_size = std::clamp(
+        param(parameters, "leg_size", 42.0), 18.0,
+        std::min(result.width, result.depth) * 0.2);
+    result.rear_post_size = std::clamp(
+        param(parameters, "rear_post_size", 45.0), 18.0,
+        result.width * 0.2);
+    result.leg_taper = std::clamp(
+        param(parameters, "leg_taper", 5.0), 0.0,
+        std::min(result.leg_size, result.rear_post_size) * 0.45);
+    result.leg_inset = std::clamp(
+        param(parameters, "leg_inset", 12.0), 0.0,
+        std::min(result.width, result.depth) * 0.18);
+    result.apron_height = std::clamp(
+        param(parameters, "apron_height", 60.0), 20.0,
+        result.seat_height * 0.35);
+    result.apron_thickness = std::clamp(
+        param(parameters, "apron_thickness", 22.0), 8.0,
+        result.leg_size);
+    result.stretcher_height = std::clamp(
+        param(parameters, "stretcher_height", 170.0), 0.0,
+        result.seat_height - result.seat_thickness - result.apron_height);
+    result.stretcher_size = std::clamp(
+        param(parameters, "stretcher_size", 24.0), 8.0,
+        result.leg_size);
+    result.back_rake = std::clamp(
+        param(parameters, "back_rake", 65.0), -150.0, 250.0);
+    result.rear_post_curve = std::clamp(
+        param(parameters, "rear_post_curve", -35.0), -200.0, 200.0);
+    result.back_member_width = std::clamp(
+        param(parameters, "back_member_width", 32.0), 8.0,
+        result.width * 0.25);
+    result.back_member_thickness = std::clamp(
+        param(parameters, "back_member_thickness", 18.0), 5.0,
+        result.rear_post_size);
+    result.back_rail_height = std::clamp(
+        param(parameters, "back_rail_height", 55.0), 20.0,
+        (result.total_height - result.seat_height) * 0.25);
+    result.back_curve = std::clamp(
+        param(parameters, "back_curve", 18.0), -100.0, 100.0);
+    result.back_depth_curve = std::clamp(
+        param(parameters, "back_depth_curve", 25.0), -200.0, 200.0);
+    return result;
+}
+
+ChairDefinition simple_chair_definition(
+    const std::vector<ToolParameter>& parameters) {
+    ChairDefinition result;
+    result.back_style = std::clamp(
+        static_cast<int>(param(parameters, "back_style", 0.0)), 0, 2);
+    result.back_member_count = std::clamp(
+        static_cast<int>(param(parameters, "back_member_count", 5.0)), 1, 12);
+    result.width = std::max(280.0, param(parameters, "width", 430.0));
+    result.depth = std::max(280.0, param(parameters, "depth", 430.0));
+    result.seat_height = std::max(
+        250.0, param(parameters, "seat_height", 460.0));
+    result.total_height = std::max(
+        result.seat_height + 180.0,
+        param(parameters, "total_height", 900.0));
+    result.seat_thickness = std::clamp(
+        param(parameters, "seat_thickness", 24.0), 8.0,
+        result.seat_height * 0.25);
+    result.seat_edge_radius = std::clamp(
+        param(parameters, "seat_edge_radius", 6.0), 0.0,
+        result.seat_thickness * 0.45);
+    result.leg_size = std::clamp(
+        param(parameters, "leg_size", 42.0), 18.0,
+        std::min(result.width, result.depth) * 0.2);
+    result.rear_post_size = result.leg_size;
+    result.leg_taper = std::clamp(
+        param(parameters, "leg_taper", 3.0), 0.0,
+        result.leg_size * 0.45);
+    result.leg_inset = std::clamp(
+        param(parameters, "leg_inset", 12.0), 0.0,
+        std::min(result.width, result.depth) * 0.18);
+    result.apron_height = std::clamp(
+        param(parameters, "apron_height", 60.0), 20.0,
+        result.seat_height * 0.35);
+    result.apron_thickness = std::min(22.0, result.leg_size);
+    result.stretcher_height = std::clamp(
+        param(parameters, "stretcher_height", 170.0), 0.0,
+        result.seat_height - result.seat_thickness - result.apron_height);
+    result.stretcher_size = std::min(24.0, result.leg_size);
+    result.back_rake = std::clamp(
+        param(parameters, "back_rake", 35.0), -100.0, 150.0);
+    result.back_member_width = std::clamp(
+        param(parameters, "back_member_width", 28.0), 8.0,
+        result.width * 0.25);
+    result.back_member_thickness = std::min(18.0, result.rear_post_size);
+    result.back_rail_height = std::clamp(
+        param(parameters, "back_rail_height", 50.0), 20.0,
+        (result.total_height - result.seat_height) * 0.25);
+
+    // Chair Simple deliberately keeps the construction rectilinear.  These
+    // capabilities remain available in Chair Advanced.
+    result.seat_back_curve = 0.0;
+    result.rear_post_curve = 0.0;
+    result.back_curve = 0.0;
+    result.back_depth_curve = 0.0;
+    return result;
+}
+
+void create_chair_from_definition(
+    CAlfaDoc& document,
+    const std::vector<ToolParameter>& parameters,
+    const ChairDefinition& definition,
+    const char* assembly_name) {
+    FurnitureMaterialFactory::EnsureStandardMaterials(document);
+    auto parts = CChairFurniture::BuildParts(definition);
+    if (parts.empty()) {
+        return;
+    }
+    assign_furniture_materials(document, parts, parameters, "chair");
+    std::vector<unsigned long> ids;
+    ids.reserve(parts.size());
+    for (auto& part : parts) {
+        document.AddObject(std::move(part));
+        if (CAlfaObject* added = document.GetSelectedObject()) {
+            ids.push_back(added->m_id);
+        }
+    }
+    document.AddObject(std::make_unique<CChairFurniture>(
+        assembly_name, std::move(ids)));
+}
+
+void create_chair(CAlfaDoc& document,
+                  const std::vector<ToolParameter>& parameters) {
+    create_chair_from_definition(
+        document, parameters, chair_definition(parameters), "Chair Advanced");
+}
+
+void create_simple_chair(CAlfaDoc& document,
+                         const std::vector<ToolParameter>& parameters) {
+    create_chair_from_definition(
+        document, parameters, simple_chair_definition(parameters),
+        "Chair Simple");
+}
+
+void rebuild_chair_from_definition(
+    CAlfaDoc& document,
+    size_t assembly_index,
+    const std::vector<ToolParameter>& parameters,
+    const ChairDefinition& definition) {
+    auto& objects = document.GetObjects();
+    if (assembly_index >= objects.size()) {
+        return;
+    }
+    auto* assembly = dynamic_cast<CAssembled*>(objects[assembly_index].get());
+    if (!assembly) {
+        return;
+    }
+    auto replacements = CChairFurniture::BuildParts(definition);
+    if (replacements.empty()) {
+        return;
+    }
+    assign_furniture_materials(document, replacements, parameters, "chair");
+    const unsigned long assembly_id = assembly->m_id;
+    const std::vector<unsigned long> old_ids = assembly->GetElementIds();
+    std::vector<unsigned long> new_ids;
+    new_ids.reserve(replacements.size());
+    const size_t common_count = std::min(old_ids.size(), replacements.size());
+    for (size_t index = 0; index < common_count; ++index) {
+        const size_t part_index = document.FindObjectIndexById(old_ids[index]);
+        if (part_index >= objects.size() || !objects[part_index]) {
+            return;
+        }
+        CAlfaObject& old_part = *objects[part_index];
+        replacements[index]->m_id = old_part.m_id;
+        replacements[index]->m_LayerID = old_part.m_LayerID;
+        if (replacements[index]->GetMaterialId() == 0) {
+            replacements[index]->SetMaterial(old_part.GetMaterial());
+            replacements[index]->SetMaterialId(old_part.GetMaterialId());
+        }
+        copy_solid_surface_appearance(old_part, *replacements[index]);
+        replacements[index]->SetVisible(old_part.IsVisible());
+        objects[part_index] = std::move(replacements[index]);
+        new_ids.push_back(old_ids[index]);
+    }
+    for (size_t index = common_count; index < old_ids.size(); ++index) {
+        const size_t part_index = document.FindObjectIndexById(old_ids[index]);
+        if (part_index < objects.size()) {
+            objects[part_index].reset();
+        }
+    }
+    for (size_t index = common_count; index < replacements.size(); ++index) {
+        document.AddObject(std::move(replacements[index]));
+        if (CAlfaObject* added = document.GetSelectedObject()) {
+            new_ids.push_back(added->m_id);
+        }
+    }
+    assembly = assembly_index < objects.size()
+        ? dynamic_cast<CAssembled*>(objects[assembly_index].get()) : nullptr;
+    if (!assembly || assembly->m_id != assembly_id) {
+        return;
+    }
+    assembly->SetElementIds(std::move(new_ids));
+    document.SelectObjectById(assembly_id);
+}
+
+void rebuild_chair(CAlfaDoc& document,
+                   size_t assembly_index,
+                   const std::vector<ToolParameter>& parameters) {
+    rebuild_chair_from_definition(
+        document, assembly_index, parameters, chair_definition(parameters));
+}
+
+void rebuild_simple_chair(CAlfaDoc& document,
+                          size_t assembly_index,
+                          const std::vector<ToolParameter>& parameters) {
+    rebuild_chair_from_definition(
+        document, assembly_index, parameters,
+        simple_chair_definition(parameters));
 }
 
 DrawerBoxDefinition drawer_box_definition(
@@ -3033,8 +3582,10 @@ ToolRegistry::ToolRegistry() {
         "SolidExtrudeFace",
         "Extrude Face",
         {
-            {"distance", "Distance", 1.0, -1000.0, 1000.0, 0.1},
-            {"taper", "Taper Angle", 0.0, -89.0, 89.0, 1.0}
+            {"distance", "Distance", 1.0, -1000.0, 1000.0, 0.1,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"taper", "Taper Angle", 0.0, -89.0, 89.0, 1.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Angle}
         },
         [](CAlfaDoc&, const std::vector<ToolParameter>&) {
         },
@@ -3098,6 +3649,18 @@ ToolRegistry::ToolRegistry() {
             {"angle", "Angle", 0.0, -360.0, 360.0, 1.0, ToolParameterType::Number, {}, ToolParameterUnit::Angle},
             {"transition", "Corner", 1.0, 0.0, 2.0, 1.0, ToolParameterType::Combo,
                 {"Transformed", "Right Corner", "Round Corner"}},
+            {"width.graph", "Width Scale Graph", 1.0, 0.05, 3.0, 0.01, ToolParameterType::Graph},
+            {"height.graph", "Height Scale Graph", 1.0, 0.05, 3.0, 0.01, ToolParameterType::Graph},
+            {"width.scale.0", "Width Scale 0", 1.0, 0.05, 3.0, 0.01},
+            {"width.scale.1", "Width Scale 1", 1.0, 0.05, 3.0, 0.01},
+            {"width.scale.2", "Width Scale 2", 1.0, 0.05, 3.0, 0.01},
+            {"width.scale.3", "Width Scale 3", 1.0, 0.05, 3.0, 0.01},
+            {"width.scale.4", "Width Scale 4", 1.0, 0.05, 3.0, 0.01},
+            {"height.scale.0", "Height Scale 0", 1.0, 0.05, 3.0, 0.01},
+            {"height.scale.1", "Height Scale 1", 1.0, 0.05, 3.0, 0.01},
+            {"height.scale.2", "Height Scale 2", 1.0, 0.05, 3.0, 0.01},
+            {"height.scale.3", "Height Scale 3", 1.0, 0.05, 3.0, 0.01},
+            {"height.scale.4", "Height Scale 4", 1.0, 0.05, 3.0, 0.01},
             {"section.id", "Section ID", 0.0, 0.0, 1000000000.0, 1.0},
             {"guide.id", "Guide ID", 0.0, 0.0, 1000000000.0, 1.0}
         },
@@ -3161,6 +3724,186 @@ ToolRegistry::ToolRegistry() {
             document.CreateLoftSurfaceFromSelectedBSplines();
         },
         [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {
+        }
+    });
+
+    tools_.push_back({
+        "SurfaceRuled",
+        "Ruled Surface",
+        {
+            {"length", "Length", 350.0, 0.001, 1000000.0, 1.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"direction", "Direction", 2.0, 0.0, 2.0, 1.0,
+                ToolParameterType::Combo, {"Axis X", "Axis Y", "Axis Z"}},
+            {"reverse_normal", "Reverse Normal", 0.0, 0.0, 1.0, 1.0,
+                ToolParameterType::Checkbox},
+            {"profile.id", "Curve ID", 0.0, 0.0, 4294967295.0, 1.0}
+        },
+        [](CAlfaDoc& document, const std::vector<ToolParameter>& parameters) {
+            document.CreateRuledSurfaceFromSpline(
+                static_cast<unsigned long>(std::max(0.0, param(parameters, "profile.id", 0.0))),
+                param(parameters, "length", 350.0),
+                static_cast<int>(param(parameters, "direction", 2.0)),
+                param(parameters, "reverse_normal", 0.0) >= 0.5);
+        },
+        [](CAlfaDoc& document, size_t index, const std::vector<ToolParameter>& parameters) {
+            document.RebuildRuledSurface(
+                index,
+                static_cast<unsigned long>(std::max(0.0, param(parameters, "profile.id", 0.0))),
+                param(parameters, "length", 350.0),
+                static_cast<int>(param(parameters, "direction", 2.0)),
+                param(parameters, "reverse_normal", 0.0) >= 0.5);
+        }
+    });
+
+    tools_.push_back({
+        "DrawSpline",
+        "Draw Spline",
+        {},
+        [](CAlfaDoc&, const std::vector<ToolParameter>&) {
+        },
+        [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {
+        }
+    });
+
+    for (const auto& curve_construction :
+         std::vector<std::pair<std::string, std::string>>{
+             {"PlaneIntersection", "Plane Intersection"},
+             {"SurfaceIntersection", "Surface Intersection"},
+             {"ProjectCurveToSurface", "Project Curve"},
+             {"ExtractSurfaceEdge", "Extract Edge"}}) {
+        tools_.push_back({
+            curve_construction.first,
+            curve_construction.second,
+            {},
+            [](CAlfaDoc&, const std::vector<ToolParameter>&) {},
+            [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {}
+        });
+    }
+
+    tools_.push_back({
+        "CurveFillets",
+        "Fillets",
+        {},
+        [](CAlfaDoc&, const std::vector<ToolParameter>&) {},
+        [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {}
+    });
+
+    tools_.push_back({
+        "SolidWireTool",
+        "Wire",
+        {
+            {"radius", "Radius", 10.0, 0.01, 1000000.0, 0.1,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"profile.id", "Path ID", 0.0, 0.0, 1000000000.0, 1.0}
+        },
+        [](CAlfaDoc&, const std::vector<ToolParameter>&) {},
+        [](CAlfaDoc& document, size_t index, const std::vector<ToolParameter>& parameters) {
+            rebuild_wire_base(document, index, parameters);
+        }
+    });
+
+    tools_.push_back({
+        "BezierCurve3D",
+        "Bezier 3D",
+        {},
+        [](CAlfaDoc&, const std::vector<ToolParameter>&) {},
+        [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {}
+    });
+
+    tools_.push_back({
+        "NurbsCurve3D",
+        "NURBS 3D",
+        {},
+        [](CAlfaDoc&, const std::vector<ToolParameter>&) {},
+        [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {}
+    });
+
+    for (const auto& curve_edit :
+         std::vector<std::pair<std::string, std::string>>{
+             {"CurveJoin", "Join"},
+             {"CurveSplit", "Split"},
+             {"CurveExtend", "Extend"},
+             {"CurveTrimByPlane", "Trim by Plane"},
+             {"CurveSimplifyByPoint", "Simplify by Point"},
+             {"CurveReverse", "Reverse"},
+             {"NurbsParametersTool", "NURBS Parameters"}}) {
+        tools_.push_back({
+            curve_edit.first,
+            curve_edit.second,
+            {},
+            [](CAlfaDoc&, const std::vector<ToolParameter>&) {},
+            [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {}
+        });
+    }
+
+    tools_.push_back({
+        "SewingFaceTool",
+        "Sewing Faces",
+        {},
+        [](CAlfaDoc&, const std::vector<ToolParameter>&) {},
+        [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {}
+    });
+
+    tools_.push_back({
+        "SolidSweepTwoRails",
+        "Sweep Solid (2 Rails)",
+        {
+            {"profile.id", "Profile ID", 0.0, 0.0, 1000000000.0, 1.0},
+            {"guide1.id", "Rail 1 ID", 0.0, 0.0, 1000000000.0, 1.0},
+            {"guide2.id", "Rail 2 ID", 0.0, 0.0, 1000000000.0, 1.0}
+        },
+        [](CAlfaDoc& document, const std::vector<ToolParameter>&) {
+            document.CreateTwoRailSweepSolidFromSelection();
+        },
+        [](CAlfaDoc& document, size_t index, const std::vector<ToolParameter>& parameters) {
+            document.RebuildTwoRailSweepSolid(
+                index,
+                static_cast<unsigned long>(std::max(0.0, param(parameters, "profile.id", 0.0))),
+                static_cast<unsigned long>(std::max(0.0, param(parameters, "guide1.id", 0.0))),
+                static_cast<unsigned long>(std::max(0.0, param(parameters, "guide2.id", 0.0))));
+        }
+    });
+
+    tools_.push_back({
+        "SurfaceFourSplines",
+        "Surface by 4 Splines",
+        {
+            {"curve1.id", "Curve 1 ID", 0.0, 0.0, 1000000000.0, 1.0},
+            {"curve2.id", "Curve 2 ID", 0.0, 0.0, 1000000000.0, 1.0},
+            {"curve3.id", "Curve 3 ID", 0.0, 0.0, 1000000000.0, 1.0},
+            {"curve4.id", "Curve 4 ID", 0.0, 0.0, 1000000000.0, 1.0}
+        },
+        [](CAlfaDoc& document, const std::vector<ToolParameter>&) {
+            document.CreateFourSplineSurfaceFromSelection();
+        },
+        [](CAlfaDoc& document, size_t index, const std::vector<ToolParameter>& parameters) {
+            document.RebuildFourSplineSurface(
+                index,
+                static_cast<unsigned long>(std::max(0.0, param(parameters, "curve1.id", 0.0))),
+                static_cast<unsigned long>(std::max(0.0, param(parameters, "curve2.id", 0.0))),
+                static_cast<unsigned long>(std::max(0.0, param(parameters, "curve3.id", 0.0))),
+                static_cast<unsigned long>(std::max(0.0, param(parameters, "curve4.id", 0.0))));
+        }
+    });
+
+    tools_.push_back({
+        "SurfaceSweepTwoRails",
+        "Sweep Surface (2 Rails)",
+        {
+            {"profile.id", "Profile ID", 0.0, 0.0, 1000000000.0, 1.0},
+            {"guide1.id", "Rail 1 ID", 0.0, 0.0, 1000000000.0, 1.0},
+            {"guide2.id", "Rail 2 ID", 0.0, 0.0, 1000000000.0, 1.0}
+        },
+        [](CAlfaDoc& document, const std::vector<ToolParameter>&) {
+            document.CreateTwoRailSweepSurfaceFromSelection();
+        },
+        [](CAlfaDoc& document, size_t index, const std::vector<ToolParameter>& parameters) {
+            document.RebuildTwoRailSweepSurface(
+                index,
+                static_cast<unsigned long>(std::max(0.0, param(parameters, "profile.id", 0.0))),
+                static_cast<unsigned long>(std::max(0.0, param(parameters, "guide1.id", 0.0))),
+                static_cast<unsigned long>(std::max(0.0, param(parameters, "guide2.id", 0.0))));
         }
     });
 
@@ -3267,10 +4010,7 @@ ToolRegistry::ToolRegistry() {
         }
     });
 
-    tools_.push_back({
-        "cabinet",
-        "Cabinet",
-        {
+    const std::vector<ToolParameter> cabinet_advanced_parameters = {
             {"body_type", "Body Type", 0.0, 0.0, 6.0, 1.0,
                 ToolParameterType::Combo,
                 {"Straight", "Corner", "Radius", "Corner-2", "Radius-2",
@@ -3303,6 +4043,36 @@ ToolRegistry::ToolRegistry() {
                 ToolParameterType::Number, {}, ToolParameterUnit::Angle},
             {"door_hinge_side", "Door Hinge", 0.0, 0.0, 1.0, 1.0,
                 ToolParameterType::Combo, {"Left", "Right"}},
+            {"handle_orientation", "Handle", 0.0, 0.0, 1.0, 1.0,
+                ToolParameterType::Combo, {"Horizontal", "Vertical"}},
+            {"body_material_id", "Body Material", 0.0, 0.0, 4294967295.0, 1.0,
+                ToolParameterType::Material},
+            {"facade_material_id", "Facade Material", 0.0, 0.0, 4294967295.0, 1.0,
+                ToolParameterType::Material}
+    };
+
+    tools_.push_back({
+        "cabinet",
+        "Cabinet",
+        {
+            {"facade_type", "Facade", 2.0, 0.0, 2.0, 1.0,
+                ToolParameterType::Combo, {"Open", "Single Door", "Double Door"}},
+            {"facade_style", "Facade Style", 0.0, 0.0, 1.0, 1.0,
+                ToolParameterType::Combo,
+                {"Plain", "Frame"}},
+            {"width", "Width", 600.0, 300.0, 3000.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"height", "Height", 720.0, 300.0, 2600.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"depth", "Depth", 560.0, 200.0, 1200.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"panel_thickness", "Panel Thickness", 18.0, 5.0, 100.0, 1.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"shelf_count", "Shelf Count", 2.0, 0.0, 20.0, 1.0},
+            {"door_open_angle", "Door Open Angle", 0.0, 0.0, 150.0, 5.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Angle},
+            {"handle_orientation", "Handle", 0.0, 0.0, 1.0, 1.0,
+                ToolParameterType::Combo, {"Horizontal", "Vertical"}},
             {"body_material_id", "Body Material", 0.0, 0.0, 4294967295.0, 1.0,
                 ToolParameterType::Material},
             {"facade_material_id", "Facade Material", 0.0, 0.0, 4294967295.0, 1.0,
@@ -3313,6 +4083,206 @@ ToolRegistry::ToolRegistry() {
         },
         [](CAlfaDoc& document, size_t index, const std::vector<ToolParameter>& parameters) {
             rebuild_kitchen_cabinet(document, index, parameters);
+        }
+    });
+
+    tools_.push_back({
+        "chair_simple",
+        "Chair Simple",
+        {
+            {"back_style", "Back Style", 0.0, 0.0, 2.0, 1.0,
+                ToolParameterType::Combo,
+                {"Vertical Slats", "Horizontal Rails", "Panel"}},
+            {"width", "Width", 430.0, 280.0, 1200.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"depth", "Depth", 430.0, 280.0, 1200.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"seat_height", "Seat Height", 460.0, 250.0, 900.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"total_height", "Total Height", 900.0, 500.0, 1800.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"seat_thickness", "Seat Thickness", 24.0, 8.0, 120.0, 2.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"seat_edge_radius", "Seat Edge Radius", 6.0, 0.0, 50.0, 1.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"leg_size", "Leg/Post Size", 42.0, 18.0, 120.0, 2.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"leg_taper", "Leg Taper", 3.0, 0.0, 40.0, 1.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"leg_inset", "Leg Inset", 12.0, 0.0, 100.0, 2.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"apron_height", "Apron Height", 60.0, 20.0, 180.0, 5.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"stretcher_height", "Stretcher Height", 170.0, 0.0, 500.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"back_rake", "Back Rake", 35.0, -100.0, 150.0, 5.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"back_member_count", "Back Members", 5.0, 1.0, 12.0, 1.0},
+            {"back_member_width", "Back Member Width", 28.0, 8.0, 120.0, 2.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"back_rail_height", "Back Rail Height", 50.0, 20.0, 160.0, 5.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"body_material_id", "Wood Material", 0.0, 0.0, 4294967295.0, 1.0,
+                ToolParameterType::Material}
+        },
+        [](CAlfaDoc& document, const std::vector<ToolParameter>& parameters) {
+            create_simple_chair(document, parameters);
+        },
+        [](CAlfaDoc& document, size_t index,
+           const std::vector<ToolParameter>& parameters) {
+            rebuild_simple_chair(document, index, parameters);
+        }
+    });
+
+    tools_.push_back({
+        "SurfaceJoin",
+        "Join",
+        {},
+        [](CAlfaDoc& document, const std::vector<ToolParameter>&) {
+            document.JoinSelectedSurfaces();
+        },
+        [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {
+        }
+    });
+
+    tools_.push_back({
+        "cabinet_advanced",
+        "Cabinet Advanced",
+        cabinet_advanced_parameters,
+        [](CAlfaDoc& document, const std::vector<ToolParameter>& parameters) {
+            create_kitchen_cabinet(document, parameters);
+        },
+        [](CAlfaDoc& document, size_t index, const std::vector<ToolParameter>& parameters) {
+            rebuild_kitchen_cabinet(document, index, parameters);
+        }
+    });
+
+    std::vector<ToolParameter> cabinet_slx_parameters = cabinet_advanced_parameters;
+    cabinet_slx_parameters.insert(
+        cabinet_slx_parameters.begin(),
+        {
+            {"slx.profile.id", "Profile Sketch ID", 0.0, 0.0, 4294967295.0, 1.0},
+            {"slx.panel.id", "Panel Sketch ID", 0.0, 0.0, 4294967295.0, 1.0},
+            {"slx.contour.1.id", "Milling Contour 1 ID", 0.0, 0.0, 4294967295.0, 1.0},
+            {"slx.contour.2.id", "Milling Contour 2 ID", 0.0, 0.0, 4294967295.0, 1.0},
+            {"slx.contour.3.id", "Milling Contour 3 ID", 0.0, 0.0, 4294967295.0, 1.0},
+            {"slx.contour.4.id", "Milling Contour 4 ID", 0.0, 0.0, 4294967295.0, 1.0},
+            {"slx.contour.5.id", "Milling Contour 5 ID", 0.0, 0.0, 4294967295.0, 1.0},
+            {"slx.contour.6.id", "Milling Contour 6 ID", 0.0, 0.0, 4294967295.0, 1.0},
+            {"slx.contour.7.id", "Milling Contour 7 ID", 0.0, 0.0, 4294967295.0, 1.0},
+            {"slx.contour.8.id", "Milling Contour 8 ID", 0.0, 0.0, 4294967295.0, 1.0}
+        });
+    tools_.push_back({
+        "cabinet_advanced_slx",
+        "Cabinet Advanced SLX",
+        std::move(cabinet_slx_parameters),
+        [](CAlfaDoc& document, const std::vector<ToolParameter>& parameters) {
+            create_kitchen_cabinet(document, parameters);
+        },
+        [](CAlfaDoc& document, size_t index, const std::vector<ToolParameter>& parameters) {
+            rebuild_kitchen_cabinet(document, index, parameters);
+        }
+    });
+
+    tools_.push_back({
+        "cabinet_showcase",
+        "Cabinet Showcase",
+        {
+            {"showcase_facade_type", "Facade", 0.0, 0.0, 1.0, 1.0,
+                ToolParameterType::Combo, {"Single Door", "Double Door"}},
+            {"showcase_fill", "Showcase Fill", 0.0, 0.0, 3.0, 1.0,
+                ToolParameterType::Combo,
+                {"Glass", "Lattice", "Muntin Bars", "Stained Glass"}},
+            {"width", "Width", 600.0, 300.0, 3000.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"height", "Height", 720.0, 300.0, 2600.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"depth", "Depth", 350.0, 150.0, 1200.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"panel_thickness", "Panel Thickness", 18.0, 5.0, 100.0, 1.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"shelf_count", "Shelf Count", 2.0, 0.0, 20.0, 1.0},
+            {"door_open_angle", "Door Open Angle", 0.0, 0.0, 150.0, 5.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Angle},
+            {"door_hinge_side", "Door Hinge", 0.0, 0.0, 1.0, 1.0,
+                ToolParameterType::Combo, {"Left", "Right"}},
+            {"handle_orientation", "Handle", 0.0, 0.0, 1.0, 1.0,
+                ToolParameterType::Combo, {"Horizontal", "Vertical"}},
+            {"body_material_id", "Body Material", 0.0, 0.0, 4294967295.0, 1.0,
+                ToolParameterType::Material},
+            {"facade_material_id", "Frame Material", 0.0, 0.0, 4294967295.0, 1.0,
+                ToolParameterType::Material}
+        },
+        [](CAlfaDoc& document, const std::vector<ToolParameter>& parameters) {
+            create_showcase_cabinet(document, parameters);
+        },
+        [](CAlfaDoc& document, size_t index,
+           const std::vector<ToolParameter>& parameters) {
+            rebuild_showcase_cabinet(document, index, parameters);
+        }
+    });
+
+    tools_.push_back({
+        "chair",
+        "Chair Advanced",
+        {
+            {"back_style", "Back Style", 0.0, 0.0, 2.0, 1.0,
+                ToolParameterType::Combo,
+                {"Vertical Slats", "Horizontal Rails", "Panel"}},
+            {"width", "Width", 430.0, 280.0, 1200.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"depth", "Depth", 480.0, 280.0, 1200.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"seat_height", "Seat Height", 470.0, 250.0, 900.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"total_height", "Total Height", 980.0, 500.0, 1800.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"seat_thickness", "Seat Thickness", 25.0, 8.0, 120.0, 2.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"seat_edge_radius", "Seat Edge Radius", 8.0, 0.0, 50.0, 1.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"seat_back_curve", "Seat Back Curve", 55.0, -200.0, 200.0, 2.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"leg_size", "Front Leg Size", 42.0, 18.0, 120.0, 2.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"rear_post_size", "Back Post Size", 45.0, 18.0, 140.0, 2.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"leg_taper", "Leg Taper", 5.0, 0.0, 40.0, 1.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"leg_inset", "Leg Inset", 12.0, 0.0, 100.0, 2.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"apron_height", "Apron Height", 60.0, 20.0, 180.0, 5.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"apron_thickness", "Apron Thickness", 22.0, 8.0, 80.0, 2.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"stretcher_height", "Stretcher Height", 170.0, 0.0, 500.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"stretcher_size", "Stretcher Size", 24.0, 8.0, 80.0, 2.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"back_rake", "Back Rake", 65.0, -150.0, 250.0, 5.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"rear_post_curve", "Rear Post Curve", -35.0, -200.0, 200.0, 2.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"back_member_count", "Back Members", 5.0, 1.0, 12.0, 1.0},
+            {"back_member_width", "Back Member Width", 32.0, 8.0, 120.0, 2.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"back_member_thickness", "Back Member Thickness", 18.0, 5.0, 80.0, 1.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"back_rail_height", "Back Rail Height", 55.0, 20.0, 160.0, 5.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"back_curve", "Back Curve", 18.0, -100.0, 100.0, 2.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"back_depth_curve", "Back Depth Curve", 25.0, -200.0, 200.0, 2.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"body_material_id", "Wood Material", 0.0, 0.0, 4294967295.0, 1.0,
+                ToolParameterType::Material}
+        },
+        [](CAlfaDoc& document, const std::vector<ToolParameter>& parameters) {
+            create_chair(document, parameters);
+        },
+        [](CAlfaDoc& document, size_t index,
+           const std::vector<ToolParameter>& parameters) {
+            rebuild_chair(document, index, parameters);
         }
     });
 
@@ -3498,11 +4468,11 @@ ActiveParametricObject ToolRegistry::Activate(const std::string& id, CAlfaDoc& d
                   document.GetSelectedObjectIndex(), *object, 0, &document)
             : ActiveParametricObject{};
     }
-    if ((id == "table" || id == "cabinet" || id == "desk" || id == "drawer_box")
+    if ((id == "chair" || id == "chair_simple" || id == "table" || is_cabinet_tool(id) || id == "desk" || id == "drawer_box")
         && document.GetObjects().size() <= object_count_before) {
         return {};
     }
-    if ((id == "table" || id == "cabinet" || id == "desk" || id == "drawer_box")
+    if ((id == "chair" || id == "chair_simple" || id == "table" || is_cabinet_tool(id) || id == "desk" || id == "drawer_box")
         && !dynamic_cast<CAssembled*>(document.GetSelectedObject())) {
         return {};
     }
@@ -3539,7 +4509,7 @@ ActiveParametricObject ToolRegistry::CreateParametricObject(const std::string& i
                   document.GetSelectedObjectIndex(), *object, 0, &document)
             : ActiveParametricObject{};
     }
-    if ((id == "table" || id == "cabinet" || id == "desk" || id == "drawer_box")
+    if ((id == "chair" || id == "chair_simple" || id == "table" || is_cabinet_tool(id) || id == "desk" || id == "drawer_box")
         && (document.GetObjects().size() <= object_count_before
             || !dynamic_cast<CAssembled*>(document.GetSelectedObject()))) {
         return {};
@@ -3981,6 +4951,26 @@ bool ToolRegistry::ReplayProfileDependents(unsigned long profile_id, CAlfaDoc& d
     bool rebuilt_any = false;
     auto& objects = document.GetObjects();
     for (size_t i = 0; i < objects.size(); ++i) {
+        if (objects[i]
+            && objects[i]->GetParametricToolId() == "cabinet_advanced_slx") {
+            const bool uses_profile = std::any_of(
+                objects[i]->GetParametricParameters().begin(),
+                objects[i]->GetParametricParameters().end(),
+                [profile_id](const ParametricParameterValue& parameter) {
+                    return parameter.id.rfind("slx.", 0) == 0
+                        && static_cast<unsigned long>(
+                               std::max(0.0, parameter.value)) == profile_id;
+                });
+            if (uses_profile) {
+                const ActiveParametricObject active = ActiveObjectFromDocument(
+                    i, *objects[i], 0, &document);
+                if (!active.tool_id.empty()) {
+                    Rebuild(active, document);
+                    rebuilt_any = true;
+                }
+            }
+            continue;
+        }
         const auto* solid = dynamic_cast<const CSolid*>(objects[i].get());
         if (!solid || solid->GetNumOperations() <= 0) {
             continue;
@@ -3994,7 +4984,9 @@ bool ToolRegistry::ReplayProfileDependents(unsigned long profile_id, CAlfaDoc& d
             for (const ParametricParameterValue& parameter : operation->Parameters) {
                 if ((parameter.id == "profile.id"
                      || parameter.id == "section.id"
-                     || parameter.id == "guide.id")
+                     || parameter.id == "guide.id"
+                     || parameter.id == "guide1.id"
+                     || parameter.id == "guide2.id")
                     && static_cast<unsigned long>(std::max(0.0, parameter.value)) == profile_id) {
                     uses_profile = true;
                     break;
@@ -4015,6 +5007,16 @@ bool ToolRegistry::ReplayAllProfileDependents(CAlfaDoc& document) const {
     bool rebuilt_any = false;
     auto& objects = document.GetObjects();
     for (size_t i = 0; i < objects.size(); ++i) {
+        if (objects[i]
+            && objects[i]->GetParametricToolId() == "cabinet_advanced_slx") {
+            const ActiveParametricObject active = ActiveObjectFromDocument(
+                i, *objects[i], 0, &document);
+            if (!active.tool_id.empty()) {
+                Rebuild(active, document);
+                rebuilt_any = true;
+            }
+            continue;
+        }
         const auto* solid = dynamic_cast<const CSolid*>(objects[i].get());
         bool uses_profile = false;
         if (solid) {
@@ -4028,7 +5030,9 @@ bool ToolRegistry::ReplayAllProfileDependents(CAlfaDoc& document) const {
                     [](const ParametricParameterValue& parameter) {
                         return parameter.id == "profile.id"
                             || parameter.id == "section.id"
-                            || parameter.id == "guide.id";
+                            || parameter.id == "guide.id"
+                            || parameter.id == "guide1.id"
+                            || parameter.id == "guide2.id";
                     });
                 if (uses_profile) {
                     break;
@@ -4153,7 +5157,7 @@ ActiveParametricObject ToolRegistry::ActiveObjectFromDocument(
             }
         }
     }
-    if (tool_id == "cabinet") {
+    if (is_cabinet_tool(tool_id)) {
         double legacy_angle = 0.0;
         bool has_left_angle = false;
         bool has_right_angle = false;

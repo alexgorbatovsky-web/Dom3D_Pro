@@ -5,6 +5,7 @@
 //#include "Line2D.h"
 #include "OpenGLCompat.h"
 #include "SurfaceUVMapping.h"
+#include "solid/Solid.h"
 #include "solid/SurfaceFace.h"
 #include "CAlfaDoc.h"
 
@@ -12,8 +13,11 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QImage>
+#include <QOpenGLContext>
+#include <QOpenGLShaderProgram>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <deque>
 #include <filesystem>
@@ -154,28 +158,71 @@ float clamp01(float value) {
     return std::clamp(value, 0.0f, 1.0f);
 }
 
-Color shaded_color(Color base, Vec3 normal, float specular_strength, float shininess, bool selected) {
-    const Vec3 n = normalize(normal);
-    const Vec3 key_light = normalize({-0.45f, 0.82f, 0.36f});
-    const Vec3 fill_light = normalize({0.72f, 0.42f, -0.58f});
-    const Vec3 camera_fill_light = normalize({0.28f, 0.28f, 0.92f});
-    const Vec3 view_dir = normalize({0.30f, 0.45f, 0.84f});
-    const Vec3 half_vector = normalize(key_light + view_dir);
-    const float key = std::max(0.0f, dot(n, key_light));
-    const float fill = std::max(0.0f, dot(n, fill_light));
-    const float camera_fill = std::max(0.0f, dot(n, camera_fill_light));
-    const float sky = std::max(0.0f, n.y);
-    const float side = 1.0f - std::fabs(n.y);
-    const float shade = std::min(1.38f, 0.40f + key * 0.56f + fill * 0.18f + camera_fill * 0.14f + sky * 0.13f + side * 0.07f);
-    const float gloss = std::pow(std::max(0.0f, dot(n, half_vector)), std::max(4.0f, shininess));
-    const float rim = std::pow(std::max(0.0f, 1.0f - std::fabs(dot(n, view_dir))), 3.0f) * std::max(key, camera_fill * 0.45f);
+Color shaded_color(Color base,
+                   Vec3 normal,
+                   Vec3 direction_to_eye,
+                   Vec3 view_up,
+                   float specular_strength,
+                   float shininess,
+                   bool selected) {
+    Vec3 view_dir = normalize(direction_to_eye);
+    if (dot(view_dir, view_dir) <= 0.000001f) {
+        view_dir = {0.0f, 0.0f, 1.0f};
+    }
+    Vec3 up = normalize(view_up);
+    if (dot(up, up) <= 0.000001f) {
+        up = {0.0f, 1.0f, 0.0f};
+    }
+    Vec3 right = normalize(cross(view_dir, up));
+    if (dot(right, right) <= 0.000001f) {
+        right = {1.0f, 0.0f, 0.0f};
+    }
+    up = normalize(cross(right, view_dir));
+
+    // Surfaces are intentionally rendered without back-face culling.  Light
+    // the side that is visible to the camera; otherwise a correctly smooth
+    // open surface becomes almost black solely because its BRep orientation
+    // happens to point away from the viewer.
+    Vec3 n = normalize(normal);
+    if (dot(n, view_dir) < 0.0f) {
+        n = n * -1.0f;
+    }
+
+    // A soft camera-relative studio rig.  Keeping the key and fill lights in
+    // view space makes the model readable while orbiting and avoids the hard
+    // black patches produced by fixed world-space light directions.
+    const std::array<Vec3, 3> lights{
+        normalize(view_dir + up * 0.58f + right * 0.38f),
+        normalize(view_dir + up * 0.10f - right * 0.82f),
+        normalize(up + view_dir * 0.42f)
+    };
+    const std::array<float, 3> light_strengths{0.48f, 0.24f, 0.14f};
+    float diffuse_light = 0.0f;
+    float gloss = 0.0f;
+    float strongest_light = 0.0f;
+    for (size_t i = 0; i < lights.size(); ++i) {
+        const float incidence = std::max(0.0f, dot(n, lights[i]));
+        diffuse_light += incidence * light_strengths[i];
+        strongest_light = std::max(strongest_light, incidence);
+        const Vec3 half_vector = normalize(lights[i] + view_dir);
+        gloss = std::max(
+            gloss,
+            std::pow(std::max(0.0f, dot(n, half_vector)),
+                     std::max(4.0f, shininess)) * light_strengths[i]);
+    }
+
+    constexpr float kStudioAmbient = 0.68f;
+    const float shade = std::min(1.42f, kStudioAmbient + diffuse_light);
+    const float rim = std::pow(
+        std::max(0.0f, 1.0f - std::fabs(dot(n, view_dir))), 3.0f)
+        * strongest_light;
     const float highlight = std::min(0.32f, specular_strength * (gloss * 0.68f + rim * 0.12f));
     const float selected_boost = selected ? 1.08f : 1.0f;
 
     return {
-        clamp01(base.r * shade * selected_boost + key * 0.06f + highlight),
-        clamp01(base.g * shade * selected_boost + key * 0.06f + highlight),
-        clamp01(base.b * shade * selected_boost + key * 0.08f + highlight)
+        clamp01(base.r * shade * selected_boost + strongest_light * 0.04f + highlight),
+        clamp01(base.g * shade * selected_boost + strongest_light * 0.04f + highlight),
+        clamp01(base.b * shade * selected_boost + strongest_light * 0.05f + highlight)
     };
 }
 
@@ -190,8 +237,102 @@ Color normal_rgb_color(Vec3 normal, bool selected) {
     };
 }
 
+GLuint zebra_texture_id() {
+    static GLuint texture_id = 0;
+    if (texture_id != 0) {
+        return texture_id;
+    }
+
+    constexpr int kTextureSize = 128;
+    std::array<unsigned char, kTextureSize * 4> pixels{};
+    const auto smooth_step = [](float first, float second, float value) {
+        const float t = std::clamp(
+            (value - first) / (second - first), 0.0f, 1.0f);
+        return t * t * (3.0f - 2.0f * t);
+    };
+    for (int i = 0; i < kTextureSize; ++i) {
+        const float phase = (static_cast<float>(i) + 0.5f) / kTextureSize;
+        const float rising = smooth_step(0.46f, 0.50f, phase);
+        const float falling = 1.0f - smooth_step(0.96f, 1.0f, phase);
+        const float white = std::min(rising, falling);
+        const unsigned char value = static_cast<unsigned char>(
+            std::round((0.025f + white * 0.95f) * 255.0f));
+        pixels[static_cast<size_t>(i) * 4 + 0] = value;
+        pixels[static_cast<size_t>(i) * 4 + 1] = value;
+        pixels[static_cast<size_t>(i) * 4 + 2] = value;
+        pixels[static_cast<size_t>(i) * 4 + 3] = 255;
+    }
+
+    glGenTextures(1, &texture_id);
+    glBindTexture(GL_TEXTURE_1D, texture_id);
+    glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexImage1D(
+        GL_TEXTURE_1D, 0, GL_RGBA, kTextureSize, 0,
+        GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+    glBindTexture(GL_TEXTURE_1D, 0);
+    return texture_id;
+}
+
+QOpenGLShaderProgram* zebra_shader_program() {
+    static QOpenGLContext* shader_context = nullptr;
+    static std::unique_ptr<QOpenGLShaderProgram> shader_program;
+    QOpenGLContext* current_context = QOpenGLContext::currentContext();
+    if (!current_context) {
+        return nullptr;
+    }
+    if (shader_program && shader_context == current_context) {
+        return shader_program.get();
+    }
+
+    auto candidate = std::make_unique<QOpenGLShaderProgram>();
+    constexpr const char* vertex_shader = R"GLSL(
+#version 120
+varying vec3 zebraNormalEye;
+varying vec3 zebraPositionEye;
+
+void main() {
+    vec4 eyePosition = gl_ModelViewMatrix * gl_Vertex;
+    zebraPositionEye = eyePosition.xyz;
+    zebraNormalEye = gl_NormalMatrix * gl_Normal;
+    gl_Position = gl_ProjectionMatrix * eyePosition;
+}
+)GLSL";
+    constexpr const char* fragment_shader = R"GLSL(
+#version 120
+varying vec3 zebraNormalEye;
+varying vec3 zebraPositionEye;
+uniform float zebraStripeCount;
+
+void main() {
+    vec3 normal = normalize(zebraNormalEye);
+    vec3 directionToEye = normalize(-zebraPositionEye);
+    vec3 reflection = reflect(-directionToEye, normal);
+    float coordinate = reflection.y * 0.5 + 0.5;
+    float phase = coordinate * zebraStripeCount * 6.28318530718;
+    float wave = sin(phase);
+    float transition = max(fwidth(phase) * 0.35, 0.035);
+    float white = smoothstep(-transition, transition, wave);
+    float value = mix(0.025, 0.975, white);
+    gl_FragColor = vec4(value, value, value, 1.0);
+}
+)GLSL";
+    if (!candidate->addShaderFromSourceCode(
+            QOpenGLShader::Vertex, vertex_shader)
+        || !candidate->addShaderFromSourceCode(
+            QOpenGLShader::Fragment, fragment_shader)
+        || !candidate->link()) {
+        return nullptr;
+    }
+    shader_context = current_context;
+    shader_program = std::move(candidate);
+    return shader_program.get();
+}
+
 Color wire_color(Color base, MeshDisplayMode mode, bool selected) {
-    if (mode == MeshDisplayMode::SurfaceGray) {
+    if (mode == MeshDisplayMode::SurfaceGray
+        || mode == MeshDisplayMode::SurfaceColored) {
         return selected ? Color{0.045f, 0.050f, 0.052f} : Color{0.075f, 0.083f, 0.087f};
     }
     if (mode == MeshDisplayMode::Wire) {
@@ -1676,8 +1817,14 @@ CMesh3D::CMesh3D()
 }
 
 Material CMesh3D::material_Defailt = Material::DefaultMesh();
-float CMesh3D::s_WireOpacity = 0.76f;
+float CMesh3D::s_SurfaceOpacity = 1.0f;
 MeshDisplayMode CMesh3D::s_DisplayMode = MeshDisplayMode::SurfaceGray;
+bool CMesh3D::s_ZebraAnalysisEnabled = false;
+bool CMesh3D::s_ZebraAnalysisTarget = false;
+bool CMesh3D::s_ZebraOrthographic = false;
+Vec3 CMesh3D::s_ZebraEye{};
+Vec3 CMesh3D::s_ZebraForward{0.0f, 0.0f, -1.0f};
+Vec3 CMesh3D::s_ZebraUp{0.0f, 1.0f, 0.0f};
 
 CMesh3D::CMesh3D(std::string name)
     : CAlfaObject(std::move(name)) {
@@ -2408,9 +2555,27 @@ void CMesh3D::Render() {
 
 void CMesh3D::Render3d(bool selected) const {
     const MeshDisplayMode mode = GetDisplayMode();
-    if (mode == MeshDisplayMode::Wire) {
-        const Color color = GetColor();
-        RenderWire(selected, true, &color);
+    const bool zebra = IsZebraAnalysisTarget();
+    const SolidDisplayMode solid_mode = zebra
+        ? SolidDisplayMode::SurfacesAndEdges
+        : CSolid::GetDisplayMode();
+    if (solid_mode == SolidDisplayMode::HiddenLine) {
+        const Color background = CSolid::GetHiddenLineBackgroundColor();
+        RenderHiddenLineDepth(background);
+        RenderHiddenLineEdges(false, background, selected);
+        return;
+    }
+
+    const bool solid_requests_fill = solid_mode == SolidDisplayMode::SurfacesAndEdges
+        || solid_mode == SolidDisplayMode::SurfacesAndRaisedMesh;
+    const bool wire_only = solid_mode == SolidDisplayMode::Wireframe
+        || solid_mode == SolidDisplayMode::MeshOnly;
+    if (!zebra && mode == MeshDisplayMode::Wire && !solid_requests_fill) {
+        RenderWire(selected, true, nullptr);
+        return;
+    }
+    if (wire_only) {
+        RenderWire(selected, true, nullptr);
         return;
     }
 
@@ -2421,19 +2586,24 @@ void CMesh3D::Render3d(bool selected) const {
         material.bump_texture_path.clear();
     }
 
-    const bool draw_edges = mode != MeshDisplayMode::SurfaceMaterial;
+    // A standalone imported mesh has no separate BRep edge collection: its
+    // polygon edges are the equivalent of Solid edges.  Therefore the Solid
+    // display flyout must explicitly control them too.
+    const bool draw_edges = mode != MeshDisplayMode::SurfaceMaterial
+        || solid_mode == SolidDisplayMode::SurfacesAndEdges
+        || solid_mode == SolidDisplayMode::SurfacesAndRaisedMesh;
     RenderFaces(selected, draw_edges, &material,
                 mode == MeshDisplayMode::SurfaceColored);
     if (draw_edges) {
-        const Color wire_color = GetColor();
-        RenderWire(selected, true, &wire_color);
+        RenderWire(selected, true, nullptr);
     }
 }
 
 void CMesh3D::RenderFaces(bool selected,
                           bool offset_fill,
                           const Material* material_override,
-                          bool diagnostic_rgb) const {
+                          bool diagnostic_rgb,
+                          bool flat_color) const {
     if (vertices_.empty() || faces_.empty()) {
         return;
     }
@@ -2442,11 +2612,19 @@ void CMesh3D::RenderFaces(bool selected,
     const Color color = material.diffuse;
     const float specular_strength = std::clamp(material.specular <= 0.0f ? 0.18f : material.specular, 0.0f, 1.0f);
     const float shininess = std::clamp(material.shininess <= 0.0f ? 36.0f : material.shininess, 4.0f, 96.0f);
-    const float alpha = selected ? std::min(material.alpha + 0.04f, 1.0f) : material.alpha;
+    const float material_alpha = selected
+        ? std::min(material.alpha + 0.04f, 1.0f)
+        : material.alpha;
+    const bool zebra = IsZebraAnalysisTarget() && !flat_color;
+    const float alpha = zebra
+        ? 1.0f
+        : flat_color
+        ? std::clamp(material_alpha, 0.0f, 1.0f)
+        : std::clamp(material_alpha * s_SurfaceOpacity, 0.0f, 1.0f);
     // Selection is rendered in diagnostic RGB by surface normal.  A bound
     // color texture would modulate (and usually hide) those RGB colors, so it
     // must be suppressed for this draw pass without changing the material.
-    const GLuint color_texture = (selected || diagnostic_rgb)
+    const GLuint color_texture = (zebra || selected || diagnostic_rgb)
         ? 0
         : texture_id_for_path(material.color_texture_path);
     const bool has_texture = color_texture != 0;
@@ -2492,7 +2670,17 @@ void CMesh3D::RenderFaces(bool selected,
         glDepthMask(GL_FALSE);
     }
     glDisable(GL_LIGHTING);
-    if (has_texture) {
+    QOpenGLShaderProgram* zebra_program =
+        zebra ? zebra_shader_program() : nullptr;
+    const bool zebra_shader_active =
+        zebra_program && zebra_program->bind();
+    if (zebra_shader_active) {
+        zebra_program->setUniformValue("zebraStripeCount", 10.0f);
+    } else if (zebra) {
+        glEnable(GL_TEXTURE_1D);
+        glBindTexture(GL_TEXTURE_1D, zebra_texture_id());
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    } else if (has_texture) {
         glEnable(GL_TEXTURE_2D);
         glBindTexture(GL_TEXTURE_2D, color_texture);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,
@@ -2522,13 +2710,40 @@ void CMesh3D::RenderFaces(bool selected,
                 const Vec3& normal = normals_.empty() || corner.n >= normals_.size()
                     ? vertex_normals[vertex_index]
                     : normals_[corner.n];
-                const Color shade = ((selected || diagnostic_rgb) && !has_texture)
-                    ? normal_rgb_color(normal, selected)
-                    : shaded_color(color, normal, specular_strength, shininess, selected);
+                const Color shade = zebra
+                    ? Color{1.0f, 1.0f, 1.0f}
+                    : flat_color
+                    ? color
+                    : (((selected || diagnostic_rgb) && !has_texture)
+                        ? normal_rgb_color(normal, selected)
+                        : shaded_color(
+                            color,
+                            normal,
+                            s_ZebraOrthographic
+                                ? s_ZebraForward * -1.0f
+                                : normalize(s_ZebraEye - vertices_[vertex_index]),
+                            s_ZebraUp,
+                            specular_strength,
+                            shininess,
+                            selected));
                 const Vec3& vertex = vertices_[vertex_index];
                 glNormal3f(normal.x, normal.y, normal.z);
                 glColor4f(shade.r, shade.g, shade.b, alpha);
-                if (has_texture) {
+                if (zebra && !zebra_shader_active) {
+                    const Vec3 unit_normal = normalize(normal);
+                    const Vec3 direction_to_eye = s_ZebraOrthographic
+                        ? s_ZebraForward * -1.0f
+                        : normalize(s_ZebraEye - vertex);
+                    const Vec3 reflection = normalize(
+                        unit_normal
+                            * (2.0f * dot(unit_normal, direction_to_eye))
+                        - direction_to_eye);
+                    constexpr float kStripeCount = 10.0f;
+                    const float reflection_height =
+                        std::clamp(dot(reflection, s_ZebraUp), -1.0f, 1.0f);
+                    glTexCoord1f(
+                        (reflection_height * 0.5f + 0.5f) * kStripeCount);
+                } else if (has_texture) {
                     UV base_uv = corner.uv < uvs_.size()
                         ? uvs_[corner.uv]
                         : projected_uv_for_face(vertex, face_normal);
@@ -2547,7 +2762,12 @@ void CMesh3D::RenderFaces(bool selected,
         glEnable(GL_CULL_FACE);
     }
 
-    if (has_texture) {
+    if (zebra_shader_active) {
+        zebra_program->release();
+    } else if (zebra) {
+        glBindTexture(GL_TEXTURE_1D, 0);
+        glDisable(GL_TEXTURE_1D);
+    } else if (has_texture) {
         glBindTexture(GL_TEXTURE_2D, 0);
         glDisable(GL_TEXTURE_2D);
     }
@@ -2560,7 +2780,10 @@ void CMesh3D::RenderFaces(bool selected,
     }
 }
 
-void CMesh3D::RenderWire(bool selected, bool draw_on_top, const Color* color_override) const {
+void CMesh3D::RenderWire(bool selected,
+                         bool draw_on_top,
+                         const Color* color_override,
+                         bool hidden) const {
     if (vertices_.empty() || faces_.empty()) {
         return;
     }
@@ -2568,16 +2791,25 @@ void CMesh3D::RenderWire(bool selected, bool draw_on_top, const Color* color_ove
     const Color base_color = color_override ? *color_override : GetColor();
     const MeshDisplayMode mode = GetDisplayMode();
 
+    GLboolean depth_write_enabled = GL_TRUE;
+    glGetBooleanv(GL_DEPTH_WRITEMASK, &depth_write_enabled);
     glEnable(GL_DEPTH_TEST);
-    glDepthFunc(GL_LEQUAL);
+    glDepthMask(GL_FALSE);
+    glDepthFunc(hidden ? GL_GREATER : GL_LEQUAL);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glEnable(GL_LINE_SMOOTH);
     glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
-    glLineWidth(draw_on_top ? (selected ? 1.16f : 1.02f) : (selected ? 1.02f : 0.92f));
-    const float opacity = std::clamp(s_WireOpacity, 0.05f, 1.0f);
+    glLineWidth(draw_on_top ? (selected ? 1.50f : 1.28f)
+                            : (selected ? 1.20f : 1.05f));
+    if (hidden) {
+        glEnable(GL_LINE_STIPPLE);
+        glLineStipple(1, 0x0F0F);
+    }
     const Color wire = color_override ? base_color : wire_color(base_color, mode, selected);
-    const float alpha = opacity * (draw_on_top ? (selected ? 0.98f : 0.92f) : (selected ? 0.88f : 0.82f));
+    const float alpha = draw_on_top
+        ? (selected ? 0.98f : 0.92f)
+        : (selected ? 0.88f : 0.82f);
     glColor4f(wire.r, wire.g, wire.b, alpha);
 
     std::unordered_set<unsigned long long> drawn_edges;
@@ -2608,17 +2840,44 @@ void CMesh3D::RenderWire(bool selected, bool draw_on_top, const Color* color_ove
     }
     glEnd();
 
+    if (hidden) {
+        glDisable(GL_LINE_STIPPLE);
+    }
     glDisable(GL_LINE_SMOOTH);
     glDisable(GL_BLEND);
     glDepthFunc(GL_LESS);
+    glDepthMask(depth_write_enabled);
 }
 
-float CMesh3D::GetWireOpacity() {
-    return s_WireOpacity;
+void CMesh3D::RenderHiddenLineDepth(const Color& background) const {
+    Material material;
+    material.diffuse = background;
+    material.alpha = 1.0f;
+    material.specular = 0.0f;
+    material.shininess = 4.0f;
+    // Bias the depth fill behind coplanar boundary lines so a visible line
+    // cannot leak into the dashed hidden-line pass through depth precision.
+    RenderFaces(false, true, &material, false, true);
 }
 
-void CMesh3D::SetWireOpacity(float opacity) {
-    s_WireOpacity = std::clamp(opacity, 0.05f, 1.0f);
+void CMesh3D::RenderHiddenLineEdges(bool hidden,
+                                    const Color& background,
+                                    bool selected) const {
+    const float luminance = background.r * 0.2126f
+        + background.g * 0.7152f + background.b * 0.0722f;
+    const Color line_color = hidden
+        ? (luminance > 0.5f ? Color{0.62f, 0.62f, 0.62f}
+                            : Color{0.42f, 0.42f, 0.42f})
+        : wire_color(GetColor(), GetDisplayMode(), selected);
+    RenderWire(selected, false, &line_color, hidden);
+}
+
+float CMesh3D::GetSurfaceOpacity() {
+    return s_SurfaceOpacity;
+}
+
+void CMesh3D::SetSurfaceOpacity(float opacity) {
+    s_SurfaceOpacity = std::clamp(opacity, 0.0f, 1.0f);
 }
 
 MeshDisplayMode CMesh3D::GetDisplayMode() {
@@ -2627,6 +2886,35 @@ MeshDisplayMode CMesh3D::GetDisplayMode() {
 
 void CMesh3D::SetDisplayMode(MeshDisplayMode mode) {
     s_DisplayMode = mode;
+}
+
+bool CMesh3D::IsZebraAnalysisEnabled() {
+    return s_ZebraAnalysisEnabled;
+}
+
+bool CMesh3D::IsZebraAnalysisTarget() {
+    return s_ZebraAnalysisEnabled && s_ZebraAnalysisTarget;
+}
+
+void CMesh3D::SetZebraAnalysisEnabled(bool enabled) {
+    s_ZebraAnalysisEnabled = enabled;
+    if (!enabled) {
+        s_ZebraAnalysisTarget = false;
+    }
+}
+
+void CMesh3D::SetZebraAnalysisTarget(bool target) {
+    s_ZebraAnalysisTarget = target;
+}
+
+void CMesh3D::SetZebraAnalysisView(Vec3 eye,
+                                   Vec3 forward,
+                                   Vec3 up,
+                                   bool orthographic) {
+    s_ZebraEye = eye;
+    s_ZebraForward = normalize(forward);
+    s_ZebraUp = normalize(up);
+    s_ZebraOrthographic = orthographic;
 }
 
 void CMesh3D::Render2d(float center_x, float center_y, float scale) const {

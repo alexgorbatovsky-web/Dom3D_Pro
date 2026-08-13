@@ -323,88 +323,21 @@ bool build_regular_uv_mesh(CSurfaceFace* surface, float deflection)
 {
 	if (!surface || surface->m_Face.IsNull())
 		return false;
-	Standard_Real u_min = 0.0;
-	Standard_Real u_max = 0.0;
-	Standard_Real v_min = 0.0;
-	Standard_Real v_max = 0.0;
-	try {
-		BRepTools::UVBounds(TopoDS::Face(surface->m_Face), u_min, u_max, v_min, v_max);
-	} catch (const Standard_Failure&) {
+	CNet net;
+	// The adaptive net controls both the visible silhouette and interpolation
+	// of highlights.  Use half of the general mesh deflection here so smooth
+	// standalone surfaces do not look faceted at the scene tessellation value.
+	if (net.Build(surface, static_cast<double>(deflection) * 0.5) != 0)
 		return false;
-	}
-
-	if (!std::isfinite(u_min) || !std::isfinite(u_max)
-		|| !std::isfinite(v_min) || !std::isfinite(v_max)
-		|| u_max <= u_min || v_max <= v_min) {
-		return false;
-	}
-	const double mid_u = (u_min + u_max) * 0.5;
-	const double mid_v = (v_min + v_max) * 0.5;
-	const double u_length = sampled_iso_length(surface, mid_v, u_min, u_max, true);
-	const double v_length = sampled_iso_length(surface, mid_u, v_min, v_max, false);
-	const GeomAbs_SurfaceType surface_type = surface_type_of(TopoDS::Face(surface->m_Face));
-	int qty_u = mesh_point_quantity_for_length(u_length, deflection, surface_type);
-	int qty_v = mesh_point_quantity_for_length(v_length, deflection, surface_type);
-	adjust_mesh_quantities_from_prepared_edges(surface, u_min, u_max, v_min, v_max, qty_u, qty_v);
-	std::vector<Vec3> vertices;
-	std::vector<UV> uvs;
-	std::vector<Vec3> normals;
-	vertices.reserve(static_cast<size_t>(qty_u * qty_v));
-	uvs.reserve(static_cast<size_t>(qty_u * qty_v));
-	normals.reserve(static_cast<size_t>(qty_u * qty_v));
-
-	for (int v = 0; v < qty_v; ++v) {
-		const double v_alpha = static_cast<double>(v) / static_cast<double>(qty_v - 1);
-		const double vv = v_min + (v_max - v_min) * v_alpha;
-		for (int u = 0; u < qty_u; ++u) {
-			const double u_alpha = static_cast<double>(u) / static_cast<double>(qty_u - 1);
-			const double uu = u_min + (u_max - u_min) * u_alpha;
-			CPoint8d point;
-			if (!surface->GetPoint(uu, vv, &point))
-				return false;
-			vertices.push_back({static_cast<float>(point.x),
-			                    static_cast<float>(point.y),
-			                    static_cast<float>(point.z)});
-			uvs.push_back({static_cast<float>(uu), static_cast<float>(vv)});
-			normals.push_back(normalize({static_cast<float>(point.l),
-			                             static_cast<float>(point.m),
-			                             static_cast<float>(point.n)}));
-		}
-	}
-	const auto index = [qty_u](int u, int v) {
-		return static_cast<size_t>(v * qty_u + u);
-	};
-	std::vector<CMesh3D::Face> faces;
-	faces.reserve(static_cast<size_t>((qty_u - 1) * (qty_v - 1)));
-	const bool reverse = TopoDS::Face(surface->m_Face).Orientation() == TopAbs_REVERSED;
-	for (int v = 0; v + 1 < qty_v; ++v) {
-		for (int u = 0; u + 1 < qty_u; ++u) {
-			if (reverse) {
-				faces.push_back({index(u, v),
-				                 index(u, v + 1),
-				                 index(u + 1, v + 1),
-				                 index(u + 1, v)});
-			} else {
-				faces.push_back({index(u, v),
-				                 index(u + 1, v),
-				                 index(u + 1, v + 1),
-				                 index(u, v + 1)});
-			}
-		}
-	}
 	if (!surface->pMesh3D)
 		surface->pMesh3D = new CMesh3D;
 	surface->pMesh3D->SetName("Solid Face");
 	surface->pMesh3D->SetColor({0.64f, 0.70f, 0.58f});
-	if (!surface->pMesh3D->SetGeometry(std::move(vertices), std::move(faces), std::move(uvs), std::move(normals)))
+	if (TopoDS::Face(surface->m_Face).Orientation() == TopAbs_REVERSED)
+		net.ReversPoints();
+	if (!net.BuildMesh3D(surface->pMesh3D))
 		return false;
 
-	surface->Umin = u_min;
-	surface->Umax = u_max;
-	surface->Vmin = v_min;
-	surface->Vmax = v_max;
-	surface->m_QtyU = qty_u;
-	surface->m_QtyV = qty_v;
 	surface->IsTrimmed = false;
 	surface->IsInitMesh = true;
 	return true;
@@ -1555,10 +1488,15 @@ bool CSurfaceFace::BuldMeshTriangle(float Deflection, float AngDeflection)
 	std::vector<Vec3> vertices;
 	vertices.reserve(static_cast<size_t>(aTriangulation->NbNodes()));
 	std::vector<UV> uvs;
+	std::vector<Vec3> normals;
 	if (aTriangulation->HasUVNodes()) {
 		uvs.reserve(static_cast<size_t>(aTriangulation->NbNodes()));
+		normals.reserve(static_cast<size_t>(aTriangulation->NbNodes()));
 	}
 	const gp_Trsf& transform = aLoc.Transformation();
+	const bool reverseWinding = theFace.Orientation() == TopAbs_REVERSED;
+	BRepAdaptor_Surface analytic_surface(theFace);
+	bool analytic_normals_valid = aTriangulation->HasUVNodes();
 	for (Standard_Integer nodeIndex = 1; nodeIndex <= aTriangulation->NbNodes(); ++nodeIndex) {
 		gp_Pnt point = aTriangulation->Node(nodeIndex);
 		point.Transform(transform);
@@ -1570,12 +1508,39 @@ bool CSurfaceFace::BuldMeshTriangle(float Deflection, float AngDeflection)
 		if (aTriangulation->HasUVNodes()) {
 			const gp_Pnt2d uv = aTriangulation->UVNode(nodeIndex);
 			uvs.push_back({static_cast<float>(uv.X()), static_cast<float>(uv.Y())});
+			try {
+				gp_Pnt surface_point;
+				gp_Vec derivative_u;
+				gp_Vec derivative_v;
+				analytic_surface.D1(
+					uv.X(), uv.Y(), surface_point,
+					derivative_u, derivative_v);
+				gp_Vec normal = derivative_u.Crossed(derivative_v);
+				if (normal.SquareMagnitude() <= 1.0e-24) {
+					analytic_normals_valid = false;
+					normals.push_back({});
+				} else {
+					normal.Normalize();
+					if (reverseWinding) {
+						normal.Reverse();
+					}
+					normals.push_back({
+						static_cast<float>(normal.X()),
+						static_cast<float>(normal.Y()),
+						static_cast<float>(normal.Z())});
+				}
+			} catch (const Standard_Failure&) {
+				analytic_normals_valid = false;
+				normals.push_back({});
+			}
 		}
+	}
+	if (!analytic_normals_valid) {
+		normals.clear();
 	}
 
 	std::vector<CMesh3D::Face> faces;
 	faces.reserve(static_cast<size_t>(aTriangulation->NbTriangles()));
-	const bool reverseWinding = theFace.Orientation() == TopAbs_REVERSED;
 	for (Standard_Integer triangleIndex = 1; triangleIndex <= aTriangulation->NbTriangles(); ++triangleIndex) {
 		Standard_Integer n1 = 0;
 		Standard_Integer n2 = 0;
@@ -1596,7 +1561,9 @@ bool CSurfaceFace::BuldMeshTriangle(float Deflection, float AngDeflection)
 	}
 	pMesh3D->SetName("Solid Face");
 	pMesh3D->SetColor({0.64f, 0.70f, 0.58f});
-	if (!pMesh3D->SetGeometry(std::move(vertices), std::move(faces), std::move(uvs))) {
+	if (!pMesh3D->SetGeometry(
+			std::move(vertices), std::move(faces),
+			std::move(uvs), std::move(normals))) {
 		return false;
 	}
 
@@ -1791,9 +1758,14 @@ bool CSurfaceFace::InitEdges()
 	}
 */
 
+	// m_Edges is the edge representation used by the regular OCCT renderer and
+	// by picking.  InitEdges3DCoat() builds a second, legacy set of boundary
+	// splines for the optional quad-mesh path.  Running that old numerical
+	// spline builder here for every ordinary triangulated face is unnecessary
+	// and, for complex loft faces, can corrupt the heap before GetEdges() makes
+	// its next small allocation.  The quad-mesh path invokes it explicitly.
 	const bool has_render_edges = !m_Edges.empty();
-	const bool has_net_edges = InitEdges3DCoat();
-	IsInitEdges = has_render_edges || has_net_edges;
+	IsInitEdges = has_render_edges;
 	return IsInitEdges;
 }
 bool CSurfaceFace::InitEdges3DCoat()
@@ -1919,7 +1891,8 @@ bool CSurfaceFace::InitEdges3DCoat()
 
 
 void CSurfaceFace::RenderEdges(const Color& color,
-                              const std::vector<int>& selected_edge_indices) const
+                              const std::vector<int>& selected_edge_indices,
+                              bool draw_regular_edges) const
 {
 	// Object selection belongs to the shaded surface. Topological edges keep
 	// their regular style until an individual edge is selected.
@@ -1928,14 +1901,16 @@ void CSurfaceFace::RenderEdges(const Color& color,
 	const float g = std::clamp(color.g, 0.0f, 1.0f);
 	const float b = std::clamp(color.b, 0.0f, 1.0f);
 
-	for (int i = 0; i < static_cast<int>(m_Edges.size()); ++i) {
-		CSplineCurve* edge = m_Edges[static_cast<size_t>(i)];
-		if (!edge)
-			continue;
-		if (std::find(selected_edge_indices.begin(), selected_edge_indices.end(), i) != selected_edge_indices.end())
-			continue;
-		else
-			edge->Draw(r, g, b, width, 16, false, false);
+	if (draw_regular_edges) {
+		for (int i = 0; i < static_cast<int>(m_Edges.size()); ++i) {
+			CSplineCurve* edge = m_Edges[static_cast<size_t>(i)];
+			if (!edge)
+				continue;
+			if (std::find(selected_edge_indices.begin(), selected_edge_indices.end(), i) != selected_edge_indices.end())
+				continue;
+			else
+				edge->Draw(r, g, b, width, 16, false, false);
+		}
 	}
 
 	for (int edge_index : selected_edge_indices) {
@@ -2001,7 +1976,8 @@ void CSurfaceFace::PreviewScale(Vec3 center, Vec3 axis, float factor)
 bool CSurfaceFace::HitTestEdgeScreen(DomPoint point,
                                      const std::function<bool(Vec3, DomPoint&)>& world_to_screen,
                                      float tolerance,
-                                     int& edge_index) const
+                                     int& edge_index,
+                                     float* screen_distance) const
 {
 	bool found = false;
 	float best_distance = tolerance;
@@ -2042,6 +2018,8 @@ bool CSurfaceFace::HitTestEdgeScreen(DomPoint point,
 		}
 	}
 
+	if (found && screen_distance)
+		*screen_distance = best_distance;
 	return found;
 }
 
@@ -2489,7 +2467,9 @@ bool CSurfaceFace::BuildTrimmingMesh(CSolid* psol, float Deflection){
 	// not be passed through the contour trimming code.
 	UpdateMeshTypeFromBoundary();
 
-	if (is_regular_uv_mesh_surface(F1) && build_regular_uv_mesh(this, Deflection)) {
+	const bool use_adaptive_net = m_TypeMesh == REGULAR_MESH
+		|| is_regular_uv_mesh_surface(F1);
+	if (use_adaptive_net && build_regular_uv_mesh(this, Deflection)) {
 		if (m_TypeMesh == REGULAR_MESH)
 			return true;
 
@@ -2651,19 +2631,22 @@ void GetPointFromCurve(TopoDS_Edge& ed, int gtystep, CPolyline* pl)
 
 void CSurfaceFace::GetEdges(std::vector<CPolyline*>& plines)
 {
-	for (TopExp_Explorer aExpFace(m_Face, TopAbs_FACE); aExpFace.More(); aExpFace.Next())
-	{
-		TopoDS_Face curFace = TopoDS::Face(aExpFace.Current());
-		for (TopExp_Explorer wExpl(curFace, TopAbs_EDGE); wExpl.More(); wExpl.Next())
-		{
-			TopoDS_Shape aSelShape = wExpl.Current();
-			int gtystep = 5;
-			TopoDS_Edge ed = TopoDS::Edge(aSelShape);
-			CPolyline* pl = new CPolyline;
-			GetPointFromCurve(ed, gtystep, pl);
-			if (pl->np() < 2)
+	if (m_Face.IsNull())
+		return;
+
+	for (TopExp_Explorer edge_explorer(m_Face, TopAbs_EDGE);
+		edge_explorer.More(); edge_explorer.Next()) {
+		try {
+			TopoDS_Edge edge = TopoDS::Edge(edge_explorer.Current());
+			if (edge.IsNull() || BRep_Tool::Degenerated(edge))
 				continue;
-			plines.push_back(pl);
+
+			std::unique_ptr<CPolyline> polyline = std::make_unique<CPolyline>();
+			GetPointFromCurve(edge, 5, polyline.get());
+			if (polyline->np() >= 2)
+				plines.push_back(polyline.release());
+		} catch (const Standard_Failure&) {
+			// Singular loft seams and degenerated poles are not display edges.
 		}
 	}
 }

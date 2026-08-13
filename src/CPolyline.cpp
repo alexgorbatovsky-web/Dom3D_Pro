@@ -123,12 +123,14 @@ size_t CPolyline::np() const {
 
 void CPolyline::Clear() {
     points_.clear();
+    vertex_radii_.clear();
     closed_ = false;
 }
 
 void CPolyline::AddPoint(CPoint3d point) {
     closed_ = false;
     points_.push_back(point);
+    vertex_radii_.push_back(0.0);
 }
 
 void CPolyline::AddPoint(CurvePoint point) {
@@ -141,6 +143,8 @@ bool CPolyline::InsertPoint(size_t index, CPoint3d point) {
     }
 
     points_.insert(points_.begin() + static_cast<std::vector<CPoint3d>::difference_type>(index), point);
+    vertex_radii_.resize(points_.size() - 1, 0.0);
+    vertex_radii_.insert(vertex_radii_.begin() + static_cast<std::vector<double>::difference_type>(index), 0.0);
     return true;
 }
 
@@ -367,6 +371,9 @@ bool CPolyline::RemovePoint(size_t index) {
     }
 
     points_.erase(points_.begin() + static_cast<std::vector<CPoint3d>::difference_type>(index));
+    if (index < vertex_radii_.size()) {
+        vertex_radii_.erase(vertex_radii_.begin() + static_cast<std::vector<double>::difference_type>(index));
+    }
     if (!CanClose()) {
         closed_ = false;
     }
@@ -400,6 +407,19 @@ bool CPolyline::GetLockedPlane(Vec3& plane_point, Vec3& plane_normal) const {
 }
 
 bool CPolyline::ApplyFillet(size_t point_index, double radius) {
+    return SetVertexRadius(point_index, radius);
+}
+
+double CPolyline::GetVertexRadius(size_t point_index) const {
+    return point_index < vertex_radii_.size() ? vertex_radii_[point_index] : 0.0;
+}
+
+const std::vector<double>& CPolyline::GetVertexRadii() const {
+    return vertex_radii_;
+}
+
+bool CPolyline::GetFilletGeometry(size_t point_index, CPolylineFilletGeometry& geometry) const {
+    const double radius = GetVertexRadius(point_index);
     if (radius <= 0.000001 || points_.size() < 3 || point_index >= points_.size()) {
         return false;
     }
@@ -435,12 +455,10 @@ bool CPolyline::ApplyFillet(size_t point_index, double radius) {
         return false;
     }
 
-    Vec3 plane_point{};
-    Vec3 plane_normal{};
-    if (!GetLockedPlane(plane_point, plane_normal) && !plane_from_polyline_points(points_, plane_point, plane_normal)) {
+    Vec3 plane_normal = normalize(cross(previous_dir, next_dir));
+    if (dot(plane_normal, plane_normal) <= 0.000001f) {
         return false;
     }
-    plane_normal = normalize(plane_normal);
 
     const Vec3 tangent_previous = corner + previous_dir * tangent_distance;
     const Vec3 tangent_next = corner + next_dir * tangent_distance;
@@ -462,19 +480,62 @@ bool CPolyline::ApplyFillet(size_t point_index, double radius) {
         return false;
     }
 
-    const int segment_count = std::max(4, static_cast<int>(std::ceil(std::fabs(signed_angle) / (kPi / 18.0f))));
-    std::vector<CPoint3d> arc_points;
-    arc_points.reserve(static_cast<size_t>(segment_count) + 1);
-    for (int i = 0; i <= segment_count; ++i) {
-        const float t = static_cast<float>(i) / static_cast<float>(segment_count);
-        arc_points.push_back(to_point3d(center + rotate_around_axis(start_radius, plane_normal, signed_angle * t)));
-    }
-
-    points_.erase(points_.begin() + static_cast<std::vector<CPoint3d>::difference_type>(point_index));
-    points_.insert(points_.begin() + static_cast<std::vector<CPoint3d>::difference_type>(point_index),
-                   arc_points.begin(),
-                   arc_points.end());
+    geometry.tangent_previous = to_point3d(tangent_previous);
+    geometry.tangent_next = to_point3d(tangent_next);
+    geometry.center = to_point3d(center);
+    geometry.normal = plane_normal;
+    geometry.signed_angle = signed_angle;
     return true;
+}
+
+bool CPolyline::SetVertexRadius(size_t point_index, double radius) {
+    if (point_index >= points_.size() || radius < 0.0) {
+        return false;
+    }
+    vertex_radii_.resize(points_.size(), 0.0);
+    if (!IsClosed() && (point_index == 0 || point_index + 1 >= points_.size())) {
+        if (radius > 0.000001) return false;
+        vertex_radii_[point_index] = 0.0;
+        return true;
+    }
+    const double old_radius = vertex_radii_[point_index];
+    vertex_radii_[point_index] = radius;
+    if (radius > 0.000001) {
+        CPolylineFilletGeometry geometry;
+        if (!GetFilletGeometry(point_index, geometry)) {
+            vertex_radii_[point_index] = old_radius;
+            return false;
+        }
+    }
+    return true;
+}
+
+std::vector<CPoint3d> CPolyline::GetRoundedPathPoints(double maximum_angle_step) const {
+    std::vector<CPoint3d> result;
+    if (points_.empty()) return result;
+    maximum_angle_step = std::max(0.01, maximum_angle_step);
+    if (!IsClosed()) result.push_back(points_.front());
+    const size_t begin = IsClosed() ? 0 : 1;
+    const size_t end = IsClosed() ? points_.size() : points_.size() - 1;
+    for (size_t i = begin; i < end; ++i) {
+        CPolylineFilletGeometry fillet;
+        if (!GetFilletGeometry(i, fillet)) {
+            result.push_back(points_[i]);
+            continue;
+        }
+        result.push_back(fillet.tangent_previous);
+        const Vec3 center = to_vec3(fillet.center);
+        const Vec3 start_radius = to_vec3(fillet.tangent_previous) - center;
+        const int segment_count = std::max(2, static_cast<int>(std::ceil(std::fabs(fillet.signed_angle) / maximum_angle_step)));
+        for (int segment = 1; segment <= segment_count; ++segment) {
+            const float t = static_cast<float>(segment) / static_cast<float>(segment_count);
+            result.push_back(to_point3d(center + rotate_around_axis(start_radius, fillet.normal,
+                                                                    static_cast<float>(fillet.signed_angle) * t)));
+        }
+    }
+    if (!IsClosed() && points_.size() > 1) result.push_back(points_.back());
+    if (IsClosed() && !result.empty()) result.push_back(result.front());
+    return result;
 }
 
 bool CPolyline::HitTestPoint(CurvePoint point, float tolerance, size_t& point_index) const {
@@ -508,18 +569,15 @@ void CPolyline::Render3d(bool selected, bool has_selected_point, size_t selected
     glDisable(GL_DEPTH_TEST);
     glLineWidth(selected ? 5.0f : 2.0f);
     glColor3f(selected ? 0.72f : color.r, selected ? 0.12f : color.g, selected ? 1.0f : color.b);
+    const std::vector<CPoint3d> display_points = GetRoundedPathPoints();
     glBegin(GL_LINE_STRIP);
-    for (const CPoint3d& point : points_) {
-        glVertex3f(static_cast<float>(point.x), static_cast<float>(point.y), static_cast<float>(point.z));
-    }
-    if (IsClosed()) {
-        const CPoint3d& point = points_.front();
+    for (const CPoint3d& point : display_points) {
         glVertex3f(static_cast<float>(point.x), static_cast<float>(point.y), static_cast<float>(point.z));
     }
     glEnd();
     glEnable(GL_DEPTH_TEST);
 
-    if (selected) {
+    if (selected && has_selected_point) {
         for (size_t i = 0; i < points_.size(); ++i) {
             DrawPointBox(points_[i], selected, has_selected_point && i == selected_point_index);
         }
@@ -569,6 +627,7 @@ bool CPolyline::HitTest(CurvePoint point, float tolerance) const {
 std::unique_ptr<CAlfaObject> CPolyline::Clone() const {
     auto copy = std::make_unique<CPolyline>(GetName() + " Copy");
     copy->points_ = points_;
+    copy->vertex_radii_ = vertex_radii_;
     copy->closed_ = closed_;
     copy->has_locked_plane_ = has_locked_plane_;
     copy->locked_plane_point_ = locked_plane_point_;
@@ -660,8 +719,9 @@ bool CPolyline::Save(std::ostream& stream) const {
            << material.diffuse.r << " " << material.diffuse.g << " " << material.diffuse.b << " "
            << material.alpha << " " << material.specular << " " << material.shininess << " "
            << (IsClosed() ? 1 : 0) << " " << points_.size() << "\n";
-    for (const CPoint3d& point : points_) {
-        stream << point.x << " " << point.y << " " << point.z << "\n";
+    for (size_t i = 0; i < points_.size(); ++i) {
+        const CPoint3d& point = points_[i];
+        stream << point.x << " " << point.y << " " << point.z << " " << GetVertexRadius(i) << "\n";
     }
 
     return static_cast<bool>(stream);
@@ -718,6 +778,7 @@ bool CPolyline::Load(std::istream& stream) {
     SetMaterial(material);
 
     std::vector<CPoint3d> loaded;
+    std::vector<double> loaded_radii;
     loaded.reserve(count);
     for (size_t i = 0; i < count; ++i) {
         std::string point_line;
@@ -731,14 +792,17 @@ bool CPolyline::Load(std::istream& stream) {
         }
         if (coords.size() == 2) {
             loaded.emplace_back(coords[0], 0.08, coords[1]);
+            loaded_radii.push_back(0.0);
         } else if (coords.size() >= 3) {
             loaded.emplace_back(coords[0], coords[1], coords[2]);
+            loaded_radii.push_back(coords.size() >= 4 ? std::max(0.0, coords[3]) : 0.0);
         } else {
             return false;
         }
     }
 
     points_ = std::move(loaded);
+    vertex_radii_ = std::move(loaded_radii);
     SetClosed(closed_);
     return true;
 }
@@ -820,6 +884,7 @@ bool CPolyline::CreatePolygone(float Length, int qty)
     if (qty < 3)
         return false;
 	points_.resize(qty + 1);
+    vertex_radii_.assign(static_cast<size_t>(qty) + 1, 0.0);
     float alfa = PI / (float)qty;
     CPoint3d p;
     p.x = -Length / 2.0;
@@ -854,6 +919,7 @@ void CPolyline::Revers()
         points_[i] = points_[j];
         points_[j] = ptm;
     }
+    std::reverse(vertex_radii_.begin(), vertex_radii_.end());
     IsReversed = !IsReversed;
 }
 double CPolyline::GetLength()
@@ -918,6 +984,8 @@ bool CPolyline::JoinG(CPolyline* line2)
 
     if (IsEmpty()) {
         points_ = line2->GetPoints();
+        vertex_radii_ = line2->GetVertexRadii();
+        vertex_radii_.resize(points_.size(), 0.0);
         closed_ = false;
         TmpLen = static_cast<float>(GetLength());
         return true;
@@ -926,6 +994,11 @@ bool CPolyline::JoinG(CPolyline* line2)
     const std::vector<CPoint3d>& line2_points = line2->GetPoints();
     if (line2_points.size() > 1) {
         points_.insert(points_.end(), line2_points.begin() + 1, line2_points.end());
+        const std::vector<double>& line2_radii = line2->GetVertexRadii();
+        vertex_radii_.resize(points_.size() - (line2_points.size() - 1), 0.0);
+        for (size_t i = 1; i < line2_points.size(); ++i) {
+            vertex_radii_.push_back(i < line2_radii.size() ? line2_radii[i] : 0.0);
+        }
     }
     closed_ = false;
     TmpLen = static_cast<float>(GetLength());

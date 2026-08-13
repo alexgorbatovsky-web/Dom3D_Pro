@@ -1,5 +1,6 @@
 #include "PreferencesDialog.h"
 
+#include "../Common.h"
 #include "MeasurementUnits.h"
 
 #include <QButtonGroup>

@@ -4,6 +4,7 @@
 #include "BezierSpline.h"
 #include "CBSpline.h"
 #include "CMesh3D.h"
+#include "ReferenceImage.h"
 #include "CGroup.h"
 #include "CAssembled.h"
 #include "CKitchenCabinet.h"
@@ -63,6 +64,9 @@ QString object_type_name(const CAlfaObject& object) {
     }
     if (dynamic_cast<const CSolid*>(&object)) {
         return "Solid";
+    }
+    if (dynamic_cast<const CReferenceImage*>(&object)) {
+        return "ReferenceImage";
     }
     if (dynamic_cast<const CMesh3D*>(&object)) {
         return "Mesh";
@@ -821,6 +825,7 @@ bool Dom3DProjectSerializer::Save(const QString& path,
                     xml.writeAttribute("bodyType", QString::number(static_cast<unsigned int>(definition.body_type)));
                     xml.writeAttribute("facadeType", QString::number(static_cast<unsigned int>(definition.facade_type)));
                     xml.writeAttribute("facadeStyle", QString::number(static_cast<unsigned int>(definition.facade_style)));
+                    xml.writeAttribute("showcaseFill", QString::number(static_cast<unsigned int>(definition.showcase_fill)));
                     xml.writeAttribute("shelfCount", QString::number(definition.shelf_count));
                     xml.writeAttribute("width", QString::number(definition.width, 'g', 17));
                     xml.writeAttribute("depth", QString::number(definition.depth, 'g', 17));
@@ -833,6 +838,7 @@ bool Dom3DProjectSerializer::Save(const QString& path,
                     xml.writeAttribute("leftDoorOpenAngle", QString::number(definition.left_door_open_angle, 'g', 17));
                     xml.writeAttribute("rightDoorOpenAngle", QString::number(definition.right_door_open_angle, 'g', 17));
                     xml.writeAttribute("doorHingeSide", QString::number(definition.door_hinge_side));
+                    xml.writeAttribute("handleOrientation", QString::number(definition.handle_orientation));
                 }
             }
             for (unsigned long id : group->GetElementIds()) {
@@ -866,11 +872,16 @@ bool Dom3DProjectSerializer::Save(const QString& path,
             xml.writeStartElement("geometry");
             xml.writeAttribute("kind", "polyline");
             xml.writeAttribute("closed", polyline->IsClosed() ? "true" : "false");
-            for (const CPoint3d& point : polyline->GetPoints()) {
+            for (size_t point_index = 0; point_index < polyline->GetPoints().size(); ++point_index) {
+                const CPoint3d& point = polyline->GetPoints()[point_index];
                 xml.writeEmptyElement("point");
                 xml.writeAttribute("x", QString::number(point.x, 'g', 9));
                 xml.writeAttribute("y", QString::number(point.y, 'g', 9));
                 xml.writeAttribute("z", QString::number(point.z, 'g', 9));
+                const double radius = polyline->GetVertexRadius(point_index);
+                if (radius > 0.0) {
+                    xml.writeAttribute("radius", QString::number(radius, 'g', 17));
+                }
             }
             xml.writeEndElement();
         } else if (const auto* sketch = dynamic_cast<const CSmartLine*>(&object)) {
@@ -935,9 +946,22 @@ bool Dom3DProjectSerializer::Save(const QString& path,
                  ++constraint_index) {
                 const CConstraint* constraint = sketch->GetConstraint(constraint_index);
                 xml.writeEmptyElement("constraint");
-                xml.writeAttribute(
-                    "type",
-                    constraint->GetType() == ConstraintType::Horizontal ? "horizontal" : "vertical");
+                QString constraint_type;
+                switch (constraint->GetType()) {
+                case ConstraintType::Horizontal:
+                    constraint_type = "horizontal";
+                    break;
+                case ConstraintType::Vertical:
+                    constraint_type = "vertical";
+                    break;
+                case ConstraintType::TangentAtStart:
+                    constraint_type = "tangent-start";
+                    break;
+                case ConstraintType::TangentAtEnd:
+                    constraint_type = "tangent-end";
+                    break;
+                }
+                xml.writeAttribute("type", constraint_type);
                 xml.writeAttribute("line", QString::number(constraint->GetLineIndex()));
             }
             xml.writeEndElement();
@@ -955,12 +979,31 @@ bool Dom3DProjectSerializer::Save(const QString& path,
         } else if (const auto* spline = dynamic_cast<const CBSpline*>(&object)) {
             xml.writeStartElement("geometry");
             xml.writeAttribute("kind", "b-spline");
+            const char* curve_type = spline->GetCurveType() == SplineCurveType::Bezier
+                ? "bezier" : spline->GetCurveType() == SplineCurveType::Nurbs
+                    ? "nurbs" : "b-spline";
+            xml.writeAttribute("curveType", curve_type);
+            xml.writeAttribute("degree", QString::number(spline->GetDegree()));
             xml.writeAttribute("closed", spline->IsClosed() ? "true" : "false");
-            for (const CPoint3d& point : spline->GetPoints()) {
+            const std::vector<double>& weights = spline->GetWeights();
+            for (size_t point_index = 0;
+                 point_index < spline->GetPoints().size(); ++point_index) {
+                const CPoint3d& point = spline->GetPoints()[point_index];
                 xml.writeEmptyElement("point");
                 xml.writeAttribute("x", QString::number(point.x, 'g', 9));
                 xml.writeAttribute("y", QString::number(point.y, 'g', 9));
                 xml.writeAttribute("z", QString::number(point.z, 'g', 9));
+                if (spline->GetCurveType() == SplineCurveType::Nurbs) {
+                    xml.writeAttribute(
+                        "weight",
+                        QString::number(
+                            point_index < weights.size() ? weights[point_index] : 1.0,
+                            'g', 17));
+                }
+            }
+            for (double knot : spline->GetKnots()) {
+                xml.writeEmptyElement("knot");
+                xml.writeAttribute("value", QString::number(knot, 'g', 17));
             }
             xml.writeEndElement();
         } else if (const auto* cad_curve = dynamic_cast<const CCadCurve3D*>(&object)) {
@@ -1205,6 +1248,15 @@ bool Dom3DProjectSerializer::Load(const QString& path,
                     definition.body_type = static_cast<KitchenCabinetBodyType>(body_type);
                     definition.facade_type = static_cast<KitchenCabinetFacadeType>(facade_type);
                     definition.facade_style = static_cast<KitchenCabinetFacadeStyle>(facade_style);
+                    bool showcase_fill_ok = false;
+                    const uint showcase_fill = geometry.attribute(
+                        "showcaseFill", "0").toUInt(&showcase_fill_ok);
+                    if (!showcase_fill_ok || showcase_fill > 3U) {
+                        error = "Kitchen cabinet showcase fill is invalid.";
+                        return false;
+                    }
+                    definition.showcase_fill =
+                        static_cast<KitchenCabinetShowcaseFill>(showcase_fill);
                     definition.shelf_count = shelf_count;
                     definition.facade_bulge = definition.depth * 0.5;
                     if (geometry.hasAttribute("facadeBulge")
@@ -1242,6 +1294,13 @@ bool Dom3DProjectSerializer::Load(const QString& path,
                     definition.door_hinge_side = geometry.attribute("doorHingeSide", "0").toInt(&hinge_ok);
                     if (!hinge_ok) {
                         error = "Kitchen cabinet door hinge side is invalid.";
+                        return false;
+                    }
+                    bool handle_orientation_ok = true;
+                    definition.handle_orientation = geometry.attribute(
+                        "handleOrientation", "0").toInt(&handle_orientation_ok);
+                    if (!handle_orientation_ok) {
+                        error = "Kitchen cabinet handle orientation is invalid.";
                         return false;
                     }
                     if (!CKitchenCabinet::IsValid(definition)) {
@@ -1325,6 +1384,7 @@ bool Dom3DProjectSerializer::Load(const QString& path,
                 return false;
             }
             const bool closed = geometry.attribute("closed", "false") == "true";
+            std::vector<double> vertex_radii;
 
             for (QDomElement point_element = geometry.firstChildElement("point");
                  !point_element.isNull();
@@ -1340,8 +1400,25 @@ bool Dom3DProjectSerializer::Load(const QString& path,
                     return false;
                 }
                 polyline->AddPoint(CPoint3d(x, y, z));
+                double radius = 0.0;
+                if (point_element.hasAttribute("radius")) {
+                    bool radius_ok = false;
+                    radius = point_element.attribute("radius").toDouble(&radius_ok);
+                    if (!radius_ok || radius < 0.0) {
+                        error = "Invalid polyline vertex radius.";
+                        return false;
+                    }
+                }
+                vertex_radii.push_back(radius);
             }
             polyline->SetClosed(closed);
+            for (size_t point_index = 0; point_index < vertex_radii.size(); ++point_index) {
+                if (vertex_radii[point_index] > 0.0
+                    && !polyline->SetVertexRadius(point_index, vertex_radii[point_index])) {
+                    error = "Polyline vertex radius does not fit adjacent segments.";
+                    return false;
+                }
+            }
             object = std::move(polyline);
         } else if (type == "Sketch") {
             auto sketch = std::make_unique<CSmartLine>(
@@ -1465,7 +1542,11 @@ bool Dom3DProjectSerializer::Load(const QString& path,
                     ? sketch->ConstrainHorizontal(line_index)
                     : constraint_type == "vertical"
                         ? sketch->ConstrainVertical(line_index)
-                        : false;
+                        : constraint_type == "tangent-start"
+                            ? sketch->ConstrainBezierTangentAtStart(line_index)
+                            : constraint_type == "tangent-end"
+                                ? sketch->ConstrainBezierTangentAtEnd(line_index)
+                                : false;
                 if (!added) {
                     error = "Sketch constraint is invalid.";
                     return false;
@@ -1496,6 +1577,19 @@ bool Dom3DProjectSerializer::Load(const QString& path,
                 return false;
             }
             const bool closed = geometry.attribute("closed", "false") == "true";
+            const QString curve_type = geometry.attribute("curveType", "b-spline");
+            spline->SetCurveType(
+                curve_type == "bezier" ? SplineCurveType::Bezier
+                : curve_type == "nurbs" ? SplineCurveType::Nurbs
+                : SplineCurveType::BSpline);
+            bool degree_ok = false;
+            const int degree = geometry.attribute("degree", "3").toInt(&degree_ok);
+            if (!degree_ok || degree < 1) {
+                error = "Invalid spline degree.";
+                return false;
+            }
+            spline->SetDegree(degree);
+            std::vector<double> weights;
 
             for (QDomElement point_element = geometry.firstChildElement("point");
                  !point_element.isNull();
@@ -1511,6 +1605,31 @@ bool Dom3DProjectSerializer::Load(const QString& path,
                     return false;
                 }
                 spline->AddPoint(CPoint3d(x, y, z));
+                bool weight_ok = false;
+                const double weight = point_element.attribute(
+                    "weight", "1").toDouble(&weight_ok);
+                if (!weight_ok || weight <= 0.0) {
+                    error = "Invalid NURBS control point weight.";
+                    return false;
+                }
+                weights.push_back(weight);
+            }
+            spline->SetWeights(std::move(weights));
+            std::vector<double> knots;
+            for (QDomElement knot_element = geometry.firstChildElement("knot");
+                 !knot_element.isNull();
+                 knot_element = knot_element.nextSiblingElement("knot")) {
+                bool knot_ok = false;
+                const double knot = knot_element.attribute("value").toDouble(&knot_ok);
+                if (!knot_ok) {
+                    error = "Invalid NURBS knot value.";
+                    return false;
+                }
+                knots.push_back(knot);
+            }
+            if (!knots.empty() && !spline->SetKnots(std::move(knots))) {
+                error = "Invalid NURBS knot vector.";
+                return false;
             }
             spline->SetClosed(closed);
             object = std::move(spline);
@@ -1535,8 +1654,12 @@ bool Dom3DProjectSerializer::Load(const QString& path,
             }
             cad_curve->SetPoints(std::move(points));
             object = std::move(cad_curve);
-        } else if (type == "Mesh") {
-            auto mesh = std::make_unique<CMesh3D>(object_element.attribute("name", "Mesh3D").toStdString());
+        } else if (type == "Mesh" || type == "ReferenceImage") {
+            std::unique_ptr<CMesh3D> mesh = type == "ReferenceImage"
+                ? std::unique_ptr<CMesh3D>(new CReferenceImage(
+                    object_element.attribute("name", "Reference Image").toStdString()))
+                : std::make_unique<CMesh3D>(
+                    object_element.attribute("name", "Mesh3D").toStdString());
             const QDomElement geometry = required_child(object_element, "geometry", error);
             if (geometry.isNull()) {
                 return false;
@@ -1668,17 +1791,13 @@ bool Dom3DProjectSerializer::Load(const QString& path,
                 auto clone = std::make_unique<CAssociativeClone>(solid->m_Shape, source_id);
                 clone->SetPlacement(placement);
                 clone->SetName(object_element.attribute("name", "Linked Copy").toStdString());
-                clone->InitSurfaces();
-                clone->InitEdges();
-                clone->BuldMesh(0.1f);
+                clone->ReBuldMesh();
                 object = std::move(clone);
             } else if (type == "SurfaceSet") {
                 TopoDS_Shape shape = solid->m_Shape;
                 auto surface_set = std::make_unique<CSurfaceSet>(shape);
                 surface_set->SetName(object_element.attribute("name", "Surface Set").toStdString());
-                surface_set->InitSurfaces();
-                surface_set->InitEdges();
-                surface_set->BuldMesh(0.1f);
+                surface_set->ReBuldMesh();
                 object = std::move(surface_set);
             } else {
                 solid->SetName(object_element.attribute("name", "Solid").toStdString());
@@ -1704,7 +1823,9 @@ bool Dom3DProjectSerializer::Load(const QString& path,
                 object->m_id = object_id;
             }
         }
-        if (object_element.hasAttribute("materialId")) {
+        const bool reference_image =
+            dynamic_cast<CReferenceImage*>(object.get()) != nullptr;
+        if (object_element.hasAttribute("materialId") && !reference_image) {
             bool ok = false;
             const unsigned long material_id = object_element.attribute("materialId").toULong(&ok);
             if (ok) {
@@ -1734,7 +1855,17 @@ bool Dom3DProjectSerializer::Load(const QString& path,
         } else if (!loaded_layers.empty() && loaded_layers.front()) {
             object->m_LayerID = loaded_layers.front()->ID();
         }
-        upsert_loaded_material(loaded_materials, object->GetMaterial());
+        if (reference_image) {
+            // The nested object material contains the per-image alpha.  Old
+            // projects may still carry a shared materialId; deliberately do
+            // not let it replace that object-specific value.
+            Material material = object->GetMaterial();
+            material.id = 0;
+            object->SetMaterial(material);
+            object->SetMaterialId(0);
+        } else {
+            upsert_loaded_material(loaded_materials, object->GetMaterial());
+        }
         read_parametric_definition(object_element, *object);
         object->SetGroupName(object_element.attribute("group").toStdString());
         object->SetVisible(object_element.attribute("visible", "true") != "false");

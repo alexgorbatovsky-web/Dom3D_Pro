@@ -3,6 +3,7 @@
 #include "TransformGizmoGeometry.h"
 
 #include "../CBSpline.h"
+#include "../BezierSpline.h"
 #include "../CPolyline.h"
 #include "../SmartLine.h"
 #include "../solid/Solid.h"
@@ -20,11 +21,15 @@
 #include <QPainter>
 #include <QPixmap>
 #include <QSettings>
+#include <QSurfaceFormat>
 #include <QTimer>
 #include <QUrl>
 #include <QWheelEvent>
 
 #include <BRep_Tool.hxx>
+#include <BRepAdaptor_Surface.hxx>
+#include <BRepTools.hxx>
+#include <GeomAbs_SurfaceType.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Vertex.hxx>
@@ -36,6 +41,54 @@
 
 namespace {
 constexpr double kCurvePlaneY = 0.08;
+
+double point_segment_distance_squared(const QPoint& point,
+                                      const QPoint& start,
+                                      const QPoint& end) {
+    const double dx = static_cast<double>(end.x() - start.x());
+    const double dy = static_cast<double>(end.y() - start.y());
+    const double length_squared = dx * dx + dy * dy;
+    if (length_squared <= 1.0e-12) {
+        const double px = static_cast<double>(point.x() - start.x());
+        const double py = static_cast<double>(point.y() - start.y());
+        return px * px + py * py;
+    }
+    const double t = std::clamp(
+        (static_cast<double>(point.x() - start.x()) * dx
+         + static_cast<double>(point.y() - start.y()) * dy) / length_squared,
+        0.0, 1.0);
+    const double px = static_cast<double>(point.x())
+        - (static_cast<double>(start.x()) + dx * t);
+    const double py = static_cast<double>(point.y())
+        - (static_cast<double>(start.y()) + dy * t);
+    return px * px + py * py;
+}
+
+void simplify_screen_stroke(const std::vector<QPoint>& points,
+                            size_t first,
+                            size_t last,
+                            double tolerance_squared,
+                            std::vector<bool>& keep) {
+    if (last <= first + 1) {
+        return;
+    }
+    size_t farthest = first;
+    double farthest_distance = 0.0;
+    for (size_t index = first + 1; index < last; ++index) {
+        const double distance = point_segment_distance_squared(
+            points[index], points[first], points[last]);
+        if (distance > farthest_distance) {
+            farthest_distance = distance;
+            farthest = index;
+        }
+    }
+    if (farthest_distance <= tolerance_squared) {
+        return;
+    }
+    keep[farthest] = true;
+    simplify_screen_stroke(points, first, farthest, tolerance_squared, keep);
+    simplify_screen_stroke(points, farthest, last, tolerance_squared, keep);
+}
 
 void viewport_camera_basis(const Camera& camera, Vec3& forward, Vec3& right, Vec3& up) {
     forward = normalize(rotate(camera.orientation, {0.0f, 0.0f, -1.0f}));
@@ -151,6 +204,53 @@ Quaternion orientation_from_forward_up(Vec3 forward, Vec3 desired_up) {
     }
     up = normalize(cross(back, right));
     return quaternion_from_basis(right, up, back);
+}
+
+bool exact_radius_dimension_points(const TopoDS_Face& face,
+                                   CPoint3d& center,
+                                   CPoint3d& arrow_tip) {
+    if (face.IsNull()) return false;
+    try {
+        BRepAdaptor_Surface surface(face, true);
+        double u_min = 0.0;
+        double u_max = 0.0;
+        double v_min = 0.0;
+        double v_max = 0.0;
+        BRepTools::UVBounds(face, u_min, u_max, v_min, v_max);
+        if (!std::isfinite(u_min) || !std::isfinite(u_max)
+            || !std::isfinite(v_min) || !std::isfinite(v_max)) {
+            return false;
+        }
+        const gp_Pnt point = surface.Value(
+            (u_min + u_max) * 0.5, (v_min + v_max) * 0.5);
+        gp_Pnt radius_center;
+        if (surface.GetType() == GeomAbs_Cylinder) {
+            const gp_Ax1 axis = surface.Cylinder().Axis();
+            const gp_Vec from_axis(axis.Location(), point);
+            radius_center = axis.Location().Translated(
+                gp_Vec(axis.Direction()) * from_axis.Dot(gp_Vec(axis.Direction())));
+        } else if (surface.GetType() == GeomAbs_Torus) {
+            const gp_Torus torus = surface.Torus();
+            const gp_Ax1 axis = torus.Axis();
+            const gp_Vec from_axis(axis.Location(), point);
+            const gp_Vec axis_vector(axis.Direction());
+            const gp_Vec axial = axis_vector * from_axis.Dot(axis_vector);
+            gp_Vec radial = from_axis - axial;
+            if (radial.SquareMagnitude() <= 1.0e-18) return false;
+            radial.Normalize();
+            radius_center = axis.Location().Translated(
+                axial + radial * torus.MajorRadius());
+        } else if (surface.GetType() == GeomAbs_Sphere) {
+            radius_center = surface.Sphere().Location();
+        } else {
+            return false;
+        }
+        center = CPoint3d(radius_center.X(), radius_center.Y(), radius_center.Z());
+        arrow_tip = CPoint3d(point.X(), point.Y(), point.Z());
+        return true;
+    } catch (const Standard_Failure&) {
+        return false;
+    }
 }
 
 double parameter_value(const std::vector<ToolParameter>& parameters,
@@ -390,10 +490,20 @@ void set_view_by_camera_ray(Camera& camera) {
 
 OpenGLViewport::OpenGLViewport(QWidget* parent)
     : QOpenGLWidget(parent) {
+    QSurfaceFormat viewport_format = QSurfaceFormat::defaultFormat();
+    viewport_format.setSamples(8);
+    setFormat(viewport_format);
     setFocusPolicy(Qt::StrongFocus);
     setMouseTracking(true);
     setAcceptDrops(true);
     setMinimumSize(640, 420);
+    QSettings settings;
+    QColor background_color(
+        settings.value("view/backgroundColor", QStringLiteral("#0e1114")).toString());
+    if (!background_color.isValid()) {
+        background_color = QColor(QStringLiteral("#0e1114"));
+    }
+    SetBackgroundColor(background_color);
     ReloadModelingPreferences();
 }
 
@@ -404,9 +514,13 @@ void OpenGLViewport::SetDocument(CAlfaDoc* document) {
 
 void OpenGLViewport::SetTool(ToolMode tool) {
     const bool changed = tool_ != tool;
+    if (tool_ == ToolMode::DrawSpline && tool != ToolMode::DrawSpline) {
+        CancelDrawSplineStroke();
+    }
     const bool cancel_sketch_face_selection =
         sketch_waiting_for_face_ && tool != ToolMode::SketchRectangle;
     tool_ = tool;
+    ClearHoveredSolidEdge();
     if (tool_ != ToolMode::Boolean) {
         has_boolean_body_ = false;
         boolean_body_index_ = 0;
@@ -418,7 +532,10 @@ void OpenGLViewport::SetTool(ToolMode tool) {
     dragging_face_extrude_ = false;
     dragging_draft_face_ = false;
     dragging_polyline_point_ = false;
+    curve_point_drag_changed_ = false;
     dragging_sketch_handle_ = false;
+    sketch_drag_changed_ = false;
+    hovering_furniture_handle_ = false;
     selecting_with_rect_ = false;
     zoom_rect_active_ = false;
     active_sketch_handle_kind_ = SketchHandleKind::None;
@@ -427,6 +544,7 @@ void OpenGLViewport::SetTool(ToolMode tool) {
     creation_snap_active_ = false;
     if (tool_ != ToolMode::Select) {
         editing_polyline_ = false;
+        direct_curve_edit_object_id_ = 0;
         editing_sketch_ = false;
         highlighted_polyline_handle_ = false;
         highlighted_sketch_handle_kind_ = SketchHandleKind::None;
@@ -456,29 +574,18 @@ void OpenGLViewport::SetTool(ToolMode tool) {
     }
     if (tool_ != ToolMode::SketchFillet) {
         highlighted_sketch_fillet_point_ = false;
+        sketch_fillet_preview_valid_ = false;
+    }
+    if (tool_ != ToolMode::MeasurePointToPoint) {
+        measurement_waiting_for_second_point_ = false;
+        measurement_preview_valid_ = false;
     }
     highlighted_draft_face_gizmo_ = false;
     face_extrude_distance_ = 0.0f;
     draft_face_angle_degrees_ = 0.0;
     active_transform_axis_ = TransformAxis::None;
     highlighted_transform_axis_ = TransformAxis::None;
-    if (material_interaction_mode_ == MaterialInteractionMode::None) {
-        if (tool_ == ToolMode::DrawCurve || tool_ == ToolMode::DrawBSpline || tool_ == ToolMode::EditPoint || tool_ == ToolMode::ZoomRect) {
-            setCursor(Qt::CrossCursor);
-        } else if (tool_ == ToolMode::SketchRectangle
-                   || tool_ == ToolMode::SketchPolyline
-                   || tool_ == ToolMode::SketchBezier
-                   || tool_ == ToolMode::SketchConvertBezier
-                   || tool_ == ToolMode::SketchConvertArc
-                   || tool_ == ToolMode::SolidBoxRectangle
-                   || tool_ == ToolMode::SolidCylinderCircle) {
-            setCursor(Qt::CrossCursor);
-        } else if (tool_ == ToolMode::SketchFillet) {
-            setCursor(Qt::CrossCursor);
-        } else {
-            unsetCursor();
-        }
-    }
+    RestoreDefaultToolCursor();
     if (changed) {
         emit ToolModeChanged(tool_);
     }
@@ -488,9 +595,164 @@ void OpenGLViewport::SetTool(ToolMode tool) {
     update();
 }
 
+void OpenGLViewport::RestoreDefaultToolCursor() {
+    if (material_interaction_mode_ != MaterialInteractionMode::None) {
+        return;
+    }
+
+    if (tool_ == ToolMode::Select
+        || tool_ == ToolMode::Transform
+        || tool_ == ToolMode::Boolean
+        || tool_ == ToolMode::FaceExtrude
+        || tool_ == ToolMode::DraftFace
+        || tool_ == ToolMode::ThickSolid
+        || tool_ == ToolMode::DrawCurve
+        || tool_ == ToolMode::DrawBSpline
+        || tool_ == ToolMode::DrawSpline
+        || tool_ == ToolMode::EditPoint
+        || tool_ == ToolMode::ZoomRect
+        || tool_ == ToolMode::SketchRectangle
+        || tool_ == ToolMode::SketchPolyline
+        || tool_ == ToolMode::SketchBezier
+        || tool_ == ToolMode::SketchConvertBezier
+        || tool_ == ToolMode::SketchConvertArc
+        || tool_ == ToolMode::SketchFillet
+        || tool_ == ToolMode::SketchConstraintHorizontal
+        || tool_ == ToolMode::SketchConstraintVertical
+        || tool_ == ToolMode::SketchConstraintTangentStart
+        || tool_ == ToolMode::SketchConstraintTangentEnd
+        || tool_ == ToolMode::SolidFillet
+        || tool_ == ToolMode::SolidBoxRectangle
+        || tool_ == ToolMode::SolidCylinderCircle
+        || tool_ == ToolMode::MeasurePointToPoint) {
+        setCursor(Qt::CrossCursor);
+    } else {
+        unsetCursor();
+    }
+}
+
 void OpenGLViewport::SetTransformOperation(TransformOperation operation) {
     transform_operation_ = operation;
+    transform_dialog_rotation_angle_degrees_ = 0.0f;
+    transform_dialog_rotation_axis_ = {};
     SetTool(ToolMode::Transform);
+}
+
+bool OpenGLViewport::ApplyPreciseMove(Vec3 delta) {
+    if (!document_ || !document_->HasSelection()) {
+        return false;
+    }
+    const bool point_mode = selection_mode_ == SelectionMode::Point
+        && document_->HasSelectedPoint();
+    const bool changed = point_mode
+        ? document_->MoveSelectedCurvePoints(delta)
+        : document_->PreviewMoveSelectedObjects(delta);
+    if (!changed) {
+        return false;
+    }
+    if (!point_mode) {
+        document_->CommitMoveSelectedSolids(delta);
+    }
+    emit DocumentChanged();
+    update();
+    return true;
+}
+
+bool OpenGLViewport::ApplyPreciseRotate(Vec3 center, Vec3 axis, float angle_radians) {
+    if (!document_ || !document_->HasSelection()
+        || std::fabs(angle_radians) <= 0.000001f
+        || dot(axis, axis) <= 0.000001f) {
+        return false;
+    }
+    axis = normalize(axis);
+    const bool point_mode = selection_mode_ == SelectionMode::Point
+        && document_->HasSelectedPoint();
+    const bool changed = point_mode
+        ? document_->RotateSelectedCurvePoints(center, axis, angle_radians)
+        : document_->PreviewRotateSelectedObjects(center, axis, angle_radians);
+    if (!changed) {
+        return false;
+    }
+    if (!point_mode) {
+        document_->CommitRotateSelectedSolids(center, axis, angle_radians);
+    }
+    emit DocumentChanged();
+    update();
+    return true;
+}
+
+bool OpenGLViewport::ApplyPreciseScale(Vec3 center,
+                                       float factor_x,
+                                       float factor_y,
+                                       float factor_z,
+                                       bool uniform) {
+    if (!document_ || !document_->HasSelection()) {
+        return false;
+    }
+
+    const bool point_mode = selection_mode_ == SelectionMode::Point
+        && document_->HasSelectedPoint();
+    bool changed = false;
+    const auto apply_factor = [&](Vec3 axis, float factor) {
+        if (factor <= 0.0001f || std::fabs(factor - 1.0f) <= 0.000001f) {
+            return;
+        }
+        const bool step_changed = point_mode
+            ? document_->ScaleSelectedCurvePoints(center, axis, factor)
+            : (axis.x == 0.0f && axis.y == 0.0f && axis.z == 0.0f
+                ? document_->PreviewUniformScaleSelectedObjects(center, factor)
+                : document_->PreviewScaleSelectedObjects(center, axis, factor));
+        if (!step_changed) {
+            return;
+        }
+        changed = true;
+        if (!point_mode) {
+            if (axis.x == 0.0f && axis.y == 0.0f && axis.z == 0.0f) {
+                document_->CommitUniformScaleSelectedSolids(center, factor);
+            } else {
+                document_->CommitScaleSelectedSolids(center, axis, factor);
+            }
+        }
+    };
+
+    if (uniform) {
+        apply_factor({}, factor_x);
+    } else {
+        apply_factor({1.0f, 0.0f, 0.0f}, factor_x);
+        apply_factor({0.0f, 1.0f, 0.0f}, factor_y);
+        apply_factor({0.0f, 0.0f, 1.0f}, factor_z);
+    }
+    if (changed) {
+        emit DocumentChanged();
+        update();
+    }
+    return changed;
+}
+
+void OpenGLViewport::SetTransformDialogGuide(TransformOperation operation,
+                                             TransformAxis axis,
+                                             Vec3 center,
+                                             float rotation_angle_degrees,
+                                             Vec3 custom_rotation_axis) {
+    transform_operation_ = operation;
+    highlighted_transform_axis_ = axis;
+    transform_dialog_rotation_angle_degrees_ = rotation_angle_degrees;
+    transform_dialog_rotation_axis_ = custom_rotation_axis;
+    if (document_) {
+        document_->SetTransformGizmoOrigin(center);
+    }
+    SetTool(ToolMode::Transform);
+    update();
+}
+
+void OpenGLViewport::ClearTransformDialogGuide() {
+    transform_dialog_rotation_angle_degrees_ = 0.0f;
+    transform_dialog_rotation_axis_ = {};
+    highlighted_transform_axis_ = TransformAxis::None;
+    if (document_) {
+        document_->ClearTransformGizmoOrigin();
+    }
+    update();
 }
 
 void OpenGLViewport::SetSelectionConfirmationMode(bool enabled) {
@@ -561,6 +823,7 @@ void OpenGLViewport::SetSelectionMode(SelectionMode mode) {
         && mode == SelectionMode::Edge
         && document_->SelectEdgesOfSelectedFaces();
     selection_mode_ = mode;
+    ClearHoveredSolidEdge();
     if (document_) {
         if (!converted_faces_to_edges) {
             document_->ClearSelection();
@@ -664,6 +927,30 @@ void OpenGLViewport::FitToDocument() {
 
 void OpenGLViewport::ReloadModelingPreferences() {
     QSettings settings("Dom3D", "Dom3D_Pro");
+    const QString grid_mode = settings.value(
+        "view/gridDensityMode", QStringLiteral("medium")).toString();
+    grid_step_ = 100.0f;
+    grid_division_count_ = 10;
+    if (grid_mode == "small") {
+        grid_subdivisions_ = 2;
+    } else if (grid_mode == "large") {
+        grid_subdivisions_ = 10;
+    } else if (grid_mode == "custom") {
+        grid_step_ = std::clamp(
+            settings.value("view/customGridStep", 100.0).toFloat(),
+            0.001f, 1000000.0f);
+        grid_subdivisions_ = std::clamp(
+            settings.value("view/customGridSubdivisions", 2).toInt(),
+            1, 100);
+        grid_division_count_ = std::clamp(
+            settings.value("view/customGridDivisionCount", 10).toInt(),
+            1, 1000);
+    } else {
+        grid_subdivisions_ = 4;
+    }
+    grid_size_ = std::clamp(
+        grid_step_ * static_cast<float>(grid_division_count_),
+        1.0f, 1000000.0f);
     snapping_enabled_ =
         settings.value("preferences/modeling/snappingEnabled", true).toBool();
     capture_distance_pixels_ = std::clamp(
@@ -673,6 +960,49 @@ void OpenGLViewport::ReloadModelingPreferences() {
     if (!snapping_enabled_) {
         SetCreationSnapCursor(false);
     }
+    update();
+}
+
+void OpenGLViewport::RefreshSurfaceMeshQuality() {
+    if (!document_ || width() <= 0 || height() <= 0) {
+        return;
+    }
+
+    constexpr float kPerspectiveFovY = 48.0f;
+    const float viewport_height = static_cast<float>(std::max(1, height()));
+    float world_per_pixel = 0.0f;
+    if (orthographic_projection_) {
+        const float half_height = std::max(
+            kMinimumOrthographicHalfHeight, camera_.distance * 0.42f);
+        world_per_pixel = (2.0f * half_height) / viewport_height;
+    } else {
+        world_per_pixel = (2.0f * camera_.distance
+            * std::tan(deg_to_rad(kPerspectiveFovY) * 0.5f)) / viewport_height;
+    }
+
+    QSettings settings("Dom3D", "Dom3D_Pro");
+    const float modeling_tolerance = std::clamp(
+        settings.value("preferences/modeling/tolerance", 0.02).toFloat(),
+        0.001f,
+        10.0f);
+    // CSolid::BuldMesh converts this public deflection to OCC units by
+    // dividing it by ten. Compensate here so the resulting tessellation is
+    // approximately one screen pixel at the current camera scale.
+    const float mesh_deflection =
+        std::max(modeling_tolerance, world_per_pixel) * 10.0f;
+    if (!std::isfinite(mesh_deflection) || mesh_deflection <= 0.0f) {
+        return;
+    }
+
+    const int rebuilt = document_->RebuildVisibleObjectMeshes(mesh_deflection);
+    if (rebuilt > 0) {
+        update();
+    }
+    emit StatusTextChanged(
+        rebuilt > 0
+            ? QString("Update Scene: rebuilt mesh for %1 visible object(s)")
+                  .arg(rebuilt)
+            : QString("Update Scene: no visible BRep objects to rebuild"));
 }
 
 ToolMode OpenGLViewport::CurrentTool() const {
@@ -689,13 +1019,39 @@ Camera OpenGLViewport::GetCamera() const {
 
 void OpenGLViewport::SetCamera(const Camera& camera) {
     camera_ = camera;
+    rotation_pivot_enabled_ = false;
     update();
+}
+
+void OpenGLViewport::SetRotationPivot(CPoint3d point) {
+    if (!rotation_pivot_enabled_) {
+        rotation_pivot_previous_target_ = camera_.target;
+    }
+    camera_.target = {
+        static_cast<float>(point.x),
+        static_cast<float>(point.y),
+        static_cast<float>(point.z)};
+    rotation_pivot_enabled_ = true;
+    update();
+}
+
+void OpenGLViewport::ClearRotationPivot() {
+    if (!rotation_pivot_enabled_) {
+        return;
+    }
+    camera_.target = rotation_pivot_previous_target_;
+    rotation_pivot_enabled_ = false;
+    update();
+}
+
+bool OpenGLViewport::HasRotationPivot() const {
+    return rotation_pivot_enabled_;
 }
 
 void OpenGLViewport::SetXYView() {
     camera_.orientation = camera_orientation_from_yaw_pitch(0.0f, 0.0f);
-    camera_.target = {kDefaultSceneSize * 0.5f, kDefaultSceneSize * 0.5f, 0.0f};
-    camera_.distance = kDefaultPlanCameraDistance;
+    camera_.target = {grid_size_ * 0.5f, grid_size_ * 0.5f, 0.0f};
+    camera_.distance = grid_size_ / 0.84f;
     update();
 }
 
@@ -734,8 +1090,8 @@ void OpenGLViewport::SetXYPlaneViewEnabled(bool enabled) {
     if (enabled) {
         orthographic_projection_ = true;
         camera_.orientation = camera_orientation_from_yaw_pitch(0.0f, 0.0f);
-        camera_.target = {kDefaultSceneSize * 0.5f, kDefaultSceneSize * 0.5f, 0.0f};
-        camera_.distance = kDefaultPlanCameraDistance;
+        camera_.target = {grid_size_ * 0.5f, grid_size_ * 0.5f, 0.0f};
+        camera_.distance = grid_size_ / 0.84f;
     }
     update();
 }
@@ -761,6 +1117,19 @@ void OpenGLViewport::SetFloorGridVisible(bool visible) {
         return;
     }
     show_floor_grid_ = visible;
+    update();
+}
+
+void OpenGLViewport::SetBackgroundColor(const QColor& color) {
+    if (!color.isValid()) return;
+    renderer_.SetBackgroundColor({
+        static_cast<float>(color.redF()),
+        static_cast<float>(color.greenF()),
+        static_cast<float>(color.blueF())});
+    CSolid::SetHiddenLineBackgroundColor({
+        static_cast<float>(color.redF()),
+        static_cast<float>(color.greenF()),
+        static_cast<float>(color.blueF())});
     update();
 }
 
@@ -793,7 +1162,7 @@ void OpenGLViewport::CancelMaterialInteraction() {
     }
 
     material_interaction_mode_ = MaterialInteractionMode::None;
-    unsetCursor();
+    RestoreDefaultToolCursor();
     emit StatusTextChanged("Material tool canceled");
     update();
 }
@@ -923,6 +1292,23 @@ bool OpenGLViewport::BeginEditSelectedSketch() {
     return true;
 }
 
+void OpenGLViewport::EndDirectCurveEdit() {
+    if (!editing_polyline_) {
+        return;
+    }
+    editing_polyline_ = false;
+    dragging_polyline_point_ = false;
+    curve_point_drag_changed_ = false;
+    direct_curve_edit_object_id_ = 0;
+    highlighted_polyline_handle_ = false;
+    curve_point_drag_has_plane_ = false;
+    if (document_) {
+        document_->ClearPointSelection();
+    }
+    RestoreDefaultToolCursor();
+    update();
+}
+
 void OpenGLViewport::SetSketchPolylineTool() {
     if (!sketch_active_) {
         return;
@@ -980,15 +1366,59 @@ void OpenGLViewport::BeginSketchConvertLineToArc() {
 }
 
 void OpenGLViewport::BeginSketchFillet(double radius) {
-    if (!document_ || (!sketch_active_ && !document_->GetSelectedSketch())) {
+    if (!document_) {
         return;
     }
-    if (!sketch_active_) {
+    CPolyline* selected_polyline = document_->GetSelectedPolyline();
+    CSmartLine* selected_sketch = document_->GetSelectedSketch();
+    if (!sketch_active_ && selected_sketch) {
         sketch_name_ = QString::fromStdString(document_->GetSelectedSketch()->GetName());
+    } else if (!sketch_active_ && selected_polyline) {
+        sketch_name_ = QString::fromStdString(selected_polyline->GetName());
+        Vec3 forward{};
+        viewport_camera_basis(camera_, forward, sketch_u_, sketch_v_);
+    } else if (!sketch_active_) {
+        sketch_name_ = "Fillets";
+        Vec3 forward{};
+        viewport_camera_basis(camera_, forward, sketch_u_, sketch_v_);
     }
     sketch_fillet_radius_ = radius;
     SetTool(ToolMode::SketchFillet);
-    emit StatusTextChanged(QString("%1: Fillet R=%2. Укажите вершину полилинии").arg(sketch_name_).arg(sketch_fillet_radius_, 0, 'f', 2));
+    emit StatusTextChanged(QString("%1: Fillet R=%2. Укажите вершину кривой").arg(sketch_name_).arg(sketch_fillet_radius_, 0, 'f', 2));
+}
+
+void OpenGLViewport::BeginSketchConstraintHorizontal() {
+    SetTool(ToolMode::SketchConstraintHorizontal);
+    emit StatusTextChanged("Geometry constraint: select a straight segment for Horizontal");
+}
+
+void OpenGLViewport::BeginSketchConstraintVertical() {
+    SetTool(ToolMode::SketchConstraintVertical);
+    emit StatusTextChanged("Geometry constraint: select a straight segment for Vertical");
+}
+
+void OpenGLViewport::BeginSketchConstraintTangentStart() {
+    SetTool(ToolMode::SketchConstraintTangentStart);
+    emit StatusTextChanged("Geometry constraint: select a Bezier curve tangent to the previous segment");
+}
+
+void OpenGLViewport::BeginSketchConstraintTangentEnd() {
+    SetTool(ToolMode::SketchConstraintTangentEnd);
+    emit StatusTextChanged("Geometry constraint: select a Bezier curve tangent to the next segment");
+}
+
+void OpenGLViewport::SetSketchFilletRadius(double radius) {
+    if (radius <= 0.0) {
+        return;
+    }
+    sketch_fillet_radius_ = radius;
+    if (tool_ == ToolMode::SketchFillet) {
+        emit StatusTextChanged(
+            QString("%1: Fillet R=%2. Укажите вершину полилинии")
+                .arg(sketch_name_)
+                .arg(sketch_fillet_radius_, 0, 'f', 2));
+        update();
+    }
 }
 
 void OpenGLViewport::BeginSolidBoxRectangle(SketchPlane plane) {
@@ -1331,6 +1761,7 @@ void OpenGLViewport::SetSolidDimensionEdit(
             }
 
             bool found = false;
+            bool best_is_exact = false;
             double best_screen_length = -1.0;
             CPoint3d best_start{};
             CPoint3d best_end{};
@@ -1340,12 +1771,18 @@ void OpenGLViewport::SetSolidDimensionEdit(
                 if (!solid->GetFaceCenterAndNormal(surface_index, center, normal)) {
                     continue;
                 }
-                normal = normalize(normal);
-                const CPoint3d end(center.x, center.y, center.z);
-                const CPoint3d start(
-                    center.x - normal.x * radius,
-                    center.y - normal.y * radius,
-                    center.z - normal.z * radius);
+                CPoint3d start{};
+                CPoint3d end{};
+                const bool exact = exact_radius_dimension_points(
+                    solid->GetTopoFace(surface_index), start, end);
+                if (!exact) {
+                    normal = normalize(normal);
+                    end = CPoint3d(center.x, center.y, center.z);
+                    start = CPoint3d(
+                        center.x - normal.x * radius,
+                        center.y - normal.y * radius,
+                        center.z - normal.z * radius);
+                }
                 DomPoint start_screen{};
                 DomPoint end_screen{};
                 double screen_length = 0.0;
@@ -1359,8 +1796,11 @@ void OpenGLViewport::SetSolidDimensionEdit(
                         static_cast<double>(end_screen.x - start_screen.x),
                         static_cast<double>(end_screen.y - start_screen.y));
                 }
-                if (!found || screen_length > best_screen_length) {
+                if (!found || (exact && !best_is_exact)
+                    || (exact == best_is_exact
+                        && screen_length > best_screen_length)) {
                     found = true;
+                    best_is_exact = exact;
                     best_screen_length = screen_length;
                     best_start = start;
                     best_end = end;
@@ -1368,8 +1808,8 @@ void OpenGLViewport::SetSolidDimensionEdit(
             }
             if (found) {
                 solid_dimensions_.emplace_back(
-                    best_start,
-                    best_end,
+                    transformed_point(best_start),
+                    transformed_point(best_end),
                     CPoint3d(0.0, 0.0, 1.0),
                     0.0,
                     "radius",
@@ -1436,8 +1876,58 @@ void OpenGLViewport::BeginPickXYPoint() {
     emit StatusTextChanged("Pick Pc: click point on XY plane");
 }
 
-void OpenGLViewport::BeginMovePointToPoint() {
+void OpenGLViewport::BeginPick3DPoint(const QString& prompt) {
+    point_pick_object_id_ = 0;
+    picking_3d_point_ = true;
+    orbiting_ = false;
+    alt_orbiting_ = false;
+    panning_ = false;
+    zooming_ = false;
+    setCursor(Qt::CrossCursor);
+    emit StatusTextChanged(prompt.isEmpty()
+        ? "GetPoint3D: pick a point in the scene"
+        : prompt);
+    setFocus();
+}
+
+void OpenGLViewport::BeginPick3DPointOnObject(
+    unsigned long object_id, const QString& prompt) {
+    BeginPick3DPoint(prompt);
+    point_pick_object_id_ = object_id;
+}
+
+void OpenGLViewport::SetPointPickMarkers(const std::vector<CPoint3d>& points) {
+    point_pick_markers_ = points;
+    update();
+}
+
+void OpenGLViewport::ClearPointPickMarkers() {
+    if (point_pick_markers_.empty()) return;
+    point_pick_markers_.clear();
+    update();
+}
+
+void OpenGLViewport::BeginPickRotationAxis() {
+    picking_rotation_axis_ = true;
+    rotation_axis_hover_valid_ = false;
+    orbiting_ = false;
+    alt_orbiting_ = false;
+    panning_ = false;
+    zooming_ = false;
+    setCursor(Qt::CrossCursor);
+    emit StatusTextChanged(
+        "Rotate: select a coordinate axis, polyline/sketch segment, or straight solid edge");
+    setFocus();
+    update();
+}
+
+void OpenGLViewport::BeginMovePointToPoint(bool repeat) {
+    picking_3d_point_ = false;
     SetTool(ToolMode::MovePointToPoint);
+    move_point_repeat_ = repeat;
+    measurement_visible_ = false;
+    measurement_waiting_for_second_point_ = false;
+    measurement_preview_valid_ = false;
     move_point_stage_ = document_ && document_->HasSelection()
         ? MovePointStage::PickSource
         : MovePointStage::SelectObjects;
@@ -1445,6 +1935,14 @@ void OpenGLViewport::BeginMovePointToPoint() {
     emit StatusTextChanged(move_point_stage_ == MovePointStage::PickSource
         ? "Move Point to Point: pick source point"
         : "Move Point to Point: select object(s), then press Enter");
+}
+
+void OpenGLViewport::BeginMeasurePointToPoint() {
+    SetTool(ToolMode::MeasurePointToPoint);
+    measurement_waiting_for_second_point_ = false;
+    measurement_preview_valid_ = false;
+    setCursor(Qt::CrossCursor);
+    emit StatusTextChanged("Point-to-Point Dimension: pick first point");
 }
 
 void OpenGLViewport::EndSketch() {
@@ -1486,12 +1984,17 @@ void OpenGLViewport::paintGL() {
         return;
     }
    UpdateFPS();
-    renderer_.Render(*document_, camera_, orthographic_projection_, show_coordinate_axes_, show_floor_grid_, xy_plane_view_enabled_, tool_, transform_operation_, highlighted_transform_axis_, highlighted_draft_face_gizmo_, width(), height());
+    renderer_.Render(*document_, camera_, orthographic_projection_, show_coordinate_axes_, show_floor_grid_, xy_plane_view_enabled_, grid_size_, grid_step_, grid_subdivisions_, tool_, transform_operation_, highlighted_transform_axis_, transform_dialog_rotation_angle_degrees_, transform_dialog_rotation_axis_, highlighted_draft_face_gizmo_, width(), height());
+    DrawHoveredSolidEdge();
+    DrawRotationAxisPickPreview();
     if (show_coordinate_axes_) {
         DrawCoordinateAxisLabels();
     }
     if ((tool_ == ToolMode::DrawCurve || tool_ == ToolMode::DrawBSpline) && curve_preview_valid_) {
         DrawCurveRubberBand();
+    }
+    if (tool_ == ToolMode::DrawSpline && drawing_spline_stroke_) {
+        DrawSplinePreview();
     }
     if ((tool_ == ToolMode::SketchRectangle || tool_ == ToolMode::SolidBoxRectangle)
         && sketch_rectangle_has_first_point_
@@ -1503,13 +2006,19 @@ void OpenGLViewport::paintGL() {
         && sketch_rectangle_preview_valid_) {
         DrawSolidCylinderCirclePreview();
     }
+    if (tool_ == ToolMode::SketchFillet && sketch_fillet_preview_valid_) {
+        DrawSketchFilletRadiusPreview();
+    }
     if (tool_ == ToolMode::SketchPolyline && !sketch_polyline_points_.empty()) {
         DrawSketchPolylinePreview();
     }
     if (tool_ == ToolMode::SketchBezier && !sketch_bezier_points_.empty()) {
         DrawSketchBezierPreview();
     }
-    if (tool_ == ToolMode::EditPoint && document_) {
+    if ((tool_ == ToolMode::EditPoint
+         || selection_mode_ == SelectionMode::Point
+         || (tool_ == ToolMode::Select && editing_polyline_))
+        && document_) {
         DrawSelectedCurvePointHandles();
     }
     if (tool_ == ToolMode::Select && editing_sketch_ && document_) {
@@ -1527,6 +2036,17 @@ void OpenGLViewport::paintGL() {
     if (!solid_dimension_object_.tool_id.empty()) {
         DrawSolidDimensions();
     }
+    if (measurement_visible_
+        || (tool_ == ToolMode::MeasurePointToPoint
+            && measurement_waiting_for_second_point_)
+        || (tool_ == ToolMode::MovePointToPoint
+            && move_point_stage_ == MovePointStage::PickTarget
+            && measurement_waiting_for_second_point_)) {
+        DrawPointToPointMeasurement();
+    }
+    if (!point_pick_markers_.empty()) {
+        DrawPointPickMarkers();
+    }
     if (material_drag_active_) {
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing, true);
@@ -1542,6 +2062,19 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
 
     if (event->button() == Qt::MiddleButton) {
         panning_ = true;
+        return;
+    }
+
+    // Pen tablets generally have no middle mouse button. Match classic
+    // Dom-3D navigation: Ctrl + left drag pans the scene and must take
+    // precedence over selection and the active modeling tool.
+    if (event->button() == Qt::LeftButton
+        && event->modifiers().testFlag(Qt::ControlModifier)) {
+        panning_ = true;
+        orbiting_ = false;
+        alt_orbiting_ = false;
+        zooming_ = false;
+        event->accept();
         return;
     }
 
@@ -1571,6 +2104,8 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
 
     if (event->button() == Qt::RightButton) {
         zooming_ = true;
+        right_button_press_ = event->pos();
+        right_button_dragged_ = false;
         orbiting_ = false;
         alt_orbiting_ = false;
         panning_ = false;
@@ -1582,6 +2117,26 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
         return;
     }
 
+    if (picking_rotation_axis_) {
+        Vec3 axis_start{};
+        Vec3 axis_end{};
+        if (HitTestRotationAxisLine(event->pos(), axis_start, axis_end)) {
+            picking_rotation_axis_ = false;
+            rotation_axis_hover_valid_ = false;
+            RestoreDefaultToolCursor();
+            emit RotationAxisPicked(
+                CPoint3d(axis_start.x, axis_start.y, axis_start.z),
+                CPoint3d(axis_end.x, axis_end.y, axis_end.z));
+            emit StatusTextChanged("Rotate: rotation axis selected");
+            update();
+        } else {
+            emit StatusTextChanged(
+                "Rotate: point to a coordinate axis, straight segment, or straight edge");
+        }
+        event->accept();
+        return;
+    }
+
     if (tool_ == ToolMode::ZoomRect) {
         zoom_rect_active_ = true;
         zoom_rect_start_ = event->pos();
@@ -1590,7 +2145,7 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
         return;
     }
 
-    if ((tool_ == ToolMode::Select || tool_ == ToolMode::Orbit)
+    if ((tool_ == ToolMode::Select || tool_ == ToolMode::Orbit || tool_ == ToolMode::SolidFillet)
         && !solid_dimension_object_.tool_id.empty()) {
         const SolidDimensionHit* best_hit = nullptr;
         float best_distance = std::numeric_limits<float>::max();
@@ -1705,11 +2260,30 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
         }
     }
 
+    if (picking_3d_point_) {
+        CPoint3d picked{};
+        if (PickModelingPoint(event->pos(), picked)) {
+            picking_3d_point_ = false;
+            RestoreDefaultToolCursor();
+            // Publish coordinates first. A command handling the point can
+            // then replace this with its next-step or result message.
+            emit StatusTextChanged(QString("Point: X %1, Y %2, Z %3")
+                .arg(picked.x, 0, 'f', 3)
+                .arg(picked.y, 0, 'f', 3)
+                .arg(picked.z, 0, 'f', 3));
+            emit Point3DPicked(picked);
+        } else {
+            emit StatusTextChanged("GetPoint3D: move the cursor to a visible vertex or curve point");
+        }
+        event->accept();
+        return;
+    }
+
     if (picking_xy_point_) {
         CPoint3d point{};
         if (ScreenToWorldPlane(event->pos(), {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, point)) {
             picking_xy_point_ = false;
-            unsetCursor();
+            RestoreDefaultToolCursor();
             emit XYPointPicked(point);
             emit StatusTextChanged(QString("Pc picked: X %1, Y %2, Z %3")
                 .arg(point.x, 0, 'f', 6)
@@ -1751,7 +2325,7 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
         }
 
         material_interaction_mode_ = MaterialInteractionMode::None;
-        unsetCursor();
+        RestoreDefaultToolCursor();
         update();
         return;
     }
@@ -1769,16 +2343,18 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
     if (event->button() == Qt::LeftButton
         && !event->modifiers().testFlag(Qt::ShiftModifier)
         && !event->modifiers().testFlag(Qt::ControlModifier)
-        && (tool_ == ToolMode::Select || tool_ == ToolMode::Orbit)) {
+        && (tool_ == ToolMode::Select || tool_ == ToolMode::Orbit)
+        && selection_mode_ == SelectionMode::Object) {
         if (CAlfaObject* object = FindObjectForMaterialAt(event->pos())) {
             const std::string& name = object->GetName();
             const bool furniture_handle =
                 name.find("Desk Drawer Handle") != std::string::npos
                 || (name.rfind("Drawer ", 0) == 0
                     && name.find(" Handle") != std::string::npos);
-            const bool cabinet_facade = name.find("Cabinet") != std::string::npos
-                && name.find("Facade") != std::string::npos;
-            if (furniture_handle || cabinet_facade) {
+            const bool cabinet_handle = name.find("Cabinet") != std::string::npos
+                && name.find("Facade") != std::string::npos
+                && name.find("Handle") != std::string::npos;
+            if (furniture_handle || cabinet_handle) {
                 emit FurnitureInteractionRequested(object->m_id);
                 event->accept();
                 return;
@@ -1793,6 +2369,12 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
 
     if (tool_ == ToolMode::DrawBSpline) {
         DrawBSplineAt(event->pos());
+        return;
+    }
+
+    if (tool_ == ToolMode::DrawSpline) {
+        BeginDrawSplineStroke(event->pos());
+        event->accept();
         return;
     }
 
@@ -1830,6 +2412,14 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
 
     if (tool_ == ToolMode::SketchFillet) {
         HandleSketchFilletClick(event->pos());
+        return;
+    }
+
+    if (tool_ == ToolMode::SketchConstraintHorizontal
+        || tool_ == ToolMode::SketchConstraintVertical
+        || tool_ == ToolMode::SketchConstraintTangentStart
+        || tool_ == ToolMode::SketchConstraintTangentEnd) {
+        HandleSketchConstraintClick(event->pos());
         return;
     }
 
@@ -1878,12 +2468,25 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
     }
 
     if (tool_ == ToolMode::Transform) {
+        if (transform_operation_ == TransformOperation::Rotate
+            && dot(transform_dialog_rotation_axis_,
+                   transform_dialog_rotation_axis_) > 0.000001f
+            && !xy_plane_view_enabled_
+            && !sketch_active_) {
+            orbiting_ = true;
+            return;
+        }
         HandleTransformClick(event->pos(), event->modifiers().testFlag(Qt::ControlModifier));
         return;
     }
 
     if (tool_ == ToolMode::MovePointToPoint) {
         HandleMovePointToPointClick(event->pos());
+        return;
+    }
+
+    if (tool_ == ToolMode::MeasurePointToPoint) {
+        HandleMeasurePointToPointClick(event->pos());
         return;
     }
 
@@ -1895,6 +2498,7 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
                 active_sketch_handle_kind_ = kind;
                 active_sketch_handle_index_ = index;
                 dragging_sketch_handle_ = true;
+                sketch_drag_changed_ = false;
                 last_mouse_ = event->pos();
                 setCursor(Qt::ClosedHandCursor);
                 update();
@@ -1940,21 +2544,283 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
 }
 
 void OpenGLViewport::mouseDoubleClickEvent(QMouseEvent* event) {
-    if (!document_ || (tool_ != ToolMode::Select && tool_ != ToolMode::Orbit)
+    const bool direct_curve_edit_tool = tool_ == ToolMode::Select
+        || tool_ == ToolMode::Orbit
+        || tool_ == ToolMode::DrawSpline;
+    if (!document_ || !direct_curve_edit_tool
         || event->button() != Qt::LeftButton) {
         QOpenGLWidget::mouseDoubleClickEvent(event);
         return;
     }
+
+    // The second press of a Qt double-click reaches mousePressEvent first.
+    // Cancel the selection/orbit gesture it may have started, otherwise the
+    // following release would replace the point selection we establish here.
+    selecting_with_rect_ = false;
+    orbiting_ = false;
+    alt_orbiting_ = false;
 
     const DomPoint screen_point{event->pos().x(), event->pos().y()};
     auto world_to_screen = [this](Vec3 world, DomPoint& screen) {
         return renderer_.WorldToScreen(world, camera_, orthographic_projection_, width(), height(), screen);
     };
 
-    if (tool_ == ToolMode::Select
-        && document_->SelectPolylineAtScreen(screen_point, world_to_screen, 8.0f, SelectionAction::Replace)) {
+    if (tool_ == ToolMode::Select && editing_sketch_) {
+        CSmartLine* sketch = document_->GetSelectedSketch();
+        if (sketch) {
+            double best_distance = 10.0;
+            double best_parameter = 0.0;
+            std::size_t best_line = sketch->GetNumLines();
+            const auto consider_screen_segment = [&](std::size_t line_index,
+                                                       DomPoint start_screen,
+                                                       DomPoint end_screen,
+                                                       double start_parameter,
+                                                       double end_parameter) {
+                const double dx = static_cast<double>(
+                    end_screen.x - start_screen.x);
+                const double dy = static_cast<double>(
+                    end_screen.y - start_screen.y);
+                const double length_squared = dx * dx + dy * dy;
+                if (length_squared <= 1.0e-9) {
+                    return;
+                }
+                const double segment_parameter = std::clamp(
+                    ((screen_point.x - start_screen.x) * dx
+                     + (screen_point.y - start_screen.y) * dy)
+                        / length_squared,
+                    0.0,
+                    1.0);
+                const double offset_x = screen_point.x
+                    - (start_screen.x + segment_parameter * dx);
+                const double offset_y = screen_point.y
+                    - (start_screen.y + segment_parameter * dy);
+                const double distance = std::hypot(offset_x, offset_y);
+                if (distance < best_distance) {
+                    best_distance = distance;
+                    best_parameter = start_parameter
+                        + (end_parameter - start_parameter)
+                            * segment_parameter;
+                    best_line = line_index;
+                }
+            };
+            for (std::size_t line_index = 0;
+                 line_index < sketch->GetNumLines(); ++line_index) {
+                const CLinkLine* line = sketch->GetLine(line_index);
+                if (!line) {
+                    continue;
+                }
+                if (line->GetType() == LinkLineType::Bezier) {
+                    constexpr int samples = 48;
+                    DomPoint previous_screen{};
+                    if (!world_to_screen(
+                            point_to_vec3(sketch->LocalToWorld(
+                                line->GetPoint(0.0))),
+                            previous_screen)) {
+                        continue;
+                    }
+                    for (int sample = 1; sample <= samples; ++sample) {
+                        const double parameter =
+                            static_cast<double>(sample) / samples;
+                        DomPoint current_screen{};
+                        if (!world_to_screen(
+                                point_to_vec3(sketch->LocalToWorld(
+                                    line->GetPoint(parameter))),
+                                current_screen)) {
+                            break;
+                        }
+                        consider_screen_segment(
+                            line_index, previous_screen, current_screen,
+                            static_cast<double>(sample - 1) / samples,
+                            parameter);
+                        previous_screen = current_screen;
+                    }
+                    continue;
+                }
+                if (line->GetType() != LinkLineType::Segment
+                    && line->GetType() != LinkLineType::Horizontal
+                    && line->GetType() != LinkLineType::Vertical) {
+                    continue;
+                }
+                DomPoint start_screen{};
+                DomPoint end_screen{};
+                if (!world_to_screen(
+                        point_to_vec3(sketch->LocalToWorld(line->GetStart())),
+                        start_screen)
+                    || !world_to_screen(
+                        point_to_vec3(sketch->LocalToWorld(line->GetEnd())),
+                        end_screen)) {
+                    continue;
+                }
+                consider_screen_segment(
+                    line_index, start_screen, end_screen, 0.0, 1.0);
+            }
+            if (best_line < sketch->GetNumLines()) {
+                const CLinkLine* selected_line = sketch->GetLine(best_line);
+                const auto* selected_bezier =
+                    dynamic_cast<const CBezierSpline*>(selected_line);
+                if (selected_bezier) {
+                    const SketchCoordinateSystem& system =
+                        sketch->GetCoordinateSystem();
+                    CPoint3d clicked_world{};
+                    if (ScreenToWorldPlane(
+                            event->pos(),
+                            point_to_vec3(system.origin),
+                            point_to_vec3(system.normal),
+                            clicked_world)) {
+                        CPoint3d clicked_local =
+                            sketch->WorldToLocal(clicked_world);
+                        clicked_local.z = 0.0;
+                        best_parameter = selected_bezier->GetNearestParameter(
+                            clicked_local);
+                    }
+                }
+                if (best_parameter <= 0.02 || best_parameter >= 0.98) {
+                    emit StatusTextChanged(
+                        "Sketch edit: double-click farther from an existing node");
+                } else if ((selected_bezier
+                                && sketch->SplitBezierLine(
+                                    best_line, best_parameter))
+                           || (!selected_bezier
+                               && sketch->SplitLine(
+                                   best_line,
+                                   selected_line->GetPoint(
+                                       best_parameter)))) {
+                    emit DocumentChanged();
+                    emit SelectionChanged();
+                    emit StatusTextChanged(selected_bezier
+                        ? "Sketch edit: node inserted; Bezier split without changing its shape"
+                        : "Sketch edit: node inserted; LinkLine split into two segments");
+                }
+                highlighted_sketch_handle_kind_ = SketchHandleKind::None;
+                update();
+                event->accept();
+                return;
+            }
+        }
+    }
+
+    if (tool_ == ToolMode::Select && editing_polyline_
+        && document_->GetSelectedObject()
+        && document_->GetSelectedObject()->m_id == direct_curve_edit_object_id_) {
+        CAlfaObject* selected_curve = document_->GetSelectedObject();
+        double best_distance = 10.0;
+        double best_parameter = 0.0;
+        size_t best_segment = 0;
+        CPoint3d best_point{};
+        bool found = false;
+        const auto consider_segment = [&](DomPoint start_screen,
+                                          DomPoint end_screen,
+                                          CPoint3d start_world,
+                                          CPoint3d end_world,
+                                          double start_parameter,
+                                          double end_parameter,
+                                          size_t segment) {
+            const double dx = static_cast<double>(end_screen.x - start_screen.x);
+            const double dy = static_cast<double>(end_screen.y - start_screen.y);
+            const double length_squared = dx * dx + dy * dy;
+            if (length_squared <= 1.0e-9) return;
+            const double local = std::clamp(
+                ((screen_point.x - start_screen.x) * dx
+                 + (screen_point.y - start_screen.y) * dy) / length_squared,
+                0.0, 1.0);
+            const double offset_x = screen_point.x
+                - (start_screen.x + local * dx);
+            const double offset_y = screen_point.y
+                - (start_screen.y + local * dy);
+            const double distance = std::hypot(offset_x, offset_y);
+            if (distance >= best_distance) return;
+            best_distance = distance;
+            best_parameter = start_parameter
+                + (end_parameter - start_parameter) * local;
+            best_segment = segment;
+            best_point = CPoint3d(
+                start_world.x + (end_world.x - start_world.x) * local,
+                start_world.y + (end_world.y - start_world.y) * local,
+                start_world.z + (end_world.z - start_world.z) * local);
+            found = true;
+        };
+
+        if (const auto* polyline = dynamic_cast<const CPolyline*>(selected_curve)) {
+            const auto& points = polyline->GetPoints();
+            const size_t segment_count = points.size() >= 2
+                ? points.size() - 1 + (polyline->IsClosed() ? 1 : 0) : 0;
+            for (size_t segment = 0; segment < segment_count; ++segment) {
+                const size_t next = (segment + 1) % points.size();
+                DomPoint start_screen{};
+                DomPoint end_screen{};
+                if (!world_to_screen(point_to_vec3(points[segment]), start_screen)
+                    || !world_to_screen(point_to_vec3(points[next]), end_screen)) {
+                    continue;
+                }
+                consider_segment(start_screen, end_screen,
+                                 points[segment], points[next],
+                                 static_cast<double>(segment) / segment_count,
+                                 static_cast<double>(segment + 1) / segment_count,
+                                 segment);
+            }
+        } else if (const auto* spline = dynamic_cast<const CBSpline*>(selected_curve)) {
+            const int samples = std::max(
+                96, static_cast<int>(spline->GetPointCount()) * 32);
+            CPoint3d previous_world = spline->Evaluate(0.0f);
+            DomPoint previous_screen{};
+            bool previous_valid = world_to_screen(
+                point_to_vec3(previous_world), previous_screen);
+            for (int sample = 1; sample <= samples; ++sample) {
+                const double parameter = static_cast<double>(sample) / samples;
+                const CPoint3d current_world = spline->Evaluate(
+                    static_cast<float>(parameter));
+                DomPoint current_screen{};
+                const bool current_valid = world_to_screen(
+                    point_to_vec3(current_world), current_screen);
+                if (previous_valid && current_valid) {
+                    consider_segment(
+                        previous_screen, current_screen,
+                        previous_world, current_world,
+                        static_cast<double>(sample - 1) / samples,
+                        parameter, static_cast<size_t>(sample - 1));
+                }
+                previous_world = current_world;
+                previous_screen = current_screen;
+                previous_valid = current_valid;
+            }
+        }
+
+        bool inserted = false;
+        if (found) {
+            if (auto* polyline = dynamic_cast<CPolyline*>(selected_curve)) {
+                inserted = polyline->InsertPoint(best_segment + 1, best_point);
+            } else if (auto* spline = dynamic_cast<CBSpline*>(selected_curve)) {
+                inserted = spline->InsertShapePreservingPoint(best_parameter);
+            }
+        }
+        if (inserted) {
+            document_->SelectAllPointsOfSelectedCurve();
+            emit DocumentChanged();
+            emit SelectionChanged();
+            emit StatusTextChanged(
+                "Curve edit: node inserted; drag any green node");
+            update();
+            event->accept();
+            return;
+        }
+    }
+
+    if (document_->SelectPolylineAtScreen(
+            screen_point, world_to_screen, 8.0f,
+            SelectionAction::Replace)) {
+        if (tool_ != ToolMode::Select) {
+            SetTool(ToolMode::Select);
+        }
         editing_sketch_ = document_->GetSelectedSketch() != nullptr;
         editing_polyline_ = !editing_sketch_;
+        if (editing_polyline_) {
+            document_->SelectAllPointsOfSelectedCurve();
+            if (const CAlfaObject* curve = document_->GetSelectedObject()) {
+                direct_curve_edit_object_id_ = curve->m_id;
+            }
+        } else {
+            direct_curve_edit_object_id_ = 0;
+        }
         highlighted_polyline_handle_ = false;
         highlighted_sketch_handle_kind_ = SketchHandleKind::None;
         emit SelectionChanged();
@@ -1997,8 +2863,27 @@ void OpenGLViewport::mouseDoubleClickEvent(QMouseEvent* event) {
 void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
     const QPoint delta = event->pos() - last_mouse_;
 
+    if (tool_ == ToolMode::DrawSpline
+        && drawing_spline_stroke_
+        && event->buttons().testFlag(Qt::LeftButton)) {
+        AppendDrawSplineStroke(event->pos());
+        last_mouse_ = event->pos();
+        event->accept();
+        return;
+    }
+
+    if (tool_ == ToolMode::Select
+        && selection_mode_ == SelectionMode::Edge
+        && event->buttons() == Qt::NoButton
+        && !editing_polyline_
+        && !editing_sketch_) {
+        UpdateHoveredSolidEdge(event->pos());
+    } else {
+        ClearHoveredSolidEdge();
+    }
+
     if (dragging_solid_dimension_grip_
-        && (tool_ == ToolMode::Select || tool_ == ToolMode::Orbit)
+        && (tool_ == ToolMode::Select || tool_ == ToolMode::Orbit || tool_ == ToolMode::SolidFillet)
         && !active_solid_dimension_grip_.isEmpty()) {
         const QPointF mouse_delta = event->pos() - solid_dimension_drag_start_mouse_;
         const double projected_pixels =
@@ -2028,7 +2913,7 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
         return;
     }
 
-    if ((tool_ == ToolMode::Select || tool_ == ToolMode::Orbit)
+    if ((tool_ == ToolMode::Select || tool_ == ToolMode::Orbit || tool_ == ToolMode::SolidFillet)
         && !solid_dimension_object_.tool_id.empty()) {
         QString hovered_grip;
         int hovered_operation_index = -1;
@@ -2047,7 +2932,7 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
             highlighted_solid_dimension_grip_ = hovered_grip;
             highlighted_solid_dimension_operation_index_ = hovered_operation_index;
             if (hovered_grip.isEmpty()) {
-                unsetCursor();
+                RestoreDefaultToolCursor();
             } else {
                 setCursor(Qt::OpenHandCursor);
             }
@@ -2085,7 +2970,7 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
                     changed = sketch->MoveArcGripWorld(active_sketch_handle_index_, point);
                 }
                 if (changed) {
-                    emit DocumentChanged();
+                    sketch_drag_changed_ = true;
                     update();
                 }
             }
@@ -2094,7 +2979,35 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
         return;
     }
 
-    if ((tool_ == ToolMode::DrawCurve || tool_ == ToolMode::DrawBSpline)
+    if (picking_rotation_axis_ && document_) {
+        Vec3 axis_start{};
+        Vec3 axis_end{};
+        const bool found = HitTestRotationAxisLine(
+            event->pos(), axis_start, axis_end);
+        if (found != rotation_axis_hover_valid_
+            || (found
+                && (dot(axis_start - rotation_axis_hover_start_,
+                        axis_start - rotation_axis_hover_start_) > 0.000001f
+                    || dot(axis_end - rotation_axis_hover_end_,
+                           axis_end - rotation_axis_hover_end_) > 0.000001f))) {
+            rotation_axis_hover_valid_ = found;
+            if (found) {
+                rotation_axis_hover_start_ = axis_start;
+                rotation_axis_hover_end_ = axis_end;
+                setCursor(Qt::PointingHandCursor);
+            } else {
+                setCursor(Qt::CrossCursor);
+            }
+            update();
+        }
+    } else if (picking_3d_point_ && document_) {
+        CPoint3d snapped_point{};
+        // PickModelingPoint also projects a free point onto the working/view
+        // plane.  Only a real snap should show the circular capture cursor;
+        // free point placement keeps the crosshair.
+        SetCreationSnapCursor(
+            SnapCreationPoint(event->pos(), snapped_point, false));
+    } else if ((tool_ == ToolMode::DrawCurve || tool_ == ToolMode::DrawBSpline)
         && document_) {
         CPoint3d snap_point{};
         const bool valid = ScreenToCurvePlane(event->pos(), snap_point);
@@ -2121,6 +3034,28 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
             snapped = true;
         }
         SetCreationSnapCursor(snapped);
+    }
+
+    if ((tool_ == ToolMode::MeasurePointToPoint
+         || (tool_ == ToolMode::MovePointToPoint
+             && move_point_stage_ != MovePointStage::SelectObjects))
+        && document_) {
+        CPoint3d snapped_point{};
+        const bool snapped = PickModelingPoint(
+            event->pos(), snapped_point);
+        SetCreationSnapCursor(snapped);
+        if (measurement_waiting_for_second_point_
+            && (snapped != measurement_preview_valid_
+                || (snapped
+                    && (std::fabs(snapped_point.x - measurement_preview_.x) > 0.0001
+                        || std::fabs(snapped_point.y - measurement_preview_.y) > 0.0001
+                        || std::fabs(snapped_point.z - measurement_preview_.z) > 0.0001)))) {
+            measurement_preview_valid_ = snapped;
+            if (snapped) {
+                measurement_preview_ = snapped_point;
+            }
+            update();
+        }
     }
 
     if ((tool_ == ToolMode::DrawCurve || tool_ == ToolMode::DrawBSpline) && document_) {
@@ -2203,6 +3138,8 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
     }
 
     if (tool_ == ToolMode::SketchFillet && document_) {
+        CPoint3d preview_center{};
+        const bool preview_valid = ScreenToSketchPlane(event->pos(), preview_center);
         const DomPoint screen_point{event->pos().x(), event->pos().y()};
         auto world_to_screen = [this](Vec3 world, DomPoint& screen) {
             return renderer_.WorldToScreen(world, camera_, orthographic_projection_, width(), height(), screen);
@@ -2210,6 +3147,15 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
         size_t object_index = 0;
         size_t point_index = 0;
         const bool hovered = document_->FindPolylinePointAtScreen(screen_point, world_to_screen, 40.0f, object_index, point_index);
+        const bool preview_changed = preview_valid != sketch_fillet_preview_valid_
+            || (preview_valid
+                && (std::fabs(preview_center.x - sketch_fillet_preview_center_.x) > 0.0001
+                    || std::fabs(preview_center.y - sketch_fillet_preview_center_.y) > 0.0001
+                    || std::fabs(preview_center.z - sketch_fillet_preview_center_.z) > 0.0001));
+        if (preview_changed) {
+            sketch_fillet_preview_valid_ = preview_valid;
+            sketch_fillet_preview_center_ = preview_center;
+        }
         if (hovered != highlighted_sketch_fillet_point_) {
             highlighted_sketch_fillet_point_ = hovered;
             if (hovered) {
@@ -2217,6 +3163,9 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
             } else {
                 setCursor(Qt::CrossCursor);
             }
+        }
+        if (preview_changed) {
+            update();
         }
     }
 
@@ -2245,7 +3194,7 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
                 : document_->MoveSelectedPoint(point);
             if (moved) {
                 curve_point_drag_last_ = point;
-                emit DocumentChanged();
+                curve_point_drag_changed_ = true;
                 update();
             }
         }
@@ -2304,7 +3253,7 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
             if (hovered) {
                 setCursor(Qt::CrossCursor);
             } else if (material_interaction_mode_ == MaterialInteractionMode::None) {
-                unsetCursor();
+                RestoreDefaultToolCursor();
             }
             update();
         }
@@ -2320,7 +3269,7 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
             if (kind != SketchHandleKind::None) {
                 setCursor(Qt::OpenHandCursor);
             } else if (material_interaction_mode_ == MaterialInteractionMode::None) {
-                unsetCursor();
+                RestoreDefaultToolCursor();
             }
             update();
         }
@@ -2331,6 +3280,29 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
         if (hovered != highlighted_draft_face_gizmo_) {
             highlighted_draft_face_gizmo_ = hovered;
             update();
+        }
+    }
+
+    if ((tool_ == ToolMode::Select || tool_ == ToolMode::Orbit)
+        && selection_mode_ == SelectionMode::Object
+        && event->buttons() == Qt::NoButton
+        && material_interaction_mode_ == MaterialInteractionMode::None
+        && !editing_polyline_
+        && !editing_sketch_
+        && !dragging_solid_dimension_grip_
+        && highlighted_solid_dimension_grip_.isEmpty()) {
+        const CAlfaObject* hovered_object = FindObjectForMaterialAt(event->pos());
+        const bool hovering_handle = hovered_object
+            && hovered_object->GetName().find("Handle") != std::string::npos
+            && (hovered_object->GetName().find("Cabinet") != std::string::npos
+                || hovered_object->GetName().find("Drawer") != std::string::npos);
+        if (hovering_handle != hovering_furniture_handle_) {
+            hovering_furniture_handle_ = hovering_handle;
+            if (hovering_handle) {
+                setCursor(Qt::PointingHandCursor);
+            } else {
+                RestoreDefaultToolCursor();
+            }
         }
     }
 
@@ -2374,6 +3346,14 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
     }
 
     if (zooming_) {
+        const QPoint total_delta = event->pos() - right_button_press_;
+        if (!right_button_dragged_
+            && total_delta.x() * total_delta.x() + total_delta.y() * total_delta.y() > 6 * 6) {
+            right_button_dragged_ = true;
+        }
+        if (!right_button_dragged_) {
+            return;
+        }
         const float zoom_factor = std::pow(1.01f, -static_cast<float>(delta.y()));
         camera_.distance *= zoom_factor;
         camera_.distance = std::clamp(
@@ -2384,6 +3364,17 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
 }
 
 void OpenGLViewport::mouseReleaseEvent(QMouseEvent* event) {
+    if (event->button() == Qt::RightButton && zooming_) {
+        const bool show_popup = !right_button_dragged_;
+        zooming_ = false;
+        right_button_dragged_ = false;
+        if (show_popup) {
+            emit ViewportPopupMenuRequested(mapToGlobal(event->pos()));
+        }
+        event->accept();
+        return;
+    }
+
     if (event->button() == Qt::LeftButton
         && dragging_solid_dimension_grip_) {
         dragging_solid_dimension_grip_ = false;
@@ -2394,11 +3385,22 @@ void OpenGLViewport::mouseReleaseEvent(QMouseEvent* event) {
             true);
         active_solid_dimension_grip_.clear();
         active_solid_dimension_operation_index_ = -1;
-        setCursor(highlighted_solid_dimension_grip_.isEmpty()
-            ? Qt::ArrowCursor
-            : Qt::OpenHandCursor);
+        if (highlighted_solid_dimension_grip_.isEmpty()) {
+            RestoreDefaultToolCursor();
+        } else {
+            setCursor(Qt::OpenHandCursor);
+        }
         emit DocumentChanged();
         update();
+        event->accept();
+        return;
+    }
+
+    if (event->button() == Qt::LeftButton
+        && tool_ == ToolMode::DrawSpline
+        && drawing_spline_stroke_) {
+        AppendDrawSplineStroke(event->pos());
+        FinishDrawSplineStroke();
         event->accept();
         return;
     }
@@ -2468,18 +3470,20 @@ void OpenGLViewport::mouseReleaseEvent(QMouseEvent* event) {
                 || (requested_mode == SelectionMode::Face
                     && document_->HasSelectedSolidFace())
                 || (requested_mode == SelectionMode::Object
-                    && document_->HasSelection()));
+                    && document_->HasSelection()
+                    && !document_->GetSelectedSketch()));
         if (select_click_completed && quick_menu_available) {
             edge_quick_menu_anchor_ = event->pos();
             const unsigned int generation = edge_quick_menu_generation_;
-            QTimer::singleShot(550, this, [this, generation, requested_mode]() {
+            QTimer::singleShot(1000, this, [this, generation, requested_mode]() {
                 const bool selection_is_still_valid = document_
                     && ((requested_mode == SelectionMode::Edge
                          && document_->HasSelectedSolidEdge())
                         || (requested_mode == SelectionMode::Face
                             && document_->HasSelectedSolidFace())
                         || (requested_mode == SelectionMode::Object
-                            && document_->HasSelection()));
+                            && document_->HasSelection()
+                            && !document_->GetSelectedSketch()));
                 if (generation != edge_quick_menu_generation_
                     || tool_ != ToolMode::Select
                     || selection_mode_ != requested_mode
@@ -2488,7 +3492,7 @@ void OpenGLViewport::mouseReleaseEvent(QMouseEvent* event) {
                 }
                 const QPoint cursor_position = mapFromGlobal(QCursor::pos());
                 const QPoint delta = cursor_position - edge_quick_menu_anchor_;
-                if (delta.x() * delta.x() + delta.y() * delta.y() > 18 * 18) {
+                if (delta.x() * delta.x() + delta.y() * delta.y() >= 7 * 7) {
                     return;
                 }
                 const QPoint menu_position =
@@ -2528,8 +3532,14 @@ void OpenGLViewport::mouseReleaseEvent(QMouseEvent* event) {
     if (dragging_transform_ && tool_ == ToolMode::Transform) {
         CommitTransformDrag();
     }
+    const bool commit_curve_point_drag = event->button() == Qt::LeftButton
+        && dragging_polyline_point_ && curve_point_drag_changed_;
+    const bool commit_sketch_drag = event->button() == Qt::LeftButton
+        && dragging_sketch_handle_ && sketch_drag_changed_;
     dragging_polyline_point_ = false;
+    curve_point_drag_changed_ = false;
     dragging_sketch_handle_ = false;
+    sketch_drag_changed_ = false;
     creation_snap_active_ = false;
     active_sketch_handle_kind_ = SketchHandleKind::None;
     curve_point_drag_has_plane_ = false;
@@ -2549,26 +3559,61 @@ void OpenGLViewport::mouseReleaseEvent(QMouseEvent* event) {
     transform_drag_rotation_angle_ = 0.0f;
     transform_drag_scale_factor_ = 1.0f;
     active_transform_axis_ = TransformAxis::None;
-    highlighted_transform_axis_ = TransformAxis::None;
-    if (material_interaction_mode_ == MaterialInteractionMode::None) {
-        if (tool_ == ToolMode::DrawCurve || tool_ == ToolMode::DrawBSpline || tool_ == ToolMode::EditPoint || tool_ == ToolMode::ZoomRect) {
-            setCursor(Qt::CrossCursor);
-        } else if (tool_ == ToolMode::SketchRectangle
-                   || tool_ == ToolMode::SketchPolyline
-                   || tool_ == ToolMode::SketchBezier
-                   || tool_ == ToolMode::SketchConvertBezier
-                   || tool_ == ToolMode::SketchConvertArc
-                   || tool_ == ToolMode::SolidBoxRectangle
-                   || tool_ == ToolMode::SolidCylinderCircle) {
-            setCursor(Qt::CrossCursor);
-        } else {
-            unsetCursor();
-        }
+    if (commit_sketch_drag) {
+        emit DocumentChanged();
+        emit StatusTextChanged(
+            "Sketch edit: profile updated; dependent objects rebuilt");
     }
+    if (commit_curve_point_drag) {
+        emit DocumentChanged();
+        emit StatusTextChanged("Curve edit: node moved");
+    }
+    highlighted_transform_axis_ = TransformAxis::None;
+    RestoreDefaultToolCursor();
     update();
 }
 
 void OpenGLViewport::keyPressEvent(QKeyEvent* event) {
+    if (event->key() == Qt::Key_C && picking_3d_point_) {
+        picking_3d_point_ = false;
+        RestoreDefaultToolCursor();
+        emit Point3DPickCloseRequested();
+        event->accept();
+        return;
+    }
+    if ((event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter)
+        && picking_3d_point_) {
+        picking_3d_point_ = false;
+        RestoreDefaultToolCursor();
+        emit Point3DPickFinished();
+        event->accept();
+        return;
+    }
+    if (event->key() == Qt::Key_Escape && picking_rotation_axis_) {
+        picking_rotation_axis_ = false;
+        rotation_axis_hover_valid_ = false;
+        RestoreDefaultToolCursor();
+        emit RotationAxisPickCanceled();
+        emit StatusTextChanged("Rotate canceled");
+        update();
+        event->accept();
+        return;
+    }
+    if (event->key() == Qt::Key_Escape && picking_3d_point_) {
+        picking_3d_point_ = false;
+        RestoreDefaultToolCursor();
+        emit Point3DPickCanceled();
+        emit StatusTextChanged("GetPoint3D canceled");
+        event->accept();
+        return;
+    }
+    if (event->key() == Qt::Key_Escape && tool_ == ToolMode::SketchFillet) {
+        SetTool(ToolMode::Select);
+        emit StatusTextChanged("Sketch Fillet canceled. Select tool is active");
+        event->accept();
+        return;
+    }
+
     if (event->key() == Qt::Key_Escape && tool_ == ToolMode::ZoomRect) {
         zoom_rect_active_ = false;
         SetTool(ToolMode::Select);
@@ -2590,9 +3635,21 @@ void OpenGLViewport::keyPressEvent(QKeyEvent* event) {
         return;
     }
     if (event->key() == Qt::Key_Escape && tool_ == ToolMode::MovePointToPoint) {
+        measurement_waiting_for_second_point_ = false;
+        measurement_preview_valid_ = false;
+        measurement_visible_ = false;
         SetTool(ToolMode::Select);
-        unsetCursor();
         emit StatusTextChanged("Move Point to Point canceled. Select tool is active");
+        event->accept();
+        return;
+    }
+    if (event->key() == Qt::Key_Escape
+        && tool_ == ToolMode::MeasurePointToPoint) {
+        measurement_waiting_for_second_point_ = false;
+        measurement_preview_valid_ = false;
+        SetTool(ToolMode::Select);
+        emit StatusTextChanged(
+            "Point-to-Point Dimension canceled. Select tool is active");
         event->accept();
         return;
     }
@@ -2677,7 +3734,6 @@ void OpenGLViewport::keyPressEvent(QKeyEvent* event) {
         if (sketch_waiting_for_face_) {
             sketch_waiting_for_face_ = false;
             SetTool(ToolMode::Select);
-            unsetCursor();
             emit SketchFaceSelectionFinished(false);
             emit StatusTextChanged("Sketch face selection canceled");
             event->accept();
@@ -2709,7 +3765,6 @@ void OpenGLViewport::keyPressEvent(QKeyEvent* event) {
             update();
         } else {
             SetTool(ToolMode::Select);
-            unsetCursor();
             emit StatusTextChanged(
                 tool_ == ToolMode::SolidBoxRectangle
                     ? "BOX canceled"
@@ -2751,7 +3806,11 @@ void OpenGLViewport::keyPressEvent(QKeyEvent* event) {
         return;
     }
 
-    if (event->key() == Qt::Key_Escape && (tool_ == ToolMode::DrawCurve || tool_ == ToolMode::DrawBSpline)) {
+    if (event->key() == Qt::Key_Escape
+        && (tool_ == ToolMode::DrawCurve
+            || tool_ == ToolMode::DrawBSpline
+            || tool_ == ToolMode::DrawSpline)) {
+        CancelDrawSplineStroke();
         SetTool(ToolMode::Select);
         emit StatusTextChanged("Curve tool canceled");
         update();
@@ -2789,9 +3848,11 @@ void OpenGLViewport::keyPressEvent(QKeyEvent* event) {
     if (event->key() == Qt::Key_Escape && tool_ == ToolMode::Select && editing_polyline_) {
         editing_polyline_ = false;
         dragging_polyline_point_ = false;
+        curve_point_drag_changed_ = false;
+        direct_curve_edit_object_id_ = 0;
         highlighted_polyline_handle_ = false;
         if (material_interaction_mode_ == MaterialInteractionMode::None) {
-            unsetCursor();
+            RestoreDefaultToolCursor();
         }
         emit StatusTextChanged("Polyline edit finished");
         update();
@@ -2805,7 +3866,7 @@ void OpenGLViewport::keyPressEvent(QKeyEvent* event) {
         active_sketch_handle_kind_ = SketchHandleKind::None;
         highlighted_sketch_handle_kind_ = SketchHandleKind::None;
         if (material_interaction_mode_ == MaterialInteractionMode::None) {
-            unsetCursor();
+            RestoreDefaultToolCursor();
         }
         emit StatusTextChanged("Sketch edit finished");
         update();
@@ -2986,7 +4047,9 @@ void OpenGLViewport::SelectAt(const QPoint& point, SelectionAction action) {
     }
 
     if (selection_mode_ == SelectionMode::Edge) {
-        if (document_->SelectSolidEdgeAtScreen(screen_point, world_to_screen, 10.0f, action)) {
+        if (document_->SelectSolidEdgeAtScreen(
+                screen_point, world_to_screen,
+                static_cast<float>(capture_distance_pixels_), action)) {
             emit SelectionChanged();
             update();
             return;
@@ -3015,8 +4078,13 @@ void OpenGLViewport::SelectAt(const QPoint& point, SelectionAction action) {
     }
 
     if (selection_mode_ == SelectionMode::Point
-        && document_->SelectPolylinePointAtScreen(screen_point, world_to_screen, 8.0f)) {
+        && document_->SelectCurvePointAtScreen(screen_point, world_to_screen, 10.0f, action)) {
         emit SelectionChanged();
+        update();
+        return;
+    }
+    if (selection_mode_ == SelectionMode::Point) {
+        emit StatusTextChanged("Select Point: узел не найден");
         update();
         return;
     }
@@ -3026,16 +4094,12 @@ void OpenGLViewport::SelectAt(const QPoint& point, SelectionAction action) {
         return;
     }
 
-    if (selection_mode_ == SelectionMode::Point) {
-        document_->SelectPointAt(scene_point, 0.28f);
+    if (action == SelectionAction::Add) {
+        document_->AddObjectToSelectionAt(scene_point, 0.35f, false);
+    } else if (action == SelectionAction::Remove) {
+        document_->RemoveObjectFromSelectionAt(scene_point, 0.35f, false);
     } else {
-        if (action == SelectionAction::Add) {
-            document_->AddObjectToSelectionAt(scene_point, 0.35f, false);
-        } else if (action == SelectionAction::Remove) {
-            document_->RemoveObjectFromSelectionAt(scene_point, 0.35f, false);
-        } else {
-            document_->SelectObjectAt(scene_point, 0.35f, false);
-        }
+        document_->SelectObjectAt(scene_point, 0.35f, false);
     }
 
     emit SelectionChanged();
@@ -3170,7 +4234,7 @@ void OpenGLViewport::HandleBooleanClick(const QPoint& point) {
     has_boolean_body_ = false;
     boolean_body_index_ = 0;
     document_->ClearSelection();
-    tool_ = ToolMode::Select;
+    SetTool(ToolMode::Select);
     emit SelectionChanged();
     emit DocumentChanged();
     emit BooleanFinished();
@@ -3551,6 +4615,14 @@ void OpenGLViewport::HandleTransformClick(const QPoint& point, bool add_to_selec
     };
 
     const SelectionAction solid_action = add_to_selection ? SelectionAction::Add : SelectionAction::Replace;
+    if (selection_mode_ == SelectionMode::Point) {
+        if (document_->SelectCurvePointAtScreen(screen_point, world_to_screen, 10.0f, solid_action)) {
+            emit SelectionChanged();
+            emit DocumentChanged();
+            update();
+        }
+        return;
+    }
     if (document_->SelectPolylineAtScreen(screen_point, world_to_screen, 8.0f, solid_action)) {
         document_->ExpandSelectedGroups();
         emit SelectionChanged();
@@ -3624,7 +4696,10 @@ void OpenGLViewport::HandleTransformDrag(const QPoint& point, Qt::KeyboardModifi
         }
 
         const Vec3 delta = right * (mouse_dx * world_per_pixel) - up * (mouse_dy * world_per_pixel);
-        if (std::sqrt(dot(delta, delta)) > 0.000001f && document_->PreviewMoveSelectedObjects(delta)) {
+        const bool moved = selection_mode_ == SelectionMode::Point
+            ? document_->MoveSelectedCurvePoints(delta)
+            : document_->PreviewMoveSelectedObjects(delta);
+        if (std::sqrt(dot(delta, delta)) > 0.000001f && moved) {
             transform_drag_move_delta_ = transform_drag_move_delta_ + delta;
             transform_drag_has_preview_ = true;
             last_mouse_ = point;
@@ -3636,7 +4711,10 @@ void OpenGLViewport::HandleTransformDrag(const QPoint& point, Qt::KeyboardModifi
     if (transform_operation_ == TransformOperation::Scale && active_transform_axis_ == TransformAxis::UniformScale) {
         const float pixels = mouse_dx - mouse_dy;
         const float factor = std::clamp(1.0f + pixels * 0.01f, 0.05f, 20.0f);
-        if (std::fabs(pixels) > 0.0001f && document_->PreviewUniformScaleSelectedObjects(center, factor)) {
+        const bool scaled = selection_mode_ == SelectionMode::Point
+            ? document_->ScaleSelectedCurvePoints(center, {}, factor)
+            : document_->PreviewUniformScaleSelectedObjects(center, factor);
+        if (std::fabs(pixels) > 0.0001f && scaled) {
             transform_drag_scale_factor_ *= factor;
             transform_drag_has_preview_ = true;
             last_mouse_ = point;
@@ -3693,7 +4771,9 @@ void OpenGLViewport::HandleTransformDrag(const QPoint& point, Qt::KeyboardModifi
     bool transformed = false;
     if (transform_operation_ == TransformOperation::Move) {
         const Vec3 delta = axis * world_delta;
-        transformed = document_->PreviewMoveSelectedObjects(delta);
+        transformed = selection_mode_ == SelectionMode::Point
+            ? document_->MoveSelectedCurvePoints(delta)
+            : document_->PreviewMoveSelectedObjects(delta);
         if (transformed) {
             transform_drag_move_delta_ = transform_drag_move_delta_ + delta;
         }
@@ -3706,7 +4786,9 @@ void OpenGLViewport::HandleTransformDrag(const QPoint& point, Qt::KeyboardModifi
         }
         const float angle_to_apply = target_angle - transform_drag_rotation_angle_;
         if (std::fabs(angle_to_apply) > 0.000001f) {
-            transformed = document_->PreviewRotateSelectedObjects(center, axis, angle_to_apply);
+            transformed = selection_mode_ == SelectionMode::Point
+                ? document_->RotateSelectedCurvePoints(center, axis, angle_to_apply)
+                : document_->PreviewRotateSelectedObjects(center, axis, angle_to_apply);
         }
         if (transformed) {
             transform_drag_rotation_angle_ = target_angle;
@@ -3717,7 +4799,9 @@ void OpenGLViewport::HandleTransformDrag(const QPoint& point, Qt::KeyboardModifi
         last_mouse_ = point;
     } else {
         const float factor = std::clamp(1.0f + pixels_along_axis * 0.01f, 0.05f, 20.0f);
-        transformed = document_->PreviewScaleSelectedObjects(center, axis, factor);
+        transformed = selection_mode_ == SelectionMode::Point
+            ? document_->ScaleSelectedCurvePoints(center, axis, factor)
+            : document_->PreviewScaleSelectedObjects(center, axis, factor);
         if (transformed) {
             transform_drag_scale_factor_ *= factor;
             transform_drag_axis_ = axis;
@@ -3734,12 +4818,139 @@ void OpenGLViewport::HandleTransformDrag(const QPoint& point, Qt::KeyboardModifi
     }
 }
 
+void OpenGLViewport::SetDrawSplineSimplification(int percent) {
+    draw_spline_simplification_ = std::clamp(percent, 0, 100);
+    if (drawing_spline_stroke_) {
+        UpdateDrawSplinePreview();
+        update();
+    }
+}
+
+void OpenGLViewport::BeginDrawSplineStroke(const QPoint& point) {
+    if (!document_) {
+        return;
+    }
+    draw_spline_screen_points_.clear();
+    draw_spline_raw_points_.clear();
+    draw_spline_preview_points_.clear();
+
+    CPoint3d world{};
+    if (!ScreenToCurvePlane(point, world)) {
+        emit StatusTextChanged("Draw Spline: point is outside the drawing plane");
+        return;
+    }
+    document_->ClearSelection();
+    emit SelectionChanged();
+    drawing_spline_stroke_ = true;
+    draw_spline_screen_points_.push_back(point);
+    draw_spline_raw_points_.push_back(world);
+    draw_spline_preview_points_.push_back(world);
+    emit StatusTextChanged("Draw Spline: hold the left mouse button and draw");
+    update();
+}
+
+void OpenGLViewport::AppendDrawSplineStroke(const QPoint& point) {
+    if (!drawing_spline_stroke_) {
+        return;
+    }
+    if (!draw_spline_screen_points_.empty()) {
+        const QPoint delta = point - draw_spline_screen_points_.back();
+        if (delta.x() * delta.x() + delta.y() * delta.y() < 2 * 2) {
+            return;
+        }
+    }
+    CPoint3d world{};
+    if (!ScreenToCurvePlane(point, world)) {
+        return;
+    }
+    draw_spline_screen_points_.push_back(point);
+    draw_spline_raw_points_.push_back(world);
+    UpdateDrawSplinePreview();
+    update();
+}
+
+void OpenGLViewport::UpdateDrawSplinePreview() {
+    draw_spline_preview_points_.clear();
+    if (draw_spline_raw_points_.empty()) {
+        return;
+    }
+    if (draw_spline_raw_points_.size() <= 2) {
+        draw_spline_preview_points_ = draw_spline_raw_points_;
+        return;
+    }
+
+    // Ramer-Douglas-Peucker is evaluated in screen pixels, so the slider has
+    // the same feel at every camera zoom level. Fifty percent corresponds to
+    // roughly 12 px, matching the moderately simplified reference stroke.
+    const double tolerance = 0.5
+        + 23.0 * static_cast<double>(draw_spline_simplification_) / 100.0;
+    std::vector<bool> keep(draw_spline_screen_points_.size(), false);
+    keep.front() = true;
+    keep.back() = true;
+    simplify_screen_stroke(draw_spline_screen_points_, 0,
+                           draw_spline_screen_points_.size() - 1,
+                           tolerance * tolerance, keep);
+    for (size_t index = 0; index < keep.size(); ++index) {
+        if (keep[index]) {
+            draw_spline_preview_points_.push_back(draw_spline_raw_points_[index]);
+        }
+    }
+}
+
+void OpenGLViewport::FinishDrawSplineStroke() {
+    if (!drawing_spline_stroke_) {
+        return;
+    }
+    UpdateDrawSplinePreview();
+    if (!document_ || draw_spline_preview_points_.size() < 2) {
+        CancelDrawSplineStroke();
+        emit StatusTextChanged("Draw Spline: draw a longer stroke");
+        return;
+    }
+
+    auto spline = std::make_unique<CBSpline>(
+        "Draw Spline " + std::to_string(document_->GetObjects().size() + 1));
+    spline->SetCurveType(SplineCurveType::BSpline);
+    spline->SetDegree(std::min(
+        3, static_cast<int>(draw_spline_preview_points_.size()) - 1));
+    for (const CPoint3d& point : draw_spline_preview_points_) {
+        spline->AddPoint(point);
+    }
+    spline->SetParametricDefinition(
+        "DrawSpline",
+        {{"simplification", static_cast<double>(draw_spline_simplification_)}});
+    const size_t point_count = draw_spline_preview_points_.size();
+    document_->AddObject(std::move(spline));
+
+    drawing_spline_stroke_ = false;
+    draw_spline_screen_points_.clear();
+    draw_spline_raw_points_.clear();
+    draw_spline_preview_points_.clear();
+    emit SelectionChanged();
+    emit DocumentChanged();
+    emit StatusTextChanged(QString("Draw Spline: B-Spline created (%1 control points). Draw the next stroke or press Esc")
+        .arg(point_count));
+    update();
+}
+
+void OpenGLViewport::CancelDrawSplineStroke() {
+    drawing_spline_stroke_ = false;
+    draw_spline_screen_points_.clear();
+    draw_spline_raw_points_.clear();
+    draw_spline_preview_points_.clear();
+    update();
+}
+
 void OpenGLViewport::CommitTransformDrag() {
     if (!document_ || !transform_drag_has_preview_) {
         return;
     }
 
-    bool committed = false;
+    bool committed = selection_mode_ == SelectionMode::Point && document_->HasSelectedPoint();
+    if (selection_mode_ == SelectionMode::Point) {
+        if (committed) emit DocumentChanged();
+        return;
+    }
     if (transform_operation_ == TransformOperation::Move) {
         committed = document_->CommitMoveSelectedSolids(transform_drag_move_delta_);
     } else if (transform_operation_ == TransformOperation::Rotate) {
@@ -4003,10 +5214,21 @@ bool OpenGLViewport::HitTestSelectedSketchHandle(
 
 void OpenGLViewport::BeginCurvePointDrag(const CPoint3d& point) {
     dragging_polyline_point_ = true;
+    curve_point_drag_changed_ = false;
     polyline_drag_plane_y_ = point.y;
     curve_point_drag_anchor_ = point_to_vec3(point);
     curve_point_drag_last_ = point;
-    curve_point_drag_has_plane_ = CurrentSelectedCurvePlane(curve_point_drag_plane_point_, curve_point_drag_plane_normal_);
+    // A free 3D curve point follows the cursor in the view plane passing
+    // through the point grabbed by the user.  Lock the plane at mouse-down so
+    // Polyline and B-Spline handles behave identically and retain their depth.
+    Vec3 forward{};
+    Vec3 right{};
+    Vec3 up{};
+    viewport_camera_basis(camera_, forward, right, up);
+    curve_point_drag_plane_point_ = curve_point_drag_anchor_;
+    curve_point_drag_plane_normal_ = normalize(forward);
+    curve_point_drag_has_plane_ = dot(curve_point_drag_plane_normal_,
+                                      curve_point_drag_plane_normal_) > 0.000001f;
 }
 
 bool OpenGLViewport::CurrentSelectedCurvePlane(Vec3& plane_point, Vec3& plane_normal) const {
@@ -4414,6 +5636,91 @@ void OpenGLViewport::HandleSketchConvertLineToBezierClick(const QPoint& point) {
     update();
 }
 
+void OpenGLViewport::HandleSketchConstraintClick(const QPoint& point) {
+    CSmartLine* sketch = document_ ? document_->GetSelectedSketch() : nullptr;
+    if (!sketch) {
+        emit StatusTextChanged("Geometry constraint: select a sketch first");
+        return;
+    }
+
+    const bool tangent = tool_ == ToolMode::SketchConstraintTangentStart
+        || tool_ == ToolMode::SketchConstraintTangentEnd;
+    const DomPoint mouse{point.x(), point.y()};
+    double best_distance = 12.0;
+    std::size_t best_line = sketch->GetNumLines();
+    for (std::size_t line_index = 0;
+         line_index < sketch->GetNumLines(); ++line_index) {
+        const CLinkLine* line = sketch->GetLine(line_index);
+        if (!line || (tangent != (line->GetType() == LinkLineType::Bezier))) {
+            continue;
+        }
+        if (!tangent && line->GetType() != LinkLineType::Segment
+            && line->GetType() != LinkLineType::Horizontal
+            && line->GetType() != LinkLineType::Vertical) {
+            continue;
+        }
+
+        constexpr int samples = 32;
+        const int segment_count = tangent ? samples : 1;
+        DomPoint previous{};
+        if (!renderer_.WorldToScreen(
+                point_to_vec3(sketch->LocalToWorld(line->GetPoint(0.0))),
+                camera_, orthographic_projection_, width(), height(), previous)) {
+            continue;
+        }
+        for (int segment = 1; segment <= segment_count; ++segment) {
+            DomPoint current{};
+            if (!renderer_.WorldToScreen(
+                    point_to_vec3(sketch->LocalToWorld(line->GetPoint(
+                        static_cast<double>(segment) / segment_count))),
+                    camera_, orthographic_projection_, width(), height(), current)) {
+                break;
+            }
+            const double distance = DistanceToScreenSegment(
+                mouse, previous, current);
+            if (distance < best_distance) {
+                best_distance = distance;
+                best_line = line_index;
+            }
+            previous = current;
+        }
+    }
+
+    if (best_line >= sketch->GetNumLines()) {
+        emit StatusTextChanged(tangent
+            ? "Geometry constraint: click closer to a Bezier curve"
+            : "Geometry constraint: click closer to a straight segment");
+        return;
+    }
+
+    bool applied = false;
+    QString name;
+    if (tool_ == ToolMode::SketchConstraintHorizontal) {
+        applied = sketch->ConstrainHorizontal(best_line);
+        name = "Horizontal";
+    } else if (tool_ == ToolMode::SketchConstraintVertical) {
+        applied = sketch->ConstrainVertical(best_line);
+        name = "Vertical";
+    } else if (tool_ == ToolMode::SketchConstraintTangentStart) {
+        applied = sketch->ConstrainBezierTangentAtStart(best_line);
+        name = "Tangent at start";
+    } else {
+        applied = sketch->ConstrainBezierTangentAtEnd(best_line);
+        name = "Tangent at end";
+    }
+    if (!applied) {
+        emit StatusTextChanged(
+            QString("%1: the required adjacent segment is missing").arg(name));
+        return;
+    }
+
+    emit DocumentChanged();
+    emit SelectionChanged();
+    BeginEditSelectedSketch();
+    emit StatusTextChanged(QString("Geometry constraint added: %1").arg(name));
+    update();
+}
+
 void OpenGLViewport::HandleSketchConvertLineToArcClick(const QPoint& point) {
     CSmartLine* sketch = document_ ? document_->GetSelectedSketch() : nullptr;
     if (!sketch) {
@@ -4654,7 +5961,10 @@ void OpenGLViewport::HandleSketchFilletClick(const QPoint& point) {
 
     emit DocumentChanged();
     emit SelectionChanged();
-    emit StatusTextChanged(QString("%1: Fillet R=%2 построен").arg(sketch_name_).arg(sketch_fillet_radius_, 0, 'f', 2));
+    emit StatusTextChanged(
+        QString("%1: Fillet R=%2 построен. Укажите следующую вершину")
+            .arg(sketch_name_)
+            .arg(sketch_fillet_radius_, 0, 'f', 2));
     update();
 }
 
@@ -4715,6 +6025,7 @@ bool OpenGLViewport::SnapCreationPoint(const QPoint& point,
             sketch_v_,
             result,
             best_distance);
+    bool found_point_candidate = false;
     const CAlfaObject* active_curve = nullptr;
     if (tool_ == ToolMode::DrawCurve) {
         active_curve = &document_->GetActivePolyline();
@@ -4751,12 +6062,51 @@ bool OpenGLViewport::SnapCreationPoint(const QPoint& point,
             best_distance = distance;
             result = candidate;
             found = true;
+            found_point_candidate = true;
         }
+    };
+    const auto consider_segment = [&](const CAlfaObject* object,
+                                      const CPoint3d& start,
+                                      const CPoint3d& end) {
+        // An explicit node inside the capture radius has priority over a
+        // sampled point on the adjacent curve.  This is essential when the
+        // user clicks the first node to close a curve.
+        if (found_point_candidate || !object || !object->IsVisible()) return;
+        DomPoint start_screen{};
+        DomPoint end_screen{};
+        if (!renderer_.WorldToScreen(point_to_vec3(start), camera_,
+                orthographic_projection_, width(), height(), start_screen)
+            || !renderer_.WorldToScreen(point_to_vec3(end), camera_,
+                orthographic_projection_, width(), height(), end_screen)) return;
+        const double dx = end_screen.x - start_screen.x;
+        const double dy = end_screen.y - start_screen.y;
+        const double squared = dx * dx + dy * dy;
+        const double t = squared <= 1.0e-12 ? 0.0 : std::clamp(
+            ((mouse.x - start_screen.x) * dx + (mouse.y - start_screen.y) * dy)
+                / squared, 0.0, 1.0);
+        const double screen_x = start_screen.x + dx * t;
+        const double screen_y = start_screen.y + dy * t;
+        const double distance = std::hypot(mouse.x - screen_x, mouse.y - screen_y);
+        if (distance > best_distance) return;
+        const CPoint3d candidate(
+            start.x + (end.x - start.x) * t,
+            start.y + (end.y - start.y) * t,
+            start.z + (end.z - start.z) * t);
+        if (require_sketch_plane) {
+            const Vec3 delta = point_to_vec3(candidate) - sketch_origin_;
+            if (std::fabs(dot(delta, sketch_normal_)) > 0.001f) return;
+        }
+        best_distance = static_cast<float>(distance);
+        result = candidate;
+        found = true;
     };
 
     for (const auto& object_ptr : document_->GetObjects()) {
         const CAlfaObject* object = object_ptr.get();
         if (!object || !object->IsVisible()) {
+            continue;
+        }
+        if (point_pick_object_id_ != 0 && object->m_id != point_pick_object_id_) {
             continue;
         }
         if (const auto* polyline = dynamic_cast<const CPolyline*>(object)) {
@@ -4767,6 +6117,10 @@ bool OpenGLViewport::SnapCreationPoint(const QPoint& point,
                     points[index],
                     object == active_curve && index + 1 == points.size());
             }
+            const std::vector<CPoint3d> path = polyline->GetRoundedPathPoints();
+            for (size_t index = 0; index + 1 < path.size(); ++index) {
+                consider_segment(object, path[index], path[index + 1]);
+            }
         } else if (const auto* spline = dynamic_cast<const CBSpline*>(object)) {
             const auto& points = spline->GetPoints();
             for (std::size_t index = 0; index < points.size(); ++index) {
@@ -4774,6 +6128,15 @@ bool OpenGLViewport::SnapCreationPoint(const QPoint& point,
                     object,
                     points[index],
                     object == active_curve && index + 1 == points.size());
+            }
+            CPoint3d previous = spline->Evaluate(0.0f);
+            const int sample_count = std::max(
+                64, static_cast<int>(spline->GetPointCount()) * 24);
+            for (int sample = 1; sample <= sample_count; ++sample) {
+                const CPoint3d current = spline->Evaluate(
+                    static_cast<float>(sample) / sample_count);
+                consider_segment(object, previous, current);
+                previous = current;
             }
         } else if (const auto* sketch = dynamic_cast<const CSmartLine*>(object)) {
             for (std::size_t index = 0; index < sketch->GetNodeCount(); ++index) {
@@ -4787,6 +6150,24 @@ bool OpenGLViewport::SnapCreationPoint(const QPoint& point,
         }
     }
     return found;
+}
+
+bool OpenGLViewport::PickModelingPoint(const QPoint& point,
+                                       CPoint3d& result) const {
+    if (SnapCreationPoint(point, result, false)) {
+        return true;
+    }
+    if (point_pick_object_id_ != 0) {
+        return false;
+    }
+    if (xy_plane_view_enabled_) {
+        return ScreenToWorldPlane(
+            point,
+            {0.0f, 0.0f, 0.0f},
+            {0.0f, 0.0f, 1.0f},
+            result);
+    }
+    return ScreenToViewPlane(point, camera_.target, result);
 }
 
 void OpenGLViewport::HandleMovePointToPointClick(const QPoint& point) {
@@ -4806,14 +6187,19 @@ void OpenGLViewport::HandleMovePointToPointClick(const QPoint& point) {
     }
 
     CPoint3d picked{};
-    if (!SnapCreationPoint(point, picked, false)) {
+    if (!PickModelingPoint(point, picked)) {
         emit StatusTextChanged("Move Point to Point: click a visible vertex or sketch point");
         return;
     }
     if (move_point_stage_ == MovePointStage::PickSource) {
         move_point_source_ = picked;
         move_point_stage_ = MovePointStage::PickTarget;
+        measurement_start_ = picked;
+        measurement_preview_ = picked;
+        measurement_waiting_for_second_point_ = true;
+        measurement_preview_valid_ = false;
         emit StatusTextChanged("Move Point to Point: pick target point");
+        update();
         return;
     }
 
@@ -4821,16 +6207,64 @@ void OpenGLViewport::HandleMovePointToPointClick(const QPoint& point) {
         static_cast<float>(picked.x - move_point_source_.x),
         static_cast<float>(picked.y - move_point_source_.y),
         static_cast<float>(picked.z - move_point_source_.z)};
-    if (document_->MoveSelectedObjects(delta)) {
-        emit DocumentChanged();
+    if (ApplyPreciseMove(delta)) {
         emit SelectionChanged();
         emit StatusTextChanged("Move Point to Point completed");
     } else {
         emit StatusTextChanged("Move Point to Point: selected objects cannot be moved");
     }
-    SetTool(ToolMode::Select);
-    unsetCursor();
+    measurement_waiting_for_second_point_ = false;
+    measurement_preview_valid_ = false;
+    measurement_visible_ = false;
+    if (move_point_repeat_) {
+        move_point_stage_ = MovePointStage::PickSource;
+        setCursor(Qt::CrossCursor);
+        emit StatusTextChanged("Move: pick the next source point or use an axis button");
+    } else {
+        SetTool(ToolMode::Select);
+    }
     update();
+}
+
+void OpenGLViewport::HandleMeasurePointToPointClick(const QPoint& point) {
+    if (!document_) {
+        return;
+    }
+    CPoint3d picked{};
+    if (!SnapCreationPoint(point, picked, false)) {
+        emit StatusTextChanged(
+            "Point-to-Point Dimension: click a visible vertex or sketch point");
+        return;
+    }
+
+    if (!measurement_waiting_for_second_point_) {
+        measurement_start_ = picked;
+        measurement_end_ = picked;
+        measurement_preview_ = picked;
+        measurement_visible_ = false;
+        measurement_preview_valid_ = true;
+        measurement_waiting_for_second_point_ = true;
+        emit StatusTextChanged("Point-to-Point Dimension: pick second point");
+        update();
+        return;
+    }
+
+    measurement_end_ = picked;
+    measurement_preview_ = picked;
+    measurement_visible_ = true;
+    measurement_preview_valid_ = false;
+    measurement_waiting_for_second_point_ = false;
+    const double dx = measurement_end_.x - measurement_start_.x;
+    const double dy = measurement_end_.y - measurement_start_.y;
+    const double dz = measurement_end_.z - measurement_start_.z;
+    const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+    const DisplayLengthUnit unit = LoadDisplayLengthUnit();
+    emit StatusTextChanged(
+        QString("Point-to-Point Dimension: %1 %2. Pick next first point")
+            .arg(MillimetersToDisplay(distance, unit), 0, 'f', 2)
+            .arg(DisplayLengthUnitSuffix(unit)));
+    update();
+    emit PointToPointMeasurementFinished(distance);
 }
 
 bool OpenGLViewport::SnapSketchGridPoint(const QPoint& point,
@@ -4839,7 +6273,9 @@ bool OpenGLViewport::SnapSketchGridPoint(const QPoint& point,
                                          Vec3 v_axis,
                                          CPoint3d& result,
                                          float& best_distance) const {
-    if (!snapping_enabled_ || kDefaultGridStep <= 0.0f) {
+    const float snap_step = grid_step_ / static_cast<float>(
+        std::max(1, grid_subdivisions_));
+    if (!snapping_enabled_ || snap_step <= 0.0f) {
         return false;
     }
 
@@ -4856,8 +6292,8 @@ bool OpenGLViewport::SnapSketchGridPoint(const QPoint& point,
     const float v_coordinate = dot(delta, v_axis);
     const Vec3 candidate =
         origin
-        + u_axis * (std::round(u_coordinate / kDefaultGridStep) * kDefaultGridStep)
-        + v_axis * (std::round(v_coordinate / kDefaultGridStep) * kDefaultGridStep);
+        + u_axis * (std::round(u_coordinate / snap_step) * snap_step)
+        + v_axis * (std::round(v_coordinate / snap_step) * snap_step);
 
     DomPoint screen{};
     if (!renderer_.WorldToScreen(
@@ -4897,7 +6333,8 @@ void OpenGLViewport::SetCreationSnapCursor(bool snapped) {
                || tool_ == ToolMode::SketchPolyline
                || tool_ == ToolMode::SketchBezier
                || tool_ == ToolMode::SolidBoxRectangle
-               || tool_ == ToolMode::SolidCylinderCircle) {
+               || tool_ == ToolMode::SolidCylinderCircle
+               || picking_3d_point_) {
         setCursor(Qt::CrossCursor);
     }
 }
@@ -5059,6 +6496,22 @@ bool OpenGLViewport::ScreenToCurvePlane(const QPoint& point, CPoint3d& result) {
         return ScreenToWorldPlane(point, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, result);
     }
 
+    if (tool_ == ToolMode::DrawSpline) {
+        if (draw_spline_raw_points_.empty()) {
+            // Freehand drawing is a screen-oriented operation. The floor is
+            // edge-on in front/side views, so a camera ray cannot intersect
+            // it there. Start the stroke on the view plane through the camera
+            // target; all following samples stay on that same plane.
+            return ScreenToViewPlane(point, camera_.target, result);
+        }
+        const CPoint3d& anchor = draw_spline_raw_points_.front();
+        return ScreenToViewPlane(
+            point,
+            {static_cast<float>(anchor.x), static_cast<float>(anchor.y),
+             static_cast<float>(anchor.z)},
+            result);
+    }
+
     const std::vector<CPoint3d>& points = tool_ == ToolMode::DrawBSpline
         ? document_->GetActiveBSpline().GetPoints()
         : document_->GetActivePolyline().GetPoints();
@@ -5156,6 +6609,123 @@ bool OpenGLViewport::ScreenToViewPlane(const QPoint& point, Vec3 plane_point, CP
     return true;
 }
 
+void OpenGLViewport::UpdateHoveredSolidEdge(const QPoint& point) {
+    if (!document_) {
+        ClearHoveredSolidEdge();
+        return;
+    }
+
+    const DomPoint screen_point{point.x(), point.y()};
+    auto world_to_screen = [this](Vec3 world, DomPoint& screen) {
+        return renderer_.WorldToScreen(
+            world, camera_, orthographic_projection_, width(), height(), screen);
+    };
+
+    size_t object_index = static_cast<size_t>(-1);
+    int surface_index = -1;
+    int edge_index = -1;
+    document_->FindSolidEdgeAtScreen(
+        screen_point,
+        world_to_screen,
+        static_cast<float>(capture_distance_pixels_),
+        object_index,
+        surface_index,
+        edge_index);
+
+    if (object_index == hovered_edge_object_index_
+        && surface_index == hovered_edge_surface_index_
+        && edge_index == hovered_edge_index_) {
+        return;
+    }
+    hovered_edge_object_index_ = object_index;
+    hovered_edge_surface_index_ = surface_index;
+    hovered_edge_index_ = edge_index;
+    update();
+}
+
+void OpenGLViewport::ClearHoveredSolidEdge() {
+    if (hovered_edge_object_index_ == static_cast<size_t>(-1)
+        && hovered_edge_surface_index_ < 0
+        && hovered_edge_index_ < 0) {
+        return;
+    }
+    hovered_edge_object_index_ = static_cast<size_t>(-1);
+    hovered_edge_surface_index_ = -1;
+    hovered_edge_index_ = -1;
+    update();
+}
+
+void OpenGLViewport::DrawHoveredSolidEdge() {
+    if (!document_
+        || tool_ != ToolMode::Select
+        || selection_mode_ != SelectionMode::Edge
+        || hovered_edge_object_index_ >= document_->GetObjects().size()) {
+        return;
+    }
+
+    const auto* solid = dynamic_cast<const CSolid*>(
+        document_->GetObjects()[hovered_edge_object_index_].get());
+    if (!solid) {
+        return;
+    }
+    const auto edge_ref = std::make_pair(
+        hovered_edge_surface_index_, hovered_edge_index_);
+    const auto& selected_edges = solid->GetSelectedEdgeRefs();
+    if (std::find(selected_edges.begin(), selected_edges.end(), edge_ref)
+        != selected_edges.end()) {
+        return;
+    }
+
+    const CSurfaceFace* surface = solid->GetSurfaceFace(
+        hovered_edge_surface_index_);
+    std::vector<Vec3> points;
+    if (!surface
+        || !surface->GetEdgePolylinePoints(hovered_edge_index_, points)
+        || points.size() < 2) {
+        return;
+    }
+
+    const GLboolean depth_test_enabled = glIsEnabled(GL_DEPTH_TEST);
+    const GLboolean lighting_enabled = glIsEnabled(GL_LIGHTING);
+    const GLboolean blend_enabled = glIsEnabled(GL_BLEND);
+    const GLboolean line_smooth_enabled = glIsEnabled(GL_LINE_SMOOTH);
+    GLfloat previous_line_width = 1.0f;
+    glGetFloatv(GL_LINE_WIDTH, &previous_line_width);
+
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_LIGHTING);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_LINE_SMOOTH);
+    glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
+
+    const auto draw_edge = [&points](float width, Color color, float alpha) {
+        glLineWidth(width);
+        glColor4f(color.r, color.g, color.b, alpha);
+        glBegin(GL_LINE_STRIP);
+        for (const Vec3& point : points) {
+            glVertex3f(point.x, point.y, point.z);
+        }
+        glEnd();
+    };
+    draw_edge(6.0f, {0.08f, 0.02f, 0.08f}, 0.90f);
+    draw_edge(3.4f, {1.0f, 0.05f, 0.92f}, 1.0f);
+
+    glLineWidth(previous_line_width);
+    if (!line_smooth_enabled) {
+        glDisable(GL_LINE_SMOOTH);
+    }
+    if (!blend_enabled) {
+        glDisable(GL_BLEND);
+    }
+    if (lighting_enabled) {
+        glEnable(GL_LIGHTING);
+    }
+    if (depth_test_enabled) {
+        glEnable(GL_DEPTH_TEST);
+    }
+}
+
 void OpenGLViewport::DrawCurveRubberBand() {
     if (!document_) {
         return;
@@ -5219,6 +6789,37 @@ void OpenGLViewport::DrawSketchRectanglePreview() {
     glEnable(GL_DEPTH_TEST);
 }
 
+void OpenGLViewport::DrawSplinePreview() {
+    if (draw_spline_raw_points_.empty()) {
+        return;
+    }
+
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_LIGHTING);
+    glPointSize(4.0f);
+    glColor4f(0.92f, 0.92f, 0.92f, 0.85f);
+    glBegin(GL_POINTS);
+    for (const CPoint3d& point : draw_spline_raw_points_) {
+        glVertex3f(static_cast<float>(point.x), static_cast<float>(point.y),
+                   static_cast<float>(point.z));
+    }
+    glEnd();
+    glPointSize(1.0f);
+    glEnable(GL_DEPTH_TEST);
+
+    if (draw_spline_preview_points_.size() < 2) {
+        return;
+    }
+    CBSpline preview("Draw Spline Preview");
+    preview.SetCurveType(SplineCurveType::BSpline);
+    preview.SetDegree(std::min(
+        3, static_cast<int>(draw_spline_preview_points_.size()) - 1));
+    for (const CPoint3d& point : draw_spline_preview_points_) {
+        preview.AddPoint(point);
+    }
+    preview.Render3d(true);
+}
+
 void OpenGLViewport::DrawSolidCylinderCirclePreview() {
     const Vec3 center{
         static_cast<float>(sketch_rectangle_first_point_.x),
@@ -5267,6 +6868,49 @@ void OpenGLViewport::DrawSolidCylinderCirclePreview() {
     }
     glEnd();
     glLineWidth(1.0f);
+    glDisable(GL_BLEND);
+    glEnable(GL_DEPTH_TEST);
+}
+
+void OpenGLViewport::DrawSketchFilletRadiusPreview() {
+    if (!sketch_fillet_preview_valid_ || sketch_fillet_radius_ <= 0.0) {
+        return;
+    }
+
+    const Vec3 center{
+        static_cast<float>(sketch_fillet_preview_center_.x),
+        static_cast<float>(sketch_fillet_preview_center_.y),
+        static_cast<float>(sketch_fillet_preview_center_.z)};
+    const Vec3 u_axis = normalize(sketch_u_);
+    const Vec3 v_axis = normalize(sketch_v_);
+    const float radius = static_cast<float>(sketch_fillet_radius_);
+
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_LIGHTING);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glLineWidth(2.0f);
+    glColor4f(0.10f, 0.85f, 1.0f, 0.95f);
+    constexpr int segments = 64;
+    glBegin(GL_LINE_LOOP);
+    for (int i = 0; i < segments; ++i) {
+        const float angle = 2.0f * 3.14159265358979323846f
+            * static_cast<float>(i) / static_cast<float>(segments);
+        const Vec3 point = center
+            + u_axis * (std::cos(angle) * radius)
+            + v_axis * (std::sin(angle) * radius);
+        glVertex3f(point.x, point.y, point.z);
+    }
+    glEnd();
+
+    const float marker = radius * 0.08f;
+    glLineWidth(1.0f);
+    glBegin(GL_LINES);
+    glVertex3f((center - u_axis * marker).x, (center - u_axis * marker).y, (center - u_axis * marker).z);
+    glVertex3f((center + u_axis * marker).x, (center + u_axis * marker).y, (center + u_axis * marker).z);
+    glVertex3f((center - v_axis * marker).x, (center - v_axis * marker).y, (center - v_axis * marker).z);
+    glVertex3f((center + v_axis * marker).x, (center + v_axis * marker).y, (center + v_axis * marker).z);
+    glEnd();
     glDisable(GL_BLEND);
     glEnable(GL_DEPTH_TEST);
 }
@@ -5365,17 +7009,62 @@ void OpenGLViewport::DrawSketchBezierPreview() {
 }
 
 void OpenGLViewport::DrawSelectedCurvePointHandles() {
-    const std::vector<CPoint3d> points = document_->GetSelectedCurvePointPositions();
-    if (points.empty()) {
+    std::vector<std::pair<size_t, size_t>> displayed_points =
+        document_->GetSelectedCurvePoints();
+    if (tool_ == ToolMode::Select && editing_polyline_
+        && document_->HasSelection()) {
+        displayed_points.clear();
+        const size_t object_index = document_->GetSelectedObjectIndex();
+        const CAlfaObject* object = document_->GetSelectedObject();
+        size_t point_count = 0;
+        if (const auto* polyline = dynamic_cast<const CPolyline*>(object)) {
+            point_count = polyline->GetPointCount();
+        } else if (const auto* spline = dynamic_cast<const CBSpline*>(object)) {
+            point_count = spline->GetPointCount();
+        }
+        displayed_points.reserve(point_count);
+        for (size_t point_index = 0; point_index < point_count; ++point_index) {
+            displayed_points.emplace_back(object_index, point_index);
+        }
+    }
+    if (displayed_points.empty()) {
         return;
     }
 
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_LIGHTING);
     glPointSize(10.0f);
-    glColor3f(0.0f, 1.0f, 0.0f);
     glBegin(GL_POINTS);
-    for (const CPoint3d& point : points) {
+    const auto& objects = document_->GetObjects();
+    for (const auto& selected : displayed_points) {
+        if (selected.first >= objects.size() || !objects[selected.first]) continue;
+        CPoint3d point{};
+        bool found = false;
+        bool bezier_control = false;
+        if (const auto* polyline = dynamic_cast<const CPolyline*>(
+                objects[selected.first].get())) {
+            if (selected.second < polyline->GetPoints().size()) {
+                point = polyline->GetPoints()[selected.second];
+                found = true;
+            }
+        } else if (const auto* spline = dynamic_cast<const CBSpline*>(
+                       objects[selected.first].get())) {
+            if (selected.second < spline->GetPoints().size()) {
+                point = spline->GetPoints()[selected.second];
+                found = true;
+                bezier_control = spline->IsBezierChain()
+                    && selected.second % 3 != 0;
+            }
+        } else if (const auto* sketch = dynamic_cast<const CSmartLine*>(
+                       objects[selected.first].get())) {
+            if (selected.second < sketch->GetNodeCount()) {
+                point = sketch->GetNodeWorld(selected.second);
+                found = true;
+            }
+        }
+        if (!found) continue;
+        if (bezier_control) glColor3f(0.15f, 0.75f, 1.0f);
+        else glColor3f(0.0f, 1.0f, 0.0f);
         glVertex3f(static_cast<float>(point.x), static_cast<float>(point.y), static_cast<float>(point.z));
     }
     glEnd();
@@ -5693,6 +7382,217 @@ float OpenGLViewport::DistanceToScreenSegment(DomPoint point, DomPoint start, Do
     return std::sqrt(px * px + py * py);
 }
 
+bool OpenGLViewport::HitTestRotationAxisLine(
+    const QPoint& point, Vec3& start, Vec3& end) const {
+    if (!document_) {
+        return false;
+    }
+
+    constexpr float kTolerance = 12.0f;
+    const DomPoint mouse{point.x(), point.y()};
+    const auto world_to_screen = [this](Vec3 world, DomPoint& screen) {
+        return renderer_.WorldToScreen(
+            world, camera_, orthographic_projection_, width(), height(), screen);
+    };
+
+    float best_distance = kTolerance;
+    bool found = document_->FindRotationAxisLineAtScreen(
+        mouse, world_to_screen, kTolerance,
+        start, end, &best_distance);
+
+    if (show_coordinate_axes_) {
+        const float axis_length = xy_plane_view_enabled_
+            ? grid_size_
+            : grid_size_ * 0.5f;
+        const Vec3 origin{};
+        const Vec3 axis_ends[] = {
+            {axis_length, 0.0f, 0.0f},
+            {0.0f, axis_length, 0.0f},
+            {0.0f, 0.0f, axis_length}
+        };
+        for (const Vec3& axis_end : axis_ends) {
+            DomPoint screen_start{};
+            DomPoint screen_end{};
+            if (!world_to_screen(origin, screen_start)
+                || !world_to_screen(axis_end, screen_end)) {
+                continue;
+            }
+            const float distance = DistanceToScreenSegment(
+                mouse, screen_start, screen_end);
+            if (distance <= best_distance) {
+                best_distance = distance;
+                start = origin;
+                end = axis_end;
+                found = true;
+            }
+        }
+    }
+    return found;
+}
+
+void OpenGLViewport::DrawRotationAxisPickPreview() {
+    if (!picking_rotation_axis_ || !rotation_axis_hover_valid_) {
+        return;
+    }
+
+    glPushAttrib(GL_ENABLE_BIT | GL_LINE_BIT | GL_COLOR_BUFFER_BIT);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_LIGHTING);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_LINE_SMOOTH);
+    glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
+    glLineWidth(5.0f);
+    glColor4f(1.0f, 0.86f, 0.06f, 1.0f);
+    glBegin(GL_LINES);
+    glVertex3f(rotation_axis_hover_start_.x,
+               rotation_axis_hover_start_.y,
+               rotation_axis_hover_start_.z);
+    glVertex3f(rotation_axis_hover_end_.x,
+               rotation_axis_hover_end_.y,
+               rotation_axis_hover_end_.z);
+    glEnd();
+    glPopAttrib();
+}
+
+void OpenGLViewport::DrawPointToPointMeasurement() {
+    const CPoint3d end = measurement_waiting_for_second_point_
+        ? measurement_preview_ : measurement_end_;
+    DomPoint start_screen{};
+    if (!renderer_.WorldToScreen(
+            point_to_vec3(measurement_start_), camera_,
+            orthographic_projection_, width(), height(), start_screen)) {
+        return;
+    }
+
+    // The scene renderer may leave GL in wireframe polygon mode. Filled
+    // QPainter primitives then disappear on some drivers, while text remains.
+    // Force a predictable overlay state before drawing the dimension.
+    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setRenderHint(QPainter::TextAntialiasing, true);
+    const QColor dimension_color(0, 235, 245);
+    const QColor outline_color(2, 12, 16, 235);
+    painter.setPen(QPen(dimension_color, 2.2));
+    painter.setBrush(Qt::NoBrush);
+    const QPointF start(start_screen.x, start_screen.y);
+
+    if (measurement_waiting_for_second_point_
+        && !measurement_preview_valid_) {
+        painter.drawEllipse(start, 4.0, 4.0);
+        return;
+    }
+
+    DomPoint end_screen{};
+    if (!renderer_.WorldToScreen(
+            point_to_vec3(end), camera_, orthographic_projection_,
+            width(), height(), end_screen)) {
+        return;
+    }
+    const QPointF finish(end_screen.x, end_screen.y);
+    const QLineF dimension_line(start, finish);
+    if (dimension_line.length() < 0.5) {
+        painter.drawEllipse(start, 4.0, 4.0);
+        return;
+    }
+
+    const QPointF direction = (finish - start) / dimension_line.length();
+    const QPointF normal(-direction.y(), direction.x());
+    const bool short_dimension = dimension_line.length() < 58.0;
+    const QPointF visible_start = short_dimension
+        ? start - direction * 20.0 : start;
+    const QPointF visible_finish = short_dimension
+        ? finish + direction * 20.0 : finish;
+    constexpr qreal arrow_length = 14.0;
+    constexpr qreal arrow_width = 5.0;
+    const auto draw_arrow = [&](const QPointF& tip,
+                                const QPointF& inward) {
+        const QPointF base = tip + inward * arrow_length;
+        painter.drawLine(tip, base + normal * arrow_width);
+        painter.drawLine(tip, base - normal * arrow_width);
+    };
+    const auto draw_geometry = [&](const QPen& pen) {
+        painter.setPen(pen);
+        painter.setBrush(Qt::NoBrush);
+        painter.drawLine(visible_start, visible_finish);
+        draw_arrow(start, short_dimension ? -direction : direction);
+        draw_arrow(finish, short_dimension ? direction : -direction);
+        painter.drawEllipse(start, 3.2, 3.2);
+        painter.drawEllipse(finish, 3.2, 3.2);
+    };
+    draw_geometry(QPen(outline_color, 4.6,
+                       Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    draw_geometry(QPen(dimension_color, 2.2,
+                       Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+
+    const double dx = end.x - measurement_start_.x;
+    const double dy = end.y - measurement_start_.y;
+    const double dz = end.z - measurement_start_.z;
+    const double distance_mm = std::sqrt(dx * dx + dy * dy + dz * dz);
+    const DisplayLengthUnit unit = LoadDisplayLengthUnit();
+    const QString text = QString("%1 %2")
+        .arg(MillimetersToDisplay(distance_mm, unit), 0, 'f', 2)
+        .arg(DisplayLengthUnitSuffix(unit));
+
+    QFont font = painter.font();
+    font.setPointSize(9);
+    font.setBold(true);
+    painter.setFont(font);
+    const QFontMetrics metrics(font);
+    const QSize text_size = metrics.size(Qt::TextSingleLine, text);
+    const qreal label_offset = text_size.height() * 0.5 + 11.0;
+    QPointF text_center = (start + finish) * 0.5 + normal * label_offset;
+    if (text_center.x() - text_size.width() * 0.5 < 4.0
+        || text_center.x() + text_size.width() * 0.5 > width() - 4.0
+        || text_center.y() - text_size.height() * 0.5 < 4.0
+        || text_center.y() + text_size.height() * 0.5 > height() - 4.0) {
+        text_center = (start + finish) * 0.5 - normal * label_offset;
+    }
+    QRectF text_rect(
+        text_center.x() - text_size.width() * 0.5 - 4.0,
+        text_center.y() - text_size.height() * 0.5 - 2.0,
+        text_size.width() + 8.0,
+        text_size.height() + 4.0);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(4, 10, 13, 225));
+    painter.drawRoundedRect(text_rect, 3.0, 3.0);
+    painter.setPen(dimension_color);
+    painter.drawText(text_rect, Qt::AlignCenter, text);
+}
+
+void OpenGLViewport::DrawPointPickMarkers() {
+    std::vector<QPointF> screen_points;
+    screen_points.reserve(point_pick_markers_.size());
+    for (const CPoint3d& point : point_pick_markers_) {
+        DomPoint screen{};
+        if (renderer_.WorldToScreen(
+                point_to_vec3(point), camera_, orthographic_projection_,
+                width(), height(), screen)) {
+            screen_points.emplace_back(screen.x, screen.y);
+        }
+    }
+    if (screen_points.empty()) return;
+    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(QPen(QColor(10, 255, 70), 2.0));
+    painter.setBrush(QColor(10, 255, 70, 210));
+    for (size_t index = 1; index < screen_points.size(); ++index) {
+        painter.drawLine(screen_points[index - 1], screen_points[index]);
+    }
+    QFont font = painter.font();
+    font.setBold(true);
+    font.setPixelSize(11);
+    painter.setFont(font);
+    for (size_t index = 0; index < screen_points.size(); ++index) {
+        const QPointF point = screen_points[index];
+        painter.drawRect(QRectF(point.x() - 5.0, point.y() - 5.0, 10.0, 10.0));
+        painter.drawText(point + QPointF(8.0, -7.0),
+                         QString::number(index + 1));
+    }
+}
+
 void OpenGLViewport::DrawSolidDimensions() {
     solid_dimension_hits_.clear();
     if (solid_dimensions_.empty()) {
@@ -5736,6 +7636,7 @@ void OpenGLViewport::DrawSolidDimensions() {
             continue;
         }
         const bool primary = dimension.IsActive();
+        const bool radial_dimension = dimension.GetParameterId() == "radius";
         if (primary) {
             glColor3f(0.05f, 0.62f, 1.0f);
             glLineWidth(2.5f);
@@ -5784,7 +7685,8 @@ void OpenGLViewport::DrawSolidDimensions() {
                     * kArrowLengthPixels / projected_length;
                 // For a very short dimension turn the arrows outward, matching
                 // the legacy CDimens::DrawArrow behavior.
-                if (projected_length < kArrowLengthPixels * 2.0 + 3.0) {
+                if (!radial_dimension
+                    && projected_length < kArrowLengthPixels * 2.0 + 3.0) {
                     arrow_length = -arrow_length;
                 }
             }
@@ -5795,7 +7697,9 @@ void OpenGLViewport::DrawSolidDimensions() {
             line(tip, add_point(base, scale_point(wing, arrow_width)));
             line(tip, add_point(base, scale_point(wing, -arrow_width)));
         };
-        draw_arrow(geometry.dimension_start, direction);
+        if (!radial_dimension) {
+            draw_arrow(geometry.dimension_start, direction);
+        }
         glEnd();
 
         // The dimension end is the draggable handle. Draw its arrow directly
@@ -5935,15 +7839,16 @@ void OpenGLViewport::DrawSolidDimensions() {
                   << tip + inward * 12.0 - perpendicular * 5.0;
             return arrow;
         };
+        const bool radial_dimension = dimension.GetParameterId() == "radius";
         const QPolygonF first_arrow = arrow_polygon(dimension_start, direction);
         const QPolygonF second_arrow = arrow_polygon(dimension_end, -direction);
         painter.setPen(QPen(outline, 2.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
         painter.setBrush(outline);
-        painter.drawPolygon(first_arrow);
+        if (!radial_dimension) painter.drawPolygon(first_arrow);
         painter.drawPolygon(second_arrow);
         painter.setPen(Qt::NoPen);
         painter.setBrush(color);
-        painter.drawPolygon(first_arrow);
+        if (!radial_dimension) painter.drawPolygon(first_arrow);
         painter.setBrush(QColor(255, 45, 25));
         painter.drawPolygon(second_arrow);
 
@@ -5984,8 +7889,6 @@ void OpenGLViewport::DrawSolidDimensions() {
                  dimension.GetSourceIndex()});
         }
 
-        const bool radial_dimension =
-            dimension.GetParameterId() == "radius";
         const QString text = QString("%1%2%3")
             .arg(radial_dimension ? QStringLiteral("R ") : QString())
             .arg(MillimetersToDisplay(dimension.GetValue(), display_unit), 0, 'f', 1)
@@ -6068,7 +7971,7 @@ void OpenGLViewport::DrawCoordinateAxisLabels() {
     DomPoint z_screen{};
     const float lift = 0.02f;
     const float axis_length =
-        xy_plane_view_enabled_ ? kDefaultSceneSize : kDefaultGridHalfSize;
+        xy_plane_view_enabled_ ? grid_size_ : grid_size_ * 0.5f;
     const Vec3 x_label{axis_length, 0.0f, lift};
     const Vec3 y_label{0.0f, axis_length, lift};
     const bool has_x = renderer_.WorldToScreen(x_label, camera_, orthographic_projection_, width(), height(), x_screen);

@@ -110,7 +110,7 @@ bool StepIO::Import(const std::string& path, std::vector<std::unique_ptr<CSolid>
     char buffer[100];
     void Step(char* text);
     SYSTEMTIME st;
-    // Получаем текущее системное время (местное)
+    // РџРѕР»СѓС‡Р°РµРј С‚РµРєСѓС‰РµРµ СЃРёСЃС‚РµРјРЅРѕРµ РІСЂРµРјСЏ (РјРµСЃС‚РЅРѕРµ)
     GetLocalTime(&st);
     sprintf(buffer, "STEP file read Started at %02d:%02d:%02d.%03d", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
     Step(buffer);
@@ -221,16 +221,36 @@ bool StepIO::Import(
 
         LogTime("Make solids started");
 
-        solids.reserve((size_t)nbs);
-
+        // A scene exported by Dom3D is represented by a single STEP compound.
+        // NbShapes() therefore commonly returns one transferred shape even when
+        // that compound contains many independent objects. Preserve those
+        // objects by unwrapping compound/compsolid containers before creating
+        // document solids.
+        std::vector<TopoDS_Shape> imported_shapes;
         for (Standard_Integer i = 1; i <= nbs; ++i)
         {
-            TopoDS_Shape sh = reader.Shape(i);
+            collect_top_level_shapes(reader.Shape(i), imported_shapes);
+        }
 
-            if (sh.IsNull())
-                continue;
+        if (imported_shapes.empty())
+        {
+            collect_top_level_shapes(reader.OneShape(), imported_shapes);
+        }
 
-            solids.push_back(make_imported_solid(sh, (int)i, (int)nbs));
+        const int imported_count = static_cast<int>(imported_shapes.size());
+        solids.reserve(imported_shapes.size());
+        for (int i = 0; i < imported_count; ++i)
+        {
+            solids.push_back(make_imported_solid(
+                imported_shapes[static_cast<size_t>(i)],
+                i + 1,
+                imported_count));
+        }
+
+        if (solids.empty())
+        {
+            error = "STEP file does not contain valid shapes.";
+            return false;
         }
 
         LogTime("Make solids completed");
