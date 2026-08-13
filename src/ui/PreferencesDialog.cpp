@@ -178,6 +178,7 @@ void PreferencesDialog::LoadSettings() {
     two_d_drag_auto_->setChecked(settings.value("preferences/modeling/2dDragAuto", false).toBool());
     control_intersections_->setChecked(settings.value("preferences/modeling/controlIntersections", false).toBool());
     gizmo_3d_enable_->setChecked(settings.value("preferences/modeling/gizmo3dEnable", true).toBool());
+
 }
 
 void PreferencesDialog::ApplySettings() {

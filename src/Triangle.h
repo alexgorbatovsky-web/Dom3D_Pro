@@ -18,10 +18,10 @@ struct CSizeBlock
 	double X_min, X_max;
 	double Y_min, Y_max;
 	double Z_min, Z_max;
-	CPoint3d m_p[8];//Угловые точки
-	double m_Rad;//Радиус ограничивающей  Сферы
-	CPoint3d m_pc;//Центр ограничивающей сферы
-	CPlane m_plane[6];//Граничные плоскости
+	CPoint3d m_p[8];
+	double m_Rad;
+	CPoint3d m_pc;
+	CPlane m_plane[6];
 
 	CSizeBlock() { X_min = Y_min = Z_min = 1e15;	X_max = Y_max = Z_max = -1e15; m_Rad = 0; }
 
@@ -76,7 +76,7 @@ public:
 		CPoint3d vtx[3];
 		
 		// calculated
-		CVector n;//Это вектор перпендикулярный треугольнику
+		CVector n;
 		CPoint3d u;
 		CPoint3d v;
 		double  d;

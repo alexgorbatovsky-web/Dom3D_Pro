@@ -61,7 +61,7 @@ int CSizeBlock::CrossLine(CPoint3d* p1, CPoint3d* p2, CPoint3d* pc, CPlane* pl)
 
 
 bool CSizeBlock::IsPointIn(CSizeBlock* Block2, CPoint3d* p_In)
-{//ѕровер€ем, находитс€ ли углова€ точка m_p[i] в блоке Block2
+{
     for (int i = 0; i < 8; i++)
         if (m_p[i].IsPointIn(Block2)) {
             *p_In = m_p[i];

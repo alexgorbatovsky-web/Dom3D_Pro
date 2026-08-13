@@ -16,9 +16,9 @@ public:
 	CPlane(){a=1.0;b=0.0;c=0.0;d=0.0;}
 	CPlane(double ai,double bi,double ci,double di){a=ai;b=bi;c=ci;d=di;}
 	CPlane(CPoint3d* p1, CPoint3d* p2, CPoint3d* p3);
-	CPlane(CPoint3d* p, CVector* vect);//Плоскоть проходящая через точку перп. вектору
-	CPlane(CPoint3d* p, CVector* vect,CPlane *pl);//Плоскоть проходящая через Прямую перп. Плоск.
-	CPlane(CPoint3d* p, CPlane *pl);//Плоскоть проходящая через Точку парал. Плоск.
+	CPlane(CPoint3d* p, CVector* vect);
+	CPlane(CPoint3d* p, CVector* vect,CPlane *pl);
+	CPlane(CPoint3d* p, CPlane *pl);
 
 	void Get_3Point(CPoint3d* p1,CPoint3d* p2,CPoint3d* p3);
     void mod_coord_ma(CPoint3d* p0, CVector* cx, CVector* cy, CVector* cz);

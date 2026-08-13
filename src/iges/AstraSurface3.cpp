@@ -1,5 +1,3 @@
-////////////	реализация функций Астры на C
-/////////	начало 24.07.2000 конец  25.07.
 /////////////////////////////////////////////////////////
 #include "defines.h"
 #include "AstraVect.h"
@@ -27,8 +25,6 @@ BOOL SCPL3(double RS[15],int IS[8],double  TS[22],int IPR,double P[6],double E,d
 
 BOOL ASLM(double RES[12], int IS[30], double TS[22], double PR[6],double EQV, double E, double* A)
 {
-//****PACЧET TOЧKИ ПEPECEЧEHИЯ ПPЯMOЙ C ПOBEPXHOCTЬЮ
-//****BEPCИЯ: 00 (19.02.97)
 	static double RS[12];
 	static double F[17];
 	int KIN[36]={2,3,2,901,407,1001,800,-113,0,1000,805,-114,1,1000,806,
@@ -36,7 +32,7 @@ BOOL ASLM(double RES[12], int IS[30], double TS[22], double PR[6],double EQV, do
 				2,4,2,900,408,1000,9,1801,700,-113,6,-114,105,2000,0};
 	double Y[3]={7777777777., 1,1};
 	if(E<0.0001){
-		message_error_("ЗАДАНА ПОГРЕШНОСТЬ < 0.0001!");
+		message_error_("Invalid legacy geometry parameter!");
 		return BAD;
 	} 
 	int K1=0;
@@ -70,8 +66,6 @@ Lb100:	IS(3)=L;
 //***************************************************************
 BOOL INPH(double RS[30],int IS[8], double TS[6], double EQV, double* A)
 {
-//****BЫЧИCЛEHИE ЗHAЧEHИЙ ЭKBИДИCTAHTЫ ПOBEPXHOCTИ
-//****BEPCИЯ: 01 (19.02.97)
 	double R[30];
 	double Y[3]={7777777777., 1,1};
 	int M[16]={1,9,19,29,41,52,81,110,6,9,9,12,6,9,9,12};
@@ -96,7 +90,6 @@ BOOL INPH(double RS[30],int IS[8], double TS[6], double EQV, double* A)
 	if(L==12 || L==112) I=3;
 	if(L==22 || L==122) I=4;
 	if(I==0){
-		message_error_("OШИБKA B ПPИЗHAKE PEЗУЛЬTATA!");
 		IS(3)=L;
 		return BAD;
 	} 
@@ -123,12 +116,10 @@ BOOL INPH(double RS[30],int IS[8], double TS[6], double EQV, double* A)
 		J=10;
 	if(R(J)*RS(4)+R(J+1)*RS(5)+R(J+2)*RS(6)<=0){
 		IS(3)=L;
-		message_error_("ОСОБАЯ  ТОЧКА  ЭКВИДИСТАНТЫ ПОВ-ТИ!");
 		return BAD;
 	} 
 	if(I==8 && R(10)*RS(7)+R(11)*RS(8)+R(12)*RS(9)<=0){
 		IS(3)=L;
-		message_error_("ОСОБАЯ  ТОЧКА  ЭКВИДИСТАНТЫ ПОВ-ТИ!");
 		return BAD;
 	} 
 Lb1: if(L<100) goto Lb3;
@@ -148,8 +139,6 @@ Lb3: IS(3)=L;
 //***************************************************************
 BOOL ASM6WM(double F[17], double TS[22], int* K1, int K)
 {
-//****MИHИMИЗAЦИЯ B HAПPABЛEHИИ
-//****BEPCИЯ: 02 (25.07.97)
 	static double D[4];
 	static double T;
 	double A=0;
@@ -159,7 +148,6 @@ BOOL ASM6WM(double F[17], double TS[22], int* K1, int K)
 	if(*K1!=0) goto Lb5;
 	if(F(10)!=0) goto Lb1;
 	if(F(11)<1 || F(11)>50){
-		message_error_("ПРЕДЕЛ ЧИСЛА ИТЕРАЦИЙ НЕ [1-50]!\nASM6WM");
 		return BAD;
 	} 
 	TS(18)=TS(13);
@@ -179,10 +167,8 @@ Lb19:	if( ASM1(TS, 1, K, TS, &F(6), &A))
 	R=sqrt(R);
 	if(R>0) goto Lb3;
 	if(A<0){
-		message_astra("BЫXOД B УГЛ. TOЧKУ OБЛACTИ!\nASM6WM");
 		return BAD;
 	} 
-	message_astra("HAПPABЛEHИE HE OПPEДEЛEHO!\nASM6WM");
 	return BAD;
 Lb3:	for (I=1; I<=K; I++)
 			F(5+I)=F(5+I)/R;
@@ -222,7 +208,6 @@ Lb12: if(IRAS<=2) goto Lb10;
 Lb10: *K1=0;
 	F(10)=F(10)+1;
 	if(F(10)>F(11)){
-		message_astra("BЫXOД ПO ЧИCЛУ ИTEPAЦИЙ!\nASM6WM");
 		return BAD;
 	} 
 	R=fabs(TS(15));
@@ -237,17 +222,13 @@ Lb10: *K1=0;
 //***************************************************************
 BOOL ASSHG(int IPR, double* T, double TN, double TK, double DT)
 {
-//****ШАГ ПО ПАРАМЕТРУ
-//****BEPCИЯ: 07 (11. 3.97)
 	double R;
 	int I=1;
 	int J=1;
 	 if((*T-TN)*(TK-*T)<0){
-		message_error_("ТЕКУЩЕЕ Т ВНЕ [Тн, Тк]!\nASSHG");
 		return BAD;
 	} 
 	 if(DT<=0){
-		message_error_("ШАГ ВНЕ ИНТЕРВАЛА [0,1]!\nASSHG");
 		return BAD;
 	} 
 	int ICURS=1;
@@ -256,12 +237,9 @@ BOOL ASSHG(int IPR, double* T, double TN, double TK, double DT)
 	R=*T+DT*ICURS;
 	if(IPR==0) goto Lb4;
 	if(IPR!=1 && IPR!=2){
-		message_error_("ТИП ШАГА НЕ (0,1,2)!\nASSHG");
 		return BAD;
 	} 
-//....ШАГ С ПРОХОЖД. ЦЕЛОЧИСЛ. ЗНАЧ.
 	if(DT>1){
-		message_error_("ШАГ ВНЕ ИНТЕРВАЛА [0,1]!\nASSHG");
 		return BAD;
 	} 
 	I=(int)*T;
@@ -290,8 +268,6 @@ Lb4: if((TK-R)*ICURS<0)
 //***************************************************************
 BOOL INVLLM(int ISP[8], double TS[6], double PR[6], double DK[2], double EQV, double* A)
 {
-//****ВЫБОР НАЧ. ПРИБЛИЖЕНИЯ ДЛЯ ПРЯМОЙ пересек-ся с плоскостью
-//****BEPCИЯ: 01 (15.02.97)
 	double RS[6];
 	double D[2];
 	double UV[6];
@@ -299,7 +275,6 @@ BOOL INVLLM(int ISP[8], double TS[6], double PR[6], double DK[2], double EQV, do
 	int I=1;
 	for( I=1; I<=2; I++){
 		if(DK(I)<1 || DK(I)>100){
-			message_error_("ЧИСЛО РАЗБИЕНИЙ НЕ [1-100]!\nINVLLM");
 			return BAD;
 		} 
 		D(I)=1/DK(I);
@@ -336,14 +311,11 @@ Lb4: if(IP!=3) goto Lb3;
 //***************************************************************
 BOOL SCPL(int* NRES, double* B, double* ST, int IPR, int IS[8], double T[22], double PL[6], double EQV, double E, double* A)
 {
-//****РАЧЕТ ПЛОСКОГО СЕЧЕНИЯ ЗАДАННОГО СЕГМЕНТА ПОВЕРХНОСТИ 
-//****BEPCИЯ: 00 (15.02.97)
 	double R[3];
 	int KIN[15]={2,2,2,801,507,1302,406,-113,101,-114,102,-415,406,2000,0};
 	double Y[3];
 	double Q=0;
 	 if(*NRES<7){
-			message_error_("ПОЛЕ РЕЗУЛЬТАТА МАЛО!");
 			return BAD;
 		} 
 	int IP=IPR;
@@ -356,15 +328,12 @@ Lb1: if( SCPL2(&B(1,J),IS,T, &IP,PL,E,EQV,A))
 	ST(1,J)=T(1);
 	ST(2,J)=T(2);
 	if(J==1) goto Lb2;
-//....подсчет параметра
 	if( ASVOPM(R,KIN,&B(1,J),&B(1,J-1),Y,Y,Y,Y,Y,Y))
 		return BAD;
 	Q=16+R(2)*R(2)-R(1);
 	B(7,J)=B(7,J-1)+6*R(3)/(sqrt(Q)+R(2));
-//....конец цикла по числу точек сечения 
 Lb2: J=J+1;
 	if(J>*NRES-5){
-			message_error_("ПOЛE PEЗУЛЬTATA ИCЧEPПAHO!");
 			return BAD;
 		} 
 	if(IP!=5) goto Lb1;
@@ -380,13 +349,10 @@ Lb2: J=J+1;
 //***************************************************************	
 BOOL SCPL1(int* IPR, int IS[8], double TS[6], double EQV, double PL[6], double* A)
 {
-//****ПOИCK НАЧ. ПРИБЛИЖЕНИЯ ДЛЯ 1-ОЙ ТОЧКИ ПЛОСКОСКОГО СЕЧЕНИЯ
-//****BEPCИЯ: 01 (10.12.99)
 	double RS[6];
 	double TK[8];
 	int II=__IntAbs(*IPR);
 	if(II<1 || II>5){
-		message_error_("ПРИЗНАК ОРИЕНТАЦИИ НЕ [1-5]!");
 		return BAD;
 	} 
 	IS(3)=11;
@@ -401,14 +367,12 @@ Lb10: TS(1)=TS(3);
 	TS(2)=TS(4);
 	NP=1;
 	JJ=0;
-//....проход по точкам линии V=Vн
 	K=1;
 Lb1: goto Lb20;
 Lb2: if(TS(1)==TS(5)) goto Lb3;
 	if( ASSHG(1,&TS(1),TS(3),TS(5),SH))
 		return BAD;
 	goto Lb1;
-//....проход по точкам линии U=Uк
 Lb3: D=SH;
 	if(IS(7)<42) 
 		D=D*0.2;
@@ -417,13 +381,11 @@ Lb4: if( ASSHG(1,&TS(2),TS(4),TS(6),D))
 		return BAD;
 	goto Lb20;
 Lb5: if(TS(2)!=TS(6)) goto Lb4;
-//....проход по точкам линии V=Vк
 	K=2;
 Lb6: if( ASSHG(1,&TS(1),TS(5),TS(3),SH))
 		return BAD;
 	goto Lb20;
 Lb7: if(TS(1)!=TS(3)) goto Lb6;
-//....проход по точкам линии U=Uн
 	D=SH;
 	if(IS(7)<42) 
 		D=D*0.2;
@@ -433,12 +395,10 @@ Lb8: if( ASSHG(1,&TS(2),TS(6),TS(4),D))
 	goto Lb20;
 Lb9: if(TS(2)!=TS(4)) goto Lb8;
 	 if(SH<1){
-		message_astra("HET ПEPECEЧEHИЯ С ГРАНИЦЕЙ!");
 		return BAD;
 	} 
 	SH=0.1;
 	goto Lb10;
-//....общий блок анализа условия пересечения
 Lb20: if( INPH(RS,IS,TS,EQV,A))
 		return BAD;
 	Q=(RS(1)-PL(1))*PL(4)+(RS(2)-PL(2))*PL(5)+(RS(3)-PL(3))*PL(6);
@@ -466,7 +426,6 @@ Lb20: if( INPH(RS,IS,TS,EQV,A))
 	case 4:
 		goto Lb5;
 	}
-//....возвращение результата
 Lb30: K=1;
 	if(II<=3){
 	   if(*IPR>0 && TK(3,1)>TK(3,2))
@@ -493,8 +452,6 @@ Lb30: K=1;
 //***************************************************************
 BOOL SCPL2(double RES[7],int IS[8],double TS[22],int* IPR,double P[6],double E,double EQV,double* A)
 {
-//****РАСЧЕТ ОЧЕРЕДНОЙ ТОЧКИ ПЛОСКОГО СЕЧЕНИЯ ПOBEPXHOCTИ
-//****BEPCИЯ: 00 (19.02.97)
 	static double RS[29];
 	int KT[4]={4,6,3,5};
 	static int IJ[2];
@@ -507,11 +464,9 @@ BOOL SCPL2(double RES[7],int IS[8],double TS[22],int* IPR,double P[6],double E,d
 	int K=1;
 	int LPNT=0;
 	if(*IPR<0 || *IPR>4){
-		message_error_("НОМЕР ВАРИАНТА НЕ [0-4]!");
 		return BAD;
 	} 
 	if(*IPR==0) goto Lb2;
-//....В ПЕРВОЙ ТОЧКЕ СЕЧЕНИЯ
 	RS(29)=1;
 	TS(7)=1;
 	TS(8)=0.01;
@@ -520,7 +475,6 @@ BOOL SCPL2(double RES[7],int IS[8],double TS[22],int* IPR,double P[6],double E,d
 	*IPR=K;
 	LPNT=0;
 	goto Lb3;
-//....ПОСЛЕДУЮЩИЕ ТОЧКИ
 Lb2: TS(1)=TS(9);
 	TS(2)=TS(10);
 	LPNT=1;
@@ -585,8 +539,6 @@ Lb7: for(int I=1; I<=6; I++)
 //***************************************************************
 BOOL SCPL3(double RS[15],int IS[8],double  TS[22],int IPR,double P[6],double E,double EQV,double* PT,double* A)
 {
-//****PACЧET TOЧKИ ПЛОСКОГО СЕЧЕНИЯ ПOBEPXHOCTИ
-//****BEPCИЯ: 00 (19.02.97)
 	static double F[17];
 	static double R[3];
 	int M[3]={1,14,25};
@@ -598,21 +550,17 @@ BOOL SCPL3(double RS[15],int IS[8],double  TS[22],int IPR,double P[6],double E,d
 	double B;
 	int I,J,K;
 	if(E<1E-4){
-		message_error_("ЗAДAHA ПOГPEШHOCTЬ < 0.0001!");
 		return BAD;
 	} 
 	if(*PT*(*PT)!=1){
-		message_error_("ПРИЗНАК ОРИЕНТАЦИИ КРИВОЙ НЕ 1!");
 		return BAD;
 	} 
 	if(IPR>3 || IPR<0){
-		message_error_("НОМЕР ВАРИАНТА НЕ [0-3]!");
 		return BAD;
 	} 
 	int L=IS(3);
 	IS(3)=22;
 	if(IPR==0) goto Lb2;
-//....УСТАНОВКА НАЧ. ЗНАЧЕНИЙ
 	K=0;
 	F(10)=0;
 	F(11)=20;
@@ -624,7 +572,6 @@ BOOL SCPL3(double RS[15],int IS[8],double  TS[22],int IPR,double P[6],double E,d
 	B=(P(4)*P(4)+P(5)*P(5)+P(6)*P(6))*E*E;
 	for(I=1; I<=3; I++)
 		R(I)=0;
-//....ИТЕРАЦИЯ
 Lb2: if( INPH(RS,IS,TS,EQV,A))
 		 return BAD;
 	if(IPR==0) goto Lb4;
@@ -644,7 +591,6 @@ Lb3: F(2)=2*R(1)*R(2);
 		return BAD;
 	}
 	goto Lb2;
-//....ОФОРМЛЕНИЕ РЕЗУЛЬТАТА
 Lb4: for(I=7; I<=9; I++){
 		RS(6+I)=RS(I);
 		RS(I)=RS(3+I);

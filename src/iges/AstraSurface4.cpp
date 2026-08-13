@@ -1,5 +1,3 @@
-////////////	реализация функций Астры на C
-/////////	начало 27.07.2000 конец 31.07.
 /////////////////////////////////////////////////////////
 #include "defines.h"
 #include "AstraVect.h"
@@ -40,31 +38,24 @@ int IRAS=0;
 BOOL SCSF(int* NRES, double* RES, double* PP,int IS1[8],int IS2[8],\
 		  double TS1[22],double TS2[22],int LG,double EQV[2], double E, double* A, double* B)
 {
-//****ПEPECEЧEHИE ПOBEPXHOCTEЙ
-//****BEPCИЯ: 01 (11.03.97)
 	double R[3];
 	int NU[15]={2,2,2,801,507,1302,406,-113,101,-114,102,-415,406,2000,0};
 	 if(LG<0 || LG>4){
-		message_error_("ПРИЗНАК ГРАНИЦЫ НЕ 1,4!");
 		return BAD;
 	 }
 	 if(*NRES<=IS1(5) || *NRES<=IS1(6)){
-		message_error_("ПОЛЕ РЕЗУЛЬТАТА МАЛО!");
 		return BAD;
 	 }
 	int J=1;
 	int NVAR=LG;
 	int L=0;
 	double PT=1.0;
-//....поиск нач. приближения
 	if( SCSF1(IS1,IS2,TS1,TS2,&NVAR,EQV,E,A,B,NRES,RES))
 		return BAD;
 
-//....расчет очередной точки
 Lb1: if( SCSF2(&RES(1,J), IS1, IS2, TS1, TS2, &NVAR, EQV, E, A, B))
 		 goto Lb2;
 	goto Lb3;
-//....последняя точка
 Lb2: if(J==1)
 		return BAD;
 	L=0;
@@ -85,7 +76,6 @@ Lb2: if(J==1)
 		if(VOPA(&RES(4,J),1, &RES(4,J)))
 			return BAD;
 	NVAR=5;
-//....подсчет параметра в точке
 Lb3: RES(7,J)=0;
 	PP(1,J)=TS1(1);
 	PP(2,J)=TS1(2);
@@ -98,10 +88,8 @@ Lb3: RES(7,J)=0;
 		return BAD;
 	Q=16+R(2)*R(2)-R(1);
 	RES(7,J)=RES(7,J-1)+6*R(3)/(sqrt(Q)+R(2));
-//....конец цикла по числу точек сечения 
 Lb4: J=J+1;;
 	if(J>*NRES-8){
-		message_astra("ПOЛE PEЗУЛЬTATA ИCЧEPПAHO!");
 		return BAD;
 	 }
 	if(NVAR!=5) goto Lb1;
@@ -121,8 +109,6 @@ Lb4: J=J+1;;
 BOOL SCSF0(int IS1[8],int IS2[8],double TS1[22],double TS2[22],\
 		   int* LP,double EQV[2],double* A1,double* A2,int* NRP, double* RP)
 {
-//****ПОИСК НАЧ. ПРИБЛ. ТОЧКИ ПЕРЕСЕЧЕНИЯ КООРД. ЛИНИИ С ПОВ-ТЬЮ
-//****BEPCИЯ: 00 (22.02.97)
 	double DP[2];
 	double RS[6];
 	int JJ[4]={4,6,3,5};
@@ -131,18 +117,15 @@ BOOL SCSF0(int IS1[8],int IS2[8],double TS1[22],double TS2[22],\
     int IPR=__IntAbs(*LP);
 	double Q=-1;
 	if(IPR<1 || IPR>4){
-		message_astra("ПРИЗНАК ЛИНИИ НЕ [1-4]!");
 		return BAD;
 	 }
 	if(*NRP-1<IS1(5) || *NRP-1<IS1(6)){
-		message_astra("РАБОЧЕЕ ПОЛЕ МАЛО!");
 		return BAD;
 	 }
 	int L1=IS1(3);
 	int L2=IS2(3);
 	IS1(3)=11;
 	IS2(3)=11;
-//....ВЫДЕЛЕНИЕ КООРДИНАТНОЙ ЛИНИИ ПЕРВОЙ ПОВЕРХНОСТИ
 	int J=1;
 	if(IPR>=3) 
 		J=2;
@@ -161,11 +144,9 @@ Lb2: if(TS1(J)==TS1(J+4)) goto Lb3;
 	   return BAD;
 	K=K+1;
 	if(K>*NRP-1){
-		message_astra("РАБОЧЕЕ ПОЛЕ МАЛО!");
 		return BAD;
 	 }
 	goto Lb1;
-//....ПЕРЕБОР ВТОРОЙ ПОВЕРХНОСТИ
 Lb3: DP(1)=1;
 	DP(2)=1;
 	Q=-1;
@@ -209,11 +190,8 @@ Lb6:	if( ASSHG(0, &TS1(J),TS1(J+2),TS1(J+4),D))
 BOOL SCSF1(int IS1[8],int IS2[8],double TS1[6],double TS2[6],\
 		   int* LG,double EQV[2],double E,double* A1, double* A2,int* NRP,double* RP)
 {
-//****ПОИСК 1-ОЙ ТОЧКИ ЛИНИИ ПЕРЕСЕЧЕНИЯ ПОВ-ЕЙ
-//****BEPCИЯ: 01 (03.03.97)
     static double RS[30];
 	if(*LG<0 || *LG>4){
-		message_astra("НОМЕР ВАРИАНТА НЕ [1-4]!");
 		return BAD;
 	 }
 	TS1(13)=1;
@@ -223,12 +201,10 @@ BOOL SCSF1(int IS1[8],int IS2[8],double TS1[6],double TS2[6],\
 	int K=1;
 	double PT=1.0;
 	if(*LG==0) goto Lb1;
-//....ДЛЯ ЗАДАННОЙ ГРАНИЦЫ 1-ОЙ ПОВЕРХНОСТИ
 	if( SCSF0(IS1,IS2,TS1,TS2,LG,EQV,A1,A2,NRP,RP))
 		return BAD;
 	K=int(*LG+1)/2+1;
 	return SCSF3(RS, IS1, IS2, TS1, TS2, &K, EQV, E, &PT,A1,A2);
-//....ОБЩИЙ СЛУЧАЙ
 Lb1: for(int I=1; I<=4; I++){
 		*LG=I;
 		if( SCSF0(IS1,IS2,TS1,TS2,LG,EQV,A1,A2,NRP,RP))
@@ -240,7 +216,6 @@ Lb1: for(int I=1; I<=4; I++){
 //		if(IRAS==0)
 //			return OK;
 	 }
-	return BAD;////нету начального приближения
 }
 
 #undef RES
@@ -258,8 +233,6 @@ Lb1: for(int I=1; I<=4; I++){
 BOOL SCSF2(double* RES,int* IS1, int* IS2, double* TS1, double* TS2,\
 		   int* IPR,double* EQV, double E, double* A1, double* A2)
 {
-//****ПОСЛЕДОВАТЕЛЬНЫЙ РАСЧЕТ ТОЧЕК ЛИНИИ ПЕРЕСЕЧЕНИЯ ПОВ-ЕЙ
-//****BEPCИЯ: 00 (24.02.97)
 	static double RS[43];
     static double  R[12];
 	static int KT[4]={4,6,3,5};
@@ -272,7 +245,6 @@ BOOL SCSF2(double* RES,int* IS1, int* IS2, double* TS1, double* TS2,\
 		1,4,801,507,902,604,-213,200,601,100,802,202,-414,201,
 		2000,0};
 	 if(*IPR<0 || *IPR>4){
-		message_error_("НОМЕP ВАРИАНТА НЕ [0-4]");
 		return BAD;
 	}
 	 int K=0;
@@ -282,7 +254,6 @@ BOOL SCSF2(double* RES,int* IS1, int* IS2, double* TS1, double* TS2,\
 	 int L=1;
 	double R1=0;
 	if(*IPR==0) goto Lb2;
-//....ДЛЯ ПЕРВОЙ ТОЧКИ
 	RS(43)=1;
 	K=int((*IPR+1)/2);
 	TS1(3-K)=TS1(KT(*IPR));
@@ -298,7 +269,6 @@ BOOL SCSF2(double* RES,int* IS1, int* IS2, double* TS1, double* TS2,\
 		T(K1(I)+2)=TS2(I);
 	}
 	goto Lb3;
-//....ДЛЯ ПОСЛЕДУЮЩИХ ТОЧЕК
 Lb2: TS1(1)=TS1(9);
 	TS1(2)=TS1(10);
 	TS2(1)=TS2(9);
@@ -317,7 +287,6 @@ Lb4: if(SCSF3(RS,IS1,IS2,TS1,TS2, &K,EQV,E,&RS(43),A1,A2))
 	for(I=37;I<=40; I++)
 		D=D+RS(I)*RS(I);
    if(D==0){
-		message_error_("НAПPABЛEHИE HE OПPEДEЛEHO");
 		return BAD;
 	}
 	D=sqrt(D);
@@ -333,7 +302,6 @@ Lb4: if(SCSF3(RS,IS1,IS2,TS1,TS2, &K,EQV,E,&RS(43),A1,A2))
 	if(ASM1(T,3,4,T, &RS(37), &RS(43)))
 		return BAD;
 	goto Lb4;
-//....РАСЧЕТ ШАГА В ПОСЛЕДУЮЩУЮ ТОЧКУ
 Lb6:	for(I=1;I<=2; I++){
 		TS1(8+I)=TS1(I);
 		TS2(8+I)=TS2(I);
@@ -400,7 +368,6 @@ Lb15: TS1(1)=T(1);
 		R1=R1+(RS(I)-RS(18+I))*(RS(I)-RS(18+I));
 	if(R1>E*E) goto Lb3;
 	*IPR=5;
-//....ЗАНЕСЕНИЕ ТОЧКИ В РЕЗУЛЬТАТ
 Lb21: for(I=1;I<=6; I++)
 		RES(I)=RS(I);
 	return	OK;
@@ -416,8 +383,6 @@ Lb21: for(I=1;I<=6; I++)
 BOOL SCSF3(double RS[30],int* IS1, int* IS2,double* TS1,double* TS2,\
 		   int* IPR, double EQV[2], double E, double* PT, double* A1,double* A2)
 {
-//****PACЧET TOЧKИ ПEPECEЧEHИЯ КООРД. ЛИНИИ С ПOB-ТЬЮ
-//****BEPCИЯ: 01 (03.03.97)
 	static double F[17];
 	static double R[3];
 	static int M[3]={29,41,51};
@@ -430,22 +395,18 @@ BOOL SCSF3(double RS[30],int* IS1, int* IS2,double* TS1,double* TS2,\
 		3,-1,-1,2,601,604,602,705,-313,102,2000,0,
 		3,4,1,-1,901,101,804,104,1401,708,605,109,2000,0};
 	IRAS=0;
-//....КОНТРОЛЬ УПРАВЛЯЮЩИХ ПАРАМЕТРОВ
 	if(IPR==0){
 		message_error_("IPR==NULL");
 		return BAD;
 	}
 	if(*IPR<0 || *IPR>3){
-		message_error_("НОМЕP ВАРИАНТА НЕ [0-3]");
 		IRAS=1;
 		return BAD;
 	}
 	if(E<=0.00001){
-		message_error_("ЗАДАНА ТОЧНОСТЬ < 0.00001");
 		IRAS=1;
 		return BAD;
 	}
-//....ПОДГОТОВКА ИТЕРАЦИИ
 	int L3=IS1(3);
 	int L2=IS2(3);
 	IS1(3)=22;
@@ -462,7 +423,6 @@ BOOL SCSF3(double RS[30],int* IS1, int* IS2,double* TS1,double* TS2,\
 	int I=0;
 	int IP=0;
 	int L1=61;
-//....ИТЕРАЦИИ
 Lb1: if(INPH(&RS(7),IS1,TS1,EQV(1),A1))
 		goto Lb101;
 
@@ -513,7 +473,6 @@ Lb8: if(ASM6W(F,TS2,&K,2))
 		 goto Lb11;
 	if(K==0) goto Lb9;
 	goto Lb2;
-//....CЕМАФОР
 Lb9: IP=0;
 Lb10: I=3-I;
 	K=0;
@@ -522,7 +481,6 @@ Lb11: if(IP!=0)
 		goto Lb100;
 	IP=1;
 	goto Lb10;
-//....ОФОРМЛЕНИЕ РЕЗУЛЬТАТА
 Lb20: if( ASVOPM(RS,&INT(85),&RS(7),&RS(28),PT,Y,Y,Y,Y,Y))
 		  goto Lb101;
 	IS1(3)=L3;

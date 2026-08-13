@@ -22,7 +22,7 @@ public:
 	CVector(CVector* v1, CVector* v2);
 	CVector(CPoint3d& p1, CPoint3d& p2);
 	CVector(CVector* v1, CVector* v2, CVector* v3, CVector* v4);
-	CVector(double axy, double az);//2 полярных угла
+	CVector(double axy, double az);
 	double	DotP(const CPoint3d& p2);
 
 	inline double	Dot( const CVector & p2)

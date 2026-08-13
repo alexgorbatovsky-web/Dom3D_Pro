@@ -459,7 +459,7 @@ public:
 struct CFace3Pr
 {
 	int m_index;// index of CFace3ds
-	CVector norm;// Нормаль к этому треугольнику
+	CVector norm;
 	unsigned int num_vert;
 
 	CFace3Pr() { m_index = 0; num_vert = 0; }

@@ -18,6 +18,8 @@
 #include "MaterialDrag.h"
 #include "MeasurementUnits.h"
 #include "PreferencesDialog.h"
+#include "LightingDialog.h"
+#include "LanguageManager.h"
 #include "HotkeyManagerDialog.h"
 #include "CommandSearchPopup.h"
 #include "BooleanDialog.h"
@@ -580,7 +582,7 @@ private:
         const CPolyline* selected = document_.GetSelectedPolyline();
         if (!selected) {
             if (set_status_) {
-                set_status_("Fiill Contour: выберите CPolyline или укажите контур в списке");
+                set_status_("Fiill Contour:select the required geometry and continue");
             }
             return;
         }
@@ -2026,7 +2028,7 @@ int ShowCurveTrimPlaneMethodDialog(
             QRegularExpression("\\s+"), Qt::SkipEmptyParts);
         if (values.size() != 4) {
             factors_editor->setStyleSheet("QLineEdit { background: #ffd6d6; }");
-            factors_editor->setToolTip("Введите четыре числа: A B C D");
+            factors_editor->setToolTip("Enter four numbers: A B C D");
             factors_editor->setFocus();
             factors_editor->selectAll();
             return;
@@ -2037,7 +2039,7 @@ int ShowCurveTrimPlaneMethodDialog(
             parsed[static_cast<size_t>(index)] = values[index].toDouble(&ok);
             if (!ok) {
                 factors_editor->setStyleSheet("QLineEdit { background: #ffd6d6; }");
-                factors_editor->setToolTip("Введите четыре числа: A B C D");
+                factors_editor->setToolTip("Enter four numbers: A B C D");
                 factors_editor->setFocus();
                 factors_editor->selectAll();
                 return;
@@ -2279,25 +2281,25 @@ MainWindow::MainWindow(QWidget* parent)
             statusBar()->showMessage("Associative Clone: select one solid, then press Enter");
         } else if (pending_group_command_ == PendingGroupCommand::JoinSurfaces) {
             statusBar()->showMessage(
-                "Join Surfaces: выбери минимум две поверхности, затем Enter");
+                "Join Surfaces:select the required geometry and continue");
         } else if (pending_group_command_ == PendingGroupCommand::PlaneIntersection) {
             statusBar()->showMessage(
-                "Plane Intersection: выберите Plane и поверхность, тело или Mesh, затем Enter");
+                "Plane Intersection:select the required geometry and continue");
         } else if (pending_group_command_ == PendingGroupCommand::SurfaceIntersection) {
             statusBar()->showMessage(
-                "Surface Intersection: выберите две поверхности, затем Enter");
+                "Surface Intersection:select the required geometry and continue");
         } else if (pending_group_command_ == PendingGroupCommand::ProjectCurveToSurface) {
             statusBar()->showMessage(
-                "Project Curve: выберите кривую и поверхность, затем Enter");
+                "Project Curve:select the required geometry and continue");
         } else if (pending_group_command_ == PendingGroupCommand::ExtractSurfaceEdge) {
             statusBar()->showMessage(
-                "Extract Edge: выберите кромки поверхности или тела, затем Enter");
+                "Extract Edge:select the required geometry and continue");
         } else if (pending_group_command_ == PendingGroupCommand::FourSplineSurface) {
-            statusBar()->showMessage("Surface by 4 Splines: выбери четыре граничных сплайна, затем Enter");
+            statusBar()->showMessage("Surface by 4 Splines:select the required geometry and continue");
         } else if (pending_group_command_ == PendingGroupCommand::TwoRailSweepSurface) {
-            statusBar()->showMessage("Sweep Surface (2 Rails): выбери профиль и две направляющие, затем Enter");
+            statusBar()->showMessage("Sweep Surface (2 Rails):select the required geometry and continue");
         } else if (pending_group_command_ == PendingGroupCommand::TwoRailSweepSolid) {
-            statusBar()->showMessage("Sweep Solid (2 Rails): выбери закрытый Sketch и две направляющие, затем Enter");
+            statusBar()->showMessage("Sweep Solid (2 Rails):select the required geometry and continue");
         }
     });
     connect(viewport_, &OpenGLViewport::Point3DPicked, this, [this](CPoint3d point) {
@@ -2356,7 +2358,7 @@ MainWindow::MainWindow(QWidget* parent)
     });
     connect(viewport_, &OpenGLViewport::Point3DPickCanceled, this, [this]() {
         if (plane_three_point_pick_active_) {
-            CancelPlaneThreePointPick("Plane: выбор трёх точек отменён");
+            CancelPlaneThreePointPick("Plane:operation canceled");
             return;
         }
         if (pending_curve_edit_command_ != CurveEditCommand::None) {
@@ -2409,21 +2411,21 @@ MainWindow::MainWindow(QWidget* parent)
         } else if (!pending_trim_tool_id_.empty()) {
             CancelPendingTrim("Trim command canceled");
         } else if (pending_group_command_ == PendingGroupCommand::JoinSurfaces) {
-            CancelPendingGroupCommand("Join Surfaces: отменено");
+            CancelPendingGroupCommand("Join Surfaces:operation canceled");
         } else if (pending_group_command_ == PendingGroupCommand::PlaneIntersection) {
-            CancelPendingGroupCommand("Plane Intersection: отменено");
+            CancelPendingGroupCommand("Plane Intersection:operation canceled");
         } else if (pending_group_command_ == PendingGroupCommand::SurfaceIntersection) {
-            CancelPendingGroupCommand("Surface Intersection: отменено");
+            CancelPendingGroupCommand("Surface Intersection:operation canceled");
         } else if (pending_group_command_ == PendingGroupCommand::ProjectCurveToSurface) {
-            CancelPendingGroupCommand("Project Curve: отменено");
+            CancelPendingGroupCommand("Project Curve:operation canceled");
         } else if (pending_group_command_ == PendingGroupCommand::ExtractSurfaceEdge) {
-            CancelPendingGroupCommand("Extract Edge: отменено");
+            CancelPendingGroupCommand("Extract Edge:operation canceled");
         } else if (pending_group_command_ == PendingGroupCommand::FourSplineSurface) {
-            CancelPendingGroupCommand("Surface by 4 Splines: отменено");
+            CancelPendingGroupCommand("Surface by 4 Splines:operation canceled");
         } else if (pending_group_command_ == PendingGroupCommand::TwoRailSweepSurface) {
-            CancelPendingGroupCommand("Sweep Surface (2 Rails): отменено");
+            CancelPendingGroupCommand("Sweep Surface (2 Rails):operation canceled");
         } else if (pending_group_command_ == PendingGroupCommand::TwoRailSweepSolid) {
-            CancelPendingGroupCommand("Sweep Solid (2 Rails): отменено");
+            CancelPendingGroupCommand("Sweep Solid (2 Rails):operation canceled");
         } else {
             CancelPendingGroupCommand("Group command canceled");
         }
@@ -2661,7 +2663,7 @@ MainWindow::MainWindow(QWidget* parent)
                 edge_tool_started_from_face_quick_menu_ = false;
                 viewport_->SetSelectionMode(SelectionMode::Face);
                 statusBar()->showMessage(
-                    "Face quick menu: не удалось выбрать кромки грани", 1600);
+                    "Face quick menu:operation failed; check the selected geometry and parameters", 1600);
                 return;
             }
             ActivateParametricTool(
@@ -2944,7 +2946,7 @@ MainWindow::MainWindow(QWidget* parent)
         if (active_parametric_object_.tool_id == "fillet_edge" || active_parametric_object_.tool_id == "fillet_all_edges") {
             const double radius = active_parametric_object_.parameters.empty() ? 2.0 : active_parametric_object_.parameters[0].value;
             if (!document_.HasLiveFillet()) {
-                statusBar()->showMessage("Fillet: выбери кромку тела");
+                statusBar()->showMessage("Fillet:select the required geometry and continue");
                 return;
             }
             const bool rebuilt = document_.UpdateLiveFillet(radius);
@@ -2956,13 +2958,13 @@ MainWindow::MainWindow(QWidget* parent)
             viewport_->update();
             statusBar()->showMessage(rebuilt
                 ? QString("Fillet: radius %1").arg(radius, 0, 'f', 2)
-                : "Fillet: радиус не подходит");
+                : "Fillet:operation failed; check the selected geometry and parameters");
             return;
         }
         if (active_parametric_object_.tool_id == "ChamferSolid") {
             const double distance = active_parametric_object_.parameters.empty() ? 2.0 : active_parametric_object_.parameters[0].value;
             if (!document_.HasLiveChamfer()) {
-                statusBar()->showMessage("Chamfer: выбери кромку тела");
+                statusBar()->showMessage("Chamfer:select the required geometry and continue");
                 return;
             }
             const bool rebuilt = document_.UpdateLiveChamfer(distance);
@@ -2970,7 +2972,7 @@ MainWindow::MainWindow(QWidget* parent)
             viewport_->update();
             statusBar()->showMessage(rebuilt
                 ? QString("Chamfer: Distance %1").arg(distance, 0, 'f', 2)
-                : "Chamfer: размер не подходит");
+                : "Chamfer:operation failed; check the selected geometry and parameters");
             return;
         }
         if (active_parametric_object_.tool_id == "ThickSolidTool") {
@@ -2984,7 +2986,7 @@ MainWindow::MainWindow(QWidget* parent)
             }
             viewport_->SetThickSolidThickness(thickness);
             viewport_->update();
-            statusBar()->showMessage(QString("ThickSolid: Thick %1, выбери Face и нажми OK").arg(thickness, 0, 'f', 2));
+            statusBar()->showMessage(QString("ThickSolid: Thick %1, select the required geometry and continue").arg(thickness, 0, 'f', 2));
             return;
         }
         if (active_parametric_object_.tool_id == "SolidExtrudeTool") {
@@ -3003,7 +3005,7 @@ MainWindow::MainWindow(QWidget* parent)
                 return;
             }
             if (!document_.HasLivePolylineExtrude()) {
-                statusBar()->showMessage("Extrude: выбери замкнутую Polyline или Sketch");
+                statusBar()->showMessage("Extrude:select the required geometry and continue");
                 return;
             }
             const bool rebuilt = document_.UpdateLiveExtrudeSelectedPolyline(distance, reverse, taper_angle);
@@ -3011,7 +3013,7 @@ MainWindow::MainWindow(QWidget* parent)
             viewport_->update();
             statusBar()->showMessage(rebuilt
                 ? QString("Extrude: Distance %1, Angle %2").arg(distance, 0, 'f', 2).arg(taper_angle, 0, 'f', 2)
-                : "Extrude: профиль или параметры не подходят");
+                : "Extrude:operation status");
             return;
         }
         if (active_parametric_object_.tool_id == "SurfaceOfRevolution") {
@@ -3027,7 +3029,7 @@ MainWindow::MainWindow(QWidget* parent)
             }
             if (!document_.HasLivePolylineRevolve()) {
                 statusBar()->showMessage(
-                    "Revolve: выбери Polyline или Sketch");
+                    "Revolve:select the required geometry and continue");
                 return;
             }
             const bool rebuilt = document_.UpdateLiveRevolveSelectedPolyline(angle, axis_index);
@@ -3035,7 +3037,7 @@ MainWindow::MainWindow(QWidget* parent)
             viewport_->update();
             statusBar()->showMessage(rebuilt
                 ? QString("Revolve: Angle %1").arg(angle, 0, 'f', 1)
-                : "Revolve: профиль или параметры не подходят");
+                : "Revolve:operation status");
             return;
         }
         // A new cabinet is created only after OK.  Parameter changes merely
@@ -3048,13 +3050,13 @@ MainWindow::MainWindow(QWidget* parent)
                 QTimer::singleShot(0, this, [this]() {
                     QMessageBox::information(
                         this,
-                        "Угловой шкаф",
-                        "Для корпуса Corner доступен только фасад из двух створок.\n"
-                        "Параметр изменён на Double Door.");
+                        "Corner Cabinet",
+                        "Only a double-door front is available for a Corner cabinet.\n"
+                        "The parameter was changed to Double Door.");
                 });
             } else {
                 statusBar()->showMessage(
-                    "Cabinet: задайте параметры и нажмите OK");
+                    "Cabinet:adjust the required parameters and continue");
             }
             return;
         }
@@ -3096,9 +3098,9 @@ MainWindow::MainWindow(QWidget* parent)
             QTimer::singleShot(0, this, [this]() {
                 QMessageBox::information(
                     this,
-                    "Угловой шкаф",
-                    "Для корпуса Corner доступен только фасад из двух створок.\n"
-                    "Параметр изменён на Double Door.");
+                    "Corner Cabinet",
+                    "Only a double-door front is available for a Corner cabinet.\n"
+                    "The parameter was changed to Double Door.");
             });
         } else {
             statusBar()->showMessage("Object rebuilt", 1200);
@@ -3461,6 +3463,18 @@ void MainWindow::CreateActions() {
     auto* tools_menu = menuBar()->addMenu("&Tools");
     auto* edit_menu = menuBar()->addMenu("&Edit");
     auto* help_menu = menuBar()->addMenu("&Help");
+    auto& languages = LanguageManager::Instance();
+    languages.BindText(file_menu, "MenuFile", "&File");
+    languages.BindText(view_menu, "MenuView", "&View");
+    languages.BindText(tools_menu, "MenuTools", "&Tools");
+    languages.BindText(edit_menu, "MenuEdit", "&Edit");
+    languages.BindText(help_menu, "MenuHelp", "&Help");
+    connect(&languages, &LanguageManager::LanguageChanged, this, [this, &languages]() {
+        languages.Apply(this);
+        statusBar()->showMessage(
+            languages.Text("LanguageChangedStatus", "Interface language changed"),
+            1600);
+    });
 
     tab_toolbar_ = addToolBar("Tool Tabs");
     tab_toolbar_->setObjectName("ToolTabs");
@@ -3578,6 +3592,11 @@ void MainWindow::CreateActions() {
     view_menu->addAction("Update Scene", this, [this]() {
         viewport_->RefreshSurfaceMeshQuality();
     });
+    auto* lighting_action = view_menu->addAction("Lighting...", this, [this]() {
+        ShowLightingDialog();
+    });
+    languages.BindText(lighting_action, "LightingMenuAction", "Lighting...");
+    view_menu->addSeparator();
     auto* reference_image_menu = view_menu->addMenu("Add Ref image");
     reference_image_menu->addAction("Ref image for X-axis", this, [this]() {
         AddReferenceImage(ReferenceImageAxis::X);
@@ -3922,9 +3941,26 @@ void MainWindow::CreateActions() {
         statusBar()->showMessage(QString("Selected %1 visible object(s)").arg(count), 1200);
     }));
 
-    help_menu->addAction(add_action("Help &Topics", QKeySequence::HelpContents, [this]() {
+    auto* help_topics_action = add_action("Help &Topics", QKeySequence::HelpContents, [this]() {
         QMessageBox::information(this, "Help Topics", "Help system will be added here.");
-    }));
+    });
+    languages.BindText(help_topics_action, "HelpTopics", "Help &Topics");
+    help_menu->addAction(help_topics_action);
+
+    auto* language_menu = help_menu->addMenu("Language");
+    languages.BindText(language_menu, "MenuLanguage", "Language");
+    auto* language_group = new QActionGroup(language_menu);
+    language_group->setExclusive(true);
+    for (const QString& language : languages.AvailableLanguages()) {
+        auto* action = language_menu->addAction(languages.LanguageDisplayName(language));
+        action->setCheckable(true);
+        action->setChecked(language.compare(
+            languages.CurrentLanguage(), Qt::CaseInsensitive) == 0);
+        language_group->addAction(action);
+        connect(action, &QAction::triggered, this, [language]() {
+            LanguageManager::Instance().SetLanguage(language);
+        });
+    }
     help_menu->addSeparator();
     help_menu->addAction(add_action("&About Dom-3D...", {}, [this]() {
         QMessageBox::about(this, "About Dom-3D",
@@ -5388,13 +5424,13 @@ void MainWindow::RequestObjectColor() {
     viewport_->SetTool(ToolMode::Select);
     viewport_->SetSelectionMode(SelectionMode::Object);
     UpdateActiveToolUi("select");
-    statusBar()->showMessage("Color: выберите CAlfaObject для редактирования цвета");
+    statusBar()->showMessage("Color:select the required geometry and continue");
 }
 
 void MainWindow::EditSelectedObjectColor() {
     if (!document_.HasSelection()) {
         object_color_pick_pending_ = true;
-        statusBar()->showMessage("Color: выберите CAlfaObject для редактирования цвета");
+        statusBar()->showMessage("Color:select the required geometry and continue");
         return;
     }
 
@@ -5649,7 +5685,7 @@ void MainWindow::ChangeSelectedObjectLayer() {
         viewport_->SetTool(ToolMode::Select);
         viewport_->SetSelectionMode(SelectionMode::Object);
         UpdateActiveToolUi("select");
-        statusBar()->showMessage("Layer: выберите объект для смены слоя");
+        statusBar()->showMessage("Layer:select the required geometry and continue");
         return;
     }
 
@@ -5755,9 +5791,9 @@ QString MainWindow::SpatialCurvePrompt() const {
         return {};
     }
     if (spatial_curve_kind_ == SpatialCurveKind::Bezier)
-        return QString("Bezier 3D: выберите узел (%1); C — замкнуть, Enter — завершить, Esc — отменить")
+        return QString("Bezier 3D:operation canceled")
             .arg(spatial_curve_point_count_);
-    return QString("%1: выберите Point3D (%2); C — замкнуть, Enter — завершить, Esc — отменить")
+    return QString("%1:operation canceled")
         .arg(curve_name)
         .arg(spatial_curve_point_count_);
 }
@@ -5904,7 +5940,7 @@ void MainWindow::FinishSpatialCurve() {
     }
     if (spatial_curve_point_count_ < 2) {
         CancelSpatialCurve();
-        statusBar()->showMessage("3D curve: нужно не менее двух точек", 2200);
+        statusBar()->showMessage("3D curve:additional geometry is required", 2200);
         return;
     }
 
@@ -5940,14 +5976,14 @@ void MainWindow::FinishSpatialCurve() {
     UpdateActiveToolUi("select");
     RefreshSceneTree();
     viewport_->update();
-    statusBar()->showMessage(QString("%1 создана").arg(name), 1800);
+    statusBar()->showMessage(QString("%1 operation completed").arg(name), 1800);
 }
 
 void MainWindow::CloseSpatialCurve() {
     if (spatial_curve_kind_ == SpatialCurveKind::None) return;
     if (spatial_curve_point_count_ < 3 || spatial_curve_object_id_ == 0) {
         statusBar()->showMessage(
-            "3D curve: для замыкания нужно не менее трёх точек", 2200);
+            "3D curve:additional geometry is required", 2200);
         viewport_->BeginPick3DPoint(SpatialCurvePrompt());
         return;
     }
@@ -5970,7 +6006,7 @@ void MainWindow::CloseSpatialCurve() {
         }
     }
     if (!closed) {
-        statusBar()->showMessage("3D curve: не удалось замкнуть кривую", 2200);
+        statusBar()->showMessage("3D curve:operation failed; check the selected geometry and parameters", 2200);
         viewport_->BeginPick3DPoint(SpatialCurvePrompt());
         return;
     }
@@ -5979,7 +6015,7 @@ void MainWindow::CloseSpatialCurve() {
     const QString name = kind == SpatialCurveKind::Polyline ? "Polyline 3D"
         : kind == SpatialCurveKind::BSpline ? "B-Spline 3D"
         : kind == SpatialCurveKind::Bezier ? "Bezier 3D" : "NURBS 3D";
-    statusBar()->showMessage(QString("%1 замкнута").arg(name), 1800);
+    statusBar()->showMessage(QString("%1 operation status").arg(name), 1800);
 }
 
 void MainWindow::CancelSpatialCurve() {
@@ -6004,7 +6040,7 @@ void MainWindow::CancelSpatialCurve() {
     UpdateActiveToolUi("select");
     RefreshSceneTree();
     viewport_->update();
-    statusBar()->showMessage("Создание 3D curve отменено", 1600);
+    statusBar()->showMessage("3D curve creation canceled", 1600);
 }
 
 void MainWindow::BeginCurveEditCommand(CurveEditCommand command) {
@@ -6020,22 +6056,22 @@ void MainWindow::BeginCurveEditCommand(CurveEditCommand command) {
     QString prompt;
     switch (command) {
     case CurveEditCommand::Join:
-        prompt = "Join: выберите две или больше однотипных кривых, затем Enter";
+        prompt = "Join:select the required geometry and continue";
         break;
     case CurveEditCommand::Split:
-        prompt = "Split: выберите две пересекающиеся кривые, затем Enter";
+        prompt = "Split:select the required geometry and continue";
         break;
     case CurveEditCommand::Extend:
-        prompt = "Extend: выберите одну незамкнутую кривую, затем Enter";
+        prompt = "Extend:select the required geometry and continue";
         break;
     case CurveEditCommand::TrimByPlane:
-        prompt = "Trim by Plane: выберите кривую (Plane необязательна), затем Enter";
+        prompt = "Trim by Plane:select the required geometry and continue";
         break;
     case CurveEditCommand::SimplifyByPoint:
-        prompt = "Split by Point: выберите одну кривую, затем Enter";
+        prompt = "Split by Point:select the required geometry and continue";
         break;
     case CurveEditCommand::Reverse:
-        prompt = "Reverse: выберите одну или несколько кривых, затем Enter";
+        prompt = "Reverse:select the required geometry and continue";
         break;
     case CurveEditCommand::None:
         return;
@@ -6075,7 +6111,7 @@ bool MainWindow::PrepareCurveEditCommandSelection() {
             std::array<double, 4> remembered_factors = LoadRememberedPlaneFactors();
             const int method = ShowCurveTrimPlaneMethodDialog(this, remembered_factors);
             if (method == QDialog::Rejected) {
-                CancelCurveEditCommand("Trim by Plane: отменено");
+                CancelCurveEditCommand("Trim by Plane:operation canceled");
                 return true;
             }
             if (method == 7) {
@@ -6085,7 +6121,7 @@ bool MainWindow::PrepareCurveEditCommandSelection() {
                 viewport_->SetTool(ToolMode::Select);
                 viewport_->SetSelectionMode(SelectionMode::Face);
                 statusBar()->showMessage(
-                    "Trim by Plane — Face of Solid: выберите плоскую грань тела");
+                    "Trim by Plane — Face of Solid:select the required geometry and continue");
                 return true;
             } else if (method == 2) {
                 pending_curve_trim_plane_points_ = {
@@ -6104,7 +6140,7 @@ bool MainWindow::PrepareCurveEditCommandSelection() {
                     + remembered_factors[1] * remembered_factors[1]
                     + remembered_factors[2] * remembered_factors[2];
                 if (squared <= 1.0e-18) {
-                    statusBar()->showMessage("Plane: нормаль A, B, C не может быть нулевой", 2600);
+                    statusBar()->showMessage("Plane:operation failed; check the selected geometry and parameters", 2600);
                     return false;
                 }
                 SaveRememberedPlaneFactors(remembered_factors);
@@ -6120,7 +6156,7 @@ bool MainWindow::PrepareCurveEditCommandSelection() {
                 if (!ShowPlaneValuesDialog(
                         this, "Point + Normal", {"Point X", "Point Y", "Point Z",
                         "Normal X", "Normal Y", "Normal Z"}, values)) {
-                    CancelCurveEditCommand("Trim by Plane: отменено");
+                    CancelCurveEditCommand("Trim by Plane:operation canceled");
                     return true;
                 }
                 pending_curve_trim_plane_points_ = PlanePointsFromOriginNormal(
@@ -6128,7 +6164,7 @@ bool MainWindow::PrepareCurveEditCommandSelection() {
                     Vec3{static_cast<float>(values[3]), static_cast<float>(values[4]),
                          static_cast<float>(values[5])});
                 if (pending_curve_trim_plane_points_.empty()) {
-                    statusBar()->showMessage("Plane: нормаль не может быть нулевой", 2600);
+                    statusBar()->showMessage("Plane:operation failed; check the selected geometry and parameters", 2600);
                     return false;
                 }
                 const CPoint3d& origin = pending_curve_trim_plane_points_[0];
@@ -6149,22 +6185,22 @@ bool MainWindow::PrepareCurveEditCommandSelection() {
     viewport_->SetSelectionConfirmationMode(false);
     QString prompt;
     if (pending_curve_edit_command_ == CurveEditCommand::Split) {
-        prompt = "Split: укажите нужное пересечение";
+        prompt = "Split:select the required geometry and continue";
     } else if (pending_curve_edit_command_ == CurveEditCommand::Extend) {
-        prompt = "Extend: укажите конец кривой";
+        prompt = "Extend:select the required geometry and continue";
     } else if (pending_curve_edit_command_ == CurveEditCommand::TrimByPlane) {
         prompt = plane_count == 1 || pending_curve_trim_plane_points_.size() == 3
-            ? "Trim by Plane: укажите часть кривой, которую оставить"
-            : "Trim by Plane — Point 1 of 3: задайте временную плоскость";
+            ? "Trim by Plane:select the required geometry and continue"
+            : "Trim by Plane — Point 1 of 3:adjust the required parameters and continue";
     } else {
-        prompt = "Split by Point: укажите точку разреза";
+        prompt = "Split by Point:select the required geometry and continue";
     }
     if (pending_curve_edit_command_ == CurveEditCommand::TrimByPlane
         && (plane_count == 1 || pending_curve_trim_plane_points_.size() == 3)) {
         viewport_->BeginPick3DPointOnObject(
-            objects[curves.front()]->m_id, prompt + "; Esc — отменить");
+            objects[curves.front()]->m_id, prompt + "; Esc —operation canceled");
     } else {
-        viewport_->BeginPick3DPoint(prompt + "; Esc — отменить");
+        viewport_->BeginPick3DPoint(prompt + "; Esc —operation canceled");
     }
     return true;
 }
@@ -6175,7 +6211,7 @@ void MainWindow::CompleteCurveEditPoint(CPoint3d point) {
     switch (pending_curve_edit_command_) {
     case CurveEditCommand::Split:
         changed = SplitSelectedCurves(point);
-        message = changed ? "Split: curves divided" : "Split: пересечение не найдено";
+        message = changed ? "Split: curves divided" : "Split:operation failed; check the selected geometry and parameters";
         break;
     case CurveEditCommand::Extend:
         changed = ExtendSelectedCurve(point);
@@ -6210,9 +6246,9 @@ void MainWindow::CompleteCurveEditPoint(CPoint3d point) {
                     pending_curve_trim_plane_points_.pop_back();
                     viewport_->SetPointPickMarkers(pending_curve_trim_plane_points_);
                     statusBar()->showMessage(
-                        "Trim by Plane: третья точка не должна лежать на прямой", 2400);
+                        "Trim by Plane:operation status", 2400);
                     viewport_->BeginPick3DPoint(
-                        "Trim by Plane — Point 3 of 3: выберите точку вне прямой");
+                        "Trim by Plane — Point 3 of 3:select the required geometry and continue");
                     return;
                 }
                 SaveRememberedPlaneFactors(PlaneFactorsFromPoints(
@@ -6222,13 +6258,13 @@ void MainWindow::CompleteCurveEditPoint(CPoint3d point) {
                         && IsEditableCurve(document_.GetObjects()[index].get())) {
                         viewport_->BeginPick3DPointOnObject(
                             document_.GetObjects()[index]->m_id,
-                            "Trim by Plane: кликните по части выбранной кривой, которую оставить");
+                            "Trim by Plane:select the required geometry and continue");
                         break;
                     }
                 }
             } else {
                 viewport_->BeginPick3DPoint(
-                    QString("Trim by Plane — Point %1 of 3: задайте временную плоскость")
+                    QString("Trim by Plane — Point %1 of 3:adjust the required parameters and continue")
                         .arg(pending_curve_trim_plane_points_.size() + 1));
             }
             return;
@@ -6240,7 +6276,7 @@ void MainWindow::CompleteCurveEditPoint(CPoint3d point) {
                     && IsEditableCurve(document_.GetObjects()[index].get())) {
                     viewport_->BeginPick3DPointOnObject(
                         document_.GetObjects()[index]->m_id,
-                        "Trim by Plane: выберите другую часть этой Polyline или Esc");
+                        "Trim by Plane:select the required geometry and continue");
                     break;
                 }
             }
@@ -6251,7 +6287,7 @@ void MainWindow::CompleteCurveEditPoint(CPoint3d point) {
         }
     case CurveEditCommand::SimplifyByPoint:
         changed = SimplifySelectedCurveByPoint(point);
-        message = changed ? "Split by Point: two curve pieces created" : "Split by Point: нельзя разрезать в конце кривой";
+        message = changed ? "Split by Point: two curve pieces created" : "Split by Point:operation failed; check the selected geometry and parameters";
         break;
     default:
         break;
@@ -6315,13 +6351,13 @@ bool MainWindow::JoinSelectedCurves() {
     const auto* first_spline = dynamic_cast<CBSpline*>(objects[indices[0]].get());
     for (size_t index : indices) {
         if (polyline_family != static_cast<bool>(dynamic_cast<CPolyline*>(objects[index].get()))) {
-            statusBar()->showMessage("Join: Polyline и spline нельзя соединять в одну кривую", 2600);
+            statusBar()->showMessage("Join: Polyline operation failed; check the selected geometry and parameters", 2600);
             return false;
         }
         const auto* spline = dynamic_cast<CBSpline*>(objects[index].get());
         if (first_spline && (!spline
             || spline->GetCurveType() != first_spline->GetCurveType())) {
-            statusBar()->showMessage("Join: типы сплайнов должны совпадать", 2600);
+            statusBar()->showMessage("Join:operation failed; check the selected geometry and parameters", 2600);
             return false;
         }
     }
@@ -6352,7 +6388,7 @@ bool MainWindow::JoinSelectedCurves() {
             }
         }
         if (best_mode < 0 || best_distance > tolerance_squared) {
-            statusBar()->showMessage("Join: концы кривых должны совпадать (допуск 1 мм)", 2600);
+            statusBar()->showMessage("Join:operation failed; check the selected geometry and parameters", 2600);
             return false;
         }
         std::vector<CPoint3d> next = *CurveControlPoints(objects[best_index].get());
@@ -6774,7 +6810,7 @@ void MainWindow::BeginPlaneThreePointPick() {
     plane_three_point_picks_.clear();
     viewport_->ClearPointPickMarkers();
     plane_three_point_pick_active_ = true;
-    viewport_->BeginPick3DPoint("Plane — Point 1 of 3: выберите первую точку");
+    viewport_->BeginPick3DPoint("Plane — Point 1 of 3:select the required geometry and continue");
 }
 
 void MainWindow::AppendPlaneThreePointPick(CPoint3d point) {
@@ -6797,9 +6833,9 @@ void MainWindow::AppendPlaneThreePointPick(CPoint3d point) {
             plane_three_point_picks_.pop_back();
             viewport_->SetPointPickMarkers(plane_three_point_picks_);
             statusBar()->showMessage(
-                "Plane: три точки не должны лежать на одной прямой", 2600);
+                "Plane:operation failed; check the selected geometry and parameters", 2600);
             viewport_->BeginPick3DPoint(
-                "Plane — Point 3 of 3: выберите точку вне прямой");
+                "Plane — Point 3 of 3:select the required geometry and continue");
             return;
         }
     }
@@ -6826,7 +6862,7 @@ void MainWindow::AppendPlaneThreePointPick(CPoint3d point) {
     if (plane_three_point_picks_.size() < 3) {
         const size_t next = plane_three_point_picks_.size() + 1;
         viewport_->BeginPick3DPoint(
-            QString("Plane — Point %1 of 3: выберите точку").arg(next));
+            QString("Plane — Point %1 of 3:select the required geometry and continue").arg(next));
         return;
     }
     SaveRememberedPlaneFactors(PlaneFactorsFromPoints(
@@ -6836,7 +6872,7 @@ void MainWindow::AppendPlaneThreePointPick(CPoint3d point) {
     plane_three_point_pick_active_ = false;
     viewport_->ClearPointPickMarkers();
     statusBar()->showMessage(
-        "Plane: плоскость построена по трём точкам; поля доступны для точной правки",
+        "Plane:operation completed",
         3000);
 }
 
@@ -6860,7 +6896,7 @@ bool MainWindow::CompletePendingPlaneFacePick() {
     if (!document_.GetSelectedSolidFaceSketchPlane(
             center, x_axis, y_axis, normal, body_id, face_index)) {
         statusBar()->showMessage(
-            "Face of Solid: выберите плоскую грань тела", 2500);
+            "Face of Solid:select the required geometry and continue", 2500);
         return true;
     }
     normal = normalize(normal);
@@ -6884,7 +6920,7 @@ bool MainWindow::CompletePendingPlaneFacePick() {
         document_.SelectObjectById(curve_id, SelectionAction::Replace);
         viewport_->BeginPick3DPointOnObject(
             curve_id,
-            "Trim by Plane: кликните по части выбранной кривой, которую оставить");
+            "Trim by Plane:select the required geometry and continue");
         RefreshSceneTree();
         viewport_->update();
         return true;
@@ -6920,7 +6956,7 @@ bool MainWindow::CompletePendingPlaneFacePick() {
     UpdateActiveToolUi("PlaneTool");
     RefreshSceneTree();
     viewport_->update();
-    statusBar()->showMessage("Plane: создана по грани тела; OK — принять");
+    statusBar()->showMessage("Plane:operation completed");
     return true;
 }
 
@@ -6989,8 +7025,8 @@ bool MainWindow::UpdateNurbsParameterEditor() {
         properties_dock_->setWindowTitle("NURBS Parameters");
     }
     statusBar()->showMessage(selected_points.empty()
-        ? "NURBS: задайте Degree или выделите контрольные точки для Weight"
-        : QString("NURBS: Weight применяется к %1 выбранным точкам; OK — принять")
+        ? "NURBS:select the required geometry and continue"
+        : QString("NURBS: Weight operation status")
               .arg(selected_points.size()));
     return true;
 }
@@ -7053,7 +7089,7 @@ void MainWindow::ApplyNurbsParameterChanges() {
     RefreshSceneTree();
     viewport_->update();
     statusBar()->showMessage(changed_weight_count > 0
-        ? QString("NURBS: Weight %1 применён к %2 точкам")
+        ? QString("NURBS: Weight %1 operation completed")
               .arg(weight_parameter->value, 0, 'f', 3)
               .arg(changed_weight_count)
         : QString("NURBS: Degree %1").arg(spline->GetDegree()));
@@ -7228,7 +7264,7 @@ void MainWindow::CreateTwoRailSweepSurface() {
         viewport_->SetSelectionConfirmationMode(true);
         UpdateActiveToolUi("SurfaceSweepTwoRails");
         statusBar()->showMessage(
-            "Sweep Surface (2 Rails): выбери профиль первым и две открытые направляющие, затем Enter");
+            "Sweep Surface (2 Rails):select the required geometry and continue");
         return;
     }
     RecordDocumentChange("Two-rail sweep surface");
@@ -7238,7 +7274,7 @@ void MainWindow::CreateTwoRailSweepSurface() {
     UpdateActiveToolUi("select");
     RefreshSceneTree();
     viewport_->update();
-    statusBar()->showMessage("Sweep Surface (2 Rails) создана", 1600);
+    statusBar()->showMessage("Sweep Surface (2 Rails) operation completed", 1600);
 }
 
 void MainWindow::JoinSelectedSurfaces() {
@@ -7251,7 +7287,7 @@ void MainWindow::JoinSelectedSurfaces() {
             viewport_->SetTool(ToolMode::Select);
             UpdateActiveToolUi("select");
             statusBar()->showMessage(
-                "Join: не удалось построить переход с непрерывностью G2",
+                "Join:operation failed; check the selected geometry and parameters",
                 2600);
             return;
         }
@@ -7261,7 +7297,7 @@ void MainWindow::JoinSelectedSurfaces() {
         viewport_->SetSelectionConfirmationMode(true);
         UpdateActiveToolUi("SurfaceJoin");
         statusBar()->showMessage(
-            "Join Surfaces: выбери минимум две поверхности, затем Enter");
+            "Join Surfaces:select the required geometry and continue");
         return;
     }
 
@@ -7272,7 +7308,7 @@ void MainWindow::JoinSelectedSurfaces() {
     UpdateActiveToolUi("select");
     RefreshSceneTree();
     viewport_->update();
-    statusBar()->showMessage("Поверхности объединены", 1600);
+    statusBar()->showMessage("Surfaces joined", 1600);
 }
 
 void MainWindow::CreatePlaneIntersection() {
@@ -7284,7 +7320,7 @@ void MainWindow::CreatePlaneIntersection() {
         viewport_->SetSelectionConfirmationMode(true);
         UpdateActiveToolUi("PlaneIntersection");
         statusBar()->showMessage(
-            "Plane Intersection: выберите Plane и поверхность, тело или Mesh, затем Enter");
+            "Plane Intersection:select the required geometry and continue");
         return;
     }
     RecordDocumentChange("Plane intersection curves");
@@ -7295,7 +7331,7 @@ void MainWindow::CreatePlaneIntersection() {
     RefreshSceneTree();
     viewport_->update();
     statusBar()->showMessage(
-        QString("Plane Intersection: создано кривых — %1").arg(created), 1800);
+        QString("Plane Intersection:operation completed").arg(created), 1800);
 }
 
 void MainWindow::CreateSurfaceIntersection() {
@@ -7307,7 +7343,7 @@ void MainWindow::CreateSurfaceIntersection() {
         viewport_->SetSelectionConfirmationMode(true);
         UpdateActiveToolUi("SurfaceIntersection");
         statusBar()->showMessage(
-            "Surface Intersection: выберите две пересекающиеся поверхности, затем Enter");
+            "Surface Intersection:select the required geometry and continue");
         return;
     }
     RecordDocumentChange("Surface intersection curves");
@@ -7318,7 +7354,7 @@ void MainWindow::CreateSurfaceIntersection() {
     RefreshSceneTree();
     viewport_->update();
     statusBar()->showMessage(
-        QString("Surface Intersection: создано кривых — %1").arg(created), 1800);
+        QString("Surface Intersection:operation completed").arg(created), 1800);
 }
 
 void MainWindow::ProjectCurveToSurface() {
@@ -7342,7 +7378,7 @@ void MainWindow::ProjectCurveToSurface() {
         viewport_->SetSelectionConfirmationMode(true);
         UpdateActiveToolUi("ProjectCurveToSurface");
         statusBar()->showMessage(
-            "Project Curve: выберите одну кривую и одну поверхность, затем Enter");
+            "Project Curve:select the required geometry and continue");
         return;
     }
 
@@ -7350,7 +7386,7 @@ void MainWindow::ProjectCurveToSurface() {
     if (!ShowPlaneValuesDialog(
             this, "Projection Direction", {"Vector X", "Vector Y", "Vector Z"},
             values)) {
-        CancelPendingGroupCommand("Project Curve: отменено");
+        CancelPendingGroupCommand("Project Curve:operation canceled");
         return;
     }
     const Vec3 direction{static_cast<float>(values[0]),
@@ -7362,7 +7398,7 @@ void MainWindow::ProjectCurveToSurface() {
         viewport_->SetSelectionConfirmationMode(false);
         UpdateActiveToolUi("select");
         statusBar()->showMessage(
-            "Project Curve: проекция по этому вектору не пересекает поверхность",
+            "Project Curve:operation failed; check the selected geometry and parameters",
             2600);
         return;
     }
@@ -7374,7 +7410,7 @@ void MainWindow::ProjectCurveToSurface() {
     RefreshSceneTree();
     viewport_->update();
     statusBar()->showMessage(
-        QString("Project Curve: создано кривых — %1").arg(created), 1800);
+        QString("Project Curve:operation completed").arg(created), 1800);
 }
 
 void MainWindow::ExtractSurfaceEdge() {
@@ -7386,7 +7422,7 @@ void MainWindow::ExtractSurfaceEdge() {
         viewport_->SetSelectionConfirmationMode(true);
         UpdateActiveToolUi("ExtractSurfaceEdge");
         statusBar()->showMessage(
-            "Extract Edge: выберите одну или несколько кромок поверхности или тела, затем Enter");
+            "Extract Edge:select the required geometry and continue");
         return;
     }
     RecordDocumentChange("Extract surface edges");
@@ -7397,7 +7433,7 @@ void MainWindow::ExtractSurfaceEdge() {
     RefreshSceneTree();
     viewport_->update();
     statusBar()->showMessage(
-        QString("Extract Edge: создано кривых — %1").arg(created), 1800);
+        QString("Extract Edge:operation completed").arg(created), 1800);
 }
 
 void MainWindow::CreateFourSplineSurface() {
@@ -7408,7 +7444,7 @@ void MainWindow::CreateFourSplineSurface() {
         viewport_->SetSelectionConfirmationMode(true);
         UpdateActiveToolUi("SurfaceFourSplines");
         statusBar()->showMessage(
-            "Surface by 4 Splines: выбери четыре соединённые открытые кривые, затем Enter");
+            "Surface by 4 Splines:select the required geometry and continue");
         return;
     }
     RecordDocumentChange("Four-spline surface");
@@ -7418,7 +7454,7 @@ void MainWindow::CreateFourSplineSurface() {
     UpdateActiveToolUi("select");
     RefreshSceneTree();
     viewport_->update();
-    statusBar()->showMessage("Surface by 4 Splines создана", 1600);
+    statusBar()->showMessage("Surface by 4 Splines operation completed", 1600);
 }
 
 void MainWindow::CreateTwoRailSweepSolid() {
@@ -7429,7 +7465,7 @@ void MainWindow::CreateTwoRailSweepSolid() {
         viewport_->SetSelectionConfirmationMode(true);
         UpdateActiveToolUi("SolidSweepTwoRails");
         statusBar()->showMessage(
-            "Sweep Solid (2 Rails): выбери закрытый Sketch-сечение и две открытые направляющие, затем Enter");
+            "Sweep Solid (2 Rails):select the required geometry and continue");
         return;
     }
     RecordDocumentChange("Two-rail sweep solid");
@@ -7440,7 +7476,7 @@ void MainWindow::CreateTwoRailSweepSolid() {
     RefreshSceneTree();
     viewport_->update();
     statusBar()->showMessage(
-        "Sweep Solid (2 Rails) создан: ширина следует направляющим, толщина постоянна",
+        "Sweep Solid (2 Rails) operation completed",
         2200);
 }
 
@@ -8651,10 +8687,10 @@ void MainWindow::BeginSolidBox() {
 
     auto* coordinate_label = new QLabel("Placement", &dlg);
     auto* plane_combo = new QComboBox(&dlg);
-    plane_combo->addItem(QString::fromUtf8("Плоскость XY"), static_cast<int>(OpenGLViewport::SketchPlane::XY));
-    plane_combo->addItem(QString::fromUtf8("Плоскость XZ"), static_cast<int>(OpenGLViewport::SketchPlane::XZ));
-    plane_combo->addItem(QString::fromUtf8("Плоскость YZ"), static_cast<int>(OpenGLViewport::SketchPlane::YZ));
-    plane_combo->addItem(QString::fromUtf8("Грань тела"), static_cast<int>(OpenGLViewport::SketchPlane::XY));
+    plane_combo->addItem(QString::fromUtf8("XY Plane"), static_cast<int>(OpenGLViewport::SketchPlane::XY));
+    plane_combo->addItem(QString::fromUtf8("XZ Plane"), static_cast<int>(OpenGLViewport::SketchPlane::XZ));
+    plane_combo->addItem(QString::fromUtf8("YZ Plane"), static_cast<int>(OpenGLViewport::SketchPlane::YZ));
+    plane_combo->addItem(QString::fromUtf8("Solid Face"), static_cast<int>(OpenGLViewport::SketchPlane::XY));
 
     layout->addWidget(coordinate_label, 0, 0, 1, 2);
     layout->addWidget(plane_combo, 1, 0, 1, 2);
@@ -8699,10 +8735,10 @@ void MainWindow::BeginSolidCylinder() {
 
     auto* coordinate_label = new QLabel("Placement", &dlg);
     auto* plane_combo = new QComboBox(&dlg);
-    plane_combo->addItem(QString::fromUtf8("Плоскость XY"), static_cast<int>(OpenGLViewport::SketchPlane::XY));
-    plane_combo->addItem(QString::fromUtf8("Плоскость XZ"), static_cast<int>(OpenGLViewport::SketchPlane::XZ));
-    plane_combo->addItem(QString::fromUtf8("Плоскость YZ"), static_cast<int>(OpenGLViewport::SketchPlane::YZ));
-    plane_combo->addItem(QString::fromUtf8("Грань тела"), static_cast<int>(OpenGLViewport::SketchPlane::XY));
+    plane_combo->addItem(QString::fromUtf8("XY Plane"), static_cast<int>(OpenGLViewport::SketchPlane::XY));
+    plane_combo->addItem(QString::fromUtf8("XZ Plane"), static_cast<int>(OpenGLViewport::SketchPlane::XZ));
+    plane_combo->addItem(QString::fromUtf8("YZ Plane"), static_cast<int>(OpenGLViewport::SketchPlane::YZ));
+    plane_combo->addItem(QString::fromUtf8("Solid Face"), static_cast<int>(OpenGLViewport::SketchPlane::XY));
     layout->addWidget(coordinate_label, 0, 0, 1, 2);
     layout->addWidget(plane_combo, 1, 0, 1, 2);
 
@@ -8750,11 +8786,11 @@ void MainWindow::BeginNewSketch() {
     auto* name_edit = new QLineEdit(QString("Sketch-%1").arg(sketch_counter_), &dlg);
     auto* coordinate_label = new QLabel("Coordinate system", &dlg);
     auto* plane_combo = new QComboBox(&dlg);
-    plane_combo->addItem(QString::fromUtf8("Плоскость XY"), static_cast<int>(OpenGLViewport::SketchPlane::XY));
-    plane_combo->addItem(QString::fromUtf8("Плоскость XZ"), static_cast<int>(OpenGLViewport::SketchPlane::XZ));
-    plane_combo->addItem(QString::fromUtf8("Плоскость YZ"), static_cast<int>(OpenGLViewport::SketchPlane::YZ));
-    plane_combo->addItem(QString::fromUtf8("Грань тела"), static_cast<int>(OpenGLViewport::SketchPlane::XY));
-    plane_combo->addItem(QString::fromUtf8("Задать 3-мя точками"), static_cast<int>(OpenGLViewport::SketchPlane::XY));
+    plane_combo->addItem(QString::fromUtf8("XY Plane"), static_cast<int>(OpenGLViewport::SketchPlane::XY));
+    plane_combo->addItem(QString::fromUtf8("XZ Plane"), static_cast<int>(OpenGLViewport::SketchPlane::XZ));
+    plane_combo->addItem(QString::fromUtf8("YZ Plane"), static_cast<int>(OpenGLViewport::SketchPlane::YZ));
+    plane_combo->addItem(QString::fromUtf8("Solid Face"), static_cast<int>(OpenGLViewport::SketchPlane::XY));
+    plane_combo->addItem(QString::fromUtf8("Define with 3 Points"), static_cast<int>(OpenGLViewport::SketchPlane::XY));
 
     layout->addWidget(name_label, 0, 0);
     layout->addWidget(name_edit, 0, 1);
@@ -8795,28 +8831,28 @@ void MainWindow::BeginNewSketch() {
                 if (!selected) {
                     UpdateActiveToolUi("select");
                     statusBar()->showMessage(
-                        QString::fromUtf8("Создание эскиза отменено"), 1200);
+                        QString::fromUtf8("Sketch creation canceled"), 1200);
                     return;
                 }
                 ++sketch_counter_;
                 UpdateActiveToolUi("NewSketch");
                 ShowSketchPanel();
                 statusBar()->showMessage(
-                    QString::fromUtf8("%1: эскиз привязан к грани тела")
+                    QString::fromUtf8("%1:operation completed")
                         .arg(sketch_name));
             },
             Qt::SingleShotConnection);
         viewport_->BeginSketchFaceSelection(sketch_name);
         UpdateActiveToolUi("NewSketch");
         statusBar()->showMessage(
-            QString::fromUtf8("%1: укажите плоскую грань тела")
+            QString::fromUtf8("%1:select the required geometry and continue")
                 .arg(sketch_name));
         return;
     } else if (coordinate_mode == 4) {
         QMessageBox::information(
             this,
             "New Sketch",
-            QString::fromUtf8("Задание плоскости тремя точками будет реализовано отдельно."));
+            QString::fromUtf8("Defining a plane by three points will be implemented separately."));
         UpdateActiveToolUi("select");
         return;
     } else {
@@ -8829,7 +8865,7 @@ void MainWindow::BeginNewSketch() {
     ShowSketchPanel();
     statusBar()->showMessage(
         coordinate_mode == 3
-            ? QString::fromUtf8("%1: эскиз привязан к грани тела").arg(sketch_name)
+            ? QString::fromUtf8("%1:operation completed").arg(sketch_name)
             : QString("%1: Rectangle tool").arg(sketch_name));
 }
 
@@ -8879,7 +8915,7 @@ void MainWindow::BeginSketchFillet() {
     sketch_fillet_radius_spin_->setFocus();
     sketch_fillet_radius_spin_->selectAll();
     UpdateActiveToolUi("CurveFillets");
-    statusBar()->showMessage(QString("Fillets R=%1: укажите вершину кривой").arg(radius, 0, 'f', 2));
+    statusBar()->showMessage(QString("Fillets R=%1:select the required geometry and continue").arg(radius, 0, 'f', 2));
 }
 
 void MainWindow::BeginDrawSpline() {
@@ -8892,7 +8928,7 @@ void MainWindow::BeginDrawSpline() {
     ShowDrawSplineDialog();
     viewport_->setFocus(Qt::OtherFocusReason);
     statusBar()->showMessage(
-        "Draw Spline: удерживайте левую кнопку и нарисуйте кривую; Esc — завершить");
+        "Draw Spline:adjust the required parameters and continue");
 }
 
 void MainWindow::ShowDrawSplineDialog() {
@@ -8935,7 +8971,7 @@ void MainWindow::ShowDrawSplineDialog() {
             if (viewport_->CurrentTool() == ToolMode::DrawSpline) {
                 viewport_->SetTool(ToolMode::Select);
                 UpdateActiveToolUi("select");
-                statusBar()->showMessage("Draw Spline завершён", 1200);
+                statusBar()->showMessage("Draw Spline operation status", 1200);
             }
         });
     }
@@ -9154,7 +9190,7 @@ bool MainWindow::TryApplyPendingTrim() {
         viewport_->SetSelectionConfirmationMode(true);
         UpdateActiveToolUi(tool_id);
         statusBar()->showMessage(
-            QString("%1: выберите Solid и %2 (Ctrl или Shift добавляет к выбору, Esc отменяет)")
+            QString("%1:operation canceled")
                 .arg(QString::fromStdString(
                     tool_registry_.LabelFor(tool_id)))
                 .arg(cutter));
@@ -9173,7 +9209,7 @@ bool MainWindow::TryApplyPendingTrim() {
     RefreshSceneTree();
     viewport_->update();
     statusBar()->showMessage(
-        QString("%1: выберите Direction и нажмите OK")
+        QString("%1:select the required geometry and continue")
             .arg(QString::fromStdString(
                 tool_registry_.LabelFor(tool_id))));
     return true;
@@ -9210,7 +9246,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         const int method = ShowCurveTrimPlaneMethodDialog(this, factors);
         if (method == QDialog::Rejected) {
             UpdateActiveToolUi("select");
-            statusBar()->showMessage("Plane: отменено", 1200);
+            statusBar()->showMessage("Plane:operation canceled", 1200);
             return;
         }
         const ToolDefinition* definition = tool_registry_.Find("PlaneTool");
@@ -9228,7 +9264,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
             viewport_->SetSelectionMode(SelectionMode::Face);
             UpdateActiveToolUi(tool_id);
             statusBar()->showMessage(
-                "Plane — Face of Solid: выберите плоскую грань тела");
+                "Plane — Face of Solid:select the required geometry and continue");
             return;
         } else if (method == 1) {
             set_value("mode", 2.0);
@@ -9248,7 +9284,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         } else if (method == 5) {
             if (factors[0] * factors[0] + factors[1] * factors[1]
                     + factors[2] * factors[2] <= 1.0e-18) {
-                statusBar()->showMessage("Plane: нормаль A, B, C не может быть нулевой", 2600);
+                statusBar()->showMessage("Plane:operation failed; check the selected geometry and parameters", 2600);
                 return;
             }
             set_value("mode", 0.0);
@@ -9264,7 +9300,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
             }
             if (values[3] * values[3] + values[4] * values[4]
                     + values[5] * values[5] <= 1.0e-18) {
-                statusBar()->showMessage("Plane: нормаль не может быть нулевой", 2600);
+                statusBar()->showMessage("Plane:operation failed; check the selected geometry and parameters", 2600);
                 return;
             }
             set_value("mode", 1.0);
@@ -9290,7 +9326,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         RefreshSceneTree();
         viewport_->update();
         if (pick_three_points) BeginPlaneThreePointPick();
-        else statusBar()->showMessage("Plane: плоскость создана; OK — принять");
+        else statusBar()->showMessage("Plane:operation completed");
         return;
     }
     if (tool_id == "SolidBox") {
@@ -9421,7 +9457,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
             UpdateActiveToolUi(tool_id);
         } else {
             statusBar()->showMessage(
-                "NURBS Parameters: выберите NURBS-кривую и нужные контрольные точки",
+                "NURBS Parameters:select the required geometry and continue",
                 3000);
             UpdateActiveToolUi("select");
         }
@@ -9469,10 +9505,9 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         dlg.SetSelectedOperation(DialogOperationFromBoolean(last_boolean_operation_));
         CenterDialogOnCursor(dlg);
         if (dlg.exec() != QDialog::Accepted) {
-            // Отмена
             UpdateActiveToolUi("select");
             viewport_->SetTool(ToolMode::Select);
-            statusBar()->showMessage("Булева операция отменена", 800);
+            statusBar()->showMessage("Boolean operation canceled", 800);
             return;
         }
 
@@ -9494,7 +9529,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
             tool_registry_.ApplySketchFeatureToSelection(document_);
         if (active_parametric_object_.tool_id.empty()) {
             statusBar()->showMessage(
-                "Boss / Pocket: выделите замкнутый Sketch на грани тела (и при необходимости само тело через Ctrl)",
+                "Boss / Pocket:select the required geometry and continue",
                 3000);
             UpdateActiveToolUi("select");
             return;
@@ -9507,7 +9542,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         RefreshSceneTree();
         viewport_->update();
         statusBar()->showMessage(
-            "Boss / Pocket: выберите тип операции, задайте Depth и Taper Angle");
+            "Boss / Pocket:select the required geometry and continue");
         return;
     }
 
@@ -9535,7 +9570,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
             if (!tool_registry_.ApplyOffsetFaceOnce(document_, distance)) {
                 UpdateActiveToolUi("select");
                 statusBar()->showMessage(
-                    "Offset Face: это смещение не может быть построено для выбранной грани",
+                    "Offset Face:operation failed; check the selected geometry and parameters",
                     2800);
                 return;
             }
@@ -9552,8 +9587,8 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
             tool_registry_.ApplyOffsetFaceToSelection(document_);
         if (active_parametric_object_.tool_id.empty()) {
             statusBar()->showMessage(selected_body
-                ? "Offset Face: это смещение не может быть построено для выбранной грани"
-                : "Offset Face: выберите грань Solid-тела",
+                ? "Offset Face:operation failed; check the selected geometry and parameters"
+                : "Offset Face:select the required geometry and continue",
                 2800);
             UpdateActiveToolUi("select");
             return;
@@ -9566,7 +9601,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         RefreshSceneTree();
         viewport_->update();
         statusBar()->showMessage(
-            "Offset Face: задайте знаковое смещение Distance и нажмите OK");
+            "Offset Face:adjust the required parameters and continue");
         return;
     }
 
@@ -9584,9 +9619,9 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         viewport_->BeginFaceExtrudeTool(taper_angle);
         UpdateActiveToolUi(tool_id);
         if (document_.HasSelectedSolidFace()) {
-            statusBar()->showMessage(QString("Extrude Face: тяни оранжевую ручку, Taper Angle %1").arg(taper_angle, 0, 'f', 2));
+            statusBar()->showMessage(QString("Extrude Face:operation status").arg(taper_angle, 0, 'f', 2));
         } else {
-            statusBar()->showMessage(QString("Extrude Face: выбери плоскую грань, Taper Angle %1").arg(taper_angle, 0, 'f', 2));
+            statusBar()->showMessage(QString("Extrude Face:select the required geometry and continue").arg(taper_angle, 0, 'f', 2));
         }
         return;
     }
@@ -9596,9 +9631,9 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         viewport_->BeginDraftFaceTool();
         UpdateActiveToolUi(tool_id);
         if (document_.HasSelectedSolidFace()) {
-            statusBar()->showMessage("Draft Face: выбери прямую кромку-ось");
+            statusBar()->showMessage("Draft Face:select the required geometry and continue");
         } else {
-            statusBar()->showMessage("Draft Face: выбери плоскую грань");
+            statusBar()->showMessage("Draft Face:select the required geometry and continue");
         }
         return;
     }
@@ -9618,9 +9653,9 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         RefreshSceneTree();
         viewport_->update();
         if (document_.HasLiveThickSolid() && document_.GetLiveThickSolidFaceCount() > 0) {
-            statusBar()->showMessage("ThickSolid: меняй Thick, OK оставит результат");
+            statusBar()->showMessage("ThickSolid:adjust the required parameters and continue");
         } else {
-            statusBar()->showMessage(document_.GetSelectedSolid() ? "ThickSolid: выбери Face" : "ThickSolid: выбери CSolid");
+            statusBar()->showMessage(document_.GetSelectedSolid() ? "ThickSolid:select the required geometry and continue" : "ThickSolid:select the required geometry and continue");
         }
         return;
     }
@@ -9630,7 +9665,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         CSmartLine* profile = document_.GetSelectedSketch();
         if (!profile || !profile->IsClosed()) {
             statusBar()->showMessage(
-                "Frame: выделите один замкнутый Sketch-профиль",
+                "Frame:select the required geometry and continue",
                 2200);
             UpdateActiveToolUi("select");
             return;
@@ -9641,7 +9676,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         document_.EnsureObjectId(*profile);
         if (!document_.CreateFrameSolid(profile->m_id, default_width, default_height)) {
             statusBar()->showMessage(
-                "Frame: построение не выполнено. Проверьте профиль и его размеры",
+                "Frame:operation failed; check the selected geometry and parameters",
                 2200);
             UpdateActiveToolUi("select");
             return;
@@ -9650,7 +9685,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         active_parametric_edit_existing_ = false;
         CAlfaObject* frame_solid = document_.GetSelectedObject();
         if (!frame_solid) {
-            statusBar()->showMessage("Frame: созданное тело недоступно", 1600);
+            statusBar()->showMessage("Frame:operation failed; check the selected geometry and parameters", 1600);
             UpdateActiveToolUi("select");
             return;
         }
@@ -9662,7 +9697,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         viewport_->SetTool(ToolMode::Select);
         UpdateActiveToolUi(tool_id);
         viewport_->update();
-        statusBar()->showMessage("Frame: задайте Width и Height, затем нажмите OK");
+        statusBar()->showMessage("Frame:adjust the required parameters and continue");
         return;
     }
 
@@ -9675,14 +9710,14 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         const bool closed = (dynamic_cast<CSmartLine*>(path) && dynamic_cast<CSmartLine*>(path)->IsClosed())
             || (dynamic_cast<CBSpline*>(path) && dynamic_cast<CBSpline*>(path)->IsClosed());
         if (!path || !supported || closed) {
-            statusBar()->showMessage("Wire: выделите открытую Polyline, Sketch или B-Spline", 2200);
+            statusBar()->showMessage("Wire:select the required geometry and continue", 2200);
             UpdateActiveToolUi("select");
             return;
         }
         constexpr double default_radius = 10.0;
         document_.EnsureObjectId(*path);
         if (!document_.CreateWireSolid(path->m_id, default_radius)) {
-            statusBar()->showMessage("Wire: не удалось построить трубу. Проверьте радиусы изгибов", 2200);
+            statusBar()->showMessage("Wire:operation failed; check the selected geometry and parameters", 2200);
             UpdateActiveToolUi("select");
             return;
         }
@@ -9697,7 +9732,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         viewport_->SetTool(ToolMode::Select);
         UpdateActiveToolUi(tool_id);
         viewport_->update();
-        statusBar()->showMessage("Wire: задайте радиус трубы, затем нажмите OK");
+        statusBar()->showMessage("Wire:adjust the required parameters and continue");
         return;
     }
 
@@ -9706,7 +9741,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         CSmartLine* profile = document_.GetSelectedSketch();
         if (!profile || profile->GetNumLines() == 0) {
             statusBar()->showMessage(
-                "Polyhedron: выделите один Sketch-профиль",
+                "Polyhedron:select the required geometry and continue",
                 2200);
             UpdateActiveToolUi("select");
             return;
@@ -9718,7 +9753,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         if (!document_.CreatePolyhedronSolid(
                 profile->m_id, default_axis, default_turns)) {
             statusBar()->showMessage(
-                "Polyhedron: построение не выполнено. Проверьте профиль и ось",
+                "Polyhedron:operation failed; check the selected geometry and parameters",
                 2200);
             UpdateActiveToolUi("select");
             return;
@@ -9728,7 +9763,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         CAlfaObject* polyhedron = document_.GetSelectedObject();
         if (!polyhedron) {
             statusBar()->showMessage(
-                "Polyhedron: созданное тело недоступно", 1600);
+                "Polyhedron:operation failed; check the selected geometry and parameters", 1600);
             UpdateActiveToolUi("select");
             return;
         }
@@ -9741,7 +9776,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         UpdateActiveToolUi(tool_id);
         viewport_->update();
         statusBar()->showMessage(
-            "Polyhedron: задайте Turns (не меньше 3) и Axis, затем нажмите OK");
+            "Polyhedron:adjust the required parameters and continue");
         return;
     }
 
@@ -9782,7 +9817,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
 
         if (!section || !guide) {
             statusBar()->showMessage(
-                "Swept: выделите замкнутый Sketch-сечение и открытую B-Spline или Sketch-направляющую",
+                "Swept:select the required geometry and continue",
                 2200);
             UpdateActiveToolUi("select");
             return;
@@ -9792,7 +9827,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         document_.EnsureObjectId(*guide);
         if (!document_.CreateSweptSolid(section->m_id, guide->m_id, 1, 0.0, 0.0, 0.0)) {
             statusBar()->showMessage(
-                "Swept: построение не выполнено. Проверьте сечение и начальный участок направляющей",
+                "Swept:operation failed; check the selected geometry and parameters",
                 2200);
             UpdateActiveToolUi("select");
             return;
@@ -9801,7 +9836,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         active_parametric_edit_existing_ = false;
         CAlfaObject* swept_solid = document_.GetSelectedObject();
         if (!swept_solid) {
-            statusBar()->showMessage("Swept: созданное тело недоступно", 1600);
+            statusBar()->showMessage("Swept:operation failed; check the selected geometry and parameters", 1600);
             UpdateActiveToolUi("select");
             return;
         }
@@ -9813,7 +9848,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         viewport_->SetTool(ToolMode::Select);
         UpdateActiveToolUi(tool_id);
         viewport_->update();
-        statusBar()->showMessage("Swept: задайте Delta X, Delta Y и Angle, затем нажмите OK");
+        statusBar()->showMessage("Swept:adjust the required parameters and continue");
         return;
     }
 
@@ -9841,14 +9876,14 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
             active_parametric_object_ = {};
             UpdateActiveToolUi("select");
             viewport_->SetTool(ToolMode::Select);
-            statusBar()->showMessage("Extrude: операция не выполнена");
+            statusBar()->showMessage("Extrude:operation failed; check the selected geometry and parameters");
             return;
         }
         RefreshSceneTree();
         viewport_->update();
         statusBar()->showMessage(document_.HasLivePolylineExtrude()
-            ? "Extrude: меняй параметры, OK оставит результат"
-            : "Extrude: выбери замкнутую Polyline или Sketch");
+            ? "Extrude:adjust the required parameters and continue"
+            : "Extrude:select the required geometry and continue");
         return;
     }
 
@@ -9875,14 +9910,14 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
             active_parametric_object_ = {};
             UpdateActiveToolUi("select");
             viewport_->SetTool(ToolMode::Select);
-            statusBar()->showMessage("Revolve: операция не выполнена");
+            statusBar()->showMessage("Revolve:operation failed; check the selected geometry and parameters");
             return;
         }
         RefreshSceneTree();
         viewport_->update();
         statusBar()->showMessage(document_.HasLivePolylineRevolve()
-            ? "Revolve: меняй параметры, OK оставит результат"
-            : "Revolve: выбери Polyline или Sketch");
+            ? "Revolve:adjust the required parameters and continue"
+            : "Revolve:select the required geometry and continue");
         return;
     }
 
@@ -9899,7 +9934,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         UpdateActiveToolUi(tool_id);
         if (!document_.CreateLoftSurfaceFromSelectedBSplines()) {
             UpdateActiveToolUi("select");
-            statusBar()->showMessage("Loft Surface: выбери минимум 2 B-Spline", 1800);
+            statusBar()->showMessage("Loft Surface:select the required geometry and continue", 1800);
             return;
         }
         RefreshSceneTree();
@@ -9915,7 +9950,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         UpdateActiveToolUi(tool_id);
         if (!document_.ReverseSelectedSurfaceNormals()) {
             UpdateActiveToolUi("select");
-            statusBar()->showMessage("Reverse Normals: выбери поверхность", 1800);
+            statusBar()->showMessage("Reverse Normals:select the required geometry and continue", 1800);
             return;
         }
         RefreshSceneTree();
@@ -9943,14 +9978,14 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
             active_parametric_object_ = {};
             UpdateActiveToolUi("select");
             viewport_->SetTool(ToolMode::Select);
-            statusBar()->showMessage("Chamfer: операция не выполнена");
+            statusBar()->showMessage("Chamfer:operation failed; check the selected geometry and parameters");
             return;
         }
         RefreshSceneTree();
         viewport_->update();
         statusBar()->showMessage(document_.HasLiveChamfer()
-            ? "Chamfer: меняй Distance, OK оставит результат"
-            : "Chamfer: выбери кромку тела");
+            ? "Chamfer:adjust the required parameters and continue"
+            : "Chamfer:select the required geometry and continue");
         return;
     }
 
@@ -9959,13 +9994,13 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         if (tool_id == "fillet_edge" && !document_.HasSelectedSolidEdge()) {
             UpdateActiveToolUi("select");
             viewport_->SetTool(ToolMode::Select);
-            statusBar()->showMessage("Fillet: сначала выберите кромку тела");
+            statusBar()->showMessage("Fillet:select the required geometry and continue");
             return;
         }
         if (tool_id == "fillet_all_edges" && !document_.GetSelectedSolid()) {
             UpdateActiveToolUi("select");
             viewport_->SetTool(ToolMode::Select);
-            statusBar()->showMessage("Fillet All: выбери тело");
+            statusBar()->showMessage("Fillet All:select the required geometry and continue");
             return;
         }
 
@@ -9997,7 +10032,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
             active_parametric_object_ = {};
             UpdateActiveToolUi("select");
             viewport_->SetTool(ToolMode::Select);
-            statusBar()->showMessage("Fillet: операция не выполнена");
+            statusBar()->showMessage("Fillet:operation failed; check the selected geometry and parameters");
             return;
         }
         if (all_edges && !document_.UpdateLiveFillet(active_parametric_object_.parameters[0].value)) {
@@ -10006,7 +10041,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
             active_parametric_object_ = {};
             UpdateActiveToolUi("select");
             viewport_->SetTool(ToolMode::Select);
-            statusBar()->showMessage("Fillet: операция не выполнена");
+            statusBar()->showMessage("Fillet:operation failed; check the selected geometry and parameters");
             return;
         }
         if (document_.HasLiveFillet()) {
@@ -10022,8 +10057,8 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         RefreshSceneTree();
         viewport_->update();
         statusBar()->showMessage(document_.HasLiveFillet()
-            ? (tool_id == "fillet_edge" ? "Fillet: меняй Radius, OK оставит результат" : "Fillet All: меняй Radius, OK оставит результат")
-            : "Fillet: выбери кромку тела");
+            ? (tool_id == "fillet_edge" ? "Fillet:adjust the required parameters and continue" : "Fillet All:adjust the required parameters and continue")
+            : "Fillet:select the required geometry and continue");
         return;
     }
 
@@ -10066,8 +10101,8 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
                 viewport_->update();
                 statusBar()->showMessage(
                     template_ids.size() == 2
-                        ? "SLX: созданы эскизы Frame Profile и Panel Profile — сохрани или измени их"
-                        : "SLX: не удалось создать шаблоны профилей",
+                        ? "SLX:operation completed"
+                        : "SLX:operation failed; check the selected geometry and parameters",
                     6000);
                 return;
             }
@@ -10098,7 +10133,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
             if (sketches.size() == 2) {
                 if (!sketches[0]->IsClosed() || !sketches[1]->IsClosed()) {
                     statusBar()->showMessage(
-                        "SLX Frame: профиль рамки и профиль филёнки должны быть замкнуты",
+                        "SLX Frame:operation failed; check the selected geometry and parameters",
                         5000);
                     return;
                 }
@@ -10121,7 +10156,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
                 for (size_t contour = 0; contour < contour_count; ++contour) {
                     if (!sketches[contour]->IsClosed()) {
                         statusBar()->showMessage(
-                            "SLX Milled: все контуры фрезеровки должны быть замкнуты",
+                            "SLX Milled:operation failed; check the selected geometry and parameters",
                             4500);
                         return;
                     }
@@ -10176,7 +10211,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         if (!spline || spline->GetPointCount() < 2) {
             UpdateActiveToolUi("select");
             statusBar()->showMessage(
-                "Ruled Surface: выбери одну гладкую кривую (не Polyline)", 2200);
+                "Ruled Surface:select the required geometry and continue", 2200);
             return;
         }
         document_.EnsureObjectId(*spline);
@@ -10192,7 +10227,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
             tool_id, document_, parameters);
         if (active_parametric_object_.tool_id.empty()) {
             UpdateActiveToolUi("select");
-            statusBar()->showMessage("Ruled Surface: не удалось создать поверхность", 2000);
+            statusBar()->showMessage("Ruled Surface:operation failed; check the selected geometry and parameters", 2000);
             return;
         }
         property_panel_->SetActiveObject(active_parametric_object_);
@@ -10203,7 +10238,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         RefreshSceneTree();
         viewport_->update();
         statusBar()->showMessage(
-            "Ruled Surface: настрой Length, Direction и Reverse Normal; OK оставит результат");
+            "Ruled Surface:adjust the required parameters and continue");
         return;
     }
     if (!active_parametric_object_.tool_id.empty()) {
@@ -10254,7 +10289,7 @@ void MainWindow::ShowLowPolyTool() {
         viewport_->SetTool(ToolMode::Select);
         viewport_->SetSelectionMode(SelectionMode::Object);
         UpdateActiveToolUi("SolidLowPoly");
-        statusBar()->showMessage("Low Poly: выбери тело");
+        statusBar()->showMessage("Low Poly:select the required geometry and continue");
         return;
     }
 
@@ -10279,7 +10314,7 @@ void MainWindow::ShowLowPolyTool() {
     dialog->show();
     dialog->raise();
     dialog->activateWindow();
-    statusBar()->showMessage("Low Poly: меняй параметры или Create Low Poly", 1600);
+    statusBar()->showMessage("Low Poly:adjust the required parameters and continue", 1600);
 }
 
 void MainWindow::ShowMeshFillContourTool() {
@@ -10301,7 +10336,7 @@ void MainWindow::ShowMeshFillContourTool() {
 
     if (!dialog->HasContours()) {
         dialog->deleteLater();
-        statusBar()->showMessage("Fiill Contour: сначала создайте CPolyline с 3+ точками", 2000);
+        statusBar()->showMessage("Fiill Contour:operation status", 2000);
         return;
     }
 
@@ -10314,7 +10349,7 @@ void MainWindow::ShowMeshFillContourTool() {
     dialog->show();
     dialog->raise();
     dialog->activateWindow();
-    statusBar()->showMessage("Fiill Contour: выберите CPolyline и Density", 1800);
+    statusBar()->showMessage("Fiill Contour:select the required geometry and continue", 1800);
 }
 
 void MainWindow::ShowTrimMeshTestTool() {
@@ -10382,25 +10417,25 @@ void MainWindow::ShowTrimMeshTestTool() {
     connect(select_mesh_button, &QPushButton::clicked, dialog, [this, mesh_id, mesh_label, describe_object]() {
         CMesh3D* mesh = document_.GetSelectedMesh();
         if (!mesh) {
-            statusBar()->showMessage("Trim Mesh Test: выбери Mesh", 1400);
+            statusBar()->showMessage("Trim Mesh Test:select the required geometry and continue", 1400);
             return;
         }
         document_.EnsureObjectId(*mesh);
         *mesh_id = mesh->m_id;
         mesh_label->setText(describe_object(mesh));
-        statusBar()->showMessage("Trim Mesh Test: mesh выбран, теперь выбери линию выреза", 1600);
+        statusBar()->showMessage("Trim Mesh Test: mesh select the required geometry and continue", 1600);
     });
 
     connect(select_line_button, &QPushButton::clicked, dialog, [this, line_id, line_label, describe_object]() {
         CPolyline* line = document_.GetSelectedPolyline();
         if (!line) {
-            statusBar()->showMessage("Trim Mesh Test: выбери Polyline как линию выреза", 1400);
+            statusBar()->showMessage("Trim Mesh Test:select the required geometry and continue", 1400);
             return;
         }
         document_.EnsureObjectId(*line);
         *line_id = line->m_id;
         line_label->setText(describe_object(line));
-        statusBar()->showMessage("Trim Mesh Test: line выбрана, введи Pc и запускай", 1600);
+        statusBar()->showMessage("Trim Mesh Test: line adjust the required parameters and continue", 1600);
     });
 
     connect(pick_pc_button, &QPushButton::clicked, dialog, [this]() {
@@ -10417,7 +10452,7 @@ void MainWindow::ShowTrimMeshTestTool() {
         auto* mesh = dynamic_cast<CMesh3D*>(document_.FindObjectById(*mesh_id));
         auto* line = dynamic_cast<CPolyline*>(document_.FindObjectById(*line_id));
         if (!mesh || !line) {
-            statusBar()->showMessage("Trim Mesh Test: сначала выбери Mesh и Line", 1600);
+            statusBar()->showMessage("Trim Mesh Test:select the required geometry and continue", 1600);
             return;
         }
 
@@ -10425,7 +10460,7 @@ void MainWindow::ShowTrimMeshTestTool() {
         const bool changed = mesh->TrimByPlineTest(line, pc);
         RefreshSceneTree();
         viewport_->update();
-        statusBar()->showMessage(changed ? "Trim Mesh Test: выполнено" : "Trim Mesh Test: не изменило mesh", 1800);
+        statusBar()->showMessage(changed ? "Trim Mesh Test:operation completed" : "Trim Mesh Test:operation failed; check the selected geometry and parameters", 1800);
     });
     connect(close_button, &QPushButton::clicked, dialog, &QDialog::accept);
 
@@ -10433,7 +10468,7 @@ void MainWindow::ShowTrimMeshTestTool() {
     dialog->show();
     dialog->raise();
     dialog->activateWindow();
-    statusBar()->showMessage("Trim Mesh Test: выбери mesh в сцене и нажми Use Selected Mesh", 1800);
+    statusBar()->showMessage("Trim Mesh Test:select the required geometry and continue", 1800);
 }
 
 void MainWindow::ShowClassifyFaceCutTool() {
@@ -10481,46 +10516,46 @@ void MainWindow::ShowClassifyFaceCutTool() {
     connect(select_face_button, &QPushButton::clicked, dialog, [this, face_id, face_label, describe_object]() {
         CPolyline* face = document_.GetSelectedPolyline();
         if (!face) {
-            statusBar()->showMessage("Classify Face Cut: выбери CPolyline для Plface", 1500);
+            statusBar()->showMessage("Classify Face Cut:select the required geometry and continue", 1500);
             return;
         }
         document_.EnsureObjectId(*face);
         *face_id = face->m_id;
         face_label->setText(describe_object(face));
-        statusBar()->showMessage("Classify Face Cut: Plface выбран, теперь выбери PlCut", 1600);
+        statusBar()->showMessage("Classify Face Cut: Plface select the required geometry and continue", 1600);
     });
 
     connect(select_cut_button, &QPushButton::clicked, dialog, [this, cut_id, cut_label, describe_object]() {
         CPolyline* cut = document_.GetSelectedPolyline();
         if (!cut) {
-            statusBar()->showMessage("Classify Face Cut: выбери CPolyline для PlCut", 1500);
+            statusBar()->showMessage("Classify Face Cut:select the required geometry and continue", 1500);
             return;
         }
         document_.EnsureObjectId(*cut);
         *cut_id = cut->m_id;
         cut_label->setText(describe_object(cut));
-        statusBar()->showMessage("Classify Face Cut: PlCut выбран, нажми DoTest", 1600);
+        statusBar()->showMessage("Classify Face Cut: PlCut operation status", 1600);
     });
 
     connect(test_button, &QPushButton::clicked, dialog, [this, face_id, cut_id]() {
         auto* face = dynamic_cast<CPolyline*>(document_.FindObjectById(*face_id));
         auto* cut = dynamic_cast<CPolyline*>(document_.FindObjectById(*cut_id));
         if (!face || !cut) {
-            statusBar()->showMessage("Classify Face Cut: сначала выбери Plface и PlCut", 1800);
+            statusBar()->showMessage("Classify Face Cut:select the required geometry and continue", 1800);
             return;
         }
         if (face == cut) {
-            statusBar()->showMessage("Classify Face Cut: Plface и PlCut должны быть разными линиями", 1800);
+            statusBar()->showMessage("Classify Face Cut: Plface operation failed; check the selected geometry and parameters", 1800);
             return;
         }
         if (face->np() < 3 || cut->np() < 2) {
-            statusBar()->showMessage("Classify Face Cut: Plface требует 3+ точек, PlCut — 2+", 2000);
+            statusBar()->showMessage("Classify Face Cut: Plface operation failed; check the selected geometry and parameters", 2000);
             return;
         }
 
         DoTest(face, cut);
         viewport_->update();
-        statusBar()->showMessage("Classify Face Cut: DoTest выполнен", 1800);
+        statusBar()->showMessage("Classify Face Cut: DoTest operation completed", 1800);
     });
     connect(close_button, &QPushButton::clicked, dialog, &QDialog::accept);
 
@@ -10528,7 +10563,7 @@ void MainWindow::ShowClassifyFaceCutTool() {
     dialog->show();
     dialog->raise();
     dialog->activateWindow();
-    statusBar()->showMessage("Classify Face Cut: выбери Plface и нажми Use Selected Plface", 1900);
+    statusBar()->showMessage("Classify Face Cut:select the required geometry and continue", 1900);
 }
 
 void MainWindow::UpdateSolidBodyDimensions() {
@@ -10779,7 +10814,7 @@ bool MainWindow::TryStartLiveEdgeToolFromSelection() {
             return true;
         }
         if (!document_.HasSelectedSolidEdge()) {
-            statusBar()->showMessage("Fillet: выбери кромку тела");
+            statusBar()->showMessage("Fillet:select the required geometry and continue");
             return false;
         }
         const double radius = active_parametric_object_.parameters.empty() ? 2.0 : active_parametric_object_.parameters[0].value;
@@ -10787,7 +10822,7 @@ bool MainWindow::TryStartLiveEdgeToolFromSelection() {
         if (!document_.BeginLiveFilletSelectedEdges(false) || !document_.UpdateLiveFillet(radius)) {
             document_.CancelLiveFillet();
             undo_redo_.CancelChange();
-            statusBar()->showMessage("Fillet: операция не выполнена");
+            statusBar()->showMessage("Fillet:operation failed; check the selected geometry and parameters");
             return false;
         }
         viewport_->SetSolidDimensionEdit(
@@ -10800,7 +10835,7 @@ bool MainWindow::TryStartLiveEdgeToolFromSelection() {
             document_.GetSelectedObjectIndex(), true);
         RefreshSceneTree();
         viewport_->update();
-        statusBar()->showMessage("Fillet: меняй Radius, OK оставит результат");
+        statusBar()->showMessage("Fillet:adjust the required parameters and continue");
         return true;
     }
 
@@ -10809,7 +10844,7 @@ bool MainWindow::TryStartLiveEdgeToolFromSelection() {
             return true;
         }
         if (!document_.HasSelectedSolidEdge()) {
-            statusBar()->showMessage("Chamfer: выбери кромку тела");
+            statusBar()->showMessage("Chamfer:select the required geometry and continue");
             return false;
         }
         const double distance = active_parametric_object_.parameters.empty() ? 2.0 : active_parametric_object_.parameters[0].value;
@@ -10817,12 +10852,12 @@ bool MainWindow::TryStartLiveEdgeToolFromSelection() {
         if (!document_.BeginLiveChamferSelectedEdges() || !document_.UpdateLiveChamfer(distance)) {
             document_.CancelLiveChamfer();
             undo_redo_.CancelChange();
-            statusBar()->showMessage("Chamfer: операция не выполнена");
+            statusBar()->showMessage("Chamfer:operation failed; check the selected geometry and parameters");
             return false;
         }
         RefreshSceneTree();
         viewport_->update();
-        statusBar()->showMessage("Chamfer: меняй Distance, OK оставит результат");
+        statusBar()->showMessage("Chamfer:adjust the required parameters and continue");
         return true;
     }
 
@@ -10837,7 +10872,7 @@ bool MainWindow::TryStartLivePolylineExtrudeFromSelection() {
         return true;
     }
     if (!document_.GetSelectedPolyline() && !document_.GetSelectedSketch()) {
-        statusBar()->showMessage("Extrude: выбери замкнутую Polyline или Sketch");
+        statusBar()->showMessage("Extrude:select the required geometry and continue");
         return false;
     }
 
@@ -10847,13 +10882,13 @@ bool MainWindow::TryStartLivePolylineExtrudeFromSelection() {
     const double taper_angle = parameters.size() > 2 ? parameters[2].value : 0.0;
     if (!document_.BeginLiveExtrudeSelectedPolyline(distance, reverse, taper_angle)) {
         document_.CancelLiveExtrudeSelectedPolyline();
-        statusBar()->showMessage("Extrude: профиль должен быть плоским и замкнутым");
+        statusBar()->showMessage("Extrude:operation failed; check the selected geometry and parameters");
         return false;
     }
 
     RefreshSceneTree();
     viewport_->update();
-    statusBar()->showMessage("Extrude: меняй параметры, OK оставит результат");
+    statusBar()->showMessage("Extrude:adjust the required parameters and continue");
     return true;
 }
 
@@ -10866,7 +10901,7 @@ bool MainWindow::TryStartLivePolylineRevolveFromSelection() {
     }
     if (!document_.GetSelectedPolyline() && !document_.GetSelectedSketch()) {
         statusBar()->showMessage(
-            "Revolve: выбери Polyline или Sketch");
+            "Revolve:select the required geometry and continue");
         return false;
     }
 
@@ -10876,13 +10911,13 @@ bool MainWindow::TryStartLivePolylineRevolveFromSelection() {
     if (!document_.BeginLiveRevolveSelectedPolyline(angle, axis_index)) {
         document_.CancelLiveRevolveSelectedPolyline();
         statusBar()->showMessage(
-            "Revolve: профиль должен образовывать область с выбранной осью");
+            "Revolve:operation failed; check the selected geometry and parameters");
         return false;
     }
 
     RefreshSceneTree();
     viewport_->update();
-    statusBar()->showMessage("Revolve: меняй параметры, OK оставит результат");
+    statusBar()->showMessage("Revolve:adjust the required parameters and continue");
     return true;
 }
 
@@ -10941,7 +10976,7 @@ void MainWindow::AcceptActiveProperties() {
         && IsCabinetTool(active_parametric_object_.tool_id)
         && active_parametric_object_.object_index
                >= document_.GetObjects().size()) {
-        statusBar()->showMessage("Cabinet: построение сборки...");
+        statusBar()->showMessage("Cabinet:operation completed");
         QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
         undo_redo_.BeginChange();
         ActiveParametricObject created =
@@ -10952,7 +10987,7 @@ void MainWindow::AcceptActiveProperties() {
         if (created.tool_id.empty()) {
             undo_redo_.CancelChange();
             statusBar()->showMessage(
-                "Cabinet: не удалось построить сборку", 2500);
+                "Cabinet:operation failed; check the selected geometry and parameters", 2500);
             return;
         }
         active_parametric_object_ = std::move(created);
@@ -11054,7 +11089,7 @@ void MainWindow::AcceptActiveProperties() {
         const bool all_edges = active_parametric_object_.tool_id == "fillet_all_edges";
         const std::vector<std::pair<int, int>> edge_refs = document_.GetLiveFilletEdgeRefs();
         if (!document_.HasLiveFillet()) {
-            statusBar()->showMessage(all_edges ? "Fillet All: выбери тело" : "Fillet: выбери кромку тела", 1600);
+            statusBar()->showMessage(all_edges ? "Fillet All:select the required geometry and continue" : "Fillet:select the required geometry and continue", 1600);
             return;
         }
         const std::vector<int> created_surface_indices = document_.GetLiveFilletCreatedSurfaceIndices();
@@ -11097,7 +11132,7 @@ void MainWindow::AcceptActiveProperties() {
         const double distance = active_parametric_object_.parameters.empty() ? 2.0 : active_parametric_object_.parameters[0].value;
         const std::vector<std::pair<int, int>> edge_refs = document_.GetLiveChamferEdgeRefs();
         if (!document_.HasLiveChamfer()) {
-            statusBar()->showMessage("Chamfer: выбери кромку тела", 1600);
+            statusBar()->showMessage("Chamfer:select the required geometry and continue", 1600);
             return;
         }
         const std::vector<int> created_surface_indices = document_.GetLiveChamferCreatedSurfaceIndices();
@@ -11130,7 +11165,7 @@ void MainWindow::AcceptActiveProperties() {
         const double thickness = active_parametric_object_.parameters.empty() ? 0.0 : active_parametric_object_.parameters[0].value;
         viewport_->SetThickSolidThickness(thickness);
         if (!document_.FinishLiveThickSolid()) {
-            statusBar()->showMessage("ThickSolid: выбери Face и задай Thick != 0", 1600);
+            statusBar()->showMessage("ThickSolid:select the required geometry and continue", 1600);
             viewport_->update();
             return;
         }
@@ -11147,7 +11182,7 @@ void MainWindow::AcceptActiveProperties() {
     if (active_parametric_object_.tool_id == "SolidExtrudeTool") {
         const double distance = active_parametric_object_.parameters.empty() ? 0.0 : active_parametric_object_.parameters[0].value;
         if (!document_.FinishLiveExtrudeSelectedPolyline()) {
-            statusBar()->showMessage("Extrude: выбери профиль и задай Distance != 0", 1600);
+            statusBar()->showMessage("Extrude:select the required geometry and continue", 1600);
             viewport_->update();
             return;
         }
@@ -11164,7 +11199,7 @@ void MainWindow::AcceptActiveProperties() {
         const double angle = active_parametric_object_.parameters.empty() ? 0.0 : active_parametric_object_.parameters[0].value;
         if (!document_.FinishLiveRevolveSelectedPolyline()) {
             statusBar()->showMessage(
-                "Revolve: выбери Polyline или Sketch и задай Angle > 0",
+                "Revolve:select the required geometry and continue",
                 1600);
             viewport_->update();
             return;
@@ -11712,6 +11747,17 @@ void MainWindow::ShowPreferences() {
     if (dialog.exec() == QDialog::Accepted) {
         statusBar()->showMessage("Preferences applied", 1400);
     }
+}
+
+void MainWindow::ShowLightingDialog() {
+    if (!lighting_dialog_) {
+        lighting_dialog_ = new LightingDialog(this);
+        connect(lighting_dialog_, &LightingDialog::LightingChanged,
+                viewport_, qOverload<>(&OpenGLViewport::update));
+    }
+    lighting_dialog_->show();
+    lighting_dialog_->raise();
+    lighting_dialog_->activateWindow();
 }
 
 void MainWindow::AddReferenceImage(ReferenceImageAxis axis) {
@@ -12506,7 +12552,6 @@ void MainWindow::PopulateToolsPanelForTab(int tab_index) {
     } else if (tab == "Surfaces") {
         tool_ids = {"PlaneTool", "SurfaceRuled", "SurfaceLoft", "SurfaceSweepTwoRails", "SurfaceFourSplines", "SurfaceJoin", "SurfaceReverseNormals", "SurfaceOfRevolution"};
     } else if (tab == "Solid") {
-        // единый boolean-инструмент вместо трёх отдельных
         tool_ids = {"SolidBeamTool", "SolidBox", "SolidCylinder", "SolidSphereTool", "SolidTorusTool", "SolidPrismTool", "SolidExtrudeTool", "SolidTwoSketches", "SolidSketchFeature", "SolidSweptTool", "SolidSweepTwoRails", "SolidFrameTool", "SolidWireTool", "SolidPolyhedronTool", "TrimByPlane", "TrimBySketch", "TrimBySurface", "SurfaceOfRevolution", "boolean", "fillet_edge", "fillet_all_edges", "ChamferSolid", "SolidExtrudeFace", "SolidOffsetFace", "SolidDraft", "ThickSolidTool"};
     }
 

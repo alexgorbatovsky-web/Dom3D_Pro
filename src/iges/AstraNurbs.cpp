@@ -1,5 +1,3 @@
-////////////	реализация функций Астры на C
-/////////	начало 18.10.2000
 /////////////////////////////////////////////////////////
 #include "defines.h"
 #include "AstraVect.h"
@@ -16,43 +14,39 @@ extern BOOL ASSHG(int IPR, double* T, double TN, double TK, double DT);
 BOOL VTKB(double* RES,int IPR, int IU, int IEX, int N, int ITBS, int K,\
 		  int IP, double S, double* A)
 {
-//C*****РАСЧЕТ ЗНАЧЕНИЙ NURBS-КРИВОЙ НА ЗАДАННОМ УЧАСТКЕ
-//C*****BEPCИЯ: 01 (27.01.99)
 //	DIMENSION RES(4,6),A(K,*),
 	double B[404];//B(4,101)
 	double H[20];//H(4,5)
-//.....контроль данных
 	if(IU < 1 || IU > 5){
-		message_error_("ЧИСЛО ПРОИЗВОДНЫХ НЕ 1-5!");
+		message_error_("Invalid legacy geometry parameter!");
 		return BAD;
 	}
 	if(IEX < 1 || IEX > 4){
-		message_error_("ПРИЗНАК ЭКСТРАПОЛЯЦИИ НЕ 1-4!");
+		message_error_("Invalid legacy geometry parameter!");
 		return BAD;
 	}
 	if(N < 2 || N > 51){
-		message_error_("ПОРЯДОК СПЛАЙНА НЕ 2-51!");
+		message_error_("Invalid legacy geometry parameter!");
 		return BAD;
 	}
 	if(ITBS < -1 || ITBS > 1){
-		message_error_("ПРИЗНАК ТИПА В-СПЛАЙНА НЕ -1,0,1!");
+		message_error_("Invalid legacy geometry parameter!");
 		return BAD;
 	}
 	if(K < 4){
-		message_error_("РАЗМЕРНОСТЬ ДАННЫХ K < 4!");
+		message_error_("Invalid legacy geometry parameter!");
 		return BAD;
 	}
 	int KPR=__IntAbs(ITBS)+3;
 	if(IP < KPR+1 || IP > K){
-		message_error_("ОШИБКА В ИНДЕСЕ ПАРАМЕТРА!");
+		message_error_("Invalid legacy geometry parameter!");
 		return BAD;
 	}
-//.....контроль экстраполяции
 	double T=S;
 	int ID=IU;
 	if(S < 0 || S > 1){
 		if(IEX==1){
-			message_error_("ЭКСТРАПОЛЯЦИЯ ЗАПРЕЩЕНА!");
+			message_error_("Invalid legacy geometry parameter!");
 			return BAD;
 		}
 	   if(S < 0)
@@ -61,15 +55,13 @@ BOOL VTKB(double* RES,int IPR, int IU, int IEX, int N, int ITBS, int K,\
 		   T=1;
 	   ID=IEX;
 	}
-//....подсчет внутреннего параметра
 	double DT=A(IP,N+1)-A(IP,N);
 	if(DT <= 0){
-		message_error_("ПАРАМЕТР НЕ ВОЗРАСТАЕТ!");
+		message_error_("Invalid legacy geometry parameter!");
 		return BAD;
 	}
 	double P=A(IP,N)*(1-T)+A(IP,N+1)*T;
 	int JJ=0;
-//....расчет точек и производных В-сплайна
 	for(JJ=1; JJ<=5; JJ++){
 		for(int M=1; M<=4; M++)
 			H(M,JJ)=0;
@@ -86,7 +78,7 @@ BOOL VTKB(double* RES,int IPR, int IU, int IEX, int N, int ITBS, int K,\
 			int L=I-J+1;
 			double D=A(IP,L+N)-A(IP,I);
 			if(D <= 0){
-				message_error_("ПАРАМЕТР НЕ ВОЗРАСТАЕТ!");
+				message_error_("Invalid legacy geometry parameter!");
 				return BAD;
 			}
 			if(J <= JJ){
@@ -97,7 +89,7 @@ BOOL VTKB(double* RES,int IPR, int IU, int IEX, int N, int ITBS, int K,\
 				V=(P-A(IP,I))/D;
 				W=1-V;
 				if(V < 0 || V > 1){
-					message_error_("ПАРАМЕТР НЕ ВОЗРАСТАЕТ!");
+					message_error_("Invalid legacy geometry parameter!");
 					return BAD;
 				}
 			}
@@ -116,7 +108,6 @@ BOOL VTKB(double* RES,int IPR, int IU, int IEX, int N, int ITBS, int K,\
 			}
 		 }
 	}
-//....экстраполяция
 	if(S < 0 || S > 1){
          T=S-T;
          for(int I=1; I<=KPR; I++){
@@ -146,7 +137,6 @@ BOOL VTKB(double* RES,int IPR, int IU, int IEX, int N, int ITBS, int K,\
             for(int J=1; J<=IU; J++)
                RES(I,J)=H(I,J);
 	}
-//....возвращение внутреннего параметра
 	if(IPR==1){
          int I=IU+1;
          RES(1,I)=A(IP,N)*(1-S)+A(IP,N+1)*S;
@@ -164,60 +154,44 @@ BOOL VTKB(double* RES,int IPR, int IU, int IEX, int N, int ITBS, int K,\
 //
 //****************************************************************
 
-/*           NB - integer - максимальный размер поля результата. После
-C*      исполнения модуля содержит число узлов полученного кубического 
-C*      сплайна;
-C*           B(7,NB) - поле под массив коэфициентов сплайн-кривой;
-C*           N - степень NURBS-кривой (0 < N < 51);
-C*           L - размер полной сетки параметра NURBS-кривой;
-C*           A(5,L) - массив коэффициентов и значений параметров NURBS-кривой.
-C*          E - заданная точность приближения, Е > 0.0001;
-C*           IT(L) - рабочий массив; 
-*/
-
 BOOL IG126K(int* NB,double* B,int N,int L,double*  A,double E, int* IT)
 {
-//*****КОНВЕРТАЦИЯ NURBS-КРИВОЙ В КПС С ЗАДАННОЙ ТОЧНОСТЬЮ 
-//*****BEPCИЯ: 00 (22.07.99)
       double TS=0;
 	  double RES[24];
-//....контроль данных
 	if(*NB < 2){
-		message_error_("РАЗМЕР  ПОЛЯ РЕЗУЛЬТАТА < 2!");
+		message_error_("Invalid legacy geometry parameter!");
 		return BAD;
 	}
 	if(L < 2*N+2){
-		message_error_("L НЕ СООТВЕТСТВУЕТ N!");
+		message_error_("Invalid legacy geometry parameter!");
 		return BAD;
 	}
 	if(N < 1 || N > 50){
-		message_error_("СТЕПЕНЬ NURBSа НЕ 1-50!");
+		message_error_("Invalid legacy geometry parameter!");
 		return BAD;
 	}
 	if(E < 0.0001){
-		message_error_("ЗАДАНА ТОЧНОСТЬ < 0.0001!");
+		message_error_("Invalid legacy geometry parameter!");
 		return BAD;
 	}
 	int M=L-N-1;
 	int I=0;
-//....контроль весов
 	for(I=1; I<=M; I++)
 		if(A(4,I) <= 0){
-			message_error_("ВЕС НЕ ПОЛОЖИТЕЛЕН!");
+			message_error_("Invalid legacy geometry parameter!");
 			return BAD;
 		}
-//....создание массива ссылок и контроль кратности узлов
 	int J=0;
 	int K=0;
 	for( I=N+1; I<=L-N; I++){
 		K=K+1;
 		if(A(5,I) > A(5,I+1)){
-			message_error_("ПАРАМЕТР НЕ ВОЗРАСТАЕТ!");
+			message_error_("Invalid legacy geometry parameter!");
 			return BAD;
 		}
 		if(A(5,I) != A(5,I+1) || I==L-N){
 		   if(N-K < 1 && K > 1){
-				message_error_("КРИВАЯ С ИЗЛОМОМ!");
+				message_error_("Invalid legacy geometry parameter!");
 				return BAD;
 			}
 			J=J+1;
@@ -227,15 +201,13 @@ BOOL IG126K(int* NB,double* B,int N,int L,double*  A,double E, int* IT)
 	}
 	int KU=J;
 	if(KU < 2){
-		message_error_("ВЫРОЖДЕНИЕ КРИВОЙ!");
+		message_error_("Invalid legacy geometry parameter!");
 		return BAD;
 	}
-//....цикл по числу сегментов
 	J=0;
 	for( I=1; I<=KU-1; I++){
 		int IS=IT(I);
 		TS=0;
-		//.......поиск max(R''''(u) на очередном сегменте
 		double Q=0;
 		for(int II=1; II<=11; II++){
 			double U=TS;
@@ -243,7 +215,7 @@ BOOL IG126K(int* NB,double* B,int N,int L,double*  A,double E, int* IT)
 				return BAD;
 			double W=RES(4,1);
 			if(W <= 0){
-				message_error_("ВЕС НЕ ПОЛОЖИТЕЛЕН!");
+				message_error_("Invalid legacy geometry parameter!");
 				return BAD;
 			}
 			for(int K=1; K<=3; K++){
@@ -260,7 +232,6 @@ BOOL IG126K(int* NB,double* B,int N,int L,double*  A,double E, int* IT)
 			if( ASSHG(0,&TS,0,1.0,0.1))
 				return BAD;
 		}
-		//.......подсчет шага на очередном сегменте
 		double DT=sqrt(Q/(E*384));
 		DT=sqrt(DT);
 		M=(int)DT;
@@ -272,11 +243,10 @@ BOOL IG126K(int* NB,double* B,int N,int L,double*  A,double E, int* IT)
 		if(I==KU-1)
 			M=M+1;
 		TS=0;
-		//.......расчет точек результата
 		for(int II=1; II<=M; II++){
 			J=J+1;
 			if(J > *NB){
-				message_error_("ПОЛЕ РЕЗУЛЬТАТА ИСЧЕРПАНО!");
+				message_error_("Invalid legacy geometry parameter!");
 				return BAD;
 			}
 			double U=TS;
@@ -284,12 +254,12 @@ BOOL IG126K(int* NB,double* B,int N,int L,double*  A,double E, int* IT)
 				return BAD;
 			double W=RES(4,1);
 			if(W <= 0){
-				message_error_("ВЫРОЖДЕНИЕ КРИВОЙ!");
+				message_error_("Invalid legacy geometry parameter!");
 				return BAD;
 			}
 			Q=(RES(3,3)-RES(2,3))*W;
 			if(Q <= 0){
-				message_error_("ПАРАМЕТР НЕ ВОЗРАСТАЕТ!");
+				message_error_("Invalid legacy geometry parameter!");
 				return BAD;
 			}
 			for(int KK=1;KK<=3; KK++){
@@ -300,7 +270,7 @@ BOOL IG126K(int* NB,double* B,int N,int L,double*  A,double E, int* IT)
 			if( ASSHG(1,&TS,0,1.0,DT))
 				return BAD;
 		}
-	}////////end цикла по числу сегментов
+	}
 	*NB=J;
 	return OK;
 }
@@ -316,14 +286,10 @@ BOOL IG126K(int* NB,double* B,int N,int L,double*  A,double E, int* IT)
 //****************************************************************
 BOOL IG126(int* N,double* A,double* T,double* W,double* B)
 {
-//****ПРЕОБРАЗОВАНИЕ КРИВОЙ В ФОРМУ NURBSа
-//****BEPCИЯ: 00 (01.03.97)
 //      DIMENSION A(7,N),T(2*N+4),W(2*N),B(3,2*N)
       if(*N < 2 || *N > 5000){
-		  message_error_("ЧИСЛО ТОЧЕК КРИВОЙ НЕ 2-5000");
 		  return BAD;
 	  }
-//....ЗАНЕСЕНИЕ ЗНАЧЕНИЙ ПАРАМЕТРА В МАССИВ Т
 	int I=0;
 	for(I=1;I<=2*(*N)+4;I++){
 		int II=(int)(I-1)/2;
@@ -333,10 +299,8 @@ BOOL IG126(int* N,double* A,double* T,double* W,double* B)
 			II=*N;
 		T(I)=A(7,II);
 	  }
-//....ЗАНЕСЕНИЕ ЗНАЧЕНИЙ ВЕСОВ В МАССИВ W
 	for(I=1; I<=2*(*N);I++)
 		W(I)=1;
-//....ЗАНЕСЕНИЕ КОЭФФИЦИЕНТОВ В-СПЛАЙНА В МАССИВ B
 	int II=1;
 	for(I=1; I<=*N;I++)
 		for(int J=1; J<=2;J++){
@@ -352,4 +316,3 @@ BOOL IG126(int* N,double* A,double* T,double* W,double* B)
 		}
       return OK;
 }
-

@@ -321,7 +321,6 @@ double CVector::GetAngle(CPlane* pl)
 //short get_rotate_Vector_angle(LMN *v1,LMN *v2,LMN *vect,double *beta)
 double CVector::GetAngleRotateVector(CVector* v1,CVector* v2)
 {
-/////Функция считает this вектор и угол поворота для совмещения v1 и v2
 	CPoint3d p0;
 	CPoint3d p1;
 	CPoint3d p2;
@@ -361,9 +360,6 @@ double CVector::GetAngleRotateVector(CVector* v1,CVector* v2)
 //void get_2angle_rotate_Vector(LMN *v1,LMN *v2,double *alfa,LMN *cy,double *beta)
 void CVector::GetAnglesRotateVector(CVector* v1,CVector* v2, double* alfa, double* beta)
 {
-///Функция считает this вектор и 2 угла поворота для совмещения v1 и v2
-//	Причем первый поворот делаем вокруг оси Cz на Угол alfa
-//	Второй поворот делаем вокруг оси This Вектора на Угол beta
 	CPoint3d p0;
 	CPoint3d p1;
 	CPoint3d p2;
@@ -446,27 +442,22 @@ void CVector::LMN_lm(double*li, double*mi)
 }
 
 int CVector::GetTwoAngleRotate(CVector* v2, double* alfa, double* beta)
-{///Функция считает  2 угла поворота для с вектором v2
-//	Причем первый поворот делаем вокруг оси Cx на Угол alfa
-//	Второй поворот делаем вокруг оси Cz на Угол beta
+{
 	CVector vx(1,0,0);
 	if(vx.IsCollinear(v2, DELTA))
 		if(vx.IsCongruent(v2))
 			return GetTwoAngleRotateVx(v2,alfa, beta);
 
-////////////////Вначале  для плоскости YZ
 	CPoint3d p1;
 	p1.Move(this, 100);
 	p1.x=0;
 	CPoint3d p2;
 	p2.Move(v2, 100);
 	p2.x=0;
-/////////////Определим угол для совмещения 2-х векторов В плоскости YZ
 	CPoint3d p0;
 	CVector cy(0,1,0);
-	CVector c1(&p0, &p1);//1-й вектор в плоскости YZ
-	CVector c2(&p0, &p2);//2-й вектор в плоскости YZ
-	/////////Теперь проанализируем какой знак
+	CVector c1(&p0, &p1);
+	CVector c2(&p0, &p2);
 	double a1=c1.GetAngle(&cy);
 	if(c1.n<0)
 		a1=-a1;
@@ -475,7 +466,6 @@ int CVector::GetTwoAngleRotate(CVector* v2, double* alfa, double* beta)
 		a2=-a2;
 	*alfa=a2-a1;
 	
-///////////////////////////Теперь повторим для плоскости XY
 	CVector V1_rot=*this;
 	CPoint3d px(100,0,0);
 	V1_rot.Rotate(&p0, &px, *alfa);
@@ -492,11 +482,9 @@ int CVector::GetTwoAngleRotate(CVector* v2, double* alfa, double* beta)
 	p2.Move(v2, 100);
 	p2.z=0;
 
-/////////////Определим угол для совмещения 2-х векторов для плоскости XY
 	CVector cx(1,0,0);
-	CVector c1z(&p0, &p1);//1-й вектор в плоскости XY
-	CVector c2z(&p0, &p2);//2-й вектор в плоскости XY
-	/////////Теперь проанализируем какой знак
+	CVector c1z(&p0, &p1);
+	CVector c2z(&p0, &p2);
 	a1=c1z.GetAngle(&cx);
 	if(c1z.m<0)
 		a1=-a1;
@@ -509,26 +497,21 @@ int CVector::GetTwoAngleRotate(CVector* v2, double* alfa, double* beta)
 
 int CVector::GetTwoAngleRotateVx(CVector* v2, double* alfa, double* beta)
 {
-//	Причем первый поворот делаем вокруг оси Cz на Угол alfa
-//	Второй поворот делаем вокруг оси Cy на Угол beta
 	CVector vz(0,0,1);
 	if(vz.IsCollinear(v2, DELTA))
 //		if(vz.IsCongruent(v2))
 			return GetTwoAngleRotateVz(v2,alfa, beta);
 
-////////////////Вначале  для плоскости XY
 	CPoint3d p1;
 	p1.Move(this, 100);
 	p1.z=0;
 	CPoint3d p2;
 	p2.Move(v2, 100);
 	p2.z=0;
-/////////////Определим угол для совмещения 2-х векторов В плоскости YZ
 	CPoint3d p0;
 	CVector cy(1,0,0);
-	CVector c1(&p0, &p1);//1-й вектор в плоскости XY
-	CVector c2(&p0, &p2);//2-й вектор в плоскости XY
-	/////////Теперь проанализируем какой знак
+	CVector c1(&p0, &p1);
+	CVector c2(&p0, &p2);
 	double a1=c1.GetAngle(&cy);
 	if(c1.m<0)
 		a1=-a1;
@@ -541,7 +524,6 @@ int CVector::GetTwoAngleRotateVx(CVector* v2, double* alfa, double* beta)
 			*alfa=PI/2.0;
 
 	
-///////////////////////////Теперь повторим для плоскости ZX
 
 	CVector V1_rot=*this;
 	CPoint3d pz(0,0,120);
@@ -559,11 +541,9 @@ int CVector::GetTwoAngleRotateVx(CVector* v2, double* alfa, double* beta)
 	p2.Move(v2, 100);
 	p2.y=0;
 
-/////////////Определим угол для совмещения 2-х векторов для плоскости XY
 	CVector cx(0,0,1);
-	CVector c1z(&p0, &p1);//1-й вектор в плоскости ZX
-	CVector c2z(&p0, &p2);//2-й вектор в плоскости ZX
-	/////////Теперь проанализируем какой знак
+	CVector c1z(&p0, &p1);
+	CVector c2z(&p0, &p2);
 	a1=c1z.GetAngle(&cx);
 	if(c1z.l<0)
 		a1=-a1;

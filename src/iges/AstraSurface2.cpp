@@ -1,5 +1,3 @@
-////////////	реализация функций Астры на C
-/////////	начало 18.07.2000 конец 21.07 Ура.
 /////////////////////////////////////////////////////////
 #include "defines.h"
 #include "AstraVect.h"
@@ -26,17 +24,15 @@ int ASM2(double F[5],double RT[8], int* K);
 //C****************************************************************
 BOOL INVLTM(int ISP[8],double TS[6], double B[3], double DK[2], double* A)
 {
-//C*****ВЫБОР НАЧ. ПРИБЛИЖЕНИЯ ДЛЯ ТОЧКИ
-//C*****BEPCИЯ: 00 (31.01.97)
 	double RES[3];
 	double D[2];
 	double UV[6];
 	if(DK(1)<1 || DK(1)>100){
-	    message_error_("ЧИСЛО РАЗБИЕНИЙ НЕ [1-100]!");
+	    message_error_("Invalid legacy geometry parameter!");
 	    return BAD;
 	    }
 	if(DK(2)<1 || DK(2)>100){
-	    message_error_("ЧИСЛО РАЗБИЕНИЙ НЕ [1-100]!");
+	    message_error_("Invalid legacy geometry parameter!");
 	    return BAD;
 	    }
 	D(1)=1/DK(1);
@@ -74,14 +70,12 @@ Lb3: if(IP!=3) goto Lb2;
 BOOL ASSHG2(int* IPR, double D[2], double UV[6])
 {
 //C****************************************************************
-//C*****ПОСЛЕДОВАТЕЛЬНЫЙ РАСЧЕТ УЗЛОВ СЕТКИ
-//C*****BEPCИЯ: 05 (11.03.97)
 
 	double T;
 	int I=1;
 	if(*IPR==2) goto Lb2;
 	if(*IPR!=1){
-	    message_error_("ПРИЗНАК СОСТОЯНИЯ НЕ [1-2]!");
+	    message_error_("Invalid legacy geometry parameter!");
 	    return BAD;
 	    }
 	for(I=1; I<=2; I++){
@@ -93,7 +87,6 @@ Lb1: UV(I)=UV(I+2);
 	}
 	*IPR=2;
 	return OK;
-//.....ПРОДОЛЖЕНИЕ
 Lb2: int L=1;
 	T=UV(1);
 	double RD=D(1);
@@ -103,7 +96,7 @@ Lb2: int L=1;
 	T=UV(2);
 	RD=D(2);
 Lb3: if(RD<=0){
-	    message_error_("ШАГ НЕ ПОЛОЖИТЕЛЕН!");
+	    message_error_("Invalid legacy geometry parameter!");
 	    return BAD;
 	    }
 	I=(int)T+1024;
@@ -129,8 +122,6 @@ Lb4: UV(L)=T;
 //C****************************************************************
 BOOL ASTPVM(int IS[8], double TS[22], double R[3], double E, double* A)
 	{
-//C*****РАСЧЕТ TOЧKИ ПOBEPXHOCTИ, БЛИЖAЙШЕЙ K ЗAДAHHOЙ
-//C*****BEPCИЯ: 00 (31.01.97)
 	double RS[9];
 	double F[17];
 	double Y[3];
@@ -141,14 +132,14 @@ BOOL ASTPVM(int IS[8], double TS[22], double R[3], double E, double* A)
 			3,2,1,1,601,406,602,507,-313,102,2000,0};
 
 	if(E<=0.0001){
-	    message_error_("ЗАДАНА ПОГРЕШНОСТЬ <0.0001!");
+	    message_error_("Invalid legacy geometry parameter!");
 	    return BAD;
 	}
 	int L1=IS(3);
 	IS(3)=22;
 	int K=0;
 	F(10)=0;
-	F(11)=10;///////число итераций
+	F(11)=10;
 	F(14)=7;
 	TS(13)=1;
 	TS(14)=0.01;
@@ -178,8 +169,6 @@ Lb100: IS(3)=L1;
 //C****************************************************************
 BOOL ASM6W(double F[17], double TS[22], int* K1, int K)
 {
-//C*****MИHИMИЗAЦИЯ B HAПPABЛEHИИ
-//C*****BEPCИЯ: 09 (16.07.97)
 	static double D[4];
 	static double T;
 	double R=0;
@@ -189,7 +178,7 @@ BOOL ASM6W(double F[17], double TS[22], int* K1, int K)
 	if(*K1!=0) goto Lb5;
 	if(F(10)!=0) goto Lb1;
 	if(F(11)<1 || F(11)>50){
-	    message_error_("ЧИСЛО ИТЕРАЦИЙ НЕ [1-50]!");
+	    message_error_("Iteration limit reached!");
 	    return BAD;
 	}
 	TS(18)=TS(13);
@@ -209,10 +198,10 @@ Lb19: if( ASM1(TS, 1, K, TS, &F(6), &A))
 	R=sqrt(R);
 	if(R>0) goto Lb3;
 	if(A<0){
-	    message_astra("BЫXOД B УГЛ. TOЧKУ OБЛACTИ!");
+	    message_astra("Invalid legacy geometry parameter!");
 	    return BAD;
 	}
-	message_astra("HAПPABЛEHИE HE OПPEДEЛEHO!");
+	message_astra("Invalid legacy geometry parameter!");
 	return BAD;
 Lb3: for (I=1; I<=K; I++)
 		F(5+I)=F(5+I)/R;
@@ -247,7 +236,7 @@ Lb12: if(IRAS<=2) goto Lb10;
 Lb10: *K1=0;
 	F(10)=F(10)+1;
 	if(F(10)>F(11)){
-		message_astra("Выход по числу итераций!\nASM6W");
+		message_astra("Iteration limit reached!\nASM6W");
 		return BAD;
 	}
 	R=fabs(TS(15));
@@ -262,8 +251,6 @@ Lb10: *K1=0;
 //C****************************************************************
 BOOL ASM1(double TSR[4],int K, int L, double TS[12], double D[4], double* B)
 {
-//C*****OPИEHTAЦИЯ BEKTOPA OTHOCИTEЛЬHO CEГMEHTA
-//C*****BEPCИЯ: 09 (31.01.97)
 	static double R, B1, R1;
 	static double P1,P2;
 	int I,J, I1;
@@ -280,9 +267,8 @@ BOOL ASM1(double TSR[4],int K, int L, double TS[12], double D[4], double* B)
 	case 4:
 		goto Lb10;
 	}
-	message_error_("HОМЕР ВАРИАНТА НЕ [1-4]!\nASM1");
+	message_error_("Invalid legacy geometry parameter!\nASM1");
 	return BAD;
-//.....ВАРИАНТЫ 1,3 
 Lb1: for(J=1; J<=2; J++){
 		 for(I=1; I<=L; I++){
 			L1=I+L;
@@ -299,7 +285,7 @@ Lb1: for(J=1; J<=2; J++){
 			goto Lb5;
 	Lb3:	if(*B<0){
 #ifdef _DEBUG
-				message_error_("BEKTOP ПPOXOДИT BHE CEГMEHTA!\nASM1");
+				message_error_("Invalid legacy geometry parameter!\nASM1");
 #endif
 				return BAD;
 			 }
@@ -314,7 +300,6 @@ Lb1: for(J=1; J<=2; J++){
 			return OK;
 	 }
 	return OK;
-//.....ВАРИАНТЫ 2,4 
 Lb10: B1=1;
 	I1=0;
 	for(I=1; I<=L; I++){
@@ -356,14 +341,12 @@ Lb11:	if(K==2)
 //C****************************************************************
 int ASM2(double F[5],double RT[8], int* K)
 {
-//C*****MИHИMИЗAЦИЯ ФУHKЦИИ OДHOЙ ПEPEMEHHOЙ
-//C*****BEPCИЯ: 15 (31.01.97)
 	static double P,T;
 	double DF, DT;
 	double A, B, C;	
 	int I=1, J=1;
 	 if(*K>F(3)){
-		message_astra("BЫXOД ПO ЧИCЛУ ИTEPAЦИЙ!\nASM2");
+		message_astra("Invalid legacy geometry parameter!\nASM2");
 
 		char buf[120];
 		sprintf(buf, "K=%d", *K );
@@ -378,17 +361,16 @@ int ASM2(double F[5],double RT[8], int* K)
 	RT(7)=RT(5-I);
 Lb1: T=RT(1);
 	if(T<RT(6) || T>RT(7)){
-		message_error_("HEДOПУCTИMOE ЗHAЧEHИE APГУMEHTA!\nASM2");
+		message_error_("Invalid legacy geometry parameter!\nASM2");
 		return 3;
 	 }
 	if(*K!=0) goto Lb3;
-//.....УCTAHOBKA ПAPAMETPOB B HAЧAЛЬHOE COCTOЯHИE
 	if(F(3)<2 || F(3)>50){
-		message_error_("1 ОШИБКА В УПРАВЛЯЮЩЕМ ПАРАМЕТРЕ!\nASM2");
+		message_error_("Invalid legacy geometry parameter!\nASM2");
 		return 4;
 	 }
 	if(RT(4)<=0 || RT(5)<=0){
-		message_error_("2 ОШИБКА В УПРАВЛЯЮЩЕМ ПАРАМЕТРЕ!\nASM2");
+		message_error_("Invalid legacy geometry parameter!\nASM2");
 		return 4;
 	 }
 Lb2: DT=RT(5);
@@ -396,19 +378,17 @@ Lb2: DT=RT(5);
 	goto Lb7;
 Lb3: DF=F(1)-F(4);
 	 if((F(2)*F(5))==0){
-		message_astra("TOЧKA ЛOKAЛЬHOГO ЭKCTPEMУMA\nASM2");
+		message_astra("Invalid legacy geometry parameter!\nASM2");
 		return 1;
 	 }
 	if((F(2)*F(5))<0)
 		goto Lb6;
 	if(F(1)>=F(4)) goto Lb2;
-//.....BЫЧИCЛEHИE ШAГA ПУTEM ЭKCTPAПOЛЯЦИИ
 	A=2*DF+(5*F(2)-F(5))*RT(8);
 	B=F(5)-F(2);
 	if(A*B==0) goto Lb2;
 	DT=fabs(A/B*0.1666);
 	goto Lb7;
-//.....ВЫЧИСЛЕНИЕ ШАГА ПУТЕМ ИНТЕРПОЛЯЦИИ ПО КУБИЧЕСКОЙ ПАРАБОЛЕ
 Lb6:	DT=F(2)/(F(2)-F(5));
 	P=F(2)*RT(8);
 	A=(F(5)+F(2)+F(2))*RT(8)-3*DF;
@@ -417,7 +397,6 @@ Lb6:	DT=F(2)/(F(2)-F(5));
 	if(C>fabs(P)) 
 		DT=P/C;
 	DT=fabs(RT(8)*DT);
-//.....ВЫЧИСЛЕНИЕ ОЧЕРЕДНОЙ ТОЧКИ
 Lb7: if(DT>RT(4)) 
 		DT=RT(4);
 	I=7;
@@ -435,7 +414,7 @@ Lb8: if(F(1)>=F(4)) goto Lb9;
 	goto Lb10;
 Lb9: RT(8)=P-RT(I);
 Lb10: if(RT(8)==0){
-		message_astra("BЫXOД HA ГPAHИЦУ ИHTEPBAЛA!\nASM2");
+		message_astra("Invalid legacy geometry parameter!\nASM2");
 		return 2;
 	 }	  
 	  RT(1)=P;

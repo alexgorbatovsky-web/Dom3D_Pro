@@ -28,7 +28,6 @@
 #undef THIS_FILE
 static char THIS_FILE[] = __FILE__;
 #endif
-//Пробуем сделать константами оси координат, чтобы не создавать их каждый раз при повороте
 
 const CPoint3d CPoint3d::AxisX(1.0f, 0.0f, 0.0f);
 const CPoint3d CPoint3d::AxisY(0.0f, 1.0f, 0.0f);
@@ -200,7 +199,6 @@ void CPoint3d::GetGrPoz(CView3d* pv, CPoint3d* pgr)
 		Message_err("CView3d==NULL!");
 		return;
 	}
-	if (!pv->IsKindOf(RUNTIME_CLASS(CView3d)))	//pr==1 если view==CView3d
 		return;
 
 	if (pv->m_ProjType != 0) {

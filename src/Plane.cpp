@@ -66,15 +66,13 @@ CPlane::CPlane(CPoint3d* p1, CPoint3d* p2, CPoint3d* p3)
 }
 
 CPlane::CPlane(CPoint3d* p1, CVector* vect,CPlane *pl)
-{//Плоскоть проходящая через Прямую перп. Плоск.
+{
 	CPoint3d p2=*p1;
 	p2.Move(vect,100);
 	CPoint3d p3=*p1;
 	p3.Move((CVector*)&pl->a,100);	
 	if(!ABCD(&p1->x, &p2.x, &p3.x, &a, &b, &c, &d))
 		return;
-///Ошибка Прямая перпенд плоскости
-//Найдем вектор перпенд зад. вектору
 	CVector vect_orth;
 	vect->GetOrth(&vect_orth);
 	p3.Move(&vect_orth,100);	
@@ -83,7 +81,7 @@ CPlane::CPlane(CPoint3d* p1, CVector* vect,CPlane *pl)
 }
 
 CPlane::CPlane(CPoint3d* p, CPlane *pl)
-{//Плоскоть проходящая через Точку парал. Плоск.
+{
 
 	a=pl->a;
 	b=pl->b;
@@ -198,13 +196,13 @@ double CPlane::dist_Point(CPoint3d* p)
 
 BOOL CPlane::cross_Line(CPoint3d* p, CVector* vect, CPoint3d* pc)
 {
-    if(fabs(a)<DELTA && fabs(b)<DELTA && fabs(c)<DELTA)	// неправильная плоскость
+    if(fabs(a)<DELTA && fabs(b)<DELTA && fabs(c)<DELTA)
 		return BAD;
-    if(fabs(vect->l)<DELTA && fabs(vect->m)<DELTA && fabs(vect->n)<DELTA)	// неправильная прямая
+    if(fabs(vect->l)<DELTA && fabs(vect->m)<DELTA && fabs(vect->n)<DELTA)
 		return BAD;
 
 	long double line=a*vect->l+b*vect->m+c*vect->n;
-    if(fabs(line) < DDELTA)	//	прямая паралельна плоскости
+    if(fabs(line) < DDELTA)
 		return BAD;
 
 	long double t=-(a*p->x+b*p->y+c*p->z+d)/line;
@@ -217,7 +215,7 @@ BOOL CPlane::cross_Line(CPoint3d* p, CVector* vect, CPoint3d* pc)
 BOOL CPlane::CrossNormal(CPoint3d* p, CPoint3d* pc)
 {
 	long double line=a*a+b*b+c*c;
-    if(fabs(line) < DDELTA)	// неправильная плоскость
+    if(fabs(line) < DDELTA)
 		return BAD;
 
 	long double t=-(a*p->x+b*p->y+c*p->z+d)/line;
@@ -238,7 +236,7 @@ CVector vect(p1, p2);
 }
 
 CPlane::CPlane(CPoint3d* p, CVector* vect)
-{//Плоскоть проходящая через точку перп. вектору
+{
 
 	d=-vect->l*p->x-vect->m*p->y-vect->n*p->z;
 	a=vect->l;
@@ -357,7 +355,7 @@ BOOL CPlane::CroossCPlane(CPlane* pl2, CPoint3d* p1, CPoint3d* p2)
 		return BAD;
 	CPoint3d pc;
 	CVector Norm(&v1, &v2);
-	CPlane pl3(&pc, &Norm);//Плоскоть проходящая через точку перп. вектору
+	CPlane pl3(&pc, &Norm);
 	if (crossing_3plat(this, pl2, &pl3, &p1->x))
 		return BAD;
 	*p2 = *p1;

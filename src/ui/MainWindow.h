@@ -34,6 +34,7 @@ class QDragMoveEvent;
 class QDropEvent;
 class QGridLayout;
 class QLabel;
+class LightingDialog;
 class QMenu;
 class QPushButton;
 class QSlider;
@@ -181,6 +182,7 @@ private:
     QImage CaptureProjectThumbnail() const;
     void UpdateWindowTitle();
     void ShowPreferences();
+    void ShowLightingDialog();
     void ImportFile();
     void AddReferenceImage(ReferenceImageAxis axis);
     bool ImportFileFromPath(const QString& path);
@@ -288,6 +290,7 @@ private:
     int sketch_counter_ = 3;
     QDialog* sketch_fillet_dialog_ = nullptr;
     QDialog* draw_spline_dialog_ = nullptr;
+    LightingDialog* lighting_dialog_ = nullptr;
     QSlider* draw_spline_simplification_slider_ = nullptr;
     QLabel* draw_spline_simplification_value_ = nullptr;
     QDialog* precise_move_dialog_ = nullptr;

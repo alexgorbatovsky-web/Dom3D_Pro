@@ -110,7 +110,6 @@ bool StepIO::Import(const std::string& path, std::vector<std::unique_ptr<CSolid>
     char buffer[100];
     void Step(char* text);
     SYSTEMTIME st;
-    // Получаем текущее системное время (местное)
     GetLocalTime(&st);
     sprintf(buffer, "STEP file read Started at %02d:%02d:%02d.%03d", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
     Step(buffer);

@@ -67,7 +67,7 @@ extern void swap(int* val1, int* val2);
 extern void XY_ab_r_X0Y0(double x, double y, double a, double b, double r, double*x0, double*y0);
 extern void XY_XY_R_XY(double x1, double y1, double x2, double y2, double r, double*x, double*y);
 extern BOOL mood_coord2Dma(double x0, double y0, double x1, double y1, double xm, double zm, double*xa, double*ya);
-extern BOOL IsValEven(int val);/////////Четное число или нет
+extern BOOL IsValEven(int val);
 extern double dist_two_line(double p1[],double p2[],double p3[],double p4[]);
 extern short cross_2dline_vector(double x1, double y1, double x2, double y2,double a,double b,double c, double*xc, double*yc);
 extern short left_or_right(double x1, double y1, double x2, double y2, double x, double y);

@@ -785,12 +785,12 @@ void OpenGLViewport::BeginThickSolidTool(double thickness) {
     thick_solid_thickness_ = thickness;
     SetTool(ToolMode::ThickSolid);
     if (document_ && document_->BeginLiveThickSolidFromSelectedFaces(thick_solid_thickness_)) {
-        emit StatusTextChanged("ThickSolid: меняй Thick, OK оставит результат");
+        emit StatusTextChanged("ThickSolid:adjust the required parameters and continue");
     } else if (document_ && document_->GetSelectedSolid()) {
         document_->BeginLiveThickSolidFromSelectedSolid(thick_solid_thickness_);
-        emit StatusTextChanged("ThickSolid: выбери Face");
+        emit StatusTextChanged("ThickSolid:select the required geometry and continue");
     } else {
-        emit StatusTextChanged("ThickSolid: выбери CSolid");
+        emit StatusTextChanged("ThickSolid:select the required geometry and continue");
     }
 }
 
@@ -806,7 +806,7 @@ void OpenGLViewport::BeginBooleanTool(BooleanOperation operation) {
     has_boolean_body_ = false;
     boolean_body_index_ = 0;
     SetTool(ToolMode::Boolean);
-    emit StatusTextChanged("Boolean: выбери body");
+    emit StatusTextChanged("Boolean:select the required geometry and continue");
 }
 
 SelectionMode OpenGLViewport::GetSelectionMode() const {
@@ -926,6 +926,7 @@ void OpenGLViewport::FitToDocument() {
 }
 
 void OpenGLViewport::ReloadModelingPreferences() {
+    CMesh3D::ReloadLightingSettings();
     QSettings settings("Dom3D", "Dom3D_Pro");
     const QString grid_mode = settings.value(
         "view/gridDensityMode", QStringLiteral("medium")).toString();
@@ -1384,7 +1385,7 @@ void OpenGLViewport::BeginSketchFillet(double radius) {
     }
     sketch_fillet_radius_ = radius;
     SetTool(ToolMode::SketchFillet);
-    emit StatusTextChanged(QString("%1: Fillet R=%2. Укажите вершину кривой").arg(sketch_name_).arg(sketch_fillet_radius_, 0, 'f', 2));
+    emit StatusTextChanged(QString("%1: Fillet R=%2.select the required geometry and continue").arg(sketch_name_).arg(sketch_fillet_radius_, 0, 'f', 2));
 }
 
 void OpenGLViewport::BeginSketchConstraintHorizontal() {
@@ -1414,7 +1415,7 @@ void OpenGLViewport::SetSketchFilletRadius(double radius) {
     sketch_fillet_radius_ = radius;
     if (tool_ == ToolMode::SketchFillet) {
         emit StatusTextChanged(
-            QString("%1: Fillet R=%2. Укажите вершину полилинии")
+            QString("%1: Fillet R=%2.select the required geometry and continue")
                 .arg(sketch_name_)
                 .arg(sketch_fillet_radius_, 0, 'f', 2));
         update();
@@ -4084,7 +4085,7 @@ void OpenGLViewport::SelectAt(const QPoint& point, SelectionAction action) {
         return;
     }
     if (selection_mode_ == SelectionMode::Point) {
-        emit StatusTextChanged("Select Point: узел не найден");
+        emit StatusTextChanged("Select Point:operation failed; check the selected geometry and parameters");
         update();
         return;
     }
@@ -4192,7 +4193,7 @@ void OpenGLViewport::HandleBooleanClick(const QPoint& point) {
     if (!selected_solid) {
         CurvePoint scene_point{};
         if (!renderer_.ScreenToFloor(point.x(), point.y(), width(), height(), camera_, orthographic_projection_, scene_point)) {
-            emit StatusTextChanged(has_boolean_body_ ? "Boolean: выбери tool body" : "Boolean: выбери body");
+            emit StatusTextChanged(has_boolean_body_ ? "Boolean:select the required geometry and continue" : "Boolean:select the required geometry and continue");
             return;
         }
         selected_solid = document_->SelectObjectAt(scene_point, 0.35f, false) && dynamic_cast<CSolid*>(document_->GetSelectedObject());
@@ -4201,7 +4202,7 @@ void OpenGLViewport::HandleBooleanClick(const QPoint& point) {
     if (!selected_solid) {
         emit SelectionChanged();
         emit DocumentChanged();
-        emit StatusTextChanged(has_boolean_body_ ? "Boolean: tool должен быть телом" : "Boolean: body должен быть телом");
+        emit StatusTextChanged(has_boolean_body_ ? "Boolean: tool operation failed; check the selected geometry and parameters" : "Boolean: body operation failed; check the selected geometry and parameters");
         update();
         return;
     }
@@ -4213,20 +4214,20 @@ void OpenGLViewport::HandleBooleanClick(const QPoint& point) {
     if (!has_boolean_body_) {
         boolean_body_index_ = clicked_index;
         has_boolean_body_ = true;
-        emit StatusTextChanged("Boolean: выбери tool body");
+        emit StatusTextChanged("Boolean:select the required geometry and continue");
         update();
         return;
     }
 
     if (clicked_index == boolean_body_index_) {
-        emit StatusTextChanged("Boolean: выбери другое тело для tool");
+        emit StatusTextChanged("Boolean:select the required geometry and continue");
         update();
         return;
     }
 
     const bool applied = document_->ApplyBooleanToSolids(boolean_body_index_, clicked_index, boolean_operation_);
     if (!applied) {
-        emit StatusTextChanged("Boolean: операция не выполнена");
+        emit StatusTextChanged("Boolean:operation failed; check the selected geometry and parameters");
         update();
         return;
     }
@@ -4238,7 +4239,7 @@ void OpenGLViewport::HandleBooleanClick(const QPoint& point) {
     emit SelectionChanged();
     emit DocumentChanged();
     emit BooleanFinished();
-    emit StatusTextChanged("Boolean: операция выполнена");
+    emit StatusTextChanged("Boolean:operation completed");
     update();
 }
 
@@ -4451,11 +4452,11 @@ void OpenGLViewport::HandleThickSolidClick(const QPoint& point) {
             && document_->BeginLiveThickSolidFromSelectedSolid(thick_solid_thickness_)) {
             emit SelectionChanged();
             emit DocumentChanged();
-            emit StatusTextChanged("ThickSolid: выбери Face");
+            emit StatusTextChanged("ThickSolid:select the required geometry and continue");
             update();
             return;
         }
-        emit StatusTextChanged("ThickSolid: выбери CSolid");
+        emit StatusTextChanged("ThickSolid:select the required geometry and continue");
         update();
         return;
     }
@@ -4470,7 +4471,7 @@ void OpenGLViewport::HandleThickSolidClick(const QPoint& point) {
         return;
     }
 
-    emit StatusTextChanged("ThickSolid: выбери Face");
+    emit StatusTextChanged("ThickSolid:select the required geometry and continue");
     update();
 }
 
@@ -5948,13 +5949,13 @@ void OpenGLViewport::HandleSketchFilletClick(const QPoint& point) {
     if (!document_->FindPolylinePointAtScreen(screen_point, world_to_screen, 40.0f, object_index, point_index)) {
         highlighted_sketch_fillet_point_ = false;
         setCursor(Qt::CrossCursor);
-        emit StatusTextChanged(QString("%1: Вершина не найдена. Подведите курсор к зеленой точке").arg(sketch_name_));
+        emit StatusTextChanged(QString("%1:operation failed; check the selected geometry and parameters").arg(sketch_name_));
         update();
         return;
     }
 
     if (!document_->ApplyFilletToPolylinePointAtScreen(screen_point, world_to_screen, 40.0f, sketch_fillet_radius_)) {
-        emit StatusTextChanged(QString("%1: Fillet не выполнен. Уменьшите радиус").arg(sketch_name_));
+        emit StatusTextChanged(QString("%1: Fillet operation failed; check the selected geometry and parameters").arg(sketch_name_));
         update();
         return;
     }
@@ -5962,7 +5963,7 @@ void OpenGLViewport::HandleSketchFilletClick(const QPoint& point) {
     emit DocumentChanged();
     emit SelectionChanged();
     emit StatusTextChanged(
-        QString("%1: Fillet R=%2 построен. Укажите следующую вершину")
+        QString("%1: Fillet R=%2 operation completed")
             .arg(sketch_name_)
             .arg(sketch_fillet_radius_, 0, 'f', 2));
     update();
@@ -8016,7 +8017,7 @@ void OpenGLViewport::UpdateFPS()
     m_frameCounter++;
 
     int dt = now - m_lastFpsTime;
-    if (dt >= 500) // обновлять 2 раза в секунду
+    if (dt >= 500)
     {
         m_fps = 1000.0f * m_frameCounter / float(dt);
         m_frameCounter = 0;

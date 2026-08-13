@@ -122,6 +122,8 @@ set(DOM3D_SOURCES
     src/ui/MaterialSphereBrowser.cpp
     src/ui/OpenGLViewport.cpp
     src/ui/PreferencesDialog.cpp
+    src/ui/LightingDialog.cpp
+    src/ui/LanguageManager.cpp
     src/ui/HotkeyManagerDialog.cpp
     src/ui/CommandSearchPopup.cpp
     src/ui/PropertyPanel.cpp
@@ -206,6 +208,8 @@ set(DOM3D_HEADERS
     src/ui/MaterialSphereBrowser.h
     src/ui/OpenGLViewport.h
     src/ui/PreferencesDialog.h
+    src/ui/LightingDialog.h
+    src/ui/LanguageManager.h
     src/ui/HotkeyManagerDialog.h
     src/ui/CommandSearchPopup.h
     src/ui/PropertyPanel.h
@@ -312,6 +316,9 @@ source_group("Sketch" FILES ${DOM3D_SKETCH_SOURCES})
 source_group("Sketch Migration (staged)" FILES ${DOM3D_SKETCH_MIGRATION_FILES})
 
 target_compile_features(Dom3D_Pro PRIVATE cxx_std_17)
+if(MSVC)
+    target_compile_options(Dom3D_Pro PRIVATE /utf-8)
+endif()
 target_include_directories(Dom3D_Pro PRIVATE "${DOM3D_OPENCASCADE_INCLUDE_DIR}")
 target_link_directories(Dom3D_Pro PRIVATE "${DOM3D_OPENCASCADE_LIBRARY_DIR}")
 target_link_libraries(Dom3D_Pro PRIVATE Qt6::Widgets Qt6::OpenGLWidgets Qt6::Xml OpenGL::GL ${DOM3D_OPENCASCADE_LIBS})
@@ -334,6 +341,13 @@ add_custom_command(TARGET Dom3D_Pro POST_BUILD
         "${CMAKE_CURRENT_SOURCE_DIR}/materials"
         "$<TARGET_FILE_DIR:Dom3D_Pro>/materials"
     COMMENT "Copying material library"
+)
+
+add_custom_command(TARGET Dom3D_Pro POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_CURRENT_SOURCE_DIR}/Languages"
+        "$<TARGET_FILE_DIR:Dom3D_Pro>/Languages"
+    COMMENT "Copying language files"
 )
 
 set(DOM3D_WINDEPLOYQT "${DOM3D_QT_MSVC2022_PATH}/bin/windeployqt.exe")

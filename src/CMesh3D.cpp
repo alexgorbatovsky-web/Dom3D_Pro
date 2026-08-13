@@ -15,6 +15,7 @@
 #include <QImage>
 #include <QOpenGLContext>
 #include <QOpenGLShaderProgram>
+#include <QSettings>
 
 #include <algorithm>
 #include <array>
@@ -164,7 +165,8 @@ Color shaded_color(Color base,
                    Vec3 view_up,
                    float specular_strength,
                    float shininess,
-                   bool selected) {
+                   bool selected,
+                   const ViewportLightingSettings& lighting) {
     Vec3 view_dir = normalize(direction_to_eye);
     if (dot(view_dir, view_dir) <= 0.000001f) {
         view_dir = {0.0f, 0.0f, 1.0f};
@@ -188,42 +190,40 @@ Color shaded_color(Color base,
         n = n * -1.0f;
     }
 
-    // A soft camera-relative studio rig.  Keeping the key and fill lights in
-    // view space makes the model readable while orbiting and avoids the hard
-    // black patches produced by fixed world-space light directions.
-    const std::array<Vec3, 3> lights{
-        normalize(view_dir + up * 0.58f + right * 0.38f),
-        normalize(view_dir + up * 0.10f - right * 0.82f),
-        normalize(up + view_dir * 0.42f)
-    };
-    const std::array<float, 3> light_strengths{0.48f, 0.24f, 0.14f};
-    float diffuse_light = 0.0f;
-    float gloss = 0.0f;
-    float strongest_light = 0.0f;
-    for (size_t i = 0; i < lights.size(); ++i) {
-        const float incidence = std::max(0.0f, dot(n, lights[i]));
-        diffuse_light += incidence * light_strengths[i];
-        strongest_light = std::max(strongest_light, incidence);
-        const Vec3 half_vector = normalize(lights[i] + view_dir);
-        gloss = std::max(
-            gloss,
-            std::pow(std::max(0.0f, dot(n, half_vector)),
-                     std::max(4.0f, shininess)) * light_strengths[i]);
+    // The editor uses the same light-vector convention as CAD2Quads: values
+    // describe the direction in which the rays travel.  Negating that vector
+    // gives the direction from the surface towards the camera-relative light.
+    Vec3 light = normalize(
+        right * -lighting.light_x
+        + up * -lighting.light_y
+        + view_dir * -lighting.light_z);
+    if (dot(light, light) <= 0.000001f) {
+        light = view_dir;
     }
 
-    constexpr float kStudioAmbient = 0.68f;
-    const float shade = std::min(1.42f, kStudioAmbient + diffuse_light);
+    const float incidence = dot(n, light);
+    const float wrapped_incidence = std::clamp(
+        (incidence + lighting.wrap_light) / (1.0f + lighting.wrap_light),
+        0.0f,
+        1.0f);
+    const float shade = lighting.ambient + lighting.diffuse * wrapped_incidence;
+    const Vec3 half_vector = normalize(light + view_dir);
+    const float gloss = std::pow(
+        std::max(0.0f, dot(n, half_vector)),
+        std::max(4.0f, shininess * lighting.shininess_scale));
     const float rim = std::pow(
-        std::max(0.0f, 1.0f - std::fabs(dot(n, view_dir))), 3.0f)
-        * strongest_light;
-    const float highlight = std::min(0.32f, specular_strength * (gloss * 0.68f + rim * 0.12f));
+        std::max(0.0f, 1.0f - std::fabs(dot(n, view_dir))), 3.0f);
+    const float highlight = std::min(
+        0.75f,
+        specular_strength * lighting.specular * gloss + lighting.rim * rim);
     const float selected_boost = selected ? 1.08f : 1.0f;
-
-    return {
-        clamp01(base.r * shade * selected_boost + strongest_light * 0.04f + highlight),
-        clamp01(base.g * shade * selected_boost + strongest_light * 0.04f + highlight),
-        clamp01(base.b * shade * selected_boost + strongest_light * 0.05f + highlight)
+    const auto gamma_correct = [&lighting](float value) {
+        return std::pow(clamp01(value), lighting.gamma);
     };
+
+    return {gamma_correct(base.r * shade * selected_boost + highlight),
+            gamma_correct(base.g * shade * selected_boost + highlight),
+            gamma_correct(base.b * shade * selected_boost + highlight)};
 }
 
 Color normal_rgb_color(Vec3 normal, bool selected) {
@@ -1825,6 +1825,36 @@ bool CMesh3D::s_ZebraOrthographic = false;
 Vec3 CMesh3D::s_ZebraEye{};
 Vec3 CMesh3D::s_ZebraForward{0.0f, 0.0f, -1.0f};
 Vec3 CMesh3D::s_ZebraUp{0.0f, 1.0f, 0.0f};
+ViewportLightingSettings CMesh3D::s_LightingSettings{};
+
+const ViewportLightingSettings& CMesh3D::GetLightingSettings() {
+    return s_LightingSettings;
+}
+
+void CMesh3D::ReloadLightingSettings() {
+    QSettings settings("Dom3D", "Dom3D_Pro");
+    ViewportLightingSettings defaults;
+    s_LightingSettings.light_x = std::clamp(
+        settings.value("view/lighting/lightX", defaults.light_x).toFloat(), -1.0f, 1.0f);
+    s_LightingSettings.light_y = std::clamp(
+        settings.value("view/lighting/lightY", defaults.light_y).toFloat(), -1.0f, 1.0f);
+    s_LightingSettings.light_z = std::clamp(
+        settings.value("view/lighting/lightZ", defaults.light_z).toFloat(), -1.0f, 1.0f);
+    s_LightingSettings.ambient = std::clamp(
+        settings.value("view/lighting/ambient", defaults.ambient).toFloat(), 0.0f, 1.5f);
+    s_LightingSettings.wrap_light = std::clamp(
+        settings.value("view/lighting/wrapLight", defaults.wrap_light).toFloat(), 0.0f, 1.0f);
+    s_LightingSettings.diffuse = std::clamp(
+        settings.value("view/lighting/diffuse", defaults.diffuse).toFloat(), 0.0f, 1.5f);
+    s_LightingSettings.specular = std::clamp(
+        settings.value("view/lighting/specular", defaults.specular).toFloat(), 0.0f, 1.5f);
+    s_LightingSettings.shininess_scale = std::clamp(
+        settings.value("view/lighting/shininessScale", defaults.shininess_scale).toFloat(), 0.1f, 3.0f);
+    s_LightingSettings.rim = std::clamp(
+        settings.value("view/lighting/rim", defaults.rim).toFloat(), 0.0f, 1.0f);
+    s_LightingSettings.gamma = std::clamp(
+        settings.value("view/lighting/gamma", defaults.gamma).toFloat(), 0.2f, 2.5f);
+}
 
 CMesh3D::CMesh3D(std::string name)
     : CAlfaObject(std::move(name)) {
@@ -2725,7 +2755,8 @@ void CMesh3D::RenderFaces(bool selected,
                             s_ZebraUp,
                             specular_strength,
                             shininess,
-                            selected));
+                            selected,
+                            s_LightingSettings));
                 const Vec3& vertex = vertices_[vertex_index];
                 glNormal3f(normal.x, normal.y, normal.z);
                 glColor4f(shade.r, shade.g, shade.b, alpha);

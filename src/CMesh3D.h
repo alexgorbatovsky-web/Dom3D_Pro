@@ -13,6 +13,19 @@
 class CSurfaceFace;
 class CPolyline;
 
+struct ViewportLightingSettings {
+    float light_x = -0.48f;
+    float light_y = -0.72f;
+    float light_z = -0.50f;
+    float ambient = 0.18f;
+    float wrap_light = 0.28f;
+    float diffuse = 0.68f;
+    float specular = 0.38f;
+    float shininess_scale = 1.0f;
+    float rim = 0.16f;
+    float gamma = 0.88f;
+};
+
 struct Edge {
     int v1;
     int v2;
@@ -140,6 +153,8 @@ public:
                                      Vec3 forward,
                                      Vec3 up,
                                      bool orthographic);
+    static const ViewportLightingSettings& GetLightingSettings();
+    static void ReloadLightingSettings();
     bool HitTest(CurvePoint point, float tolerance) const override;
     bool HitTestMeshScreen(DomPoint point,
                            const std::function<bool(Vec3, DomPoint&, float&)>& project_world,
@@ -192,4 +207,5 @@ private:
     static Vec3 s_ZebraEye;
     static Vec3 s_ZebraForward;
     static Vec3 s_ZebraUp;
+    static ViewportLightingSettings s_LightingSettings;
 };
