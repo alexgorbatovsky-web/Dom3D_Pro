@@ -6,6 +6,7 @@
 #include "../CMesh3D.h"
 #include "../ReferenceImage.h"
 #include "../CGroup.h"
+#include "../CPart.h"
 #include "../CAssembled.h"
 #include "../CKitchenCabinet.h"
 #include "../CPolyline.h"
@@ -49,6 +50,7 @@
 #include <QDragEnterEvent>
 #include <QDragMoveEvent>
 #include <QDir>
+#include <QCoreApplication>
 #include <QDropEvent>
 #include <QEventLoop>
 #include <QFileDialog>
@@ -100,6 +102,9 @@
 #include <QVBoxLayout>
 #include <QWidgetAction>
 
+#include <BRep_Builder.hxx>
+#include <TopoDS_Compound.hxx>
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -119,6 +124,7 @@ constexpr int kMaxRecentProjectFiles = 18;
 constexpr int kSceneTreeObjectIndexRole = Qt::UserRole + 1;
 constexpr int kSceneTreeGroupRole = Qt::UserRole + 2;
 constexpr int kSceneTreeGroupIdRole = Qt::UserRole + 3;
+constexpr int kSceneTreePartsRootRole = Qt::UserRole + 4;
 
 bool IsFurnitureAssemblyTool(const std::string& tool_id) {
     return tool_id == "chair"
@@ -171,7 +177,10 @@ std::vector<unsigned long> CreateSlxFrameTemplateSketches(CAlfaDoc& document) {
     frame->SetClosed(true);
 
     auto panel = xy_sketch("SLX Panel Profile");
-    const double panel_x = 90.0;
+    // Keep every reusable section in its own local coordinate system.  The
+    // facade builder normalizes the profile bounds and places it at the panel
+    // inset, so a catalog profile does not need an authoring offset.
+    const double panel_x = 0.0;
     panel->AddLine(std::make_unique<CLinkLine>(
         CPoint3d(panel_x, 0.0, 0.0), CPoint3d(panel_x, 7.0, 0.0)));
     panel->AddLine(std::make_unique<CBezierSpline>(
@@ -729,6 +738,158 @@ QIcon SearchIcon() {
     painter.drawEllipse(QRectF(6.5, 6.5, 4.0, 4.0));
     painter.end();
     return QIcon(pixmap);
+}
+
+QIcon CatalogIcon() {
+    QPixmap pixmap(22, 22);
+    pixmap.fill(Qt::transparent);
+
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(QPen(QColor(52, 56, 64), 1.2));
+    painter.setBrush(QColor(246, 194, 52));
+    painter.drawRoundedRect(QRectF(2.5, 4.5, 17.0, 14.0), 1.4, 1.4);
+    painter.drawRect(QRectF(4.0, 2.8, 7.0, 3.8));
+
+    painter.setPen(QPen(QColor(55, 61, 70), 1.4, Qt::SolidLine,
+                        Qt::RoundCap, Qt::RoundJoin));
+    painter.setBrush(QColor(238, 241, 245));
+    painter.drawRect(QRectF(6.0, 9.0, 3.0, 3.0));
+    painter.drawRect(QRectF(13.0, 7.0, 3.0, 3.0));
+    painter.drawRect(QRectF(13.0, 14.0, 3.0, 3.0));
+    painter.drawLine(QPointF(9.0, 10.5), QPointF(11.0, 10.5));
+    painter.drawLine(QPointF(11.0, 8.5), QPointF(11.0, 15.5));
+    painter.drawLine(QPointF(11.0, 8.5), QPointF(13.0, 8.5));
+    painter.drawLine(QPointF(11.0, 15.5), QPointF(13.0, 15.5));
+    painter.end();
+    return QIcon(pixmap);
+}
+
+QPixmap CatalogOrientationGuidePixmap(
+    const QString& parameter_id, bool product) {
+    QPixmap pixmap(620, 330);
+    pixmap.fill(QColor(248, 249, 251));
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+
+    const auto arrow = [&painter](QPointF start, QPointF end,
+                                  QColor color, const QString& label) {
+        QPen pen(color, 3.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+        painter.setPen(pen);
+        painter.drawLine(start, end);
+        const QLineF line(start, end);
+        const double angle = std::atan2(-line.dy(), line.dx());
+        constexpr double arrow_size = 11.0;
+        const QPointF first = end - QPointF(
+            std::cos(angle + 0.55) * arrow_size,
+            -std::sin(angle + 0.55) * arrow_size);
+        const QPointF second = end - QPointF(
+            std::cos(angle - 0.55) * arrow_size,
+            -std::sin(angle - 0.55) * arrow_size);
+        painter.setBrush(color);
+        painter.drawPolygon(QPolygonF{end, first, second});
+        painter.setPen(QPen(color.darker(120), 1.0));
+        painter.setFont(QFont(painter.font().family(), 11, QFont::Bold));
+        painter.drawText(end + QPointF(7.0, -6.0), label);
+    };
+
+    painter.setPen(QColor(40, 44, 52));
+    painter.setFont(QFont(painter.font().family(), 14, QFont::Bold));
+    if (product) {
+        painter.drawText(22, 31, "Catalog handle — local coordinate system");
+        const QPointF origin(305.0, 225.0);
+
+        painter.setPen(QPen(QColor(128, 91, 59), 2.0, Qt::DashLine));
+        painter.setBrush(QColor(207, 171, 128, 42));
+        painter.drawRect(QRectF(90.0, 70.0, 430.0, 190.0));
+        painter.setPen(QColor(104, 75, 51));
+        painter.setFont(QFont(painter.font().family(), 10));
+        painter.drawText(99, 91, "facade plane (XZ)");
+
+        QPainterPath handle;
+        handle.moveTo(150.0, 191.0);
+        handle.cubicTo(220.0, 158.0, 390.0, 158.0, 470.0, 191.0);
+        painter.setPen(QPen(QColor(230, 181, 24), 15.0,
+                            Qt::SolidLine, Qt::RoundCap));
+        painter.drawPath(handle);
+        painter.setPen(QPen(QColor(124, 91, 12), 1.2));
+        painter.drawPath(handle);
+
+        arrow(origin, QPointF(555.0, 225.0), QColor(220, 45, 45), "+X length");
+        arrow(origin, QPointF(205.0, 120.0), QColor(35, 165, 70), "+Y");
+        arrow(origin, QPointF(305.0, 48.0), QColor(38, 92, 220), "+Z height");
+        arrow(origin, QPointF(400.0, 305.0), QColor(29, 135, 57), "-Y front");
+
+        painter.setPen(QColor(55, 58, 66));
+        painter.setFont(QFont(painter.font().family(), 10));
+        painter.drawText(22, 315,
+            "Model the handle length along X. The visible/front side faces -Y; Z is up.");
+    } else {
+        const bool panel = parameter_id == "slx.panel.id";
+        const bool cutter = parameter_id == "slx.milling.profile.id";
+        const bool milling_guide = parameter_id == "slx.milling.guide.id";
+        painter.drawText(
+            22, 31,
+            panel ? "Panel profile sketch — local XY plane"
+            : cutter ? "Cutter profile sketch — local XY plane"
+            : milling_guide ? "Milling pattern — local XY plane"
+            : "Frame profile sketch — local XY plane");
+        const QPointF origin(92.0, 264.0);
+        painter.setPen(QPen(QColor(105, 70, 38), 2.0));
+        painter.setBrush(QColor(189, 130, 74, 105));
+        QPainterPath section;
+        section.moveTo(132.0, 244.0);
+        if (milling_guide) {
+            section.moveTo(175.0, 205.0);
+            section.cubicTo(175.0, 128.0, 445.0, 128.0, 445.0, 205.0);
+            section.cubicTo(445.0, 254.0, 175.0, 254.0, 175.0, 205.0);
+        } else if (cutter) {
+            section.lineTo(132.0, 196.0);
+            section.lineTo(190.0, 196.0);
+            section.cubicTo(214.0, 196.0, 230.0, 220.0, 245.0, 244.0);
+        } else if (panel) {
+            section.lineTo(132.0, 207.0);
+            section.cubicTo(190.0, 207.0, 230.0, 152.0, 325.0, 152.0);
+            section.lineTo(480.0, 152.0);
+            section.lineTo(480.0, 244.0);
+        } else {
+            section.lineTo(132.0, 176.0);
+            section.lineTo(180.0, 176.0);
+            section.cubicTo(230.0, 113.0, 376.0, 113.0, 424.0, 176.0);
+            section.lineTo(480.0, 176.0);
+            section.lineTo(480.0, 244.0);
+        }
+        if (!milling_guide) {
+            section.closeSubpath();
+        }
+        painter.drawPath(section);
+        painter.setPen(QPen(QColor(199, 35, 205), 3.0));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawPath(section);
+
+        arrow(origin, QPointF(555.0, 264.0), QColor(220, 45, 45),
+              milling_guide ? "+X facade width" : "+X");
+        arrow(origin, QPointF(92.0, 66.0), QColor(35, 165, 70),
+              milling_guide ? "+Y facade height" : "+Y outward");
+        painter.setPen(QPen(QColor(38, 92, 220), 2.0));
+        painter.setBrush(QColor(38, 92, 220));
+        painter.drawEllipse(origin, 5.0, 5.0);
+        painter.setFont(QFont(painter.font().family(), 10, QFont::Bold));
+        painter.drawText(origin + QPointF(-50.0, 21.0), "Z: normal to sketch");
+
+        painter.setPen(QColor(55, 58, 66));
+        painter.setFont(QFont(painter.font().family(), 10));
+        painter.drawText(22, 315,
+            milling_guide
+                ? "All guides are scaled and centred as one pattern; their proportions and spacing are preserved."
+            : cutter
+                ? "Use one closed cutter section at the origin. Negative Y cuts into the facade."
+            : panel
+                ? "Use one closed contour at the origin. Its position on the door is calculated automatically."
+                : "Use one closed contour. Start at the outer/back corner; X goes inward, Y toward the face.");
+    }
+    painter.end();
+    return pixmap;
 }
 
 QIcon DuplicateObjectIcon() {
@@ -2056,6 +2217,7 @@ int ShowCurveTrimPlaneMethodDialog(
                          [&dialog, result]() { dialog.done(result); });
     };
     add_method("Face of Solid", 7);
+    add_method("Plane / Planar Sketch / Polyline", 8);
     add_method("3 Points", 1);
     add_method("Point + Normal", 6);
     add_method("Plane XY", 2);
@@ -2064,6 +2226,57 @@ int ShowCurveTrimPlaneMethodDialog(
     auto* cancel = new QPushButton("Cancel", &dialog);
     layout->addSpacing(7);
     layout->addWidget(cancel, 0, Qt::AlignHCenter);
+    QObject::connect(cancel, &QPushButton::clicked, &dialog, &QDialog::reject);
+    CenterDialogOnCursor(dialog);
+    return dialog.exec();
+}
+
+int ShowBodySectionPlaneMethodDialog(
+    QWidget* parent, std::array<double, 4>& factors) {
+    QDialog dialog(parent);
+    dialog.setWindowTitle("Body Section by Plane");
+    dialog.setModal(true);
+    dialog.setFixedWidth(270);
+    auto* layout = new QVBoxLayout(&dialog);
+    layout->setContentsMargins(10, 10, 10, 10);
+    layout->addWidget(new QLabel("Define the section plane:", &dialog));
+    const auto add_method = [&dialog, layout](const QString& text, int result) {
+        auto* button = new QPushButton(text, &dialog);
+        layout->addWidget(button);
+        QObject::connect(button, &QPushButton::clicked, &dialog,
+                         [&dialog, result]() { dialog.done(result); });
+    };
+    add_method("Pick planar face", 7);
+    add_method("Pick Plane / planar Sketch / Polyline", 8);
+    add_method("Plane XY", 2);
+    add_method("Plane XZ", 3);
+    add_method("Plane YZ", 4);
+    auto* factors_editor = new QLineEdit(&dialog);
+    factors_editor->setText(QString("%1 %2 %3 %4")
+        .arg(factors[0], 0, 'f', 6).arg(factors[1], 0, 'f', 6)
+        .arg(factors[2], 0, 'f', 6).arg(factors[3], 0, 'f', 6));
+    factors_editor->setToolTip("Plane factors A B C D");
+    layout->addWidget(factors_editor);
+    auto* factors_button = new QPushButton("Use factors A, B, C, D", &dialog);
+    layout->addWidget(factors_button);
+    QObject::connect(factors_button, &QPushButton::clicked, &dialog,
+                     [&dialog, &factors, factors_editor]() {
+        QString value = factors_editor->text();
+        value.replace(',', '.');
+        const QStringList values = value.split(
+            QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+        if (values.size() != 4) return;
+        std::array<double, 4> parsed{};
+        for (int index = 0; index < 4; ++index) {
+            bool ok = false;
+            parsed[static_cast<size_t>(index)] = values[index].toDouble(&ok);
+            if (!ok) return;
+        }
+        factors = parsed;
+        dialog.done(5);
+    });
+    auto* cancel = new QPushButton("Cancel", &dialog);
+    layout->addWidget(cancel);
     QObject::connect(cancel, &QPushButton::clicked, &dialog, &QDialog::reject);
     CenterDialogOnCursor(dialog);
     return dialog.exec();
@@ -2179,7 +2392,24 @@ MainWindow::MainWindow(QWidget* parent)
         }
     });
     connect(viewport_, &OpenGLViewport::SelectionChanged, this, [this]() {
-        if (pending_reference_plane_face_pick_ || pending_trim_plane_face_pick_) {
+        if (pending_group_command_ == PendingGroupCommand::PlaneIntersection
+            && pending_body_section_target_id_ == 0) {
+            const CSolid* solid = document_.GetSelectedSolid();
+            if (solid) {
+                pending_body_section_target_id_ = solid->m_id;
+                document_.ClearSelection();
+                RefreshSceneTree();
+                QTimer::singleShot(0, this, [this]() {
+                    BeginBodySectionPlaneInput();
+                });
+                return;
+            }
+        }
+        if (pending_body_section_plane_object_pick_) {
+            if (CompleteBodySectionPlaneObjectPick()) return;
+        }
+        if (pending_reference_plane_face_pick_ || pending_trim_plane_face_pick_
+            || pending_body_section_plane_face_pick_) {
             if (CompletePendingPlaneFacePick()) return;
         }
         if (!pending_trim_tool_id_.empty()) {
@@ -2284,7 +2514,9 @@ MainWindow::MainWindow(QWidget* parent)
                 "Join Surfaces:select the required geometry and continue");
         } else if (pending_group_command_ == PendingGroupCommand::PlaneIntersection) {
             statusBar()->showMessage(
-                "Plane Intersection:select the required geometry and continue");
+                pending_body_section_target_id_ == 0
+                    ? "Body Section by Plane: click the Solid body"
+                    : "Body Section by Plane: select the plane geometry");
         } else if (pending_group_command_ == PendingGroupCommand::SurfaceIntersection) {
             statusBar()->showMessage(
                 "Surface Intersection:select the required geometry and continue");
@@ -2390,7 +2622,10 @@ MainWindow::MainWindow(QWidget* parent)
         } else if (pending_group_command_ == PendingGroupCommand::JoinSurfaces) {
             JoinSelectedSurfaces();
         } else if (pending_group_command_ == PendingGroupCommand::PlaneIntersection) {
-            CreatePlaneIntersection();
+            if (pending_body_section_target_id_ == 0) CreatePlaneIntersection();
+            else if (pending_body_section_plane_object_pick_) {
+                CompleteBodySectionPlaneObjectPick();
+            }
         } else if (pending_group_command_ == PendingGroupCommand::SurfaceIntersection) {
             CreateSurfaceIntersection();
         } else if (pending_group_command_ == PendingGroupCommand::ProjectCurveToSurface) {
@@ -2413,7 +2648,10 @@ MainWindow::MainWindow(QWidget* parent)
         } else if (pending_group_command_ == PendingGroupCommand::JoinSurfaces) {
             CancelPendingGroupCommand("Join Surfaces:operation canceled");
         } else if (pending_group_command_ == PendingGroupCommand::PlaneIntersection) {
-            CancelPendingGroupCommand("Plane Intersection:operation canceled");
+            pending_body_section_target_id_ = 0;
+            pending_body_section_plane_face_pick_ = false;
+            pending_body_section_plane_object_pick_ = false;
+            CancelPendingGroupCommand("Body Section by Plane: operation canceled");
         } else if (pending_group_command_ == PendingGroupCommand::SurfaceIntersection) {
             CancelPendingGroupCommand("Surface Intersection:operation canceled");
         } else if (pending_group_command_ == PendingGroupCommand::ProjectCurveToSurface) {
@@ -3106,6 +3344,185 @@ MainWindow::MainWindow(QWidget* parent)
             statusBar()->showMessage("Object rebuilt", 1200);
         }
     });
+    connect(property_panel_, &PropertyPanel::CatalogSelectionRequested, this,
+            [this](const QString& parameter_id, bool product) {
+        const QString catalog_root = QDir(
+            QCoreApplication::applicationDirPath()).filePath(
+                product ? "Catalog/Products" : "Catalog/Sketches");
+        QDir().mkpath(catalog_root);
+        const bool milling_pattern_request = !product
+            && parameter_id == "slx.milling.guide.id";
+        const QString path = QFileDialog::getOpenFileName(
+            this,
+            product ? "Choose Handle from Catalog"
+                    : milling_pattern_request
+                        ? "Choose Milling Pattern from Catalog"
+                        : "Choose Profile Sketch from Catalog",
+            catalog_root,
+            "Dom3D Catalog (*.dom3d)");
+        if (path.isEmpty()) {
+            return;
+        }
+
+        CAlfaDoc catalog_document;
+        QString catalog_room;
+        ProjectViewState catalog_view;
+        QString error;
+        if (!dom3d_serializer_.Load(
+                path, catalog_document, catalog_room, catalog_view, error)) {
+            SetAlfaDoc(&document_);
+            QMessageBox::critical(this, "Catalog", error);
+            return;
+        }
+        SetAlfaDoc(&document_);
+
+        std::unique_ptr<CAlfaObject> resource;
+        std::vector<std::unique_ptr<CAlfaObject>> pattern_sketches;
+        const bool milling_pattern = milling_pattern_request;
+        Material catalog_product_material;
+        bool has_catalog_product_material = false;
+        if (product) {
+            BRep_Builder builder;
+            TopoDS_Compound compound;
+            builder.MakeCompound(compound);
+            bool has_shape = false;
+            for (const auto& object : catalog_document.GetObjects()) {
+                const auto* solid = dynamic_cast<const CSolid*>(object.get());
+                if (!solid || solid->m_Shape.IsNull()) {
+                    continue;
+                }
+                if (!has_catalog_product_material) {
+                    catalog_product_material = solid->GetMaterial();
+                    has_catalog_product_material = true;
+                }
+                builder.Add(compound, solid->m_Shape);
+                has_shape = true;
+            }
+            if (has_shape) {
+                auto solid = std::make_unique<CSolid>();
+                solid->m_Shape = compound;
+                solid->InitSurfaces();
+                solid->ReBuldMesh();
+                resource = std::move(solid);
+            }
+        } else if (milling_pattern) {
+            for (const auto& object : catalog_document.GetObjects()) {
+                if (dynamic_cast<const CSmartLine*>(object.get())) {
+                    pattern_sketches.push_back(object->Clone());
+                }
+            }
+        } else {
+            for (const auto& object : catalog_document.GetObjects()) {
+                if (dynamic_cast<const CSmartLine*>(object.get())) {
+                    resource = object->Clone();
+                    break;
+                }
+            }
+        }
+
+        if (milling_pattern && !pattern_sketches.empty()) {
+            std::vector<unsigned long> sketch_ids;
+            sketch_ids.reserve(pattern_sketches.size());
+            for (auto& sketch : pattern_sketches) {
+                sketch->m_id = 0;
+                sketch->SetName(
+                    "Catalog Milling Guide: "
+                    + QFileInfo(path).completeBaseName().toStdString());
+                sketch->SetParametricDefinition("CatalogProfileResource", {});
+                sketch->SetVisible(false);
+                document_.AddObject(std::move(sketch));
+                const std::vector<size_t> selected_indices =
+                    document_.GetSelectedObjectIndices();
+                if (!selected_indices.empty()
+                    && selected_indices.back() < document_.GetObjects().size()
+                    && document_.GetObjects()[selected_indices.back()]) {
+                    sketch_ids.push_back(
+                        document_.GetObjects()[selected_indices.back()]->m_id);
+                    document_.GetObjects()[selected_indices.back()]->SetVisible(false);
+                }
+            }
+            if (!sketch_ids.empty()) {
+                resource = std::make_unique<CGroup>(
+                    "Catalog Milling Pattern", std::move(sketch_ids));
+            }
+        }
+
+        if (!resource) {
+            QMessageBox::information(
+                this,
+                "Catalog",
+                product
+                    ? "The selected catalog item does not contain a solid handle."
+                    : milling_pattern
+                        ? "The selected catalog item does not contain milling guide sketches."
+                        : "The selected catalog item does not contain a profile sketch.");
+            return;
+        }
+
+        resource->m_id = 0;
+        resource->SetName(
+            "Catalog Resource: " + QFileInfo(path).completeBaseName().toStdString());
+        resource->SetParametricDefinition(
+            product ? "CatalogHandleResource" : "CatalogProfileResource", {});
+        if (product && has_catalog_product_material) {
+            Material imported_material = catalog_product_material;
+            // Catalog and document material IDs are independent.  Allocate a
+            // new document ID so an unrelated material cannot replace it.
+            imported_material.id = 0;
+            imported_material.name =
+                "Catalog Handle: " + QFileInfo(path).completeBaseName().toStdString();
+            Material& stored_material = document_.UpsertMaterial(
+                std::move(imported_material));
+            resource->SetMaterial(stored_material);
+            resource->SetMaterialId(stored_material.id);
+        }
+        resource->SetVisible(false);
+        document_.AddObject(std::move(resource));
+        const auto selected = document_.GetSelectedObjectIndices();
+        if (selected.empty() || selected.back() >= document_.GetObjects().size()
+            || !document_.GetObjects()[selected.back()]) {
+            return;
+        }
+        const unsigned long resource_id =
+            document_.GetObjects()[selected.back()]->m_id;
+        document_.GetObjects()[selected.back()]->SetVisible(false);
+        document_.ClearSelection();
+        property_panel_->SetCatalogParameterValue(
+            parameter_id.toStdString(), static_cast<double>(resource_id));
+        RefreshSceneTree();
+        viewport_->update();
+        statusBar()->showMessage(
+            QString("Catalog resource selected: %1")
+                .arg(QFileInfo(path).completeBaseName()),
+            1800);
+    });
+    connect(property_panel_, &PropertyPanel::CatalogOrientationHelpRequested,
+            this, [this](const QString& parameter_id, bool product) {
+        auto* dialog = new QDialog(
+            this, Qt::Tool | Qt::WindowTitleHint | Qt::WindowCloseButtonHint);
+        dialog->setAttribute(Qt::WA_DeleteOnClose, true);
+        dialog->setWindowTitle(product
+            ? "Catalog Handle Orientation"
+            : parameter_id == "slx.panel.id"
+                ? "Panel Profile Orientation"
+            : parameter_id == "slx.milling.profile.id"
+                ? "Cutter Profile Orientation"
+            : parameter_id == "slx.milling.guide.id"
+                ? "Milling Pattern Orientation"
+                : "Frame Profile Orientation");
+        auto* layout = new QVBoxLayout(dialog);
+        auto* guide = new QLabel(dialog);
+        guide->setPixmap(CatalogOrientationGuidePixmap(parameter_id, product));
+        layout->addWidget(guide);
+        auto* buttons = new QDialogButtonBox(
+            QDialogButtonBox::Close, dialog);
+        connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::close);
+        layout->addWidget(buttons);
+        dialog->setFixedSize(dialog->sizeHint());
+        const QPoint cursor = QCursor::pos();
+        dialog->move(cursor + QPoint(18, 18));
+        dialog->show();
+    });
     connect(property_panel_, &PropertyPanel::Accepted, this, [this]() {
         const bool reopen_solid_editor = reopen_solid_editor_after_properties_;
         AcceptActiveProperties();
@@ -3585,6 +4002,10 @@ void MainWindow::CreateActions() {
     }));
     file_menu->addSeparator();
     file_menu->addAction(add_action("&Import...", QKeySequence(Qt::CTRL | Qt::Key_I), [this]() { ImportFile(); }));
+    QAction* catalog_action = add_action("&Catalog...", {}, [this]() { ShowCatalogDialog(); });
+    catalog_action->setIcon(CatalogIcon());
+    catalog_action->setToolTip("Catalog");
+    file_menu->addAction(catalog_action);
     file_menu->addAction(add_action("&Export...", QKeySequence(Qt::CTRL | Qt::Key_E), [this]() { ExportFile(); }));
     file_menu->addSeparator();
     file_menu->addAction(add_action("E&xit", QKeySequence::Quit, [this]() { close(); }));
@@ -3917,6 +4338,10 @@ void MainWindow::CreateActions() {
     tools_menu->addAction(mirror_action);
     tools_menu->addAction(new_sketch_action);
     tools_menu->addSeparator();
+    QAction* facade_manager_action = add_action(
+        "Facade Manager...", {}, [this]() { ShowFacadeManager(); });
+    tools_menu->addAction(facade_manager_action);
+    tools_menu->addSeparator();
     for (const ToolDefinition& tool : tool_registry_.Tools()) {
         auto* action = tools_menu->addAction(QString::fromStdString(tool.label), this, [this, id = tool.id]() {
             ActivateParametricTool(id);
@@ -3924,6 +4349,8 @@ void MainWindow::CreateActions() {
         RegisterToolAction(action, tool.id);
     }
 
+    edit_menu->addAction(facade_manager_action);
+    edit_menu->addSeparator();
     edit_menu->addAction(add_action("Close Polyline", {}, [this]() {
         if (document_.CloseSelectedOrActivePolyline()) {
             RefreshSceneTree();
@@ -3981,6 +4408,8 @@ void MainWindow::CreateActions() {
 
     main_toolbar_->addAction(zoom_rect_action);
     main_toolbar_->addAction(all_scene_action);
+    main_toolbar_->addSeparator();
+    main_toolbar_->addAction(catalog_action);
     main_toolbar_->addSeparator();
 
     auto* selection_mode_group = new QActionGroup(main_toolbar_);
@@ -4978,6 +5407,19 @@ void MainWindow::RefreshSceneTree() {
 
     scene_tree_->clear();
     const auto& objects = document_.GetObjects();
+    const auto is_catalog_resource = [](const CAlfaObject* object) {
+        if (!object) {
+            return false;
+        }
+        const std::string& tool_id = object->GetParametricToolId();
+        return tool_id == "CatalogProfileResource"
+            || tool_id == "CatalogHandleResource";
+    };
+    auto* parts_root = new QTreeWidgetItem;
+    parts_root->setText(1, "Parts");
+    parts_root->setText(2, "Catalog / imported");
+    parts_root->setData(0, kSceneTreePartsRootRole, true);
+    parts_root->setExpanded(true);
     std::map<unsigned long, size_t> object_indices_by_id;
     for (size_t i = 0; i < objects.size(); ++i) {
         if (objects[i] && objects[i]->m_id != 0) {
@@ -5002,6 +5444,9 @@ void MainWindow::RefreshSceneTree() {
     const auto object_type = [](const CAlfaObject& object) {
         if (dynamic_cast<const CAssembled*>(&object)) {
             return QString("Assembly");
+        }
+        if (dynamic_cast<const CPart*>(&object)) {
+            return QString("Part");
         }
         if (dynamic_cast<const CGroup*>(&object)) {
             return QString("Group");
@@ -5080,14 +5525,33 @@ void MainWindow::RefreshSceneTree() {
                 continue;
             }
         }
-        scene_tree_->addTopLevelItem(item);
+        if (dynamic_cast<const CPart*>(objects[group_index].get())) {
+            parts_root->addChild(item);
+        } else {
+            scene_tree_->addTopLevelItem(item);
+        }
+    }
+
+    if (parts_root->childCount() > 0) {
+        bool any_part_visible = false;
+        for (const auto& object : objects) {
+            if (const auto* part = dynamic_cast<const CPart*>(object.get())) {
+                any_part_visible = any_part_visible || document_.IsObjectVisible(*part);
+            }
+        }
+        parts_root->setIcon(0, SceneVisibilityIcon(any_part_visible));
+        parts_root->setToolTip(0, any_part_visible ? "Hide all parts" : "Show all parts");
+        scene_tree_->insertTopLevelItem(0, parts_root);
+    } else {
+        delete parts_root;
     }
 
     std::map<QString, QTreeWidgetItem*> legacy_group_items;
 
     for (size_t i = 0; i < objects.size(); ++i) {
         const CAlfaObject* object = objects[i].get();
-        if (!object || dynamic_cast<const CGroup*>(object)) {
+        if (!object || dynamic_cast<const CGroup*>(object)
+            || is_catalog_resource(object)) {
             continue;
         }
         if (const auto* polyline = dynamic_cast<const CPolyline*>(object); polyline && polyline->IsEmpty()) {
@@ -5141,19 +5605,118 @@ void MainWindow::RefreshSceneTree() {
 }
 
 void MainWindow::OnSceneTreeItemClicked(QTreeWidgetItem* item, int column) {
-    if (!item || column != 0) {
+    if (!item) {
         return;
     }
 
     auto& objects = document_.GetObjects();
     const QVariant object_index = item->data(0, kSceneTreeObjectIndexRole);
+    if (column != 0) {
+        if (!object_index.isValid()) {
+            return;
+        }
+        const size_t index = static_cast<size_t>(object_index.toULongLong());
+        if (index >= objects.size() || !objects[index]) {
+            return;
+        }
+
+        SelectionAction action = SelectionAction::Replace;
+        const Qt::KeyboardModifiers modifiers = QApplication::keyboardModifiers();
+        if (modifiers.testFlag(Qt::ControlModifier)) {
+            action = document_.IsObjectSelected(index)
+                ? SelectionAction::Remove
+                : SelectionAction::Add;
+        } else if (modifiers.testFlag(Qt::ShiftModifier)) {
+            action = SelectionAction::Add;
+        }
+        document_.SelectObjectById(objects[index]->m_id, action);
+        ClearActiveProperties();
+        RefreshSceneTree();
+        UpdateToolAvailability();
+        viewport_->update();
+        return;
+    }
+
+    const auto refresh_visibility_icons = [this, &objects]() {
+        QSignalBlocker blocker(scene_tree_);
+        std::function<bool(QTreeWidgetItem*)> refresh_item;
+        refresh_item = [&](QTreeWidgetItem* tree_item) {
+            bool any_child_visible = false;
+            for (int child_index = 0; child_index < tree_item->childCount(); ++child_index) {
+                any_child_visible = refresh_item(tree_item->child(child_index)) || any_child_visible;
+            }
+
+            bool visible = any_child_visible;
+            bool has_visibility = false;
+            const bool parts_root = tree_item->data(
+                0, kSceneTreePartsRootRole).toBool();
+            const QVariant row_object_index = tree_item->data(0, kSceneTreeObjectIndexRole);
+            if (parts_root) {
+                visible = any_child_visible;
+                has_visibility = true;
+            } else if (row_object_index.isValid()) {
+                const size_t index = static_cast<size_t>(row_object_index.toULongLong());
+                if (index < objects.size() && objects[index]) {
+                    visible = document_.IsObjectVisible(*objects[index]);
+                    has_visibility = true;
+                }
+            } else {
+                const QVariant row_group_name = tree_item->data(0, kSceneTreeGroupRole);
+                if (row_group_name.isValid()) {
+                    const std::string group = row_group_name.toString().toStdString();
+                    visible = false;
+                    for (const auto& object : objects) {
+                        visible = visible || (object && object->GetGroupName() == group
+                                              && document_.IsObjectVisible(*object));
+                    }
+                    has_visibility = true;
+                }
+            }
+            if (has_visibility) {
+                tree_item->setIcon(0, SceneVisibilityIcon(visible));
+                tree_item->setToolTip(0, parts_root
+                    ? (visible ? "Hide all parts" : "Show all parts")
+                    : (visible ? "Hide object" : "Show object"));
+            }
+            return visible;
+        };
+        for (int top_index = 0; top_index < scene_tree_->topLevelItemCount(); ++top_index) {
+            refresh_item(scene_tree_->topLevelItem(top_index));
+        }
+    };
+
     if (object_index.isValid()) {
         const size_t index = static_cast<size_t>(object_index.toULongLong());
         if (index < objects.size() && objects[index]) {
             objects[index]->SetVisible(!objects[index]->IsVisible());
         }
         document_.ClearSelection();
-        RefreshSceneTree();
+        scene_tree_->clearSelection();
+        refresh_visibility_icons();
+        ClearActiveProperties();
+        UpdateToolAvailability();
+        viewport_->update();
+        return;
+    }
+
+    if (item->data(0, kSceneTreePartsRootRole).toBool()) {
+        bool any_part_visible = false;
+        for (const auto& object : objects) {
+            if (const auto* part = dynamic_cast<const CPart*>(object.get())) {
+                any_part_visible = any_part_visible || document_.IsObjectVisible(*part);
+            }
+        }
+        const bool parts_visible = !any_part_visible;
+        for (auto& object : objects) {
+            if (auto* part = dynamic_cast<CPart*>(object.get())) {
+                part->SetVisible(parts_visible);
+            }
+        }
+        document_.ClearSelection();
+        scene_tree_->clearSelection();
+        refresh_visibility_icons();
+        ClearActiveProperties();
+        UpdateToolAvailability();
         viewport_->update();
         return;
     }
@@ -5175,7 +5738,10 @@ void MainWindow::OnSceneTreeItemClicked(QTreeWidgetItem* item, int column) {
             }
         }
         document_.ClearSelection();
-        RefreshSceneTree();
+        scene_tree_->clearSelection();
+        refresh_visibility_icons();
+        ClearActiveProperties();
+        UpdateToolAvailability();
         viewport_->update();
     }
 }
@@ -5676,6 +6242,272 @@ void MainWindow::ShowLayerProperties() {
 
     CenterDialogOnCursor(*dialog);
     dialog->show();
+}
+
+void MainWindow::ShowFacadeManager() {
+    if (auto* existing = findChild<QDialog*>("Dom3DFacadeManager")) {
+        existing->show();
+        existing->raise();
+        existing->activateWindow();
+        return;
+    }
+
+    struct FacadePreset {
+        const char* name;
+        int style;
+    };
+    const std::array<FacadePreset, 5> presets{{
+        {"Chipboard panel", static_cast<int>(KitchenCabinetFacadeStyle::Plain)},
+        {"Frame", static_cast<int>(KitchenCabinetFacadeStyle::Frame)},
+        {"Screen", static_cast<int>(KitchenCabinetFacadeStyle::Screen)},
+        {"Facade Milled", static_cast<int>(KitchenCabinetFacadeStyle::Milled)},
+        {"MDF Profile Milano", static_cast<int>(KitchenCabinetFacadeStyle::Milano)}
+    }};
+
+    std::vector<unsigned long> target_ids;
+    const auto& initial_objects = document_.GetObjects();
+    for (size_t index = 0; index < initial_objects.size(); ++index) {
+        if (!initial_objects[index] || !initial_objects[index]->IsParametric()) {
+            continue;
+        }
+        const ActiveParametricObject active =
+            tool_registry_.ActiveObjectFromDocument(
+                index, *initial_objects[index], 0, &document_);
+        const bool has_facade_style = std::any_of(
+            active.parameters.begin(), active.parameters.end(),
+            [](const ToolParameter& parameter) {
+                return parameter.id == "facade_style";
+            });
+        if (has_facade_style) {
+            target_ids.push_back(initial_objects[index]->m_id);
+        }
+    }
+
+    if (target_ids.empty()) {
+        QMessageBox::information(
+            this, "Facade Manager",
+            "The document does not contain editable furniture facades.");
+        return;
+    }
+
+    auto original_styles = std::make_shared<std::map<unsigned long, double>>();
+    for (unsigned long id : target_ids) {
+        const CAlfaObject* object = document_.FindObjectById(id);
+        if (!object) {
+            continue;
+        }
+        const size_t index = document_.FindObjectIndexById(id);
+        const ActiveParametricObject active =
+            tool_registry_.ActiveObjectFromDocument(index, *object, 0, &document_);
+        const auto parameter = std::find_if(
+            active.parameters.begin(), active.parameters.end(),
+            [](const ToolParameter& candidate) {
+                return candidate.id == "facade_style";
+            });
+        if (parameter != active.parameters.end()) {
+            (*original_styles)[id] = parameter->value;
+        }
+    }
+    const int initial_style = original_styles->empty()
+        ? 0 : static_cast<int>(std::lround(original_styles->begin()->second));
+
+    auto* dialog = new QDialog(
+        this, Qt::Tool | Qt::CustomizeWindowHint | Qt::WindowTitleHint);
+    dialog->setObjectName("Dom3DFacadeManager");
+    dialog->setAttribute(Qt::WA_DeleteOnClose, true);
+    dialog->setWindowTitle("Facade Manager");
+    dialog->setMinimumWidth(390);
+    dialog->setModal(false);
+    auto* layout = new QVBoxLayout(dialog);
+    auto* form = new QFormLayout;
+    auto* facade_type = new QComboBox(dialog);
+    for (const FacadePreset& preset : presets) {
+        facade_type->addItem(preset.name, preset.style);
+    }
+    const int initial_index = facade_type->findData(initial_style);
+    facade_type->setCurrentIndex(initial_index >= 0 ? initial_index : 0);
+    form->addRow("Type of Facade", facade_type);
+    layout->addLayout(form);
+    auto* affected = new QLabel(
+        QString("Editable furniture assemblies: %1").arg(target_ids.size()),
+        dialog);
+    affected->setStyleSheet("QLabel { color: #666666; padding-top: 8px; }");
+    layout->addWidget(affected);
+
+    auto* buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Apply | QDialogButtonBox::Cancel,
+        dialog);
+    layout->addWidget(buttons);
+
+    struct FacadeBatchResult {
+        int rebuilt = 0;
+        bool canceled = false;
+    };
+    auto rebuilding = std::make_shared<bool>(false);
+    auto cancel_requested = std::make_shared<bool>(false);
+    auto last_applied_style = std::make_shared<int>(-1);
+    auto* stop_shortcut = new QShortcut(QKeySequence(Qt::Key_Escape), dialog);
+    stop_shortcut->setContext(Qt::ApplicationShortcut);
+    connect(stop_shortcut, &QShortcut::activated, dialog,
+            [rebuilding, cancel_requested]() {
+        if (*rebuilding) {
+            *cancel_requested = true;
+        }
+    });
+
+    if (!undo_redo_.BeginChange()) {
+        QMessageBox::critical(
+            this, "Facade Manager", "Could not start facade editing.");
+        dialog->deleteLater();
+        return;
+    }
+
+    const auto apply_style =
+        std::make_shared<std::function<FacadeBatchResult(int, bool)>>();
+    *apply_style = [this, dialog, facade_type, affected, buttons, target_ids,
+                    rebuilding, cancel_requested, last_applied_style](
+                        int requested_style, bool allow_cancel) {
+        FacadeBatchResult result;
+        *rebuilding = true;
+        *cancel_requested = false;
+        facade_type->setEnabled(false);
+        buttons->setEnabled(false);
+        QApplication::setOverrideCursor(Qt::WaitCursor);
+
+        const int total = static_cast<int>(target_ids.size());
+        int rebuilt = 0;
+        for (unsigned long id : target_ids) {
+            if (allow_cancel && *cancel_requested) {
+                result.canceled = true;
+                break;
+            }
+            const size_t index = document_.FindObjectIndexById(id);
+            auto& objects = document_.GetObjects();
+            if (index >= objects.size() || !objects[index]) {
+                continue;
+            }
+            ActiveParametricObject active =
+                tool_registry_.ActiveObjectFromDocument(
+                    index, *objects[index], 0, &document_);
+            auto parameter = std::find_if(
+                active.parameters.begin(), active.parameters.end(),
+                [](const ToolParameter& candidate) {
+                    return candidate.id == "facade_style";
+                });
+            if (parameter == active.parameters.end()) {
+                continue;
+            }
+            // Simple drawer tools support Plain/Frame only. Decorative presets
+            // map to Frame there; advanced cabinets retain all five styles.
+            parameter->value = requested_style <= parameter->maximum
+                ? requested_style
+                : (requested_style == 0
+                    ? 0.0
+                    : std::min(1.0, parameter->maximum));
+            tool_registry_.Rebuild(active, document_);
+            // Furniture rebuild selects the rebuilt assembly so its parameter
+            // editor can continue working. Facade Manager is a document-wide
+            // batch command and must not expose that internal selection.
+            document_.ClearSelection();
+            ++rebuilt;
+
+            affected->setText(QString("Rebuilt %1 of %2 — Esc to stop")
+                                  .arg(rebuilt).arg(total));
+            viewport_->update();
+            viewport_->repaint();
+            QApplication::processEvents(QEventLoop::AllEvents);
+        }
+        result.rebuilt = rebuilt;
+        if (allow_cancel && *cancel_requested && rebuilt < total) {
+            result.canceled = true;
+        }
+        *last_applied_style = result.canceled ? -1 : requested_style;
+        document_.ClearSelection();
+        RefreshSceneTree();
+        viewport_->update();
+        QApplication::restoreOverrideCursor();
+        buttons->setEnabled(true);
+        facade_type->setEnabled(true);
+        affected->setText(result.canceled
+            ? QString("Stopped after %1 of %2 assemblies")
+                  .arg(rebuilt).arg(total)
+            : QString("Editable furniture assemblies: %1").arg(total));
+        *rebuilding = false;
+        *cancel_requested = false;
+        return result;
+    };
+
+    const auto restore_original = std::make_shared<std::function<void()>>();
+    *restore_original = [this, original_styles]() {
+        for (const auto& entry : *original_styles) {
+            const size_t index = document_.FindObjectIndexById(entry.first);
+            auto& objects = document_.GetObjects();
+            if (index >= objects.size() || !objects[index]) {
+                continue;
+            }
+            ActiveParametricObject active =
+                tool_registry_.ActiveObjectFromDocument(
+                    index, *objects[index], 0, &document_);
+            auto parameter = std::find_if(
+                active.parameters.begin(), active.parameters.end(),
+                [](const ToolParameter& candidate) {
+                    return candidate.id == "facade_style";
+                });
+            if (parameter != active.parameters.end()) {
+                parameter->value = entry.second;
+                tool_registry_.Rebuild(active, document_);
+            }
+        }
+        document_.ClearSelection();
+        RefreshSceneTree();
+        viewport_->update();
+    };
+
+    connect(buttons->button(QDialogButtonBox::Apply), &QPushButton::clicked,
+            dialog, [this, facade_type, apply_style]() {
+        const FacadeBatchResult result =
+            (*apply_style)(facade_type->currentData().toInt(), true);
+        statusBar()->showMessage(
+            result.canceled
+                ? QString("Facade Manager: stopped after %1 assemblies")
+                      .arg(result.rebuilt)
+                : QString("Facade Manager: updated %1 furniture assemblies")
+                      .arg(result.rebuilt),
+            2200);
+    });
+    connect(buttons, &QDialogButtonBox::accepted,
+            dialog, [this, dialog, facade_type, apply_style,
+                     last_applied_style]() {
+        const int style = facade_type->currentData().toInt();
+        if (*last_applied_style != style) {
+            const FacadeBatchResult result = (*apply_style)(style, true);
+            if (result.canceled) {
+                statusBar()->showMessage(
+                    "Facade Manager: operation stopped; press OK to continue",
+                    2400);
+                return;
+            }
+        }
+        undo_redo_.CommitChange("Change furniture facades");
+        UpdateUndoRedoActions();
+        statusBar()->showMessage("Facade Manager: operation completed", 1800);
+        dialog->accept();
+    });
+    connect(buttons, &QDialogButtonBox::rejected,
+            dialog, &QDialog::reject);
+    connect(dialog, &QDialog::rejected,
+            this, [this, restore_original]() {
+        (*restore_original)();
+        undo_redo_.CancelChange();
+        UpdateUndoRedoActions();
+        ClearActiveProperties();
+        statusBar()->showMessage("Facade Manager: changes canceled", 1600);
+    });
+
+    CenterDialogOnCursor(*dialog);
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
 }
 
 void MainWindow::ChangeSelectedObjectLayer() {
@@ -6907,6 +7739,13 @@ bool MainWindow::CompletePendingPlaneFacePick() {
         -(normal.x * center.x + normal.y * center.y + normal.z * center.z)};
     SaveRememberedPlaneFactors(factors);
 
+    if (pending_body_section_plane_face_pick_) {
+        pending_body_section_plane_face_pick_ = false;
+        viewport_->SetSelectionMode(SelectionMode::Object);
+        CompleteBodySectionByPlane(center, normal);
+        return true;
+    }
+
     if (pending_trim_plane_face_pick_) {
         const unsigned long curve_id = pending_trim_plane_curve_id_;
         pending_trim_plane_face_pick_ = false;
@@ -7312,18 +8151,99 @@ void MainWindow::JoinSelectedSurfaces() {
 }
 
 void MainWindow::CreatePlaneIntersection() {
-    const size_t created = document_.CreatePlaneIntersectionCurves();
-    if (created == 0) {
-        pending_group_command_ = PendingGroupCommand::PlaneIntersection;
-        viewport_->SetTool(ToolMode::Select);
-        viewport_->SetSelectionMode(SelectionMode::Object);
-        viewport_->SetSelectionConfirmationMode(true);
-        UpdateActiveToolUi("PlaneIntersection");
-        statusBar()->showMessage(
-            "Plane Intersection:select the required geometry and continue");
+    const CSolid* solid = document_.GetSelectedSolid();
+    pending_group_command_ = PendingGroupCommand::PlaneIntersection;
+    pending_body_section_target_id_ = solid ? solid->m_id : 0;
+    pending_body_section_plane_face_pick_ = false;
+    pending_body_section_plane_object_pick_ = false;
+    viewport_->SetTool(ToolMode::Select);
+    viewport_->SetSelectionMode(SelectionMode::Object);
+    viewport_->SetSelectionConfirmationMode(false);
+    UpdateActiveToolUi("PlaneIntersection");
+    if (pending_body_section_target_id_ != 0) {
+        document_.ClearSelection();
+        RefreshSceneTree();
+        BeginBodySectionPlaneInput();
         return;
     }
-    RecordDocumentChange("Plane intersection curves");
+    statusBar()->showMessage("Body Section by Plane: click the Solid body");
+}
+
+void MainWindow::BeginBodySectionPlaneInput() {
+    if (pending_body_section_target_id_ == 0) return;
+    std::array<double, 4> factors = LoadRememberedPlaneFactors();
+    const int method = ShowBodySectionPlaneMethodDialog(this, factors);
+    if (method == QDialog::Rejected) {
+        pending_body_section_target_id_ = 0;
+        CancelPendingGroupCommand("Body Section by Plane: operation canceled");
+        return;
+    }
+    if (method == 7) {
+        pending_body_section_plane_face_pick_ = true;
+        viewport_->SetSelectionMode(SelectionMode::Face);
+        statusBar()->showMessage("Body Section by Plane: click a planar face");
+        return;
+    }
+    if (method == 8) {
+        pending_body_section_plane_object_pick_ = true;
+        viewport_->SetSelectionMode(SelectionMode::Object);
+        statusBar()->showMessage(
+            "Body Section by Plane: click a reference Plane, planar Sketch, or planar Polyline");
+        return;
+    }
+    Vec3 origin{};
+    Vec3 normal{};
+    if (method == 2) normal = {0.0f, 0.0f, 1.0f};
+    else if (method == 3) normal = {0.0f, 1.0f, 0.0f};
+    else if (method == 4) normal = {1.0f, 0.0f, 0.0f};
+    else {
+        normal = {static_cast<float>(factors[0]),
+                  static_cast<float>(factors[1]),
+                  static_cast<float>(factors[2])};
+        const double length_squared = dot(normal, normal);
+        if (length_squared <= 1.0e-18) {
+            statusBar()->showMessage("Body Section by Plane: invalid plane factors", 2600);
+            BeginBodySectionPlaneInput();
+            return;
+        }
+        origin = normal * static_cast<float>(-factors[3] / length_squared);
+    }
+    SaveRememberedPlaneFactors({normal.x, normal.y, normal.z,
+        -(normal.x * origin.x + normal.y * origin.y + normal.z * origin.z)});
+    CompleteBodySectionByPlane(origin, normal);
+}
+
+bool MainWindow::CompleteBodySectionPlaneObjectPick() {
+    if (!pending_body_section_plane_object_pick_ || !document_.HasSelection()) {
+        return false;
+    }
+    const CAlfaObject* object = document_.GetSelectedObject();
+    if (!object) return false;
+    Vec3 origin{};
+    Vec3 normal{};
+    std::string error_message;
+    if (!document_.GetObjectPlane(object->m_id, origin, normal, &error_message)) {
+        statusBar()->showMessage(QString::fromStdString(error_message), 2800);
+        return true;
+    }
+    pending_body_section_plane_object_pick_ = false;
+    CompleteBodySectionByPlane(origin, normal);
+    return true;
+}
+
+void MainWindow::CompleteBodySectionByPlane(Vec3 origin, Vec3 normal) {
+    std::string error_message;
+    const size_t created = document_.CreatePlaneIntersectionCurves(
+        pending_body_section_target_id_, origin, normal, &error_message);
+    if (created == 0) {
+        statusBar()->showMessage(QString::fromStdString(error_message), 3000);
+        BeginBodySectionPlaneInput();
+        return;
+    }
+    RecordDocumentChange("Body section by plane");
+    pending_body_section_target_id_ = 0;
+    pending_body_section_plane_face_pick_ = false;
+    pending_body_section_plane_object_pick_ = false;
     pending_group_command_ = PendingGroupCommand::None;
     viewport_->SetSelectionConfirmationMode(false);
     viewport_->SetTool(ToolMode::Select);
@@ -7331,7 +8251,7 @@ void MainWindow::CreatePlaneIntersection() {
     RefreshSceneTree();
     viewport_->update();
     statusBar()->showMessage(
-        QString("Plane Intersection:operation completed").arg(created), 1800);
+        QString("Body Section by Plane: created %1 section curve(s)").arg(created), 1800);
 }
 
 void MainWindow::CreateSurfaceIntersection() {
@@ -7985,6 +8905,12 @@ void MainWindow::ShowViewportPopupMenu(const QPoint& global_position) {
     connect(edit_texture, &QAction::triggered, this, [this]() {
         ShowSurfaceTextureEditor();
     });
+
+    menu.addSeparator();
+    QAction* add_to_catalog = menu.addAction("Add to Catalog...");
+    add_to_catalog->setEnabled(document_.HasSelection());
+    connect(add_to_catalog, &QAction::triggered,
+            this, &MainWindow::AddSelectionToCatalog);
 
     menu.exec(global_position);
 }
@@ -10093,22 +11019,6 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
                     sketches.push_back(sketch);
                 }
             }
-            if (sketches.empty()) {
-                const std::vector<unsigned long> template_ids =
-                    CreateSlxFrameTemplateSketches(document_);
-                RefreshSceneTree();
-                viewport_->FitToDocument();
-                viewport_->update();
-                statusBar()->showMessage(
-                    template_ids.size() == 2
-                        ? "SLX:operation completed"
-                        : "SLX:operation failed; check the selected geometry and parameters",
-                    6000);
-                return;
-            }
-            for (CSmartLine* sketch : sketches) {
-                document_.EnsureObjectId(*sketch);
-            }
             const auto set_sketch_id = [&](const std::string& id, unsigned long value) {
                 const auto parameter = std::find_if(
                     parameters.begin(), parameters.end(),
@@ -10125,11 +11035,19 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
             // Never inherit object IDs from an earlier SLX run.
             set_sketch_id("slx.profile.id", 0);
             set_sketch_id("slx.panel.id", 0);
+            set_sketch_id("slx.milling.profile.id", 0);
+            set_sketch_id("slx.milling.guide.id", 0);
+            set_sketch_id("slx.handle.id", 0);
             for (size_t contour = 0; contour < 8; ++contour) {
                 set_sketch_id(
                     "slx.contour." + std::to_string(contour + 1) + ".id", 0);
             }
 
+            if (!sketches.empty()) {
+                for (CSmartLine* sketch : sketches) {
+                    document_.EnsureObjectId(*sketch);
+                }
+            }
             if (sketches.size() == 2) {
                 if (!sketches[0]->IsClosed() || !sketches[1]->IsClosed()) {
                     statusBar()->showMessage(
@@ -10148,7 +11066,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
                 if (facade_style != parameters.end()) {
                     facade_style->value = 1.0;
                 }
-            } else {
+            } else if (!sketches.empty()) {
                 if (facade_style != parameters.end()) {
                     facade_style->value = 3.0;
                 }
@@ -11725,6 +12643,41 @@ QImage MainWindow::CaptureProjectThumbnail() const {
     return thumbnail.scaled(750, 450, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
 }
 
+QImage MainWindow::CaptureSelectionThumbnail() {
+    if (!viewport_ || !document_.HasSelection()) {
+        return CaptureProjectThumbnail();
+    }
+
+    auto& objects = document_.GetObjects();
+    std::vector<bool> visibility;
+    visibility.reserve(objects.size());
+    for (auto& object : objects) {
+        visibility.push_back(object && object->IsVisible());
+        if (object) {
+            object->CAlfaObject::SetVisible(false);
+        }
+    }
+    for (size_t index : document_.GetSelectedObjectIndices()) {
+        if (index < objects.size() && objects[index]) {
+            objects[index]->SetVisible(true);
+        }
+    }
+
+    const Camera camera = viewport_->GetCamera();
+    viewport_->FitToDocument();
+    viewport_->repaint();
+    const QImage thumbnail = CaptureProjectThumbnail();
+
+    for (size_t index = 0; index < objects.size(); ++index) {
+        if (objects[index]) {
+            objects[index]->CAlfaObject::SetVisible(visibility[index]);
+        }
+    }
+    viewport_->SetCamera(camera);
+    viewport_->update();
+    return thumbnail;
+}
+
 void MainWindow::UpdateWindowTitle() {
     QString title = "Dom3D Pro";
     if (!project_path_.empty()) {
@@ -11819,7 +12772,7 @@ void MainWindow::AddReferenceImage(ReferenceImageAxis axis) {
 }
 
 void MainWindow::ImportFile() {
-    const QString filter = "Wavefront OBJ (*.obj);;3D Studio (*.3ds);;STEP (*.step *.stp);;IGES (*.iges *.igs);;TEXT (*.txt);;All files (*.*)";
+    const QString filter = "Dom3D Project (*.dom3d);;Wavefront OBJ (*.obj);;3D Studio (*.3ds);;STEP (*.step *.stp);;IGES (*.iges *.igs);;TEXT (*.txt);;All files (*.*)";
     QString selected_filter;
     const QString path = QFileDialog::getOpenFileName(this, "Import", LastDialogDir(), filter, &selected_filter);
     if (path.isEmpty()) {
@@ -11829,13 +12782,14 @@ void MainWindow::ImportFile() {
     ImportFileFromPath(path);
 }
 
-bool MainWindow::ImportFileFromPath(const QString& path) {
+bool MainWindow::ImportFileFromPath(const QString& path, bool catalog_sketch) {
     if (path.isEmpty()) {
         return false;
     }
 
     std::string error;
     std::map<std::string, unsigned long> imported_material_ids;
+    bool preserve_import_selection = false;
     const auto register_imported_material = [this, &imported_material_ids](CMesh3D& mesh) {
         Material material = mesh.GetMaterial();
         if (material.id != 0 || material.name.empty() || material.name == "Imported Mesh") {
@@ -11858,7 +12812,89 @@ bool MainWindow::ImportFileFromPath(const QString& path) {
         mesh.SetMaterial(saved);
     };
     const QString lower_path = path.toLower();
-    if (lower_path.endsWith(".3ds")) {
+    if (lower_path.endsWith(".dom3d")) {
+        QDialog dialog(this);
+        dialog.setWindowTitle("Import Dom3D Part");
+        auto* layout = new QVBoxLayout(&dialog);
+        auto* form = new QFormLayout;
+        auto* name_edit = new QLineEdit(QFileInfo(path).completeBaseName(), &dialog);
+        form->addRow("Part name", name_edit);
+
+        const auto coordinate_row = [&dialog](double initial) {
+            auto* value = new QDoubleSpinBox(&dialog);
+            value->setRange(-1000000000.0, 1000000000.0);
+            value->setDecimals(4);
+            value->setValue(initial);
+            return value;
+        };
+        auto* px = coordinate_row(0.0);
+        auto* py = coordinate_row(0.0);
+        auto* pz = coordinate_row(0.0);
+        auto* position_widget = new QWidget(&dialog);
+        auto* position_layout = new QHBoxLayout(position_widget);
+        position_layout->setContentsMargins(0, 0, 0, 0);
+        position_layout->addWidget(new QLabel("X", position_widget));
+        position_layout->addWidget(px);
+        position_layout->addWidget(new QLabel("Y", position_widget));
+        position_layout->addWidget(py);
+        position_layout->addWidget(new QLabel("Z", position_widget));
+        position_layout->addWidget(pz);
+        form->addRow("Insertion point P0", position_widget);
+
+        const auto scale_value = [&dialog]() {
+            auto* value = new QDoubleSpinBox(&dialog);
+            value->setRange(0.0001, 10000.0);
+            value->setDecimals(4);
+            value->setValue(1.0);
+            return value;
+        };
+        auto* sx = scale_value();
+        auto* sy = scale_value();
+        auto* sz = scale_value();
+        auto* scale_widget = new QWidget(&dialog);
+        auto* scale_layout = new QHBoxLayout(scale_widget);
+        scale_layout->setContentsMargins(0, 0, 0, 0);
+        scale_layout->addWidget(new QLabel("X", scale_widget));
+        scale_layout->addWidget(sx);
+        scale_layout->addWidget(new QLabel("Y", scale_widget));
+        scale_layout->addWidget(sy);
+        scale_layout->addWidget(new QLabel("Z", scale_widget));
+        scale_layout->addWidget(sz);
+        form->addRow("Scale", scale_widget);
+
+        auto* linked = new QCheckBox("File linked", &dialog);
+        linked->setToolTip("Keep the source path for a future Reload from File command");
+        form->addRow(QString(), linked);
+        layout->addLayout(form);
+        auto* buttons = new QDialogButtonBox(
+            QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+        connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        layout->addWidget(buttons);
+        if (dialog.exec() != QDialog::Accepted) {
+            return false;
+        }
+
+        QString import_error;
+        if (!dom3d_serializer_.ImportPart(
+                path,
+                document_,
+                name_edit->text(),
+                {static_cast<float>(px->value()),
+                 static_cast<float>(py->value()),
+                 static_cast<float>(pz->value())},
+                {static_cast<float>(sx->value()),
+                 static_cast<float>(sy->value()),
+                 static_cast<float>(sz->value())},
+                linked->isChecked(),
+                !catalog_sketch,
+                import_error)) {
+            QMessageBox::critical(this, "Dom3D Import", import_error);
+            return false;
+        }
+        preserve_import_selection = true;
+        RecordDocumentChange("Import Dom3D Part");
+    } else if (lower_path.endsWith(".3ds")) {
         std::vector<std::unique_ptr<CMesh3D>> meshes;
         if (!three_ds_io_.Import(path.toStdString(), meshes, error)) {
             QMessageBox::critical(this, "3DS Import", QString::fromStdString(error));
@@ -11925,7 +12961,9 @@ bool MainWindow::ImportFileFromPath(const QString& path) {
         return false;
     }
 
-    document_.ClearSelection();
+    if (!preserve_import_selection) {
+        document_.ClearSelection();
+    }
     RememberLastDialogDir(path);
     ClearActiveProperties();
     RefreshSceneTree();
@@ -11933,6 +12971,193 @@ bool MainWindow::ImportFileFromPath(const QString& path) {
     viewport_->update();
     statusBar()->showMessage(QString("File imported: %1").arg(QFileInfo(path).fileName()), 1400);
     return true;
+}
+
+void MainWindow::AddSelectionToCatalog() {
+    const std::vector<size_t> selected = document_.GetSelectedObjectIndices();
+    if (selected.empty()) {
+        statusBar()->showMessage("Catalog: select an object first", 1600);
+        return;
+    }
+
+    const auto& objects = document_.GetObjects();
+    std::map<unsigned long, const CAlfaObject*> objects_by_id;
+    for (const auto& object : objects) {
+        if (object) {
+            objects_by_id[object->m_id] = object.get();
+        }
+    }
+    std::set<unsigned long> checked_ids;
+    std::function<bool(const CAlfaObject*)> contains_only_sketches =
+        [&](const CAlfaObject* object) -> bool {
+            if (!object) {
+                return false;
+            }
+            if (dynamic_cast<const CSmartLine*>(object)) {
+                return true;
+            }
+            const auto* group = dynamic_cast<const CGroup*>(object);
+            if (!group || group->GetElementIds().empty()
+                || !checked_ids.insert(object->m_id).second) {
+                return false;
+            }
+            for (unsigned long id : group->GetElementIds()) {
+                const auto child = objects_by_id.find(id);
+                if (child == objects_by_id.end()
+                    || !contains_only_sketches(child->second)) {
+                    return false;
+                }
+            }
+            return true;
+        };
+    const bool sketch_item = std::all_of(
+        selected.begin(), selected.end(), [&](size_t index) {
+            return index < objects.size()
+                && contains_only_sketches(objects[index].get());
+        });
+    const QString catalog_root =
+        QDir(QCoreApplication::applicationDirPath()).filePath("Catalog");
+    QDir().mkpath(QDir(catalog_root).filePath("Sketches"));
+    QDir().mkpath(QDir(catalog_root).filePath("Products"));
+    const QString initial_directory = QDir(catalog_root).filePath(
+        sketch_item ? "Sketches" : "Products");
+    const QString suggested_name = selected.front() < objects.size()
+        && objects[selected.front()]
+        ? QString::fromStdString(objects[selected.front()]->GetName())
+        : QString("Catalog item");
+    QString path = QFileDialog::getSaveFileName(
+        this,
+        "Add to Catalog",
+        QDir(initial_directory).filePath(suggested_name + ".dom3d"),
+        "Dom3D Catalog Item (*.dom3d)");
+    if (path.isEmpty()) {
+        return;
+    }
+    if (QFileInfo(path).suffix().isEmpty()) {
+        path += ".dom3d";
+    }
+
+    ProjectViewState view_state;
+    view_state.camera = viewport_->GetCamera();
+    view_state.has_camera = true;
+    view_state.orthographic_projection = viewport_->IsOrthographicProjection();
+    view_state.has_orthographic_projection = true;
+    QString error;
+    const QString room = tool_tabs_
+        ? tool_tabs_->tabText(tool_tabs_->currentIndex())
+        : QString("Catalog");
+    if (!dom3d_serializer_.SaveSelection(
+            path,
+            document_,
+            selected,
+            room,
+            view_state,
+            CaptureSelectionThumbnail(),
+            error)) {
+        QMessageBox::critical(this, "Add to Catalog", error);
+        return;
+    }
+    statusBar()->showMessage(
+        QString("Added to catalog: %1").arg(QFileInfo(path).fileName()),
+        1800);
+}
+
+void MainWindow::ShowCatalogDialog() {
+    const QString catalog_root =
+        QDir(QCoreApplication::applicationDirPath()).filePath("Catalog");
+    QDir().mkpath(QDir(catalog_root).filePath("Sketches"));
+    QDir().mkpath(QDir(catalog_root).filePath("Products"));
+
+    QDialog dialog(this);
+    dialog.setWindowTitle("Dom3D Catalog");
+    dialog.resize(760, 500);
+    auto* root_layout = new QVBoxLayout(&dialog);
+    auto* content = new QHBoxLayout;
+    auto* tree = new QTreeWidget(&dialog);
+    tree->setHeaderLabel("Catalog");
+    tree->setMinimumWidth(390);
+    auto* preview = new QLabel("Select a catalog item", &dialog);
+    preview->setAlignment(Qt::AlignCenter);
+    preview->setFrameShape(QFrame::StyledPanel);
+    preview->setMinimumSize(300, 260);
+    preview->setWordWrap(true);
+    content->addWidget(tree, 3);
+    content->addWidget(preview, 2);
+    root_layout->addLayout(content);
+
+    const auto add_directory = [&](auto&& self,
+                                   QTreeWidgetItem* parent,
+                                   const QString& directory_path) -> void {
+        QDir directory(directory_path);
+        const QFileInfoList entries = directory.entryInfoList(
+            QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot,
+            QDir::DirsFirst | QDir::Name | QDir::IgnoreCase);
+        for (const QFileInfo& entry : entries) {
+            if (entry.isFile() && entry.suffix().compare(
+                    "dom3d", Qt::CaseInsensitive) != 0) {
+                continue;
+            }
+            auto* item = new QTreeWidgetItem(parent);
+            item->setText(0, entry.completeBaseName());
+            item->setData(0, Qt::UserRole, entry.absoluteFilePath());
+            item->setData(0, Qt::UserRole + 1, entry.isFile());
+            if (entry.isDir()) {
+                item->setText(0, entry.fileName());
+                self(self, item, entry.absoluteFilePath());
+            }
+        }
+    };
+    auto* root_item = new QTreeWidgetItem(tree);
+    root_item->setText(0, "Catalog");
+    root_item->setData(0, Qt::UserRole, catalog_root);
+    root_item->setData(0, Qt::UserRole + 1, false);
+    add_directory(add_directory, root_item, catalog_root);
+    root_item->setExpanded(true);
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    auto* insert = buttons->addButton("Insert", QDialogButtonBox::AcceptRole);
+    insert->setEnabled(false);
+    root_layout->addWidget(buttons);
+    QString selected_path;
+    connect(tree, &QTreeWidget::currentItemChanged, &dialog,
+            [this, preview, insert, &selected_path](QTreeWidgetItem* current) {
+        selected_path.clear();
+        insert->setEnabled(false);
+        preview->setPixmap(QPixmap());
+        preview->setText("Select a catalog item");
+        if (!current || !current->data(0, Qt::UserRole + 1).toBool()) {
+            return;
+        }
+        selected_path = current->data(0, Qt::UserRole).toString();
+        QImage thumbnail;
+        QString error;
+        if (dom3d_serializer_.LoadThumbnail(
+                selected_path, thumbnail, error) && !thumbnail.isNull()) {
+            preview->setPixmap(QPixmap::fromImage(thumbnail).scaled(
+                preview->size() - QSize(12, 12),
+                Qt::KeepAspectRatio,
+                Qt::SmoothTransformation));
+        } else {
+            preview->setText(QFileInfo(selected_path).completeBaseName());
+        }
+        insert->setEnabled(true);
+    });
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(insert, &QPushButton::clicked, &dialog, &QDialog::accept);
+    connect(tree, &QTreeWidget::itemDoubleClicked, &dialog,
+            [&dialog](QTreeWidgetItem* item) {
+        if (item && item->data(0, Qt::UserRole + 1).toBool()) {
+            dialog.accept();
+        }
+    });
+
+    if (dialog.exec() != QDialog::Accepted || selected_path.isEmpty()) {
+        return;
+    }
+    const QString normalized = QDir::fromNativeSeparators(selected_path);
+    const bool sketch_item = normalized.contains(
+        "/Sketches/", Qt::CaseInsensitive);
+    ImportFileFromPath(selected_path, sketch_item);
 }
 
 void MainWindow::HandleDroppedFiles(const QStringList& paths) {

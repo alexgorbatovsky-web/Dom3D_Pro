@@ -72,6 +72,7 @@ set(DOM3D_SOURCES
     src/FurnitureMaterialFactory.cpp
     src/CAlfaObject.cpp
     src/CGroup.cpp
+    src/CPart.cpp
     src/CAssembled.cpp
     src/CFacadeFurniture.cpp
     src/solid/FacadeFrameShapeBuilder.cpp
@@ -156,6 +157,7 @@ set(DOM3D_HEADERS
     src/CAlfaObject.h
     src/IgesShapeCollector.h
     src/CGroup.h
+    src/CPart.h
     src/CAssembled.h
     src/CFacadeFurniture.h
     src/solid/FacadeFrameShapeBuilder.h
@@ -395,6 +397,42 @@ if(MSVC)
 endif()
 
 if(BUILD_TESTING)
+    set(CATALOG_IMPORT_TEST_SOURCES ${DOM3D_SOURCES})
+    list(REMOVE_ITEM CATALOG_IMPORT_TEST_SOURCES src/main.cpp)
+    add_executable(CatalogImportTests
+        tests/CatalogImportTests.cpp
+        ${CATALOG_IMPORT_TEST_SOURCES}
+        ${DOM3D_HEADERS}
+        ${DOM3D_SKETCH_SOURCES}
+    )
+    target_compile_features(CatalogImportTests PRIVATE cxx_std_17)
+    target_include_directories(CatalogImportTests PRIVATE
+        src
+        "${DOM3D_OPENCASCADE_INCLUDE_DIR}"
+    )
+    target_link_directories(CatalogImportTests PRIVATE
+        "${DOM3D_OPENCASCADE_LIBRARY_DIR}"
+    )
+    target_link_libraries(CatalogImportTests PRIVATE
+        Qt6::Widgets Qt6::OpenGLWidgets Qt6::Xml OpenGL::GL
+        ${DOM3D_OPENCASCADE_LIBS}
+    )
+    if(WIN32)
+        target_link_libraries(CatalogImportTests PRIVATE comdlg32)
+    endif()
+    if(MSVC)
+        target_compile_options(CatalogImportTests PRIVATE
+            /W4
+            /permissive-
+            "/FI${CMAKE_CURRENT_SOURCE_DIR}/src/legacy_compat.h"
+        )
+    endif()
+    add_test(NAME CatalogImportTests COMMAND CatalogImportTests)
+    string(REPLACE ";" "\\;" DOM3D_CTEST_HOST_PATH "$ENV{PATH}")
+    set_tests_properties(CatalogImportTests PROPERTIES
+        ENVIRONMENT "PATH=${DOM3D_QT_MSVC2022_PATH}/bin\;${DOM3D_OPENCASCADE_BINARY_DIR}\;${DOM3D_CTEST_HOST_PATH}"
+    )
+
     add_executable(FourSplineSurfaceBuilderTests
         tests/FourSplineSurfaceBuilderTests.cpp
         src/FourSplineSurfaceBuilder.cpp

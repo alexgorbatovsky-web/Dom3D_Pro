@@ -14,7 +14,9 @@ enum class ToolParameterType {
     Checkbox,
     Combo,
     Material,
-    Graph
+    Graph,
+    CatalogSketch,
+    CatalogProduct
 };
 
 enum class ToolParameterUnit {

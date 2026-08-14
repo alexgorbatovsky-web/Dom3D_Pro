@@ -17,6 +17,7 @@ class CAlfaDoc;
 class CSmartLine;
 
 CAlfaDoc* GetAlfaDoc();
+void SetAlfaDoc(CAlfaDoc* document);
 
 class CLayer {
 public:
@@ -253,7 +254,16 @@ public:
     bool MirrorSelectedObjects(Vec3 plane_point, Vec3 plane_normal);
     bool CreateLoftSurfaceFromSelectedBSplines();
     bool JoinSelectedSurfaces();
-    size_t CreatePlaneIntersectionCurves();
+    size_t CreatePlaneIntersectionCurves(
+        std::string* error_message = nullptr);
+    size_t CreatePlaneIntersectionCurves(unsigned long target_id,
+                                         Vec3 plane_origin,
+                                         Vec3 plane_normal,
+                                         std::string* error_message = nullptr);
+    bool GetObjectPlane(unsigned long object_id,
+                        Vec3& origin,
+                        Vec3& normal,
+                        std::string* error_message = nullptr) const;
     size_t CreateSurfaceIntersectionCurves();
     size_t ProjectSelectedCurveToSurface(Vec3 direction);
     size_t ExtractSelectedSurfaceEdges();

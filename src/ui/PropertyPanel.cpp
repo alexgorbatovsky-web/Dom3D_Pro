@@ -281,11 +281,38 @@ bool IsInternalPlacementParameter(const ToolParameter& parameter) {
         || parameter.id == "profile.id"
         || parameter.id == "section.id"
         || parameter.id == "guide.id"
-        || parameter.id.rfind("slx.", 0) == 0
+        || (parameter.id.rfind("slx.", 0) == 0
+            && parameter.type != ToolParameterType::CatalogSketch
+            && parameter.type != ToolParameterType::CatalogProduct)
         || parameter.id == "cutter.id"
         || parameter.id == "face.index"
         || parameter.id == "boolean.body_id"
         || parameter.id == "boolean.tool_index";
+}
+
+bool IsCatalogParameterVisible(const ActiveParametricObject& active,
+                               const ToolParameter& parameter) {
+    if (active.tool_id != "cabinet_advanced_slx") {
+        return true;
+    }
+    const auto value_of = [&active](const char* id, double fallback) {
+        const auto found = std::find_if(
+            active.parameters.begin(), active.parameters.end(),
+            [id](const ToolParameter& candidate) { return candidate.id == id; });
+        return found == active.parameters.end() ? fallback : found->value;
+    };
+    const int facade_style = static_cast<int>(value_of("facade_style", 0.0));
+    if (parameter.id == "slx.profile.id" || parameter.id == "slx.panel.id") {
+        return facade_style == 1;
+    }
+    if (parameter.id == "slx.milling.profile.id"
+        || parameter.id == "slx.milling.guide.id") {
+        return facade_style == 3;
+    }
+    if (parameter.id == "slx.handle.id") {
+        return static_cast<int>(value_of("handle_type", 0.0)) == 3;
+    }
+    return true;
 }
 
 bool IsPlaneParameterVisible(const ActiveParametricObject& active,
@@ -406,7 +433,49 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
     for (int i = 0; i < static_cast<int>(active_object_.parameters.size()); ++i) {
         ToolParameter& parameter = active_object_.parameters[static_cast<size_t>(i)];
         if (IsInternalPlacementParameter(parameter)
-            || !IsPlaneParameterVisible(active_object_, parameter)) {
+            || !IsPlaneParameterVisible(active_object_, parameter)
+            || !IsCatalogParameterVisible(active_object_, parameter)) {
+            continue;
+        }
+
+        if (parameter.type == ToolParameterType::CatalogSketch
+            || parameter.type == ToolParameterType::CatalogProduct) {
+            auto* editor = new QWidget(this);
+            auto* row = new QHBoxLayout(editor);
+            row->setContentsMargins(0, 0, 0, 0);
+            auto* from_catalog = new QCheckBox("From Catalog", editor);
+            auto* choose = new QPushButton(
+                parameter.value > 0.0 ? "Choose another..." : "Choose...", editor);
+            auto* axes = new QPushButton("Axes...", editor);
+            axes->setToolTip("Show the required local coordinate system");
+            from_catalog->setChecked(parameter.value > 0.0);
+            choose->setEnabled(from_catalog->isChecked());
+            connect(from_catalog, &QCheckBox::toggled, this,
+                    [this, i, choose](bool checked) {
+                choose->setEnabled(checked);
+                if (!checked) {
+                    active_object_.parameters[static_cast<size_t>(i)].value = 0.0;
+                    emit ParametersChanged();
+                }
+            });
+            connect(choose, &QPushButton::clicked, this, [this, i]() {
+                const ToolParameter& selected =
+                    active_object_.parameters[static_cast<size_t>(i)];
+                emit CatalogSelectionRequested(
+                    QString::fromStdString(selected.id),
+                    selected.type == ToolParameterType::CatalogProduct);
+            });
+            connect(axes, &QPushButton::clicked, this, [this, i]() {
+                const ToolParameter& selected =
+                    active_object_.parameters[static_cast<size_t>(i)];
+                emit CatalogOrientationHelpRequested(
+                    QString::fromStdString(selected.id),
+                    selected.type == ToolParameterType::CatalogProduct);
+            });
+            row->addWidget(from_catalog);
+            row->addWidget(choose);
+            row->addWidget(axes);
+            form_->addRow(QString::fromStdString(parameter.label), editor);
             continue;
         }
 
@@ -505,13 +574,17 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
                 const bool rebuild_plane_form =
                     active_object_.tool_id == "PlaneTool"
                     && parameter.id == "mode";
+                const bool rebuild_catalog_form =
+                    active_object_.tool_id == "cabinet_advanced_slx"
+                    && (parameter.id == "facade_style"
+                        || parameter.id == "handle_type");
                 parameter.value = parameter.option_values.size() == parameter.options.size()
                     && index >= 0
                     && static_cast<size_t>(index) < parameter.option_values.size()
                     ? parameter.option_values[static_cast<size_t>(index)]
                     : static_cast<double>(index);
                 emit ParametersChanged();
-                if (rebuild_plane_form) {
+                if (rebuild_plane_form || rebuild_catalog_form) {
                     QTimer::singleShot(0, this, [this]() {
                         SetActiveObject(active_object_);
                     });
@@ -682,6 +755,21 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
     button_layout->addWidget(ok);
     button_layout->addWidget(cancel);
     form_->addRow(buttons);
+}
+
+void PropertyPanel::SetCatalogParameterValue(
+    const std::string& parameter_id, double value) {
+    const auto parameter = std::find_if(
+        active_object_.parameters.begin(), active_object_.parameters.end(),
+        [&parameter_id](const ToolParameter& candidate) {
+            return candidate.id == parameter_id;
+        });
+    if (parameter == active_object_.parameters.end()) {
+        return;
+    }
+    parameter->value = value;
+    SetActiveObject(active_object_);
+    emit ParametersChanged();
 }
 
 void PropertyPanel::UpdateParameterValue(

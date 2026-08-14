@@ -35,4 +35,19 @@ public:
               ProjectViewState& view_state,
               QString& error) const;
     bool LoadThumbnail(const QString& path, QImage& thumbnail, QString& error) const;
+    bool ImportPart(const QString& path,
+                    CAlfaDoc& document,
+                    const QString& part_name,
+                    Vec3 insertion_point,
+                    Vec3 scale,
+                    bool file_linked,
+                    bool wrap_as_part,
+                    QString& error) const;
+    bool SaveSelection(const QString& path,
+                       CAlfaDoc& document,
+                       const std::vector<size_t>& selected_indices,
+                       const QString& active_room,
+                       const ProjectViewState& view_state,
+                       const QImage& thumbnail,
+                       QString& error) const;
 };

@@ -6,6 +6,7 @@
 #include "CMesh3D.h"
 #include "ReferenceImage.h"
 #include "CGroup.h"
+#include "CPart.h"
 #include "CAssembled.h"
 #include "CKitchenCabinet.h"
 #include "CPolyline.h"
@@ -21,13 +22,17 @@
 #include <QBuffer>
 #include <QByteArray>
 #include <QFile>
+#include <QFileInfo>
 #include <QImage>
 #include <QSaveFile>
 #include <QStringList>
 #include <QXmlStreamWriter>
 
 #include <cmath>
+#include <algorithm>
+#include <map>
 #include <memory>
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -52,6 +57,9 @@ QString object_type_name(const CAlfaObject& object) {
     }
     if (dynamic_cast<const CAssembled*>(&object)) {
         return "Assembly";
+    }
+    if (dynamic_cast<const CPart*>(&object)) {
+        return "Part";
     }
     if (dynamic_cast<const CGroup*>(&object)) {
         return "Group";
@@ -805,7 +813,14 @@ bool Dom3DProjectSerializer::Save(const QString& path,
         if (const auto* group = dynamic_cast<const CGroup*>(&object)) {
             xml.writeStartElement("geometry");
             const auto* assembly = dynamic_cast<const CAssembled*>(group);
-            xml.writeAttribute("kind", assembly ? "assembly" : "group");
+            const auto* part = dynamic_cast<const CPart*>(group);
+            xml.writeAttribute("kind", assembly ? "assembly" : part ? "part" : "group");
+            if (part) {
+                xml.writeAttribute("fileLinked", part->IsFileLinked() ? "true" : "false");
+                if (!part->GetSourcePath().empty()) {
+                    xml.writeAttribute("sourcePath", QString::fromStdString(part->GetSourcePath()));
+                }
+            }
             if (assembly) {
                 xml.writeAttribute("drawParam", QString::number(assembly->GetDrawParam()));
                 xml.writeAttribute("idDim", QString::number(assembly->GetIdDim()));
@@ -1204,7 +1219,7 @@ bool Dom3DProjectSerializer::Load(const QString& path,
         }
 
         std::unique_ptr<CAlfaObject> object;
-        if (type == "Group" || type == "Assembly" || type == "KitchenCabinet") {
+        if (type == "Group" || type == "Part" || type == "Assembly" || type == "KitchenCabinet") {
             const QDomElement geometry = required_child(object_element, "geometry", error);
             if (geometry.isNull()) {
                 return false;
@@ -1372,6 +1387,13 @@ bool Dom3DProjectSerializer::Load(const QString& path,
                     assembly->AddDimension(dimension);
                 }
                 object = std::move(assembly);
+            } else if (type == "Part") {
+                auto part = std::make_unique<CPart>(
+                    object_element.attribute("name", "Part").toStdString(),
+                    std::move(element_ids));
+                part->SetFileLinked(geometry.attribute("fileLinked", "false") == "true");
+                part->SetSourcePath(geometry.attribute("sourcePath").toStdString());
+                object = std::move(part);
             } else {
                 object = std::make_unique<CGroup>(
                     object_element.attribute("name", "Group").toStdString(),
@@ -1887,4 +1909,305 @@ bool Dom3DProjectSerializer::Load(const QString& path,
     }
     document.ClearSelection();
     return true;
+}
+
+namespace {
+bool parameter_is_object_reference(const std::string& id) {
+    return id == "id"
+        || (id.size() > 3 && id.compare(id.size() - 3, 3, ".id") == 0);
+}
+
+void remap_parameters(std::vector<ParametricParameterValue>& parameters,
+                      const std::map<unsigned long, unsigned long>& id_map) {
+    for (ParametricParameterValue& parameter : parameters) {
+        if (!parameter_is_object_reference(parameter.id)
+            || !std::isfinite(parameter.value)
+            || parameter.value < 0.0) {
+            continue;
+        }
+        const auto found = id_map.find(static_cast<unsigned long>(parameter.value));
+        if (found != id_map.end()) {
+            parameter.value = static_cast<double>(found->second);
+        }
+    }
+}
+
+void copy_object_identity(const CAlfaObject& source, CAlfaObject& target) {
+    target.m_col = source.m_col;
+    target.m_selected = false;
+    target.m_id = source.m_id;
+    target.m_LayerID = source.m_LayerID;
+    target.SetName(source.GetName());
+    target.SetGroupName(source.GetGroupName());
+    target.CAlfaObject::SetVisible(source.IsVisible());
+    target.CAlfaObject::SetColor(source.GetColor());
+    target.SetMaterial(source.GetMaterial());
+    target.SetMaterialId(source.GetMaterialId());
+    target.SetParametricDefinition(
+        source.GetParametricToolId(), source.GetParametricParameters());
+}
+}
+
+bool Dom3DProjectSerializer::ImportPart(const QString& path,
+                                        CAlfaDoc& document,
+                                        const QString& requested_name,
+                                        Vec3 insertion_point,
+                                        Vec3 scale,
+                                        bool file_linked,
+                                        bool wrap_as_part,
+                                        QString& error) const {
+    CAlfaDoc imported;
+    QString room;
+    ProjectViewState view;
+    if (!Load(path, imported, room, view, error)) {
+        SetAlfaDoc(&document);
+        return false;
+    }
+    SetAlfaDoc(&document);
+
+    auto& source_objects = imported.GetObjects();
+    source_objects.erase(
+        std::remove_if(source_objects.begin(), source_objects.end(),
+            [](const CAlfaDoc::ObjectPtr& object) {
+                const auto* curve = dynamic_cast<const CPolyline*>(object.get());
+                return !object || (curve && curve->IsEmpty());
+            }),
+        source_objects.end());
+    if (source_objects.empty()) {
+        error = "The imported project does not contain any objects.";
+        return false;
+    }
+    const bool has_parametric_sketch = std::any_of(
+        source_objects.begin(), source_objects.end(),
+        [](const CAlfaDoc::ObjectPtr& object) {
+            return dynamic_cast<const CSmartLine*>(object.get()) != nullptr;
+        });
+    if (has_parametric_sketch
+        && (std::fabs(scale.x - scale.y) > 1.0e-6f
+            || std::fabs(scale.x - scale.z) > 1.0e-6f)) {
+        error = "Non-uniform X/Y/Z scale cannot preserve circular arcs in a parametric sketch. Use equal scale values.";
+        return false;
+    }
+
+    QString part_name = requested_name.trimmed();
+    if (part_name.isEmpty()) {
+        part_name = QFileInfo(path).completeBaseName();
+    }
+    const QString base_name = part_name;
+    int suffix = 2;
+    const auto part_name_exists = [&document](const QString& candidate) {
+        for (const auto& object : document.GetObjects()) {
+            const auto* part = dynamic_cast<const CPart*>(object.get());
+            if (part && QString::fromStdString(part->GetName()).compare(
+                    candidate, Qt::CaseInsensitive) == 0) {
+                return true;
+            }
+        }
+        return false;
+    };
+    while (part_name_exists(part_name)) {
+        part_name = QString("%1 %2").arg(base_name).arg(suffix++);
+    }
+
+    std::set<unsigned long> nested_ids;
+    for (const auto& object : source_objects) {
+        if (const auto* group = dynamic_cast<const CGroup*>(object.get())) {
+            nested_ids.insert(group->GetElementIds().begin(), group->GetElementIds().end());
+        }
+    }
+    std::vector<unsigned long> top_level_old_ids;
+    for (const auto& object : source_objects) {
+        if (object && nested_ids.count(object->m_id) == 0) {
+            top_level_old_ids.push_back(object->m_id);
+        }
+    }
+
+    std::map<unsigned long, unsigned long> material_map;
+    for (const Material& source_material : imported.GetMaterials()) {
+        if (source_material.id == 0) {
+            continue;
+        }
+        if (const Material* existing = document.FindMaterial(source_material.name, true)) {
+            material_map[source_material.id] = existing->id;
+        } else {
+            Material copy = source_material;
+            const unsigned long old_id = copy.id;
+            copy.id = 0;
+            material_map[old_id] = document.UpsertMaterial(std::move(copy)).id;
+        }
+    }
+
+    std::map<unsigned long, unsigned long> id_map;
+    for (auto& object : source_objects) {
+        const unsigned long old_id = object->m_id;
+        object->m_id = 0;
+        document.EnsureObjectId(*object);
+        id_map[old_id] = object->m_id;
+    }
+
+    for (auto& object : source_objects) {
+        if (auto* group = dynamic_cast<CGroup*>(object.get())) {
+            std::vector<unsigned long> remapped;
+            remapped.reserve(group->GetElementIds().size());
+            for (unsigned long id : group->GetElementIds()) {
+                const auto found = id_map.find(id);
+                if (found != id_map.end()) {
+                    remapped.push_back(found->second);
+                }
+            }
+            group->SetElementIds(std::move(remapped));
+        }
+        if (auto* clone = dynamic_cast<CAssociativeClone*>(object.get())) {
+            const auto found = id_map.find(clone->GetSourceId());
+            if (found != id_map.end()) {
+                clone->SetSourceId(found->second);
+            }
+        }
+        std::vector<ParametricParameterValue> definition = object->GetParametricParameters();
+        remap_parameters(definition, id_map);
+        object->SetParametricDefinition(object->GetParametricToolId(), std::move(definition));
+        if (auto* solid = dynamic_cast<CSolid*>(object.get())) {
+            for (int operation_index = 0;
+                 operation_index < solid->GetNumOperations(); ++operation_index) {
+                if (ParametricFunction* operation = solid->GetOperation(operation_index)) {
+                    remap_parameters(operation->Parameters, id_map);
+                }
+            }
+        }
+        const auto material = material_map.find(object->GetMaterialId());
+        if (material != material_map.end()) {
+            object->SetMaterialId(material->second);
+            if (const Material* saved = document.FindMaterial(material->second)) {
+                object->SetMaterial(*saved);
+            }
+        }
+    }
+
+    std::vector<unsigned long> top_level_ids;
+    top_level_ids.reserve(top_level_old_ids.size());
+    for (unsigned long old_id : top_level_old_ids) {
+        const auto found = id_map.find(old_id);
+        if (found != id_map.end()) {
+            top_level_ids.push_back(found->second);
+        }
+    }
+
+    auto& target_objects = document.GetObjects();
+    for (auto& object : source_objects) {
+        target_objects.push_back(std::move(object));
+    }
+    source_objects.clear();
+
+    CLayer* part_layer = document.AddLayer(
+        QString(wrap_as_part ? "Part:%1" : "Catalog Sketch:%1")
+            .arg(part_name).toStdString());
+    auto part = std::make_unique<CPart>(part_name.toStdString(), std::move(top_level_ids));
+    part->SetFileLinked(file_linked);
+    part->SetSourcePath(QFileInfo(path).absoluteFilePath().toStdString());
+    CPart* part_pointer = part.get();
+    if (wrap_as_part) {
+        document.AddObject(std::move(part));
+    }
+    if (part_layer) {
+        part_pointer->SetLayer(static_cast<unsigned long>(part_layer->ID()));
+    }
+
+    const Vec3 origin{};
+    if (scale.x > 1.0e-6f && std::fabs(scale.x - 1.0f) > 1.0e-6f) {
+        part_pointer->Scale(origin, {1.0f, 0.0f, 0.0f}, scale.x);
+    }
+    if (scale.y > 1.0e-6f && std::fabs(scale.y - 1.0f) > 1.0e-6f) {
+        part_pointer->Scale(origin, {0.0f, 1.0f, 0.0f}, scale.y);
+    }
+    if (scale.z > 1.0e-6f && std::fabs(scale.z - 1.0f) > 1.0e-6f) {
+        part_pointer->Scale(origin, {0.0f, 0.0f, 1.0f}, scale.z);
+    }
+    part_pointer->Translate(insertion_point);
+    if (!wrap_as_part) {
+        document.ClearSelection();
+        const auto& ids = part_pointer->GetElementIds();
+        if (!ids.empty()) {
+            document.SelectObjectById(ids.front(), SelectionAction::Replace);
+        }
+    }
+    return true;
+}
+
+bool Dom3DProjectSerializer::SaveSelection(
+        const QString& path,
+        CAlfaDoc& document,
+        const std::vector<size_t>& selected_indices,
+        const QString& active_room,
+        const ProjectViewState& view_state,
+        const QImage& thumbnail,
+        QString& error) const {
+    if (selected_indices.empty()) {
+        error = "Select an object to add to the catalog.";
+        return false;
+    }
+
+    const auto& objects = document.GetObjects();
+    std::map<unsigned long, size_t> indices_by_id;
+    for (size_t index = 0; index < objects.size(); ++index) {
+        if (objects[index]) {
+            indices_by_id[objects[index]->m_id] = index;
+        }
+    }
+    std::set<size_t> included;
+    std::vector<size_t> pending = selected_indices;
+    while (!pending.empty()) {
+        const size_t index = pending.back();
+        pending.pop_back();
+        if (index >= objects.size() || !objects[index]
+            || !included.insert(index).second) {
+            continue;
+        }
+        if (const auto* group = dynamic_cast<const CGroup*>(objects[index].get())) {
+            for (unsigned long id : group->GetElementIds()) {
+                const auto child = indices_by_id.find(id);
+                if (child != indices_by_id.end()) {
+                    pending.push_back(child->second);
+                }
+            }
+        }
+        auto add_parameter_dependencies = [&](const std::vector<ParametricParameterValue>& parameters) {
+            for (const auto& parameter : parameters) {
+                if (!parameter_is_object_reference(parameter.id)
+                    || parameter.value < 0.0) {
+                    continue;
+                }
+                const auto dependency = indices_by_id.find(
+                    static_cast<unsigned long>(parameter.value));
+                if (dependency != indices_by_id.end()) {
+                    pending.push_back(dependency->second);
+                }
+            }
+        };
+        add_parameter_dependencies(objects[index]->GetParametricParameters());
+        if (const auto* solid = dynamic_cast<const CSolid*>(objects[index].get())) {
+            for (const ParametricFunction* operation : solid->GetOperationTree()) {
+                if (operation) {
+                    add_parameter_dependencies(operation->Parameters);
+                }
+            }
+        }
+    }
+
+    CAlfaDoc subset;
+    subset.GetObjects().clear();
+    subset.GetMaterials() = document.GetMaterials();
+    for (size_t index : included) {
+        CAlfaDoc::ObjectPtr copy = objects[index]->Clone();
+        if (!copy) {
+            SetAlfaDoc(&document);
+            error = "Could not copy the selected catalog object.";
+            return false;
+        }
+        copy_object_identity(*objects[index], *copy);
+        subset.GetObjects().push_back(std::move(copy));
+    }
+    const bool saved = Save(
+        path, subset, active_room, view_state, thumbnail, error);
+    SetAlfaDoc(&document);
+    return saved;
 }

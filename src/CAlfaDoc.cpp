@@ -1,6 +1,7 @@
 #include "CAlfaDoc.h"
 
 #include "CGroup.h"
+#include "CPart.h"
 #include "CAssembled.h"
 #include "CKitchenCabinet.h"
 #include "SmartLine.h"
@@ -1550,6 +1551,11 @@ bool hit_test_bspline_screen(const CBSpline& spline,
 CAlfaDoc* GetAlfaDoc()
 {
     return g_current_alfa_doc;
+}
+
+void SetAlfaDoc(CAlfaDoc* document)
+{
+    g_current_alfa_doc = document;
 }
 
 struct CAlfaDoc::Snapshot {
@@ -5373,7 +5379,17 @@ bool CAlfaDoc::CreateLoftSurfaceFromSelectedBSplines() {
     return true;
 }
 
-size_t CAlfaDoc::CreatePlaneIntersectionCurves() {
+size_t CAlfaDoc::CreatePlaneIntersectionCurves(
+    std::string* error_message) {
+    const auto fail = [&](const char* message) -> size_t {
+        if (error_message) {
+            *error_message = message;
+        }
+        return 0;
+    };
+    if (error_message) {
+        error_message->clear();
+    }
     const CAlfaObject* plane_object = nullptr;
     const CAlfaObject* target = nullptr;
     gp_Pln plane;
@@ -5382,16 +5398,64 @@ size_t CAlfaDoc::CreatePlaneIntersectionCurves() {
             || !IsObjectVisible(*objects_[index])) continue;
         gp_Pln candidate;
         if (selected_plane(*objects_[index], candidate)) {
-            if (plane_object) return 0;
+            if (plane_object) {
+                return fail("Body Section by Plane: select only one Plane object");
+            }
             plane_object = objects_[index].get();
             plane = candidate;
         } else {
-            if (target) return 0;
+            if (target) {
+                return fail(
+                    "Body Section by Plane: select exactly one Plane and one target body");
+            }
             target = objects_[index].get();
         }
     }
-    if (!plane_object || !target) return 0;
+    if (!plane_object && !target) {
+        return fail(
+            "Body Section by Plane: select one Plane and one Solid body");
+    }
+    if (!plane_object) {
+        return fail(
+            "Body Section by Plane: no Plane selected");
+    }
+    if (!target) {
+        return fail(
+            "Body Section by Plane: no target body selected");
+    }
 
+    const gp_Pnt plane_location = plane.Location();
+    const gp_Dir plane_normal = plane.Axis().Direction();
+    return CreatePlaneIntersectionCurves(
+        target->m_id,
+        Vec3{static_cast<float>(plane_location.X()),
+             static_cast<float>(plane_location.Y()),
+             static_cast<float>(plane_location.Z())},
+        Vec3{static_cast<float>(plane_normal.X()),
+             static_cast<float>(plane_normal.Y()),
+             static_cast<float>(plane_normal.Z())},
+        error_message);
+}
+
+size_t CAlfaDoc::CreatePlaneIntersectionCurves(
+    unsigned long target_id,
+    Vec3 plane_origin,
+    Vec3 plane_normal,
+    std::string* error_message) {
+    const auto fail = [&](const char* message) -> size_t {
+        if (error_message) *error_message = message;
+        return 0;
+    };
+    if (error_message) error_message->clear();
+    plane_normal = normalize(plane_normal);
+    if (dot(plane_normal, plane_normal) <= 1.0e-12f) {
+        return fail("Body Section by Plane: the plane normal is invalid");
+    }
+    const CAlfaObject* target = FindObjectById(target_id);
+    if (!target) return fail("Body Section by Plane: the selected body no longer exists");
+    const gp_Pln plane(
+        gp_Pnt(plane_origin.x, plane_origin.y, plane_origin.z),
+        gp_Dir(plane_normal.x, plane_normal.y, plane_normal.z));
     std::vector<std::unique_ptr<CAlfaObject>> results;
     try {
         if (const auto* mesh = dynamic_cast<const CMesh3D*>(target)) {
@@ -5410,29 +5474,118 @@ size_t CAlfaDoc::CreatePlaneIntersectionCurves() {
                 results.push_back(std::move(polyline));
             }
         } else if (const auto* solid = dynamic_cast<const CSolid*>(target)) {
-            const auto* plane_surface =
-                dynamic_cast<const CSurfaceSet*>(plane_object);
-            if (!plane_surface || plane_surface->m_Shape.IsNull()
-                || solid->m_Shape.IsNull()) return 0;
+            if (solid->m_Shape.IsNull()) {
+                return fail(
+                    "Body Section by Plane: selected Solid has no geometry");
+            }
+            // Use the mathematical infinite plane. The visible Plane object's
+            // rectangle is only a viewport aid and must not limit a section.
             BRepAlgoAPI_Section section(
-                solid->m_Shape, plane_surface->m_Shape, Standard_False);
+                solid->m_Shape, plane, Standard_False);
             section.Approximation(Standard_True);
             section.Build();
-            if (!section.IsDone()) return 0;
+            if (!section.IsDone()) {
+                return fail(
+                    "Body Section by Plane: OpenCascade could not calculate the section");
+            }
             std::vector<std::unique_ptr<CBSpline>> curves =
                 nurbs_curves_from_shape(section.Shape(),
-                                        "Plane Intersection");
+                                        "Body Section");
             for (auto& curve : curves) results.push_back(std::move(curve));
         } else {
-            return 0;
+            return fail(
+                "Body Section by Plane: target must be a Solid or Mesh");
         }
     } catch (const Standard_Failure&) {
-        return 0;
+        return fail(
+            "Body Section by Plane: geometry calculation failed");
     }
 
     const size_t count = results.size();
+    if (count == 0) {
+        return fail(
+            "Body Section by Plane: the plane does not cross the selected body");
+    }
     for (auto& result : results) AddObject(std::move(result));
     return count;
+}
+
+bool CAlfaDoc::GetObjectPlane(unsigned long object_id,
+                              Vec3& origin,
+                              Vec3& normal,
+                              std::string* error_message) const {
+    if (error_message) error_message->clear();
+    const auto fail = [&](const char* message) {
+        if (error_message) *error_message = message;
+        return false;
+    };
+    const CAlfaObject* object = FindObjectById(object_id);
+    if (!object) return fail("Body Section by Plane: plane geometry no longer exists");
+
+    gp_Pln reference_plane;
+    if (selected_plane(*object, reference_plane)) {
+        const gp_Pnt location = reference_plane.Location();
+        const gp_Dir direction = reference_plane.Axis().Direction();
+        origin = {static_cast<float>(location.X()),
+                  static_cast<float>(location.Y()),
+                  static_cast<float>(location.Z())};
+        normal = {static_cast<float>(direction.X()),
+                  static_cast<float>(direction.Y()),
+                  static_cast<float>(direction.Z())};
+        return true;
+    }
+    if (const auto* sketch = dynamic_cast<const CSmartLine*>(object)) {
+        const SketchCoordinateSystem& system = sketch->GetCoordinateSystem();
+        origin = {static_cast<float>(system.origin.x),
+                  static_cast<float>(system.origin.y),
+                  static_cast<float>(system.origin.z)};
+        normal = normalize(Vec3{static_cast<float>(system.normal.x),
+                                static_cast<float>(system.normal.y),
+                                static_cast<float>(system.normal.z)});
+        return dot(normal, normal) > 1.0e-12f
+            || fail("Body Section by Plane: the sketch plane is invalid");
+    }
+    const auto* polyline = dynamic_cast<const CPolyline*>(object);
+    if (!polyline) {
+        return fail("Body Section by Plane: select a reference Plane, planar Sketch, or planar Polyline");
+    }
+    Vec3 locked_origin{};
+    Vec3 locked_normal{};
+    if (polyline->GetLockedPlane(locked_origin, locked_normal)) {
+        origin = locked_origin;
+        normal = normalize(locked_normal);
+        return dot(normal, normal) > 1.0e-12f;
+    }
+    const auto& points = polyline->GetPoints();
+    if (points.size() < 3) {
+        return fail("Body Section by Plane: the polyline needs at least three non-collinear points");
+    }
+    origin = {static_cast<float>(points.front().x),
+              static_cast<float>(points.front().y),
+              static_cast<float>(points.front().z)};
+    normal = {};
+    for (size_t index = 1; index + 1 < points.size(); ++index) {
+        const Vec3 first{static_cast<float>(points[index].x - points[0].x),
+                         static_cast<float>(points[index].y - points[0].y),
+                         static_cast<float>(points[index].z - points[0].z)};
+        const Vec3 second{static_cast<float>(points[index + 1].x - points[0].x),
+                          static_cast<float>(points[index + 1].y - points[0].y),
+                          static_cast<float>(points[index + 1].z - points[0].z)};
+        normal = normalize(cross(first, second));
+        if (dot(normal, normal) > 1.0e-12f) break;
+    }
+    if (dot(normal, normal) <= 1.0e-12f) {
+        return fail("Body Section by Plane: the polyline points are collinear");
+    }
+    for (const CPoint3d& point : points) {
+        const Vec3 offset{static_cast<float>(point.x) - origin.x,
+                          static_cast<float>(point.y) - origin.y,
+                          static_cast<float>(point.z) - origin.z};
+        if (std::abs(dot(offset, normal)) > 1.0e-4f) {
+            return fail("Body Section by Plane: the selected polyline is not planar");
+        }
+    }
+    return true;
 }
 
 size_t CAlfaDoc::CreateSurfaceIntersectionCurves() {
@@ -7635,6 +7788,13 @@ size_t CAlfaDoc::ResolveGroupSelectionIndex(size_t object_index) const {
             }
         }
         if (parent_index >= objects_.size()) {
+            break;
+        }
+        // A Part is the import/catalog boundary, not an extra assembly level.
+        // Keep a nested assembly or group independently selectable instead of
+        // promoting every hit in an imported collection to the outer Part.
+        if (dynamic_cast<const CPart*>(objects_[parent_index].get())
+            && dynamic_cast<const CGroup*>(objects_[resolved_index].get())) {
             break;
         }
         resolved_index = parent_index;

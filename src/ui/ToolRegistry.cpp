@@ -30,6 +30,7 @@
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
+#include <BRep_Builder.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepBuilderAPI_GTransform.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
@@ -50,6 +51,8 @@
 #include <BRepOffsetAPI_ThruSections.hxx>
 #include <BRepOffsetAPI_MakePipeShell.hxx>
 #include <BRepTools.hxx>
+#include <BRepBndLib.hxx>
+#include <Bnd_Box.hxx>
 #include <GeomAbs_SurfaceType.hxx>
 #include <GProp_GProps.hxx>
 #include <gp_Ax1.hxx>
@@ -65,6 +68,7 @@
 #include <TopTools_ListIteratorOfListOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <TopoDS_Face.hxx>
+#include <TopoDS_Compound.hxx>
 #include <TopoDS_Wire.hxx>
 #include <TopoDS.hxx>
 
@@ -72,6 +76,7 @@
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <set>
 
 namespace {
 bool is_cabinet_tool(const std::string& id) {
@@ -185,7 +190,7 @@ void create_plane(CAlfaDoc& document,
     }
     auto plane = std::make_unique<CSurfaceSet>(shape);
     plane->SetName("Plane");
-    plane->SetColor({0.72f, 0.42f, 0.86f});
+    plane->SetColor({0.42f, 0.56f, 0.90f});
     if (!plane->ReBuldMesh()) {
         return;
     }
@@ -2097,44 +2102,102 @@ void rebuild_box(CAlfaDoc& document,
     replace_selected_mesh(document, object_index, make_box(name, width, height, depth, -width * 0.5f, 0.0f, -depth * 0.5f, color));
 }
 
-bool sketch_wire(const CSmartLine& sketch, TopoDS_Wire& wire) {
-    if (!sketch.IsClosed()) {
-        return BuildOpenSketchProfileWire(sketch, wire);
+std::vector<CSmartLine> place_milling_pattern_on_facade(
+        const std::vector<const CSmartLine*>& sources,
+        const TopoDS_Shape& facade) {
+    if (sources.empty()) {
+        return {};
     }
-    TopoDS_Face face;
-    Vec3 normal{};
-    if (!BuildSketchProfileFace(sketch, face, normal)) {
-        return false;
+    const SketchCoordinateSystem& reference =
+        sources.front()->GetCoordinateSystem();
+    double local_min_x = std::numeric_limits<double>::max();
+    double local_max_x = std::numeric_limits<double>::lowest();
+    double local_min_y = std::numeric_limits<double>::max();
+    double local_max_y = std::numeric_limits<double>::lowest();
+    for (const CSmartLine* source : sources) {
+        for (const CPoint3d& world : source->GetProfilePointsWorld()) {
+            const CPoint3d local = sources.front()->WorldToLocal(world);
+            local_min_x = std::min(local_min_x, local.x);
+            local_max_x = std::max(local_max_x, local.x);
+            local_min_y = std::min(local_min_y, local.y);
+            local_max_y = std::max(local_max_y, local.y);
+        }
     }
-    wire = BRepTools::OuterWire(face);
-    return !wire.IsNull();
-}
+    if (local_min_x == std::numeric_limits<double>::max()) {
+        return {};
+    }
 
-TopoDS_Shape slx_sweep(const CSmartLine& section,
-                       const CSmartLine& contour) {
-    TopoDS_Wire section_wire;
-    TopoDS_Wire contour_wire;
-    if (!sketch_wire(section, section_wire)
-        || !sketch_wire(contour, contour_wire)
-        || !contour.IsClosed()) {
+    Bnd_Box bounds;
+    BRepBndLib::Add(facade, bounds);
+    if (bounds.IsVoid()) {
         return {};
     }
-    try {
-        BRepOffsetAPI_MakePipeShell sweep(contour_wire);
-        sweep.SetTransitionMode(BRepBuilderAPI_RoundCorner);
-        sweep.Add(section_wire, false, false);
-        if (!sweep.IsReady()) {
-            return {};
+    Standard_Real min_x = 0.0;
+    Standard_Real min_y = 0.0;
+    Standard_Real min_z = 0.0;
+    Standard_Real max_x = 0.0;
+    Standard_Real max_y = 0.0;
+    Standard_Real max_z = 0.0;
+    bounds.Get(min_x, min_y, min_z, max_x, max_y, max_z);
+
+    // Catalog guides are authored in local XY. Scale the whole composition
+    // uniformly to the usable facade rectangle, preserving its proportions
+    // and all distances between individual guides.
+    const double pattern_width = local_max_x - local_min_x;
+    const double pattern_height = local_max_y - local_min_y;
+    const double facade_width = max_x - min_x;
+    const double facade_height = max_z - min_z;
+    const double minimum_side = std::min(facade_width, facade_height);
+    const double inset = std::clamp(minimum_side * 0.12, 30.0, 70.0);
+    const double available_width = std::max(1.0, facade_width - 2.0 * inset);
+    const double available_height = std::max(1.0, facade_height - 2.0 * inset);
+    const double scale_x = pattern_width > 1.0e-9
+        ? available_width / pattern_width : 1.0;
+    const double scale_y = pattern_height > 1.0e-9
+        ? available_height / pattern_height : 1.0;
+    const double pattern_scale = std::max(
+        1.0e-6, std::min(scale_x, scale_y));
+
+    // Put the guide just outside the visible (-Y) face. The 0.1 mm overlap
+    // avoids a coincident-face boolean when the cutter profile starts at Y=0.
+    const CPoint3d target_reference_origin{
+        (min_x + max_x
+            - pattern_scale * (local_min_x + local_max_x)) * 0.5,
+        min_y - 0.1,
+        (min_z + max_z
+            - pattern_scale * (local_min_y + local_max_y)) * 0.5};
+
+    const auto dot = [](const CPoint3d& left, const CPoint3d& right) {
+        return left.x * right.x + left.y * right.y + left.z * right.z;
+    };
+    std::vector<CSmartLine> result;
+    result.reserve(sources.size());
+    for (const CSmartLine* source : sources) {
+        CSmartLine guide = source->MakeCopy();
+        guide.Scale(
+            Vec3{0.0f, 0.0f, 0.0f},
+            Vec3{0.0f, 0.0f, 1.0f},
+            static_cast<float>(pattern_scale));
+        const SketchCoordinateSystem& system = source->GetCoordinateSystem();
+        const CPoint3d source_origin_in_reference =
+            sources.front()->WorldToLocal(system.origin);
+        const CPoint3d target_origin{
+            target_reference_origin.x
+                + pattern_scale * source_origin_in_reference.x,
+            target_reference_origin.y,
+            target_reference_origin.z
+                + pattern_scale * source_origin_in_reference.y};
+        CPoint3d target_x_axis{
+            dot(system.x_axis, reference.x_axis),
+            0.0,
+            dot(system.x_axis, reference.y_axis)};
+        if (!guide.SetCoordinateSystem(
+                target_origin, target_x_axis, CPoint3d{0.0, -1.0, 0.0})) {
+            continue;
         }
-        sweep.Build();
-        if (!sweep.IsDone()) {
-            return {};
-        }
-        sweep.MakeSolid();
-        return sweep.Shape();
-    } catch (const Standard_Failure&) {
-        return {};
+        result.push_back(std::move(guide));
     }
+    return result;
 }
 
 void apply_slx_facade_features(
@@ -2156,33 +2219,50 @@ void apply_slx_facade_features(
             std::max(0.0, param(parameters, id, 0.0)));
         return dynamic_cast<const CSmartLine*>(document.FindObjectById(object_id));
     };
-    const CSmartLine* milling_profile = sketch_by_parameter("slx.profile.id");
-    const CSmartLine* panel_profile = sketch_by_parameter("slx.panel.id");
-    if (!milling_profile || !panel_profile) {
+    const CSmartLine* milling_profile =
+        sketch_by_parameter("slx.milling.profile.id");
+    if (!milling_profile) {
+        // Compatibility with documents created by the first SLX prototype.
+        milling_profile = sketch_by_parameter("slx.profile.id");
+    }
+    if (!milling_profile || !milling_profile->IsClosed()) {
         return;
     }
 
     std::vector<const CSmartLine*> contours;
-    for (int index = 1; index <= 8; ++index) {
-        const std::string id = "slx.contour." + std::to_string(index) + ".id";
-        const CSmartLine* contour = sketch_by_parameter(id.c_str());
-        if (contour && contour->IsClosed()) {
-            contours.push_back(contour);
+    const unsigned long pattern_id = static_cast<unsigned long>(
+        std::max(0.0, param(parameters, "slx.milling.guide.id", 0.0)));
+    std::vector<unsigned long> pending_ids{pattern_id};
+    std::set<unsigned long> visited_ids;
+    while (!pending_ids.empty()) {
+        const unsigned long object_id = pending_ids.back();
+        pending_ids.pop_back();
+        if (object_id == 0 || !visited_ids.insert(object_id).second) {
+            continue;
+        }
+        const CAlfaObject* object = document.FindObjectById(object_id);
+        if (const auto* guide = dynamic_cast<const CSmartLine*>(object)) {
+            contours.push_back(guide);
+        } else if (const auto* group = dynamic_cast<const CGroup*>(object)) {
+            pending_ids.insert(
+                pending_ids.end(),
+                group->GetElementIds().begin(), group->GetElementIds().end());
+        }
+    }
+    if (pattern_id == 0) {
+        for (int index = 1; index <= 8; ++index) {
+            const std::string id = "slx.contour." + std::to_string(index) + ".id";
+            const CSmartLine* contour = sketch_by_parameter(id.c_str());
+            if (contour
+                && std::find(contours.begin(), contours.end(), contour)
+                    == contours.end()) {
+                contours.push_back(contour);
+            }
         }
     }
     if (contours.empty()) {
         return;
     }
-
-    std::vector<TopoDS_Shape> milling_sweeps;
-    milling_sweeps.reserve(contours.size());
-    for (const CSmartLine* contour : contours) {
-        TopoDS_Shape sweep = slx_sweep(*milling_profile, *contour);
-        if (!sweep.IsNull()) {
-            milling_sweeps.push_back(std::move(sweep));
-        }
-    }
-    const TopoDS_Shape panel_sweep = slx_sweep(*panel_profile, *contours.front());
 
     for (std::unique_ptr<CAlfaObject>& part : parts) {
         auto* solid = dynamic_cast<CSolid*>(part.get());
@@ -2191,23 +2271,180 @@ void apply_slx_facade_features(
             || part->GetName().find("Handle") != std::string::npos) {
             continue;
         }
-        TopoDS_Shape result = solid->m_Shape;
-        for (const TopoDS_Shape& cutter : milling_sweeps) {
-            BRepAlgoAPI_Cut cut(result, cutter);
+        const TopoDS_Shape raw_facade = solid->m_Shape;
+        TopoDS_Shape result = raw_facade;
+        std::vector<CSmartLine> placed_guides =
+            place_milling_pattern_on_facade(contours, result);
+        std::vector<TopoDS_Shape> cutter_sweeps;
+        for (const CSmartLine& placed_guide : placed_guides) {
+            // Give OCCT the complete tool path. PipeShell then carries one
+            // corrected cutter section around the whole guide and creates the
+            // physical RoundCorner envelopes. Splitting the guide here would
+            // manufacture four unrelated end caps and lose the router radii.
+            TopoDS_Shape cutter = BuildSweptSolidShape(
+                *milling_profile, placed_guide, 2,
+                0.0, 0.0, 0.0, {}, {}, true);
+            if (!cutter.IsNull()) {
+                cutter_sweeps.push_back(std::move(cutter));
+            }
+        }
+        if (!cutter_sweeps.empty()) {
+            BRep_Builder builder;
+            TopoDS_Compound all_cutters;
+            builder.MakeCompound(all_cutters);
+            for (const TopoDS_Shape& cutter : cutter_sweeps) {
+                builder.Add(all_cutters, cutter);
+            }
+            BRepAlgoAPI_Cut cut(raw_facade, all_cutters);
+            cut.SetFuzzyValue(0.02);
+            cut.SetRunParallel(true);
             cut.Build();
-            if (cut.IsDone()) {
+            if (cut.IsDone() && !cut.Shape().IsNull()) {
+                cut.SimplifyResult(true, true, 1.0e-5);
                 result = cut.Shape();
             }
         }
-        if (!panel_sweep.IsNull()) {
-            BRepAlgoAPI_Fuse fuse(result, panel_sweep);
-            fuse.Build();
-            if (fuse.IsDone()) {
-                result = fuse.Shape();
+        solid->m_Shape = result;
+        solid->ReBuldMesh();
+    }
+}
+
+std::vector<const CSmartLine*> slx_milling_guides(
+    CAlfaDoc& document,
+    const std::vector<ToolParameter>& parameters) {
+    std::vector<const CSmartLine*> guides;
+    const auto sketch_by_parameter = [&](const char* id) -> const CSmartLine* {
+        const unsigned long object_id = static_cast<unsigned long>(
+            std::max(0.0, param(parameters, id, 0.0)));
+        return dynamic_cast<const CSmartLine*>(document.FindObjectById(object_id));
+    };
+    const unsigned long pattern_id = static_cast<unsigned long>(
+        std::max(0.0, param(parameters, "slx.milling.guide.id", 0.0)));
+    std::vector<unsigned long> pending_ids{pattern_id};
+    std::set<unsigned long> visited_ids;
+    while (!pending_ids.empty()) {
+        const unsigned long object_id = pending_ids.back();
+        pending_ids.pop_back();
+        if (object_id == 0 || !visited_ids.insert(object_id).second) {
+            continue;
+        }
+        const CAlfaObject* object = document.FindObjectById(object_id);
+        if (const auto* guide = dynamic_cast<const CSmartLine*>(object)) {
+            guides.push_back(guide);
+        } else if (const auto* group = dynamic_cast<const CGroup*>(object)) {
+            pending_ids.insert(pending_ids.end(),
+                group->GetElementIds().begin(), group->GetElementIds().end());
+        }
+    }
+    if (pattern_id == 0) {
+        for (int index = 1; index <= 8; ++index) {
+            const std::string id =
+                "slx.contour." + std::to_string(index) + ".id";
+            const CSmartLine* guide = sketch_by_parameter(id.c_str());
+            if (guide
+                && std::find(guides.begin(), guides.end(), guide)
+                    == guides.end()) {
+                guides.push_back(guide);
             }
         }
-        solid->m_Shape = std::move(result);
-        solid->ReBuldMesh();
+    }
+    return guides;
+}
+
+void apply_slx_catalog_handle(
+    CAlfaDoc& document,
+    const std::vector<ToolParameter>& parameters,
+    std::vector<std::unique_ptr<CAlfaObject>>& parts) {
+    const int handle_type = static_cast<int>(
+        std::lround(param(parameters, "handle_type", 0.0)));
+    if (handle_type != 3) {
+        return;
+    }
+    const unsigned long source_id = static_cast<unsigned long>(
+        std::max(0.0, param(parameters, "slx.handle.id", 0.0)));
+    const auto* source = dynamic_cast<const CSolid*>(
+        document.FindObjectById(source_id));
+    Vec3 source_min{};
+    Vec3 source_max{};
+    if (!source || source->m_Shape.IsNull()
+        || !source->GetBounds(source_min, source_max)) {
+        return;
+    }
+
+    const double source_lengths[] = {
+        source_max.x - source_min.x,
+        source_max.y - source_min.y,
+        source_max.z - source_min.z};
+    const int source_long_axis = static_cast<int>(std::distance(
+        source_lengths,
+        std::max_element(source_lengths, source_lengths + 3)));
+    const double source_long = std::max(1.0e-6, source_lengths[source_long_axis]);
+    const gp_Pnt source_center(
+        (source_min.x + source_max.x) * 0.5,
+        (source_min.y + source_max.y) * 0.5,
+        (source_min.z + source_max.z) * 0.5);
+
+    for (auto& part : parts) {
+        auto* target = dynamic_cast<CSolid*>(part.get());
+        if (!target || part->GetName().find("Handle") == std::string::npos) {
+            continue;
+        }
+        Vec3 target_min{};
+        Vec3 target_max{};
+        if (!target->GetBounds(target_min, target_max)) {
+            continue;
+        }
+        const double target_lengths[] = {
+            target_max.x - target_min.x,
+            target_max.y - target_min.y,
+            target_max.z - target_min.z};
+        const int target_long_axis = static_cast<int>(std::distance(
+            target_lengths,
+            std::max_element(target_lengths, target_lengths + 3)));
+        const double target_long = std::max(1.0, target_lengths[target_long_axis]);
+        const gp_Pnt target_center(
+            (target_min.x + target_max.x) * 0.5,
+            (target_min.y + target_max.y) * 0.5,
+            (target_min.z + target_max.z) * 0.5);
+
+        TopoDS_Shape placed = source->m_Shape;
+        gp_Trsf center;
+        center.SetTranslation(gp_Vec(
+            -source_center.X(), -source_center.Y(), -source_center.Z()));
+        placed = BRepBuilderAPI_Transform(placed, center, true).Shape();
+
+        gp_Trsf scale;
+        scale.SetScale(gp_Pnt(0.0, 0.0, 0.0), target_long / source_long);
+        placed = BRepBuilderAPI_Transform(placed, scale, true).Shape();
+
+        if (source_long_axis != target_long_axis) {
+            gp_Dir rotation_axis(0.0, 1.0, 0.0);
+            double angle = 0.0;
+            if ((source_long_axis == 0 && target_long_axis == 2)
+                || (source_long_axis == 2 && target_long_axis == 0)) {
+                angle = 3.14159265358979323846 * 0.5;
+            } else if ((source_long_axis == 0 && target_long_axis == 1)
+                       || (source_long_axis == 1 && target_long_axis == 0)) {
+                rotation_axis = gp_Dir(0.0, 0.0, 1.0);
+                angle = 3.14159265358979323846 * 0.5;
+            } else {
+                rotation_axis = gp_Dir(1.0, 0.0, 0.0);
+                angle = 3.14159265358979323846 * 0.5;
+            }
+            gp_Trsf rotation;
+            rotation.SetRotation(gp_Ax1(gp_Pnt(0.0, 0.0, 0.0), rotation_axis), angle);
+            placed = BRepBuilderAPI_Transform(placed, rotation, true).Shape();
+        }
+
+        gp_Trsf move;
+        move.SetTranslation(gp_Vec(
+            target_center.X(), target_center.Y(), target_center.Z()));
+        target->Clear();
+        target->m_Shape = BRepBuilderAPI_Transform(placed, move, true).Shape();
+        target->InitSurfaces();
+        target->ReBuldMesh();
+        target->SetMaterial(source->GetMaterial());
+        target->SetMaterialId(source->GetMaterialId());
     }
 }
 
@@ -2293,13 +2530,21 @@ void create_kitchen_cabinet(CAlfaDoc& document,
     const CSmartLine* panel_profile =
         definition.facade_style == KitchenCabinetFacadeStyle::Frame
             ? slx_sketch("slx.panel.id") : nullptr;
+    const CSmartLine* milling_profile =
+        definition.facade_style == KitchenCabinetFacadeStyle::Milled
+            ? slx_sketch("slx.milling.profile.id") : nullptr;
+    const std::vector<const CSmartLine*> milling_guides =
+        definition.facade_style == KitchenCabinetFacadeStyle::Milled
+            ? slx_milling_guides(document, parameters)
+            : std::vector<const CSmartLine*>{};
     auto parts = CKitchenCabinet::BuildParts(
-        definition, frame_profile, panel_profile);
+        definition, frame_profile, panel_profile,
+        milling_profile, milling_guides);
     if (parts.empty()) {
         return;
     }
-    apply_slx_facade_features(document, parameters, parts);
     assign_furniture_materials(document, parts, parameters, "cabinet");
+    apply_slx_catalog_handle(document, parameters, parts);
     std::vector<unsigned long> ids;
     ids.reserve(parts.size());
     for (auto& part : parts) {
@@ -2335,13 +2580,21 @@ void rebuild_kitchen_cabinet(CAlfaDoc& document,
     const CSmartLine* panel_profile =
         definition.facade_style == KitchenCabinetFacadeStyle::Frame
             ? slx_sketch("slx.panel.id") : nullptr;
+    const CSmartLine* milling_profile =
+        definition.facade_style == KitchenCabinetFacadeStyle::Milled
+            ? slx_sketch("slx.milling.profile.id") : nullptr;
+    const std::vector<const CSmartLine*> milling_guides =
+        definition.facade_style == KitchenCabinetFacadeStyle::Milled
+            ? slx_milling_guides(document, parameters)
+            : std::vector<const CSmartLine*>{};
     auto replacements = CKitchenCabinet::BuildParts(
-        definition, frame_profile, panel_profile);
+        definition, frame_profile, panel_profile,
+        milling_profile, milling_guides);
     if (replacements.empty()) {
         return;
     }
-    apply_slx_facade_features(document, parameters, replacements);
     assign_furniture_materials(document, replacements, parameters, "cabinet");
+    apply_slx_catalog_handle(document, parameters, replacements);
     const unsigned long cabinet_id = cabinet->m_id;
     const std::vector<unsigned long> old_ids = cabinet->GetElementIds();
 
@@ -2425,7 +2678,12 @@ void rebuild_kitchen_cabinet(CAlfaDoc& document,
             replacement->SetMaterial(old_part.GetMaterial());
             replacement->SetMaterialId(old_part.GetMaterialId());
         }
-        copy_solid_surface_appearance(old_part, *replacement);
+        const bool catalog_handle =
+            static_cast<int>(param(parameters, "handle_type", 0.0)) == 3
+            && replacement->GetName().find("Handle") != std::string::npos;
+        if (!catalog_handle) {
+            copy_solid_surface_appearance(old_part, *replacement);
+        }
         replacement->SetVisible(old_part.IsVisible());
 
         const bool handle_has_facade_material =
@@ -3768,7 +4026,7 @@ ToolRegistry::ToolRegistry() {
 
     for (const auto& curve_construction :
          std::vector<std::pair<std::string, std::string>>{
-             {"PlaneIntersection", "Plane Intersection"},
+             {"PlaneIntersection", "Body Section by Plane"},
              {"SurfaceIntersection", "Surface Intersection"},
              {"ProjectCurveToSurface", "Project Curve"},
              {"ExtractSurfaceEdge", "Extract Edge"}}) {
@@ -4161,8 +4419,19 @@ ToolRegistry::ToolRegistry() {
     cabinet_slx_parameters.insert(
         cabinet_slx_parameters.begin(),
         {
-            {"slx.profile.id", "Profile Sketch ID", 0.0, 0.0, 4294967295.0, 1.0},
-            {"slx.panel.id", "Panel Sketch ID", 0.0, 0.0, 4294967295.0, 1.0},
+            {"slx.profile.id", "Frame Profile", 0.0, 0.0, 4294967295.0, 1.0,
+                ToolParameterType::CatalogSketch},
+            {"slx.panel.id", "Panel Profile", 0.0, 0.0, 4294967295.0, 1.0,
+                ToolParameterType::CatalogSketch},
+            {"slx.milling.profile.id", "Cutter Profile", 0.0, 0.0, 4294967295.0, 1.0,
+                ToolParameterType::CatalogSketch},
+            {"slx.milling.guide.id", "Milling Pattern", 0.0, 0.0, 4294967295.0, 1.0,
+                ToolParameterType::CatalogSketch},
+            {"handle_type", "Handle Type", 0.0, 0.0, 3.0, 1.0,
+                ToolParameterType::Combo,
+                {"Shape", "Modern", "Round", "From Catalog"}},
+            {"slx.handle.id", "Catalog Handle", 0.0, 0.0, 4294967295.0, 1.0,
+                ToolParameterType::CatalogProduct},
             {"slx.contour.1.id", "Milling Contour 1 ID", 0.0, 0.0, 4294967295.0, 1.0},
             {"slx.contour.2.id", "Milling Contour 2 ID", 0.0, 0.0, 4294967295.0, 1.0},
             {"slx.contour.3.id", "Milling Contour 3 ID", 0.0, 0.0, 4294967295.0, 1.0},

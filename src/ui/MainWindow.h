@@ -81,6 +81,7 @@ private:
     void RequestObjectColor();
     void EditSelectedObjectColor();
     void ShowLayerProperties();
+    void ShowFacadeManager();
     void ChangeSelectedObjectLayer();
     void CreateSelectedGroup();
     void UngroupSelectedGroup();
@@ -89,6 +90,9 @@ private:
     void CreateAssociativeClone();
     void JoinSelectedSurfaces();
     void CreatePlaneIntersection();
+    void BeginBodySectionPlaneInput();
+    void CompleteBodySectionByPlane(Vec3 origin, Vec3 normal);
+    bool CompleteBodySectionPlaneObjectPick();
     void CreateSurfaceIntersection();
     void ProjectCurveToSurface();
     void ExtractSurfaceEdge();
@@ -180,12 +184,15 @@ private:
     void SaveProjectAs();
     QString SelectProjectToOpen();
     QImage CaptureProjectThumbnail() const;
+    QImage CaptureSelectionThumbnail();
     void UpdateWindowTitle();
     void ShowPreferences();
     void ShowLightingDialog();
     void ImportFile();
+    void ShowCatalogDialog();
+    void AddSelectionToCatalog();
     void AddReferenceImage(ReferenceImageAxis axis);
-    bool ImportFileFromPath(const QString& path);
+    bool ImportFileFromPath(const QString& path, bool catalog_sketch = false);
     void HandleDroppedFiles(const QStringList& paths);
     void ExportFile();
     void DuplicateSelectedObject();
@@ -331,6 +338,9 @@ private:
     bool plane_three_point_method_selected_ = false;
     std::vector<CPoint3d> plane_three_point_picks_;
     bool pending_reference_plane_face_pick_ = false;
+    unsigned long pending_body_section_target_id_ = 0;
+    bool pending_body_section_plane_face_pick_ = false;
+    bool pending_body_section_plane_object_pick_ = false;
     bool pending_trim_plane_face_pick_ = false;
     unsigned long pending_trim_plane_curve_id_ = 0;
     bool object_color_pick_pending_ = false;

@@ -5,6 +5,7 @@
 #include "../CBSpline.h"
 #include "../BezierSpline.h"
 #include "../CPolyline.h"
+#include "../CPart.h"
 #include "../SmartLine.h"
 #include "../solid/Solid.h"
 #include "MaterialDrag.h"
@@ -2842,8 +2843,20 @@ void OpenGLViewport::mouseDoubleClickEvent(QMouseEvent* event) {
         return depth > 0.0f && renderer_.WorldToScreen(world, camera_, orthographic_projection_, width(), height(), screen);
     };
 
-    bool selected_object = document_->SelectSolidMeshAtScreen(screen_point, project_world, SelectionAction::Replace)
-        || document_->SelectMeshAtScreen(screen_point, project_world, SelectionAction::Replace);
+    // A nested assembly remains the editable/movable unit. Only a simple solid
+    // directly wrapped by a catalog Part needs drilling through that wrapper.
+    CSolid* hit_solid = document_->FindSolidAtScreen(screen_point, project_world);
+    bool selected_object = document_->SelectSolidMeshAtScreen(
+        screen_point, project_world, SelectionAction::Replace);
+    if (selected_object && hit_solid
+        && dynamic_cast<CPart*>(document_->GetSelectedObject())) {
+        selected_object = document_->SelectObjectById(
+            hit_solid->m_id, SelectionAction::Replace);
+    }
+    if (!selected_object) {
+        selected_object = document_->SelectMeshAtScreen(
+            screen_point, project_world, SelectionAction::Replace);
+    }
     if (!selected_object) {
         CurvePoint scene_point{};
         selected_object = renderer_.ScreenToFloor(event->pos().x(), event->pos().y(), width(), height(), camera_, orthographic_projection_, scene_point)
