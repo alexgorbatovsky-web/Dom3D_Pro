@@ -14,6 +14,7 @@
 #include "../Dom3DProjectSerializer.h"
 #include "../IgesIO.h"
 #include "../StepIO.h"
+#include "../ExchangeIO.h"
 #include <QIcon>
 #include <QMainWindow>
 #include <QStringList>
@@ -40,10 +41,12 @@ class QPushButton;
 class QSlider;
 class QTabBar;
 class QTimer;
+class QLabel;
 class QTreeWidget;
 class QTreeWidgetItem;
 class QToolBar;
 class QToolButton;
+class CDrawingText;
 enum class ReferenceImageAxis;
 
 class MainWindow : public QMainWindow {
@@ -51,6 +54,7 @@ class MainWindow : public QMainWindow {
 
 public:
     explicit MainWindow(QWidget* parent = nullptr);
+    void CompleteStartup(const QString& startup_project_path = {});
 
 private:
     void CreateActions();
@@ -80,6 +84,11 @@ private:
     void ShowViewportPopupMenu(const QPoint& global_position);
     void RequestObjectColor();
     void EditSelectedObjectColor();
+    void ShowLineWeightDialog();
+    void ShowLineStyleDialog();
+    void BeginCreateDrawingText();
+    bool EditDrawingText(CDrawingText& text, bool creating = false);
+    void CompleteDrawingTextPlacement(CPoint3d point);
     void ShowLayerProperties();
     void ShowFacadeManager();
     void ChangeSelectedObjectLayer();
@@ -166,9 +175,13 @@ private:
     void UpdateSolidBodyDimensions();
     bool ActiveParametricObjectIsAssembly() const;
     bool TryStartLiveEdgeToolFromSelection();
+    void ScheduleLiveFilletRebuild(bool immediate = false);
+    void StartPendingLiveFilletRebuild();
+    void InvalidateLiveFilletRebuild();
     bool TryStartLivePolylineExtrudeFromSelection();
     bool TryStartLivePolylineRevolveFromSelection();
     void ClearActiveProperties();
+    bool ApplyActiveCabinetProperties();
     void AcceptActiveProperties();
     void CancelActiveProperties();
     void ShowPropertyPanelAtCursor(const QString& title);
@@ -184,10 +197,12 @@ private:
     void SaveProjectAs();
     QString SelectProjectToOpen();
     QImage CaptureProjectThumbnail() const;
-    QImage CaptureSelectionThumbnail();
+    QImage CaptureSelectionThumbnail(
+        const std::vector<size_t>& selected_indices);
     void UpdateWindowTitle();
     void ShowPreferences();
     void ShowLightingDialog();
+    void ShowBlenderCyclesDialog();
     void ImportFile();
     void ShowCatalogDialog();
     void AddSelectionToCatalog();
@@ -236,7 +251,8 @@ private:
         ExtractSurfaceEdge,
         FourSplineSurface,
         TwoRailSweepSurface,
-        TwoRailSweepSolid
+        TwoRailSweepSolid,
+        ChangeLayer
     };
 
     enum class PendingPreciseTransform {
@@ -288,6 +304,12 @@ private:
     QLabel* projection_status_label_ = nullptr;
     Material selected_library_material_;
     bool has_selected_library_material_ = false;
+    QString pending_material_parameter_id_;
+    bool drawing_text_placement_pending_ = false;
+    std::string pending_drawing_text_;
+    double pending_drawing_text_height_ = 20.0;
+    double pending_drawing_text_rotation_ = 0.0;
+    std::string pending_drawing_text_font_ = "Arial";
     std::function<void()> refresh_material_library_;
     std::vector<QAction*> tool_actions_;
     std::vector<QAbstractButton*> tool_buttons_;
@@ -312,6 +334,10 @@ private:
     ThreeDSIO three_ds_io_;
     IgesIO iges_io_;
     StepIO step_io_;
+    DxfIO dxf_io_;
+    EpsIO eps_io_;
+    HpglIO hpgl_io_;
+    StlIO stl_io_;
     ToolRegistry tool_registry_;
     ActiveParametricObject active_parametric_object_;
     ActiveParametricObject solid_body_dimension_object_;
@@ -319,6 +345,7 @@ private:
     int solid_body_selected_operation_index_ = 0;
     bool solid_body_all_dimensions_ = false;
     bool active_parametric_edit_existing_ = false;
+    bool active_cabinet_parameters_dirty_ = false;
     bool solid_body_edit_mode_ = false;
     bool solid_body_dimensions_modified_ = false;
     bool reopen_solid_editor_after_properties_ = false;
@@ -347,6 +374,13 @@ private:
     bool low_poly_pick_pending_ = false;
     bool edge_tool_started_from_face_quick_menu_ = false;
     QTimer* furniture_animation_timer_ = nullptr;
+    QTimer* live_fillet_update_timer_ = nullptr;
+    bool live_fillet_build_running_ = false;
+    bool live_fillet_build_pending_ = false;
+    unsigned long long live_fillet_build_generation_ = 0;
+    QLabel* cursor_x_label_ = nullptr;
+    QLabel* cursor_y_label_ = nullptr;
+    QLabel* cursor_z_label_ = nullptr;
     ActiveParametricObject furniture_animation_object_;
     int furniture_animation_frame_ = 0;
     double furniture_animation_start_value_ = 0.0;

@@ -12,6 +12,9 @@
 #include <utility>
 #include <vector>
 
+#include <TopoDS_Edge.hxx>
+#include <TopoDS_Shape.hxx>
+
 class CSolid;
 class CAlfaDoc;
 class CSmartLine;
@@ -39,6 +42,15 @@ public:
     using ObjectList = std::vector<ObjectPtr>;
 
     struct Snapshot;
+    struct LiveFilletBuildRequest {
+        // Identity of the live source shape. The background builder must never
+        // read or modify this shape; it is used only when applying the result.
+        TopoDS_Shape source_shape;
+        // Private deep copy owned by the build request.
+        TopoDS_Shape base_shape;
+        std::vector<TopoDS_Edge> edges;
+        size_t object_index = 0;
+    };
 
     CAlfaDoc();
     ~CAlfaDoc();
@@ -301,7 +313,7 @@ public:
     bool DeleteSelectedPoint();
     bool MoveSelectedPoint(CurvePoint point);
     bool MoveSelectedPoint(CPoint3d point);
-    bool MoveSelectedCurvePoints(Vec3 delta);
+    bool MoveSelectedCurvePoints(Vec3 delta, bool constrain_to_xy = false);
     bool RotateSelectedCurvePoints(Vec3 center, Vec3 axis, float angle);
     bool ScaleSelectedCurvePoints(Vec3 center, Vec3 axis, float factor);
     bool ApplyFilletToSelectedPolylinePoint(double radius);
@@ -324,6 +336,7 @@ public:
     bool CommitRotateSelectedSolids(Vec3 center, Vec3 axis, float angle);
     bool CommitScaleSelectedSolids(Vec3 center, Vec3 axis, float factor);
     bool CommitUniformScaleSelectedSolids(Vec3 center, float factor);
+    std::vector<unsigned long> GetSelectedTransformRootIds() const;
     bool ApplyBooleanToSolids(size_t body_index, size_t tool_index, BooleanOperation operation);
     bool ApplyFilletToSelectedEdge(double radius);
     bool ApplyFilletToAllSelectedSolidEdges(double radius);
@@ -331,7 +344,21 @@ public:
     bool HasLiveFillet() const;
     std::vector<std::pair<int, int>> GetLiveFilletEdgeRefs() const;
     std::vector<int> GetLiveFilletCreatedSurfaceIndices() const;
+    bool GetLiveFilletEndPoints(CPoint3d& start, CPoint3d& end) const;
+    std::vector<CPoint3d> GetLiveFilletPoints(size_t count) const;
     bool UpdateLiveFillet(double radius);
+    bool UpdateLiveFillet(double start_radius, double end_radius);
+    bool UpdateLiveFillet(const std::vector<double>& radius_law);
+    bool CreateLiveFilletBuildRequest(LiveFilletBuildRequest& request);
+    static bool BuildLiveFilletShape(
+        const LiveFilletBuildRequest& request,
+        const std::vector<double>& radius_law,
+        TopoDS_Shape& result_shape,
+        std::vector<int>& created_surface_indices);
+    bool ApplyLiveFilletShape(
+        const LiveFilletBuildRequest& request,
+        const TopoDS_Shape& result_shape,
+        std::vector<int> created_surface_indices);
     void FinishLiveFillet();
     void CancelLiveFillet();
     bool BeginLiveChamferSelectedEdges();

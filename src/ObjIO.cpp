@@ -149,6 +149,12 @@ std::string material_export_key(const Material& material) {
         << '|' << material.color_texture_path
         << '|' << material.light_texture_path
         << '|' << material.bump_texture_path;
+    key << '|' << material.normal_texture_path
+        << '|' << material.roughness_texture_path
+        << '|' << material.metallic_texture_path
+        << '|' << material.displacement_texture_path
+        << '|' << material.roughness << '|' << material.metallic
+        << '|' << material.coat_weight << '|' << material.coat_roughness;
     return key.str();
 }
 
@@ -209,9 +215,23 @@ void write_mtl_material(std::ostream& stream,
         export_texture(material.light_texture_path, texture_directory, material_name, "light");
     const std::string bump_texture =
         export_texture(material.bump_texture_path, texture_directory, material_name, "bump");
+    const std::string normal_texture =
+        export_texture(material.normal_texture_path, texture_directory, material_name, "normal");
+    const std::string roughness_texture =
+        export_texture(material.roughness_texture_path, texture_directory, material_name, "roughness");
+    const std::string metallic_texture =
+        export_texture(material.metallic_texture_path, texture_directory, material_name, "metallic");
+    const std::string displacement_texture =
+        export_texture(material.displacement_texture_path, texture_directory, material_name, "displacement");
     if (!color_texture.empty()) stream << "map_Kd " << color_texture << "\n";
     if (!light_texture.empty()) stream << "map_Ke " << light_texture << "\n";
     if (!bump_texture.empty()) stream << "map_Bump " << bump_texture << "\n";
+    if (!normal_texture.empty()) stream << "norm " << normal_texture << "\n";
+    if (!roughness_texture.empty()) stream << "map_Pr " << roughness_texture << "\n";
+    else stream << "Pr " << std::clamp(material.roughness, 0.0f, 1.0f) << "\n";
+    if (!metallic_texture.empty()) stream << "map_Pm " << metallic_texture << "\n";
+    else stream << "Pm " << std::clamp(material.metallic, 0.0f, 1.0f) << "\n";
+    if (!displacement_texture.empty()) stream << "disp " << displacement_texture << "\n";
     stream << "\n";
 }
 
@@ -359,8 +379,17 @@ bool load_mtl(const std::filesystem::path& path,
         } else if (current && keyword == "Tr") {
             float value = 0.0f;
             if (stream >> value) current->alpha = 1.0f - std::clamp(value, 0.0f, 1.0f);
+        } else if (current && (keyword == "Pr" || keyword == "Pm")) {
+            float value = 0.0f;
+            if (stream >> value) {
+                if (keyword == "Pr") current->roughness = std::clamp(value, 0.0f, 1.0f);
+                else current->metallic = std::clamp(value, 0.0f, 1.0f);
+            }
         } else if (current && (keyword == "map_Kd" || keyword == "map_Ke"
-                               || keyword == "map_Bump" || keyword == "map_bump" || keyword == "bump")) {
+                               || keyword == "map_Bump" || keyword == "map_bump"
+                               || keyword == "bump" || keyword == "norm"
+                               || keyword == "map_Pr" || keyword == "map_Pm"
+                               || keyword == "disp")) {
             std::string texture;
             std::getline(stream, texture);
             texture = unquoted(texture);
@@ -374,6 +403,10 @@ bool load_mtl(const std::filesystem::path& path,
             const std::string resolved = texture_path.lexically_normal().string();
             if (keyword == "map_Kd") current->color_texture_path = resolved;
             else if (keyword == "map_Ke") current->light_texture_path = resolved;
+            else if (keyword == "norm") current->normal_texture_path = resolved;
+            else if (keyword == "map_Pr") current->roughness_texture_path = resolved;
+            else if (keyword == "map_Pm") current->metallic_texture_path = resolved;
+            else if (keyword == "disp") current->displacement_texture_path = resolved;
             else current->bump_texture_path = resolved;
         }
     }

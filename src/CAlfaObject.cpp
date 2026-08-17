@@ -1,4 +1,5 @@
 #include "CAlfaObject.h"
+#include "OpenGLCompat.h"
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -8,6 +9,8 @@
 #endif
 
 #include <algorithm>
+#include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -27,6 +30,13 @@ Color unpack_color(unsigned long color) {
         static_cast<float>((color >> 8) & 0xffUL) / 255.0f,
         static_cast<float>(color & 0xffUL) / 255.0f
     };
+}
+
+std::string upper_ascii(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::toupper(ch));
+    });
+    return value;
 }
 }
 
@@ -165,6 +175,18 @@ bool EditMaterialNumbers(HWND parent_window, Material& material) {
 }
 }
 
+Color CAlfaObject::SelectedColor{
+    254.0f / 255.0f,
+    254.0f / 255.0f,
+    254.0f / 255.0f};
+
+void CAlfaObject::UpdateSelectedColorFromBackground(Color background) {
+    SelectedColor = {
+        1.0f - std::clamp(background.r, 0.0f, 1.0f),
+        1.0f - std::clamp(background.g, 0.0f, 1.0f),
+        1.0f - std::clamp(background.b, 0.0f, 1.0f)};
+}
+
 
 
 
@@ -252,6 +274,66 @@ Color CAlfaObject::GetColor() const {
 
 void CAlfaObject::SetColor(Color color) {
     m_col = pack_color(color);
+}
+
+double CAlfaObject::GetLineWidth() const {
+    return line_width_;
+}
+
+void CAlfaObject::SetLineWidth(double width) {
+    if (std::isfinite(width) && width > 0.0) {
+        line_width_ = std::clamp(width, 0.01, 25.0);
+    }
+}
+
+const std::string& CAlfaObject::GetLineStyle() const {
+    return line_style_;
+}
+
+void CAlfaObject::SetLineStyle(std::string style) {
+    style = upper_ascii(std::move(style));
+    line_style_ = style.empty() ? "CONTINUOUS" : std::move(style);
+}
+
+void CAlfaObject::ApplyLineAppearance(
+    bool selected, float selected_width, float default_width) const {
+    const float object_width = static_cast<float>(
+        std::max(1.0, line_width_ * 4.0));
+    glLineWidth(selected ? std::max(selected_width, object_width + 2.0f)
+                         : (line_width_ == 0.5 ? default_width : object_width));
+    if (selected || line_style_ == "CONTINUOUS" || line_style_ == "BYLAYER"
+        || line_style_ == "BYBLOCK") {
+        glDisable(GL_LINE_STIPPLE);
+        return;
+    }
+    GLushort pattern = 0xffff;
+    GLint factor = 1;
+    if (line_style_ == "HIDDEN" || line_style_ == "DASHED") {
+        pattern = 0x0f0f;
+    } else if (line_style_ == "CENTER") {
+        pattern = 0x1c47;
+        factor = 2;
+    } else if (line_style_ == "PHANTOM") {
+        pattern = 0x5c47;
+        factor = 2;
+    } else if (line_style_ == "DASHDOT") {
+        pattern = 0x1c1f;
+    } else if (line_style_ == "DOT" || line_style_ == "DOTTED") {
+        pattern = 0x1111;
+    } else if (line_style_ == "DIVIDE" || line_style_ == "DIVIDE2") {
+        pattern = 0x2525;
+    }
+    if (pattern == 0xffff) {
+        glDisable(GL_LINE_STIPPLE);
+    } else {
+        glEnable(GL_LINE_STIPPLE);
+        glLineStipple(factor, pattern);
+    }
+}
+
+void CAlfaObject::ResetLineAppearance() const {
+    glDisable(GL_LINE_STIPPLE);
+    glLineWidth(1.0f);
 }
 
 Material CAlfaObject::GetMaterial() const {

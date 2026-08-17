@@ -7,6 +7,7 @@
 #include "../ageom.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -442,21 +443,57 @@ void CSplineCurve::Draw(float r,
     } else {
         const int steps = std::max(1, steps_per_segment);
         const double s_max = static_cast<double>(m_n - 1);
-        CPoint3d p;
+        std::uint64_t geometry_hash = 1469598103934665603ULL;
+        const auto mix = [&geometry_hash](const double value) {
+            std::uint64_t bits = 0;
+            static_assert(sizeof(bits) == sizeof(value));
+            std::memcpy(&bits, &value, sizeof(bits));
+            geometry_hash ^= bits;
+            geometry_hash *= 1099511628211ULL;
+        };
+        geometry_hash ^= static_cast<std::uint64_t>(m_n);
+        geometry_hash *= 1099511628211ULL;
+        for (int i = 0; i < m_n; ++i) {
+            mix(P(i)->x);
+            mix(P(i)->y);
+            mix(P(i)->z);
+        }
 
-        glBegin(GL_LINE_STRIP);
-        for (int seg = 0; seg < m_n - 1; ++seg) {
-            for (int step = 0; step < steps; ++step) {
-                const double s = static_cast<double>(seg) + static_cast<double>(step) / static_cast<double>(steps);
-                if (GetPoint(s, &p)) {
-                    glVertex3f(static_cast<float>(p.x), static_cast<float>(p.y), static_cast<float>(p.z));
+        if (m_DrawGeometryHash != geometry_hash
+            || m_DrawStepsPerSegment != steps
+            || m_DrawVertices.empty()) {
+            m_DrawVertices.clear();
+            m_DrawVertices.reserve(
+                static_cast<size_t>((m_n - 1) * steps + 1) * 3);
+            CPoint3d p;
+            const auto append = [this](const CPoint3d& point) {
+                m_DrawVertices.push_back(static_cast<float>(point.x));
+                m_DrawVertices.push_back(static_cast<float>(point.y));
+                m_DrawVertices.push_back(static_cast<float>(point.z));
+            };
+            for (int seg = 0; seg < m_n - 1; ++seg) {
+                for (int step = 0; step < steps; ++step) {
+                    const double s = static_cast<double>(seg)
+                        + static_cast<double>(step) / static_cast<double>(steps);
+                    if (GetPoint(s, &p)) {
+                        append(p);
+                    }
                 }
             }
+            if (GetPoint(s_max, &p)) {
+                append(p);
+            }
+            m_DrawGeometryHash = geometry_hash;
+            m_DrawStepsPerSegment = steps;
         }
-        if (GetPoint(s_max, &p)) {
-            glVertex3f(static_cast<float>(p.x), static_cast<float>(p.y), static_cast<float>(p.z));
+
+        if (!m_DrawVertices.empty()) {
+            glEnableClientState(GL_VERTEX_ARRAY);
+            glVertexPointer(3, GL_FLOAT, 0, m_DrawVertices.data());
+            glDrawArrays(GL_LINE_STRIP, 0,
+                static_cast<GLsizei>(m_DrawVertices.size() / 3));
+            glDisableClientState(GL_VERTEX_ARRAY);
         }
-        glEnd();
     }
 
     if (draw_points) {

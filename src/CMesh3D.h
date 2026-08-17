@@ -24,6 +24,10 @@ struct ViewportLightingSettings {
     float shininess_scale = 1.0f;
     float rim = 0.16f;
     float gamma = 0.88f;
+    bool environment_enabled = true;
+    std::string environment_path;
+    float environment_strength = 1.0f;
+    float environment_rotation_degrees = 0.0f;
 };
 
 struct Edge {
@@ -101,6 +105,7 @@ public:
 
     CMesh3D();
     explicit CMesh3D(std::string name);
+    ~CMesh3D() override;
 
     const std::vector<Vec3>& GetVertices() const;
     std::vector<Vec3>& GetVertices();
@@ -155,6 +160,7 @@ public:
                                      bool orthographic);
     static const ViewportLightingSettings& GetLightingSettings();
     static void ReloadLightingSettings();
+    static std::string DefaultEnvironmentPath();
     bool HitTest(CurvePoint point, float tolerance) const override;
     bool HitTestMeshScreen(DomPoint point,
                            const std::function<bool(Vec3, DomPoint&, float&)>& project_world,
@@ -190,6 +196,15 @@ public:
     bool SplitFaceByVar11(int f, int v1, int v2, std::vector<int> Pnt, CPolyline* pLine);
 
 private:
+    struct GpuVertex {
+        float position[3]{};
+        float normal[3]{};
+        float uv[2]{};
+    };
+
+    void InvalidateGpuCache() const;
+    void ReleaseGpuCache() const;
+    bool EnsureGpuCache() const;
     bool IsValidFace(const Face& face, size_t vertex_count) const;
     Vec3 FaceNormal(const Face& face) const;
     bool PointInFace2d(CurvePoint point, const Face& face) const;
@@ -199,6 +214,12 @@ private:
     std::vector<UV> uvs_;
     std::vector<Vec3> normals_;
     std::vector<Face> faces_;
+    mutable unsigned int gpu_triangle_buffer_ = 0;
+    mutable unsigned int gpu_wire_buffer_ = 0;
+    mutable size_t gpu_triangle_vertex_count_ = 0;
+    mutable size_t gpu_wire_vertex_count_ = 0;
+    mutable const void* gpu_context_ = nullptr;
+    mutable bool gpu_cache_dirty_ = true;
     static float s_SurfaceOpacity;
     static MeshDisplayMode s_DisplayMode;
     static bool s_ZebraAnalysisEnabled;

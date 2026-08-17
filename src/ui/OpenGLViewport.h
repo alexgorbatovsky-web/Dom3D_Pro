@@ -69,6 +69,7 @@ public:
     bool IsFloorGridVisible() const;
     void SetFloorGridVisible(bool visible);
     void SetBackgroundColor(const QColor& color);
+    Vec3 GetBackgroundColor() const;
     void ReloadModelingPreferences();
     void RefreshSurfaceMeshQuality();
     void BeginMaterialPaint(const Material& material);
@@ -106,8 +107,9 @@ public:
     void SetSolidDimensionEdits(
         const std::vector<ActiveParametricObject>& active_objects,
         size_t primary_operation_index);
+    void SetCabinetPreviewVisible(bool visible);
     void ClearSolidDimensionEdit();
-    void BeginPickXYPoint();
+    void BeginPickXYPoint(const QString& prompt = {});
     void BeginPick3DPoint(const QString& prompt = {});
     void BeginPick3DPointOnObject(unsigned long object_id, const QString& prompt = {});
     void SetPointPickMarkers(const std::vector<CPoint3d>& points);
@@ -118,17 +120,33 @@ public:
     void EndSketch();
     void DrawFPS();
     void UpdateFPS();
+    bool TakeCurvePointDragChange(
+        unsigned long& object_id,
+        std::vector<CPoint3d>& before,
+        std::vector<CPoint3d>& after);
+    bool TakeObjectMoveChange(
+        std::vector<unsigned long>& object_ids,
+        Vec3& delta);
+    bool TakeMaterialDropChange(
+        unsigned long& object_id,
+        Material& before_material,
+        unsigned long& before_material_id,
+        Material& after_material,
+        unsigned long& after_material_id);
 
 signals:
+    void FirstFrameRendered();
     void DocumentChanged();
     void SelectionChanged();
     void SelectionConfirmed();
     void SelectionCommandCanceled();
     void StatusTextChanged(const QString& text);
+    void CursorWorldPositionChanged(double x, double y, double z, bool valid);
     void BooleanFinished();
     void MaterialPicked(const Material& material);
     void ToolModeChanged(ToolMode tool);
     void XYPointPicked(CPoint3d point);
+    void XYPointPickCanceled();
     void Point3DPicked(CPoint3d point);
     void Point3DPickFinished();
     void Point3DPickCloseRequested();
@@ -258,11 +276,14 @@ private:
     Vec3 AxisVector(TransformAxis axis) const;
     float DistanceToScreenSegment(DomPoint point, DomPoint start, DomPoint end) const;
     void DrawCoordinateAxisLabels();
+    void DrawCabinetPreview();
     void DrawSolidDimensions();
     void DrawPointToPointMeasurement();
     void DrawPointPickMarkers();
     bool ApplyMaterialDrop(const QPoint& point, const Material& material);
     CAlfaObject* FindObjectForMaterialAt(const QPoint& point);
+    void CaptureCurvePointChangeBefore();
+    void FinalizeCurvePointChange();
 
     enum class MaterialInteractionMode {
         None,
@@ -298,6 +319,10 @@ private:
     bool editing_sketch_ = false;
     bool dragging_polyline_point_ = false;
     bool curve_point_drag_changed_ = false;
+    bool curve_point_drag_change_pending_ = false;
+    unsigned long curve_point_drag_object_id_ = 0;
+    std::vector<CPoint3d> curve_point_drag_before_points_;
+    std::vector<CPoint3d> curve_point_drag_after_points_;
     unsigned long direct_curve_edit_object_id_ = 0;
     bool dragging_sketch_handle_ = false;
     bool sketch_drag_changed_ = false;
@@ -366,6 +391,9 @@ private:
     float transform_drag_rotation_input_angle_ = 0.0f;
     float transform_drag_rotation_angle_ = 0.0f;
     float transform_drag_scale_factor_ = 1.0f;
+    bool object_move_change_pending_ = false;
+    std::vector<unsigned long> object_move_change_ids_;
+    Vec3 object_move_change_delta_{};
     bool has_boolean_body_ = false;
     bool orthographic_projection_ = false;
     bool show_coordinate_axes_ = true;
@@ -375,6 +403,12 @@ private:
     int grid_subdivisions_ = 4;
     int grid_division_count_ = 10;
     bool material_drag_active_ = false;
+    bool material_drop_change_pending_ = false;
+    unsigned long material_drop_object_id_ = 0;
+    Material material_drop_before_;
+    unsigned long material_drop_before_id_ = 0;
+    Material material_drop_after_;
+    unsigned long material_drop_after_id_ = 0;
     bool sketch_active_ = false;
     bool sketch_waiting_for_face_ = false;
     bool solid_box_waiting_for_face_ = false;
@@ -426,6 +460,7 @@ private:
     std::vector<CDimens3D> solid_dimensions_;
     std::vector<SolidDimensionHit> solid_dimension_hits_;
     QString solid_dimension_primary_parameter_;
+    bool cabinet_preview_visible_ = false;
     QString highlighted_solid_dimension_grip_;
     int highlighted_solid_dimension_operation_index_ = -1;
     QString active_solid_dimension_grip_;
@@ -449,4 +484,5 @@ private:
     int    m_frameCounter = 0;
     float  m_fps = 0.0f;
 	int m_lastFpsTime = 0;
+    bool first_frame_rendered_ = false;
 };

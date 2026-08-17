@@ -11,6 +11,7 @@
 #include "TwoRailSweepSurfaceBuilder.h"
 #include "FourSplineSurfaceBuilder.h"
 #include "CadCurve3D.h"
+#include "DrawingText.h"
 #include "ReferenceImage.h"
 #include "solid/Solid.h"
 #include "solid/AssociativeClone.h"
@@ -25,6 +26,7 @@
 #include <BRep_Builder.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
@@ -55,12 +57,14 @@
 #include <GeomAbs_CurveType.hxx>
 #include <GProp_GProps.hxx>
 #include <TColgp_Array1OfPnt.hxx>
+#include <TColgp_Array1OfPnt2d.hxx>
 #include <TColgp_HArray1OfPnt.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Ax1.hxx>
 #include <gp_Lin.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Pnt2d.hxx>
 #include <gp_Vec.hxx>
 #include <Precision.hxx>
 #include <Standard_Failure.hxx>
@@ -1639,6 +1643,8 @@ struct CAlfaDoc::LivePolylineRevolveData {
 struct CAlfaDoc::LiveFilletData {
     TopoDS_Shape base_shape;
     std::vector<TopoDS_Edge> edges;
+    TopoDS_Shape background_base_shape;
+    std::vector<TopoDS_Edge> background_edges;
     std::vector<std::pair<int, int>> edge_refs;
     std::vector<int> created_surface_indices;
     size_t object_index = 0;
@@ -3836,6 +3842,8 @@ bool CAlfaDoc::SelectPolylineAtScreen(DomPoint point,
             hit = hit_test_sketch_screen(*sketch, point, world_to_screen, tolerance);
         } else if (const auto* spline = dynamic_cast<const CBSpline*>(object)) {
             hit = hit_test_bspline_screen(*spline, point, world_to_screen, tolerance);
+        } else if (const auto* text = dynamic_cast<const CDrawingText*>(object)) {
+            hit = text->HitTestScreen(point, world_to_screen, tolerance);
         }
 
         if (!hit) {
@@ -6374,7 +6382,7 @@ bool CAlfaDoc::MoveSelectedPoint(CPoint3d point) {
     return sketch && sketch->MoveNodeWorld(selected_point_index_, point);
 }
 
-bool CAlfaDoc::MoveSelectedCurvePoints(Vec3 delta) {
+bool CAlfaDoc::MoveSelectedCurvePoints(Vec3 delta, bool constrain_to_xy) {
     if (selected_curve_points_.empty()) {
         return false;
     }
@@ -6403,7 +6411,7 @@ bool CAlfaDoc::MoveSelectedCurvePoints(Vec3 delta) {
                 CPoint3d point = spline->GetPoints()[selected.second];
                 point.x += delta.x;
                 point.y += delta.y;
-                point.z += delta.z;
+                point.z = constrain_to_xy ? 0.0 : point.z + delta.z;
                 const bool attached_control_selected =
                     spline->IsBezierChain()
                     && selected.second % 3 == 0
@@ -6428,7 +6436,7 @@ bool CAlfaDoc::MoveSelectedCurvePoints(Vec3 delta) {
                 CPoint3d point = sketch->GetNodeWorld(selected.second);
                 point.x += delta.x;
                 point.y += delta.y;
-                point.z += delta.z;
+                point.z = constrain_to_xy ? 0.0 : point.z + delta.z;
                 moved = sketch->MoveNodeWorld(selected.second, point) || moved;
             }
         }
@@ -6908,8 +6916,7 @@ bool CAlfaDoc::CommitMoveSelectedSolids(Vec3 delta) {
             if (auto* group = dynamic_cast<CGroup*>(objects_[index].get())) {
                 moved = group->CommitTranslate(delta) || moved;
             } else if (auto* solid = dynamic_cast<CSolid*>(objects_[index].get())) {
-                solid->Translate(delta);
-                moved = true;
+                moved = solid->CommitPreviewTranslate(delta) || moved;
             }
         }
     }
@@ -6917,6 +6924,16 @@ bool CAlfaDoc::CommitMoveSelectedSolids(Vec3 delta) {
         UpdateAttachedSketches();
     }
     return moved;
+}
+
+std::vector<unsigned long> CAlfaDoc::GetSelectedTransformRootIds() const {
+    std::vector<unsigned long> ids;
+    for (size_t index : GetSelectedTransformRootIndices()) {
+        if (index < objects_.size() && objects_[index]) {
+            ids.push_back(objects_[index]->m_id);
+        }
+    }
+    return ids;
 }
 
 bool CAlfaDoc::CommitRotateSelectedSolids(Vec3 center, Vec3 axis, float angle) {
@@ -7163,45 +7180,231 @@ std::vector<int> CAlfaDoc::GetLiveFilletCreatedSurfaceIndices() const {
     return live_fillet_->created_surface_indices;
 }
 
+bool CAlfaDoc::GetLiveFilletEndPoints(CPoint3d& start, CPoint3d& end) const {
+    if (!live_fillet_ || live_fillet_->edges.empty()) {
+        return false;
+    }
+    TopoDS_Vertex first;
+    TopoDS_Vertex last;
+    TopExp::Vertices(live_fillet_->edges.front(), first, last, Standard_True);
+    if (first.IsNull() || last.IsNull()) {
+        return false;
+    }
+    const gp_Pnt first_point = BRep_Tool::Pnt(first);
+    const gp_Pnt last_point = BRep_Tool::Pnt(last);
+    start = CPoint3d(first_point.X(), first_point.Y(), first_point.Z());
+    end = CPoint3d(last_point.X(), last_point.Y(), last_point.Z());
+    return true;
+}
+
+std::vector<CPoint3d> CAlfaDoc::GetLiveFilletPoints(size_t count) const {
+    std::vector<CPoint3d> points;
+    if (!live_fillet_ || live_fillet_->edges.empty() || count == 0) {
+        return points;
+    }
+    try {
+        BRepAdaptor_Curve curve(live_fillet_->edges.front());
+        const double first = curve.FirstParameter();
+        const double last = curve.LastParameter();
+        points.reserve(count);
+        for (size_t index = 0; index < count; ++index) {
+            const double ratio = count == 1
+                ? 0.0 : static_cast<double>(index) / static_cast<double>(count - 1);
+            const gp_Pnt point = curve.Value(first + (last - first) * ratio);
+            points.emplace_back(point.X(), point.Y(), point.Z());
+        }
+    } catch (const Standard_Failure&) {
+        points.clear();
+    }
+    return points;
+}
+
 bool CAlfaDoc::UpdateLiveFillet(double radius) {
     if (!live_fillet_ || live_fillet_->object_index >= objects_.size()) {
         return false;
     }
 
-    auto* solid = dynamic_cast<CSolid*>(objects_[live_fillet_->object_index].get());
-    if (!solid || live_fillet_->base_shape.IsNull()) {
+    auto* solid = dynamic_cast<CSolid*>(
+        objects_[live_fillet_->object_index].get());
+    if (!solid || live_fillet_->base_shape.IsNull()
+        || live_fillet_->edges.empty() || radius <= 0.0001) {
         return false;
     }
 
+    // Keep the common constant-radius preview on the original fast path.
+    // A private deep copy is required by the background variable-law builder,
+    // but doing that copy for every constant-radius mouse move made a simple
+    // box fillet noticeably lag behind the grip and could stall the UI.
     TopoDS_Shape result_shape;
-    if (radius <= 0.0001) {
-        result_shape = live_fillet_->base_shape;
-        live_fillet_->created_surface_indices.clear();
-    } else {
-        try {
-            BRepFilletAPI_MakeFillet fillet(live_fillet_->base_shape);
-            for (const TopoDS_Edge& edge : live_fillet_->edges) {
-                fillet.Add(radius, edge);
+    std::vector<int> created_surface_indices;
+    try {
+        BRepFilletAPI_MakeFillet fillet(live_fillet_->base_shape);
+        for (const TopoDS_Edge& edge : live_fillet_->edges) {
+            fillet.Add(radius, edge);
+        }
+        fillet.Build();
+        if (!fillet.IsDone()) {
+            return false;
+        }
+        result_shape = fillet.Shape();
+        created_surface_indices =
+            generated_face_indices(fillet, live_fillet_->edges, result_shape);
+    } catch (const Standard_Failure&) {
+        return false;
+    }
+
+    LiveFilletBuildRequest request;
+    request.source_shape = live_fillet_->base_shape;
+    request.object_index = live_fillet_->object_index;
+    return ApplyLiveFilletShape(
+        request, result_shape, std::move(created_surface_indices));
+}
+
+bool CAlfaDoc::UpdateLiveFillet(double start_radius, double end_radius) {
+    return UpdateLiveFillet(std::vector<double>{start_radius, end_radius});
+}
+
+bool CAlfaDoc::UpdateLiveFillet(const std::vector<double>& radius_law) {
+    LiveFilletBuildRequest request;
+    if (!CreateLiveFilletBuildRequest(request)) {
+        return false;
+    }
+    TopoDS_Shape result_shape;
+    std::vector<int> created_surface_indices;
+    if (!BuildLiveFilletShape(
+            request, radius_law, result_shape, created_surface_indices)) {
+        return false;
+    }
+    return ApplyLiveFilletShape(
+        request, result_shape, std::move(created_surface_indices));
+}
+
+bool CAlfaDoc::CreateLiveFilletBuildRequest(
+    LiveFilletBuildRequest& request) {
+    if (!live_fillet_ || live_fillet_->object_index >= objects_.size()
+        || live_fillet_->base_shape.IsNull() || live_fillet_->edges.empty()) {
+        return false;
+    }
+    try {
+        // Create the worker seed only once. Per-preview copies are made by the
+        // worker itself in BuildLiveFilletShape, so dragging a radius-law point
+        // never blocks the UI thread on a full BRep copy.
+        if (live_fillet_->background_base_shape.IsNull()) {
+            BRepBuilderAPI_Copy seed_copy(
+                live_fillet_->base_shape, Standard_True, Standard_False);
+            live_fillet_->background_base_shape = seed_copy.Shape();
+            live_fillet_->background_edges.clear();
+            live_fillet_->background_edges.reserve(live_fillet_->edges.size());
+            for (const TopoDS_Edge& source_edge : live_fillet_->edges) {
+                const TopoDS_Shape copied_edge =
+                    seed_copy.ModifiedShape(source_edge);
+                if (copied_edge.IsNull()
+                    || copied_edge.ShapeType() != TopAbs_EDGE) {
+                    live_fillet_->background_base_shape.Nullify();
+                    live_fillet_->background_edges.clear();
+                    return false;
+                }
+                live_fillet_->background_edges.push_back(
+                    TopoDS::Edge(copied_edge));
+            }
+        }
+        request.source_shape = live_fillet_->base_shape;
+        request.base_shape = live_fillet_->background_base_shape;
+        request.edges = live_fillet_->background_edges;
+        request.object_index = live_fillet_->object_index;
+        return !request.base_shape.IsNull()
+            && request.edges.size() == live_fillet_->edges.size();
+    } catch (const Standard_Failure&) {
+        return false;
+    }
+}
+
+bool CAlfaDoc::BuildLiveFilletShape(
+    const LiveFilletBuildRequest& request,
+    const std::vector<double>& radius_law,
+    TopoDS_Shape& result_shape,
+    std::vector<int>& created_surface_indices) {
+    if (request.base_shape.IsNull() || request.edges.empty()
+        || radius_law.empty()) {
+        return false;
+    }
+    const bool valid_radii = std::all_of(
+        radius_law.begin(), radius_law.end(),
+        [](double radius) { return radius > 0.0001; });
+    if (!valid_radii) {
+        return false;
+    }
+    try {
+            BRepBuilderAPI_Copy build_copy(
+                request.base_shape, Standard_True, Standard_False);
+            const TopoDS_Shape build_shape = build_copy.Shape();
+            std::vector<TopoDS_Edge> build_edges;
+            build_edges.reserve(request.edges.size());
+            for (const TopoDS_Edge& source_edge : request.edges) {
+                const TopoDS_Shape copied_edge =
+                    build_copy.ModifiedShape(source_edge);
+                if (copied_edge.IsNull()
+                    || copied_edge.ShapeType() != TopAbs_EDGE) {
+                    return false;
+                }
+                build_edges.push_back(TopoDS::Edge(copied_edge));
+            }
+
+            BRepFilletAPI_MakeFillet fillet(build_shape);
+            for (const TopoDS_Edge& edge : build_edges) {
+                const bool constant = std::all_of(
+                    radius_law.begin() + 1, radius_law.end(),
+                    [&radius_law](double radius) {
+                        return std::abs(radius - radius_law.front()) <= 1.0e-9;
+                    });
+                if (constant) {
+                    fillet.Add(radius_law.front(), edge);
+                } else {
+                    TColgp_Array1OfPnt2d occt_law(
+                        1, static_cast<Standard_Integer>(radius_law.size()));
+                    for (size_t index = 0; index < radius_law.size(); ++index) {
+                        const double position = radius_law.size() == 1
+                            ? 0.0
+                            : static_cast<double>(index)
+                                / static_cast<double>(radius_law.size() - 1);
+                        occt_law.SetValue(
+                            static_cast<Standard_Integer>(index + 1),
+                            gp_Pnt2d(position, radius_law[index]));
+                    }
+                    fillet.Add(occt_law, edge);
+                }
             }
             fillet.Build();
             if (!fillet.IsDone()) {
                 return false;
             }
             result_shape = fillet.Shape();
-            live_fillet_->created_surface_indices =
-                generated_face_indices(fillet, live_fillet_->edges, result_shape);
+            created_surface_indices =
+                generated_face_indices(fillet, build_edges, result_shape);
         } catch (const Standard_Failure&) {
             return false;
         }
-    }
+    return !result_shape.IsNull();
+}
 
-    if (result_shape.IsNull() || !rebuild_solid_from_shape(objects_, live_fillet_->object_index, solid, result_shape)) {
+bool CAlfaDoc::ApplyLiveFilletShape(
+    const LiveFilletBuildRequest& request,
+    const TopoDS_Shape& result_shape,
+    std::vector<int> created_surface_indices) {
+    if (!live_fillet_ || live_fillet_->object_index != request.object_index
+        || !live_fillet_->base_shape.IsSame(request.source_shape)
+        || request.object_index >= objects_.size() || result_shape.IsNull()) {
         return false;
     }
-
-    selected_object_index_ = live_fillet_->object_index;
-    selected_object_indices_ = {live_fillet_->object_index};
-    active_object_index_ = live_fillet_->object_index;
+    auto* solid = dynamic_cast<CSolid*>(objects_[request.object_index].get());
+    if (!solid || !rebuild_solid_from_shape(
+            objects_, request.object_index, solid, result_shape)) {
+        return false;
+    }
+    live_fillet_->created_surface_indices = std::move(created_surface_indices);
+    selected_object_index_ = request.object_index;
+    selected_object_indices_ = {request.object_index};
+    active_object_index_ = request.object_index;
     has_selected_object_ = true;
     ClearPointSelection();
     return true;
@@ -7558,6 +7761,30 @@ const CAlfaDoc::ObjectList& CAlfaDoc::GetObjects() const {
 }
 
 void CAlfaDoc::EnsureDefaultLayer() {
+    // Older mesh-trimming diagnostics accidentally created an empty "Faces"
+    // layer on every fillet preview. Remove those orphan layers when a
+    // document is loaded or the layer dialog is opened, while preserving a
+    // real Faces layer if an object actually uses it.
+    m_Layers.erase(
+        std::remove_if(
+            m_Layers.begin(), m_Layers.end(),
+            [this](CLayer* layer) {
+                if (!layer || layer->Name != "Faces") {
+                    return false;
+                }
+                const bool used = std::any_of(
+                    objects_.begin(), objects_.end(),
+                    [layer](const ObjectPtr& object) {
+                        return object && object->m_LayerID == layer->ID();
+                    });
+                if (used) {
+                    return false;
+                }
+                delete layer;
+                return true;
+            }),
+        m_Layers.end());
+
     if (!m_Layers.empty()) {
         if (!GetLayerByID(Work_layer)) {
             Work_layer = m_Layers.front()->ID();

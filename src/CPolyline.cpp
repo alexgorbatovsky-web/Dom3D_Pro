@@ -567,7 +567,7 @@ void CPolyline::Render3d(bool selected, bool has_selected_point, size_t selected
 
     const Color color = GetColor();
     glDisable(GL_DEPTH_TEST);
-    glLineWidth(selected ? 5.0f : 2.0f);
+    ApplyLineAppearance(selected);
     glColor3f(selected ? 0.72f : color.r, selected ? 0.12f : color.g, selected ? 1.0f : color.b);
     const std::vector<CPoint3d> display_points = GetRoundedPathPoints();
     glBegin(GL_LINE_STRIP);
@@ -575,6 +575,7 @@ void CPolyline::Render3d(bool selected, bool has_selected_point, size_t selected
         glVertex3f(static_cast<float>(point.x), static_cast<float>(point.y), static_cast<float>(point.z));
     }
     glEnd();
+    ResetLineAppearance();
     glEnable(GL_DEPTH_TEST);
 
     if (selected && has_selected_point) {
@@ -590,7 +591,7 @@ void CPolyline::Render2d(float center_x, float center_y, float scale) const {
     }
 
     const Color color = GetColor();
-    glLineWidth(2.0f);
+    ApplyLineAppearance(false);
     glColor3f(color.r, color.g, color.b);
     glBegin(GL_LINE_STRIP);
     for (const CPoint3d& point : points_) {
@@ -601,6 +602,7 @@ void CPolyline::Render2d(float center_x, float center_y, float scale) const {
         glVertex2f(center_x + static_cast<float>(point.x) * scale, center_y + static_cast<float>(point.z) * scale);
     }
     glEnd();
+    ResetLineAppearance();
 }
 
 bool CPolyline::HitTest(CurvePoint point, float tolerance) const {
@@ -635,6 +637,8 @@ std::unique_ptr<CAlfaObject> CPolyline::Clone() const {
     copy->SetGroupName(GetGroupName());
     copy->SetVisible(IsVisible());
     copy->SetColor(GetColor());
+    copy->SetLineWidth(GetLineWidth());
+    copy->SetLineStyle(GetLineStyle());
     copy->SetMaterial(GetMaterial());
     copy->SetMaterialId(GetMaterialId());
     return copy;

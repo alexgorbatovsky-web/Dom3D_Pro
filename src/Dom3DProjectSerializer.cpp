@@ -10,6 +10,7 @@
 #include "CAssembled.h"
 #include "CKitchenCabinet.h"
 #include "CPolyline.h"
+#include "DrawingText.h"
 #include "LinkLineHor.h"
 #include "LinkLineVert.h"
 #include "SmartLine.h"
@@ -33,6 +34,7 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -81,6 +83,9 @@ QString object_type_name(const CAlfaObject& object) {
     }
     if (dynamic_cast<const CPolyline*>(&object)) {
         return "Curve";
+    }
+    if (dynamic_cast<const CDrawingText*>(&object)) {
+        return "DrawingText";
     }
     if (dynamic_cast<const CSmartLine*>(&object)) {
         return "Sketch";
@@ -360,6 +365,12 @@ void write_material(QXmlStreamWriter& xml, const Material& material) {
     xml.writeAttribute("specular", QString::number(material.specular, 'g', 9));
     xml.writeAttribute("shininess", QString::number(material.shininess, 'g', 9));
     xml.writeAttribute("reflectivity", QString::number(material.reflectivity, 'g', 9));
+    xml.writeAttribute("roughness", QString::number(material.roughness, 'g', 9));
+    xml.writeAttribute("metallic", QString::number(material.metallic, 'g', 9));
+    xml.writeAttribute("coatWeight", QString::number(material.coat_weight, 'g', 9));
+    xml.writeAttribute("coatRoughness", QString::number(material.coat_roughness, 'g', 9));
+    xml.writeAttribute("normalStrength", QString::number(material.normal_strength, 'g', 9));
+    xml.writeAttribute("displacementScale", QString::number(material.displacement_scale, 'g', 9));
     xml.writeAttribute("textureOffsetU", QString::number(material.texture_offset_u, 'g', 9));
     xml.writeAttribute("textureOffsetV", QString::number(material.texture_offset_v, 'g', 9));
     xml.writeAttribute("textureScaleU", QString::number(material.texture_scale_u, 'g', 9));
@@ -369,6 +380,10 @@ void write_material(QXmlStreamWriter& xml, const Material& material) {
     xml.writeAttribute("colorTexture", QString::fromStdString(material.color_texture_path));
     xml.writeAttribute("lightTexture", QString::fromStdString(material.light_texture_path));
     xml.writeAttribute("bumpTexture", QString::fromStdString(material.bump_texture_path));
+    xml.writeAttribute("normalTexture", QString::fromStdString(material.normal_texture_path));
+    xml.writeAttribute("roughnessTexture", QString::fromStdString(material.roughness_texture_path));
+    xml.writeAttribute("metallicTexture", QString::fromStdString(material.metallic_texture_path));
+    xml.writeAttribute("displacementTexture", QString::fromStdString(material.displacement_texture_path));
     xml.writeEndElement();
 }
 
@@ -462,6 +477,12 @@ bool read_material_element(const QDomElement& material_element, Material& materi
         || !read_float_attr(material_element, "specular", material.specular, error, false)
         || !read_float_attr(material_element, "shininess", material.shininess, error, false)
         || !read_float_attr(material_element, "reflectivity", material.reflectivity, error, false)
+        || !read_float_attr(material_element, "roughness", material.roughness, error, false)
+        || !read_float_attr(material_element, "metallic", material.metallic, error, false)
+        || !read_float_attr(material_element, "coatWeight", material.coat_weight, error, false)
+        || !read_float_attr(material_element, "coatRoughness", material.coat_roughness, error, false)
+        || !read_float_attr(material_element, "normalStrength", material.normal_strength, error, false)
+        || !read_float_attr(material_element, "displacementScale", material.displacement_scale, error, false)
         || !read_float_attr(material_element, "textureOffsetU", material.texture_offset_u, error, false)
         || !read_float_attr(material_element, "textureOffsetV", material.texture_offset_v, error, false)
         || !read_float_attr(material_element, "textureScaleU", material.texture_scale_u, error, false)
@@ -473,6 +494,10 @@ bool read_material_element(const QDomElement& material_element, Material& materi
     material.texture_fit_to_surface = material_element.attribute("textureFitToSurface", "0") == "1";
     material.light_texture_path = material_element.attribute("lightTexture", QString::fromStdString(material.light_texture_path)).toStdString();
     material.bump_texture_path = material_element.attribute("bumpTexture", QString::fromStdString(material.bump_texture_path)).toStdString();
+    material.normal_texture_path = material_element.attribute("normalTexture", QString::fromStdString(material.normal_texture_path)).toStdString();
+    material.roughness_texture_path = material_element.attribute("roughnessTexture", QString::fromStdString(material.roughness_texture_path)).toStdString();
+    material.metallic_texture_path = material_element.attribute("metallicTexture", QString::fromStdString(material.metallic_texture_path)).toStdString();
+    material.displacement_texture_path = material_element.attribute("displacementTexture", QString::fromStdString(material.displacement_texture_path)).toStdString();
     return true;
 }
 
@@ -770,8 +795,35 @@ bool Dom3DProjectSerializer::Save(const QString& path,
 
     write_layers(xml, document);
 
-    xml.writeStartElement("objects");
     const auto& objects = document.GetObjects();
+    std::vector<const CSolid*> packed_solids;
+    std::unordered_map<const CSolid*, size_t> packed_solid_indices;
+    packed_solids.reserve(objects.size());
+    for (const auto& object : objects) {
+        const auto* solid = object
+            ? dynamic_cast<const CSolid*>(object.get()) : nullptr;
+        if (!solid) {
+            continue;
+        }
+        packed_solid_indices.emplace(solid, packed_solids.size());
+        packed_solids.push_back(solid);
+    }
+    if (!packed_solids.empty()) {
+        QByteArray packed_geometry;
+        if (!CSolid::SaveShapePack(
+                packed_solids, packed_geometry, error)) {
+            return false;
+        }
+        xml.writeStartElement("geometryStore");
+        xml.writeAttribute("kind", "brep-native-pack");
+        xml.writeAttribute("encoding", "base64-zlib");
+        xml.writeAttribute("count", QString::number(packed_solids.size()));
+        xml.writeCharacters(QString::fromLatin1(
+            qCompress(packed_geometry, 6).toBase64()));
+        xml.writeEndElement();
+    }
+
+    xml.writeStartElement("objects");
     for (size_t i = 0; i < objects.size(); ++i) {
         if (!objects[i]) {
             continue;
@@ -794,6 +846,8 @@ bool Dom3DProjectSerializer::Save(const QString& path,
         xml.writeAttribute("objectColorB", QString::number(object_color.b, 'g', 9));
         xml.writeAttribute("visible", object.IsVisible() ? "true" : "false");
         xml.writeAttribute("layerId", QString::number(object.m_LayerID));
+        xml.writeAttribute("lineWidth", QString::number(object.GetLineWidth(), 'g', 9));
+        xml.writeAttribute("lineStyle", QString::fromStdString(object.GetLineStyle()));
         if (const auto* clone = dynamic_cast<const CAssociativeClone*>(&object)) {
             xml.writeAttribute("sourceId", QString::number(clone->GetSourceId()));
             const gp_GTrsf& placement = clone->GetPlacement();
@@ -846,6 +900,7 @@ bool Dom3DProjectSerializer::Save(const QString& path,
                     xml.writeAttribute("depth", QString::number(definition.depth, 'g', 17));
                     xml.writeAttribute("height", QString::number(definition.height, 'g', 17));
                     xml.writeAttribute("panelThickness", QString::number(definition.panel_thickness, 'g', 17));
+                    xml.writeAttribute("millingDepth", QString::number(definition.milling_depth, 'g', 17));
                     xml.writeAttribute("facadeBulge", QString::number(definition.facade_bulge, 'g', 17));
                     xml.writeAttribute("radius2Bulge", QString::number(definition.radius2_bulge, 'g', 17));
                     xml.writeAttribute("radiusSideStraight", QString::number(definition.radius_side_straight, 'g', 17));
@@ -882,6 +937,17 @@ bool Dom3DProjectSerializer::Save(const QString& path,
                     xml.writeAttribute("offset", QString::number(dimension->GetOffsetDistance(), 'g', 17));
                 }
             }
+            xml.writeEndElement();
+        } else if (const auto* text = dynamic_cast<const CDrawingText*>(&object)) {
+            xml.writeStartElement("geometry");
+            xml.writeAttribute("kind", "drawing-text");
+            xml.writeAttribute("text", QString::fromStdString(text->GetText()));
+            xml.writeAttribute("x", QString::number(text->GetInsertion().x, 'g', 17));
+            xml.writeAttribute("y", QString::number(text->GetInsertion().y, 'g', 17));
+            xml.writeAttribute("z", QString::number(text->GetInsertion().z, 'g', 17));
+            xml.writeAttribute("height", QString::number(text->GetHeight(), 'g', 17));
+            xml.writeAttribute("rotation", QString::number(text->GetRotationDegrees(), 'g', 17));
+            xml.writeAttribute("font", QString::fromStdString(text->GetFontFamily()));
             xml.writeEndElement();
         } else if (const auto* polyline = dynamic_cast<const CPolyline*>(&object)) {
             xml.writeStartElement("geometry");
@@ -1075,9 +1141,14 @@ bool Dom3DProjectSerializer::Save(const QString& path,
             xml.writeEndElement();
             xml.writeEndElement();
         } else if (const auto* solid = dynamic_cast<const CSolid*>(&object)) {
-            if (!solid->Save(xml, error)) {
+            const auto packed = packed_solid_indices.find(solid);
+            if (packed == packed_solid_indices.end()) {
+                error = "Solid is missing from the project BRep pack.";
                 return false;
             }
+            xml.writeEmptyElement("geometry");
+            xml.writeAttribute("kind", "brep-ref");
+            xml.writeAttribute("index", QString::number(packed->second));
             write_surface_texture_transforms(xml, *solid);
             if (!write_boolean_tools(xml, *solid, error)) {
                 return false;
@@ -1143,7 +1214,12 @@ bool Dom3DProjectSerializer::Load(const QString& path,
                                   CAlfaDoc& document,
                                   QString& active_room,
                                   ProjectViewState& view_state,
-                                  QString& error) const {
+                                  QString& error,
+                                  const ProgressCallback& progress) const {
+    const auto report = [&progress](int value, const QString& text) {
+        if (progress) progress(value, text);
+    };
+    report(2, "Opening project file...");
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
         error = file.errorString();
@@ -1151,6 +1227,7 @@ bool Dom3DProjectSerializer::Load(const QString& path,
     }
 
     QDomDocument dom;
+    report(8, "Reading project data...");
     QString parse_error;
     int error_line = 0;
     int error_column = 0;
@@ -1182,6 +1259,7 @@ bool Dom3DProjectSerializer::Load(const QString& path,
         return false;
     }
 
+    report(25, "Loading materials and layers...");
     std::vector<Material> loaded_materials = Material::InitialDocumentMaterials();
     const QDomElement materials_element = root.firstChildElement("materials");
     if (!materials_element.isNull()) {
@@ -1207,11 +1285,56 @@ bool Dom3DProjectSerializer::Load(const QString& path,
     if (objects_element.isNull()) {
         return false;
     }
+    report(20, "Project data parsed");
 
+    std::vector<TopoDS_Shape> packed_shapes;
+    const QDomElement geometry_store = root.firstChildElement("geometryStore");
+    if (!geometry_store.isNull()) {
+        if (geometry_store.attribute("kind") != "brep-native-pack"
+            || geometry_store.attribute("encoding") != "base64-zlib") {
+            error = "Unsupported project geometry store.";
+            return false;
+        }
+        report(32, "Decoding project geometry...");
+        const QByteArray encoded = QByteArray::fromBase64(
+            geometry_store.text().toLatin1());
+        const QByteArray packed_data = qUncompress(encoded);
+        report(40, "Loading BRep geometry...");
+        if (packed_data.isEmpty()
+            || !CSolid::LoadShapePack(packed_data, packed_shapes, error)) {
+            if (error.isEmpty()) {
+                error = "Project geometry store is empty or damaged.";
+            }
+            return false;
+        }
+        bool count_ok = false;
+        const qsizetype expected_count = geometry_store.attribute("count")
+            .toLongLong(&count_ok);
+        if (!count_ok || expected_count < 0
+            || expected_count != static_cast<qsizetype>(packed_shapes.size())) {
+            error = "Project geometry store object count does not match.";
+            return false;
+        }
+    }
+
+    report(52, "Geometry loaded");
     CAlfaDoc::ObjectList loaded_objects;
+    int object_count = 0;
+    for (QDomElement element = objects_element.firstChildElement("object");
+         !element.isNull();
+         element = element.nextSiblingElement("object")) {
+        ++object_count;
+    }
+    int object_index = 0;
     for (QDomElement object_element = objects_element.firstChildElement("object");
          !object_element.isNull();
          object_element = object_element.nextSiblingElement("object")) {
+        report(
+            52 + static_cast<int>(42LL * object_index
+                / std::max(object_count, 1)),
+            QString("Loading objects %1 / %2...")
+                .arg(object_index + 1)
+                .arg(object_count));
         const QString type = object_element.attribute("type");
         if (type.isEmpty()) {
             error = "Object is missing type.";
@@ -1266,13 +1389,23 @@ bool Dom3DProjectSerializer::Load(const QString& path,
                     bool showcase_fill_ok = false;
                     const uint showcase_fill = geometry.attribute(
                         "showcaseFill", "0").toUInt(&showcase_fill_ok);
-                    if (!showcase_fill_ok || showcase_fill > 3U) {
+                    if (!showcase_fill_ok || showcase_fill > 4U) {
                         error = "Kitchen cabinet showcase fill is invalid.";
                         return false;
                     }
                     definition.showcase_fill =
                         static_cast<KitchenCabinetShowcaseFill>(showcase_fill);
                     definition.shelf_count = shelf_count;
+                    if (geometry.hasAttribute("millingDepth")
+                        && !read_double_attr(
+                            geometry, "millingDepth",
+                            definition.milling_depth, error)) {
+                        return false;
+                    }
+                    definition.milling_depth = std::clamp(
+                        definition.milling_depth,
+                        0.1, std::max(
+                            0.1, definition.panel_thickness - 0.5));
                     definition.facade_bulge = definition.depth * 0.5;
                     if (geometry.hasAttribute("facadeBulge")
                         && !read_double_attr(geometry, "facadeBulge", definition.facade_bulge, error)) {
@@ -1399,6 +1532,21 @@ bool Dom3DProjectSerializer::Load(const QString& path,
                     object_element.attribute("name", "Group").toStdString(),
                     std::move(element_ids));
             }
+        } else if (type == "DrawingText") {
+            const QDomElement geometry = required_child(object_element, "geometry", error);
+            if (geometry.isNull()) return false;
+            double x = 0.0, y = 0.0, z = 0.0, height = 1.0, rotation = 0.0;
+            if (!read_double_attr(geometry, "x", x, error)
+                || !read_double_attr(geometry, "y", y, error)
+                || !read_double_attr(geometry, "z", z, error)
+                || !read_double_attr(geometry, "height", height, error)
+                || !read_double_attr(geometry, "rotation", rotation, error)) {
+                return false;
+            }
+            object = std::make_unique<CDrawingText>(
+                geometry.attribute("text").toStdString(),
+                CPoint3d(x, y, z), height, rotation,
+                geometry.attribute("font", "Arial").toStdString());
         } else if (type == "Curve") {
             auto polyline = std::make_unique<CPolyline>(object_element.attribute("name", "Curve").toStdString());
             const QDomElement geometry = required_child(object_element, "geometry", error);
@@ -1779,7 +1927,32 @@ bool Dom3DProjectSerializer::Load(const QString& path,
             }
             object = std::move(mesh);
         } else if (type == "Solid" || type == "SurfaceSet" || type == "AssociativeClone") {
-            std::unique_ptr<CSolid> solid = CSolid::Load(object_element, error);
+            std::unique_ptr<CSolid> solid;
+            const QDomElement geometry = required_child(
+                object_element, "geometry", error);
+            if (geometry.isNull()) {
+                return false;
+            }
+            if (geometry.attribute("kind") == "brep-ref") {
+                bool index_ok = false;
+                const qsizetype packed_index = geometry.attribute("index")
+                    .toLongLong(&index_ok);
+                if (!index_ok || packed_index < 0
+                    || packed_index >= static_cast<qsizetype>(packed_shapes.size())) {
+                    error = "Solid contains an invalid project BRep reference.";
+                    return false;
+                }
+                TopoDS_Shape shape = packed_shapes[static_cast<size_t>(packed_index)];
+                solid = std::make_unique<CSolid>(shape);
+                if (!solid->InitSurfaces()) {
+                    error = "Could not initialize solid surfaces from project BRep pack.";
+                    return false;
+                }
+            } else {
+                // Version-1 projects saved before the shared geometry store
+                // keep an individual native-BRep or STEP block per object.
+                solid = CSolid::Load(object_element, error);
+            }
             if (!solid) {
                 return false;
             }
@@ -1813,13 +1986,13 @@ bool Dom3DProjectSerializer::Load(const QString& path,
                 auto clone = std::make_unique<CAssociativeClone>(solid->m_Shape, source_id);
                 clone->SetPlacement(placement);
                 clone->SetName(object_element.attribute("name", "Linked Copy").toStdString());
-                clone->ReBuldMesh();
+                clone->InitSurfaces();
                 object = std::move(clone);
             } else if (type == "SurfaceSet") {
                 TopoDS_Shape shape = solid->m_Shape;
                 auto surface_set = std::make_unique<CSurfaceSet>(shape);
                 surface_set->SetName(object_element.attribute("name", "Surface Set").toStdString());
-                surface_set->ReBuldMesh();
+                surface_set->InitSurfaces();
                 object = std::move(surface_set);
             } else {
                 solid->SetName(object_element.attribute("name", "Solid").toStdString());
@@ -1890,10 +2063,18 @@ bool Dom3DProjectSerializer::Load(const QString& path,
         }
         read_parametric_definition(object_element, *object);
         object->SetGroupName(object_element.attribute("group").toStdString());
+        if (object_element.hasAttribute("lineWidth")) {
+            bool ok = false;
+            const double width = object_element.attribute("lineWidth").toDouble(&ok);
+            if (ok) object->SetLineWidth(width);
+        }
+        object->SetLineStyle(object_element.attribute("lineStyle", "CONTINUOUS").toStdString());
         object->SetVisible(object_element.attribute("visible", "true") != "false");
         loaded_objects.push_back(std::move(object));
+        ++object_index;
     }
 
+    report(95, "Finalizing project...");
     document.Clear();
     for (CLayer* layer : document.m_Layers) {
         delete layer;
@@ -1908,6 +2089,7 @@ bool Dom3DProjectSerializer::Load(const QString& path,
         document.CreatePolyline();
     }
     document.ClearSelection();
+    report(100, "Project opened");
     return true;
 }
 
@@ -1939,6 +2121,8 @@ void copy_object_identity(const CAlfaObject& source, CAlfaObject& target) {
     target.m_LayerID = source.m_LayerID;
     target.SetName(source.GetName());
     target.SetGroupName(source.GetGroupName());
+    target.SetLineWidth(source.GetLineWidth());
+    target.SetLineStyle(source.GetLineStyle());
     target.CAlfaObject::SetVisible(source.IsVisible());
     target.CAlfaObject::SetColor(source.GetColor());
     target.SetMaterial(source.GetMaterial());
@@ -2154,7 +2338,11 @@ bool Dom3DProjectSerializer::SaveSelection(
         }
     }
     std::set<size_t> included;
-    std::vector<size_t> pending = selected_indices;
+    std::vector<size_t> pending;
+    pending.reserve(selected_indices.size());
+    for (size_t index : selected_indices) {
+        pending.push_back(document.ResolveGroupSelectionIndex(index));
+    }
     while (!pending.empty()) {
         const size_t index = pending.back();
         pending.pop_back();

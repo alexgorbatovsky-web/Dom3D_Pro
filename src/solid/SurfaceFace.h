@@ -65,14 +65,23 @@ public:
 	bool InitEdges3DCoat();
 	bool BuldMesh(float Deflection, bool MeshQuadro);
 	bool IsPlanar() const;
+	bool IsSpherical() const;
 	bool GetCenterAndNormal(Vec3& center, Vec3& normal) const;
 	bool GetPoint(double U, double V, CPoint8d* pnt);
 	void RenderEdges(const Color& color,
 	                 const std::vector<int>& selected_edge_indices = {},
-	                 bool draw_regular_edges = true) const;
+	                 bool draw_regular_edges = true,
+	                 bool surface_selected = false) const;
+	void RenderContour(const Color& color, bool surface_selected = false) const;
+	void RenderOutline(const Color& color,
+	                   const std::vector<int>& selected_edge_indices = {},
+	                   bool draw_regular_edges = true,
+	                   bool surface_selected = false) const;
 	void PreviewTranslate(Vec3 delta);
 	void PreviewRotate(Vec3 center, Vec3 axis, float angle);
 	void PreviewScale(Vec3 center, Vec3 axis, float factor);
+	bool CommitPreviewTranslate(Vec3 delta);
+	bool CommitPreviewRotate(Vec3 center, Vec3 axis, float angle);
 	bool HitTestEdgeScreen(DomPoint point,
 	                       const std::function<bool(Vec3, DomPoint&)>& world_to_screen,
 	                       float tolerance,

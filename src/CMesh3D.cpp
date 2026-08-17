@@ -11,15 +11,23 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QDirIterator>
+#include <QDebug>
 #include <QFileInfo>
 #include <QImage>
 #include <QOpenGLContext>
+#include <QOpenGLFunctions_2_1>
 #include <QOpenGLShaderProgram>
+#include <QOpenGLVersionFunctionsFactory>
 #include <QSettings>
+#include <QStandardPaths>
+#include <QVector3D>
+#include <QVector4D>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -40,6 +48,291 @@ void Step(const char* text);
 
 namespace {
 constexpr GLint kGlClampToEdge = 0x812F;
+
+QOpenGLFunctions_2_1* current_gl21() {
+    QOpenGLContext* context = QOpenGLContext::currentContext();
+    if (!context) return nullptr;
+    auto* functions =
+        QOpenGLVersionFunctionsFactory::get<QOpenGLFunctions_2_1>(context);
+    if (functions) functions->initializeOpenGLFunctions();
+    return functions;
+}
+
+QOpenGLShaderProgram* mesh_shader_program() {
+    static QOpenGLContext* shader_context = nullptr;
+    static std::unique_ptr<QOpenGLShaderProgram> shader;
+    QOpenGLContext* context = QOpenGLContext::currentContext();
+    if (!context) return nullptr;
+    if (shader && shader_context == context) return shader.get();
+
+    auto candidate = std::make_unique<QOpenGLShaderProgram>();
+    static const char* vertex_source = R"(
+        #version 120
+        varying vec3 eyePosition;
+        varying vec3 eyeNormal;
+        varying vec2 textureUV;
+        uniform vec4 uvBounds;
+        uniform vec4 uvTransform;
+        uniform float uvRotation;
+        uniform bool fitTexture;
+        void main() {
+            vec4 eye = gl_ModelViewMatrix * gl_Vertex;
+            eyePosition = eye.xyz;
+            eyeNormal = normalize(gl_NormalMatrix * gl_Normal);
+            vec2 uv = gl_MultiTexCoord0.st;
+            if (fitTexture) {
+                uv = (uv - uvBounds.xy) / max(uvBounds.zw - uvBounds.xy,
+                                               vec2(0.00001));
+            }
+            uv -= vec2(0.5);
+            uv *= uvTransform.zw;
+            float c = cos(uvRotation);
+            float s = sin(uvRotation);
+            uv = vec2(uv.x * c - uv.y * s, uv.x * s + uv.y * c);
+            textureUV = uv + vec2(0.5) + uvTransform.xy;
+            gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;
+        }
+    )";
+    static const char* fragment_source = R"(
+        #version 120
+        varying vec3 eyePosition;
+        varying vec3 eyeNormal;
+        varying vec2 textureUV;
+        uniform sampler2D colorTexture;
+        uniform sampler2D normalTexture;
+        uniform sampler2D roughnessTexture;
+        uniform sampler2D metallicTexture;
+        uniform sampler2D displacementTexture;
+        uniform sampler2D studioEnvironmentSharp;
+        uniform sampler2D studioEnvironmentMedium;
+        uniform sampler2D studioEnvironmentBlurred;
+        uniform bool useTexture;
+        uniform bool useNormalTexture;
+        uniform bool useRoughnessTexture;
+        uniform bool useMetallicTexture;
+        uniform bool useDisplacementTexture;
+        uniform bool pbrMaterial;
+        uniform bool diagnosticColor;
+        uniform bool selectedObject;
+        uniform bool flatColor;
+        uniform vec4 baseColor;
+        uniform vec3 lightDirection;
+        uniform vec4 lightingA;
+        uniform vec4 lightingB;
+        uniform float materialSpecular;
+        uniform float materialShininess;
+        uniform float materialRoughness;
+        uniform float materialMetallic;
+        uniform float coatWeight;
+        uniform float coatRoughness;
+        uniform float normalStrength;
+        uniform float displacementScale;
+        uniform bool useStudioEnvironment;
+        uniform float environmentStrength;
+        uniform float environmentRotation;
+        vec2 environmentUV(vec3 direction) {
+            direction = normalize(direction);
+            return vec2(fract(atan(direction.z, direction.x) / 6.28318531
+                              + 0.5 + environmentRotation / 6.28318531),
+                        asin(clamp(direction.y, -1.0, 1.0)) / 3.14159265 + 0.5);
+        }
+        mat3 cotangentFrame(vec3 normal, vec3 position, vec2 uv) {
+            vec3 dp1 = dFdx(position);
+            vec3 dp2 = dFdy(position);
+            vec2 duv1 = dFdx(uv);
+            vec2 duv2 = dFdy(uv);
+            vec3 dp2perp = cross(dp2, normal);
+            vec3 dp1perp = cross(normal, dp1);
+            vec3 tangent = dp2perp * duv1.x + dp1perp * duv2.x;
+            vec3 bitangent = dp2perp * duv1.y + dp1perp * duv2.y;
+            float scale = inversesqrt(max(max(dot(tangent, tangent),
+                                               dot(bitangent, bitangent)), 0.00000001));
+            return mat3(tangent * scale, bitangent * scale, normal);
+        }
+        void main() {
+            vec3 n = normalize(eyeNormal);
+            vec3 viewDirection = normalize(-eyePosition);
+            if (dot(n, viewDirection) < 0.0) n = -n;
+            vec3 coatNormal = n;
+            if (diagnosticColor) {
+                float direction = selectedObject ? -1.0 : 1.0;
+                gl_FragColor = vec4(clamp((direction * n + vec3(1.0))
+                                           * (127.0 / 255.0), 0.0, 1.0),
+                                    baseColor.a);
+                return;
+            }
+            mat3 tangentFrame = cotangentFrame(n, eyePosition, textureUV);
+            vec2 uv = textureUV;
+            if (useDisplacementTexture) {
+                float height = texture2D(displacementTexture, uv).r - 0.5;
+                vec3 tangentView = vec3(dot(viewDirection, tangentFrame[0]),
+                                        dot(viewDirection, tangentFrame[1]),
+                                        dot(viewDirection, tangentFrame[2]));
+                uv -= tangentView.xy / max(abs(tangentView.z), 0.25)
+                    * height * displacementScale;
+            }
+            if (useNormalTexture) {
+                vec3 mapNormal = texture2D(normalTexture, uv).xyz * 2.0 - 1.0;
+                mapNormal = normalize(mix(vec3(0.0, 0.0, 1.0), mapNormal,
+                                          normalStrength));
+                n = normalize(tangentFrame * mapNormal);
+            }
+            vec4 source = baseColor;
+            if (useTexture) source *= texture2D(colorTexture, uv);
+            if (flatColor) {
+                gl_FragColor = source;
+                return;
+            }
+            float roughness = clamp(useRoughnessTexture
+                ? texture2D(roughnessTexture, uv).r : materialRoughness,
+                0.04, 1.0);
+            float metallic = clamp(useMetallicTexture
+                ? texture2D(metallicTexture, uv).r : materialMetallic,
+                0.0, 1.0);
+            vec3 light = normalize(lightDirection);
+            float incidence = dot(n, light);
+            float wrapped = clamp((incidence + lightingA.y)
+                                  / (1.0 + lightingA.y), 0.0, 1.0);
+            float shade = lightingA.x + lightingA.z * wrapped;
+            vec3 halfVector = normalize(light + viewDirection);
+            if (!pbrMaterial) {
+                float gloss = pow(max(0.0, dot(n, halfVector)),
+                                  max(4.0, materialShininess * lightingB.x));
+                float rim = pow(max(0.0, 1.0 - abs(dot(n, viewDirection))), 3.0);
+                float highlight = min(0.75,
+                    materialSpecular * lightingA.w * gloss + lightingB.y * rim);
+                float boost = selectedObject ? 1.08 : 1.0;
+                vec3 lit = max(source.rgb * shade * boost + vec3(highlight),
+                               vec3(0.0));
+                lit = pow(lit, vec3(lightingB.z));
+                gl_FragColor = vec4(lit, source.a);
+                return;
+            }
+            // Cook-Torrance/GGX keeps a rough highlight broad while also
+            // increasing its peak as the surface gets smoother.  The old
+            // unnormalised Phong lobe never rose above F0 * light strength
+            // (about 1.5% for dielectric plastic), so PBR materials appeared
+            // completely matte even with a low roughness map.
+            float nDotL = max(dot(n, light), 0.0);
+            float nDotV = max(dot(n, viewDirection), 0.001);
+            float nDotH = max(dot(n, halfVector), 0.0);
+            float vDotH = max(dot(viewDirection, halfVector), 0.0);
+            float alpha = max(roughness * roughness, 0.002);
+            float alphaSquared = alpha * alpha;
+            float distributionDenominator = nDotH * nDotH
+                * (alphaSquared - 1.0) + 1.0;
+            float distribution = alphaSquared
+                / max(3.14159265 * distributionDenominator
+                      * distributionDenominator, 0.0001);
+            float geometryK = (roughness + 1.0) * (roughness + 1.0) / 8.0;
+            float geometryView = nDotV
+                / (nDotV * (1.0 - geometryK) + geometryK);
+            float geometryLight = nDotL
+                / (nDotL * (1.0 - geometryK) + geometryK);
+            float rim = pow(max(0.0, 1.0 - abs(dot(n, viewDirection))), 3.0);
+            vec3 f0 = mix(vec3(0.04 * materialSpecular), source.rgb, metallic);
+            vec3 fresnel = f0 + (vec3(1.0) - f0)
+                * pow(1.0 - vDotH, 5.0);
+            vec3 directSpecular = distribution * geometryView * geometryLight
+                * fresnel / max(4.0 * nDotV * nDotL, 0.001);
+            vec3 environmentSpecular = vec3(0.0);
+            vec3 environmentDiffuse = vec3(0.0);
+            if (useStudioEnvironment) {
+                vec2 reflectionUV = environmentUV(
+                    reflect(-viewDirection, n));
+                vec3 sharpEnvironment = texture2D(
+                    studioEnvironmentSharp, reflectionUV).rgb;
+                vec3 mediumEnvironment = texture2D(
+                    studioEnvironmentMedium, reflectionUV).rgb;
+                vec3 blurredEnvironment = texture2D(
+                    studioEnvironmentBlurred, reflectionUV).rgb;
+                environmentSpecular = roughness < 0.45
+                    ? mix(sharpEnvironment, mediumEnvironment,
+                          roughness / 0.45)
+                    : mix(mediumEnvironment, blurredEnvironment,
+                          (roughness - 0.45) / 0.55);
+                environmentDiffuse = texture2D(
+                    studioEnvironmentBlurred, environmentUV(n)).rgb;
+                environmentSpecular *= environmentStrength;
+                environmentDiffuse *= environmentStrength;
+            }
+            vec3 highlight = min(vec3(0.85),
+                directSpecular * nDotL * lightingA.w
+                // Image-based reflections are the main illumination for
+                // metals. Do not attenuate the whole studio environment by
+                // the comparatively low direct-specular slider.
+                + environmentSpecular * fresnel
+                    * (0.90 + 0.50 * lightingA.w)
+                + vec3(lightingB.y * rim));
+            float boost = selectedObject ? 1.08 : 1.0;
+            vec3 diffuseWeight = (vec3(1.0) - fresnel) * (1.0 - metallic);
+            vec3 diffuseLighting = vec3(shade)
+                + environmentDiffuse * 0.28;
+            vec3 lit = max(source.rgb * diffuseWeight * diffuseLighting * boost
+                           + highlight,
+                           vec3(0.0));
+            if (coatWeight > 0.0001) {
+                float coatNDotL = max(dot(coatNormal, light), 0.0);
+                float coatNDotV = max(dot(coatNormal, viewDirection), 0.001);
+                float coatNDotH = max(dot(coatNormal, halfVector), 0.0);
+                float coatVDotH = max(dot(viewDirection, halfVector), 0.0);
+                float coatAlpha = max(coatRoughness * coatRoughness, 0.0001);
+                float coatAlpha2 = coatAlpha * coatAlpha;
+                float coatDenominator = coatNDotH * coatNDotH
+                    * (coatAlpha2 - 1.0) + 1.0;
+                float coatDistribution = coatAlpha2 / max(
+                    3.14159265 * coatDenominator * coatDenominator, 0.0001);
+                float coatK = (coatRoughness + 1.0)
+                    * (coatRoughness + 1.0) / 8.0;
+                float coatGeometryV = coatNDotV
+                    / (coatNDotV * (1.0 - coatK) + coatK);
+                float coatGeometryL = coatNDotL
+                    / (coatNDotL * (1.0 - coatK) + coatK);
+                // IOR 1.5 -> F0 approximately 0.04.
+                float coatFresnel = 0.04 + 0.96
+                    * pow(1.0 - coatVDotH, 5.0);
+                vec3 coatDirect = vec3(coatDistribution * coatGeometryV
+                    * coatGeometryL * coatFresnel
+                    / max(4.0 * coatNDotV * coatNDotL, 0.001)
+                    * coatNDotL * lightingA.w);
+                vec3 coatEnvironment = vec3(0.0);
+                if (useStudioEnvironment) {
+                    vec2 coatUV = environmentUV(
+                        reflect(-viewDirection, coatNormal));
+                    vec3 coatSharp = texture2D(
+                        studioEnvironmentSharp, coatUV).rgb;
+                    vec3 coatMedium = texture2D(
+                        studioEnvironmentMedium, coatUV).rgb;
+                    vec3 coatBlurred = texture2D(
+                        studioEnvironmentBlurred, coatUV).rgb;
+                    coatEnvironment = coatRoughness < 0.45
+                        ? mix(coatSharp, coatMedium, coatRoughness / 0.45)
+                        : mix(coatMedium, coatBlurred,
+                              (coatRoughness - 0.45) / 0.55);
+                    coatEnvironment *= environmentStrength * coatFresnel;
+                }
+                float coatViewFresnel = 0.04 + 0.96
+                    * pow(1.0 - coatNDotV, 5.0);
+                lit = lit * (1.0 - coatWeight * coatViewFresnel)
+                    + coatWeight * (coatDirect + coatEnvironment);
+            }
+            lit = pow(lit, vec3(lightingB.z));
+            gl_FragColor = vec4(lit, source.a);
+        }
+    )";
+    if (!candidate->addShaderFromSourceCode(
+            QOpenGLShader::Vertex, vertex_source)
+        || !candidate->addShaderFromSourceCode(
+            QOpenGLShader::Fragment, fragment_source)
+        || !candidate->link()) {
+        qWarning().noquote() << "Dom3D mesh shader compilation failed:"
+                             << candidate->log();
+        return nullptr;
+    }
+    shader_context = context;
+    shader = std::move(candidate);
+    return shader.get();
+}
 QString resolve_texture_path(const std::string& texture_path) {
     const QString path = QString::fromStdString(texture_path).trimmed();
     if (path.isEmpty()) {
@@ -78,12 +371,39 @@ QString resolve_texture_path(const std::string& texture_path) {
 }
 
 GLuint texture_id_for_path(const std::string& texture_path) {
-    const QString resolved = resolve_texture_path(texture_path);
+    if (texture_path.empty()) {
+        return 0;
+    }
+
+    // Resolving a material path touches the file system.  A kitchen contains
+    // thousands of textured surface draws, so doing QFileInfo::exists() for
+    // every surface on every frame is considerably more expensive than the
+    // actual triangles.  Material paths are stable for the lifetime of the
+    // application; resolve each source string only once.
+    static std::unordered_map<std::string, QString> resolved_path_cache;
+    const auto resolved_found = resolved_path_cache.find(texture_path);
+    const QString resolved = resolved_found != resolved_path_cache.end()
+        ? resolved_found->second
+        : resolved_path_cache.emplace(
+              texture_path, resolve_texture_path(texture_path)).first->second;
     if (resolved.isEmpty()) {
         return 0;
     }
 
-    static std::unordered_map<std::string, GLuint> texture_cache;
+    QOpenGLContext* context = QOpenGLContext::currentContext();
+    if (!context) {
+        return 0;
+    }
+
+    // Texture names belong to an OpenGL share group.  Reusing a GLuint that
+    // was created by the splash/preview context in the main viewport context
+    // produces an apparently random black surface on the first kitchen draw.
+    const void* context_key = context->shareGroup()
+        ? static_cast<const void*>(context->shareGroup())
+        : static_cast<const void*>(context);
+    static std::unordered_map<
+        const void*, std::unordered_map<std::string, GLuint>> texture_caches;
+    auto& texture_cache = texture_caches[context_key];
     const std::string key = QDir::toNativeSeparators(resolved).toStdString();
     const auto found = texture_cache.find(key);
     if (found != texture_cache.end()) {
@@ -98,6 +418,9 @@ GLuint texture_id_for_path(const std::string& texture_path) {
 
     image = image.convertToFormat(QImage::Format_RGBA8888).mirrored(false, true);
     GLuint texture_id = 0;
+    if (QOpenGLFunctions_2_1* functions = current_gl21()) {
+        functions->glActiveTexture(GL_TEXTURE0);
+    }
     glGenTextures(1, &texture_id);
     glBindTexture(GL_TEXTURE_2D, texture_id);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -117,6 +440,167 @@ GLuint texture_id_for_path(const std::string& texture_path) {
 
     texture_cache[key] = texture_id;
     return texture_id;
+}
+
+std::array<GLuint, 3> procedural_studio_environment_texture_ids() {
+    QOpenGLContext* context = QOpenGLContext::currentContext();
+    if (!context) return {};
+    const void* context_key = context->shareGroup()
+        ? static_cast<const void*>(context->shareGroup())
+        : static_cast<const void*>(context);
+    static std::unordered_map<const void*, std::array<GLuint, 3>> caches;
+    const auto found = caches.find(context_key);
+    if (found != caches.end()) return found->second;
+
+    constexpr int width = 256;
+    constexpr int height = 128;
+    constexpr GLenum kGlRgba16f = 0x881A;
+    // These lobes represent large photographic softboxes, not point lights.
+    // Even the sharp level therefore covers a sizeable solid angle.  HDR
+    // values above 1.0 are intentional: a dielectric reflects only about 4%
+    // of the environment at normal incidence.
+    const std::array<float, 3> key_exponents{48.0f, 9.0f, 1.8f};
+    const std::array<float, 3> key_intensities{18.0f, 7.0f, 1.8f};
+    const std::array<float, 3> fill_exponents{20.0f, 5.0f, 1.4f};
+    const std::array<float, 3> fill_intensities{3.0f, 1.25f, 0.42f};
+    const Vec3 key_direction = normalize(Vec3{-0.46f, 0.54f, 0.70f});
+    const Vec3 fill_direction = normalize(Vec3{0.72f, 0.12f, 0.68f});
+    const Vec3 rim_direction = normalize(Vec3{-0.12f, -0.18f, -0.98f});
+    std::array<GLuint, 3> textures{};
+    glGenTextures(static_cast<GLsizei>(textures.size()), textures.data());
+
+    for (size_t level = 0; level < textures.size(); ++level) {
+        std::vector<float> pixels(
+            static_cast<size_t>(width) * height * 4, 1.0f);
+        for (int y = 0; y < height; ++y) {
+            const float latitude =
+                ((static_cast<float>(y) + 0.5f) / height - 0.5f)
+                * 3.14159265f;
+            const float cos_latitude = std::cos(latitude);
+            for (int x = 0; x < width; ++x) {
+                const float longitude =
+                    ((static_cast<float>(x) + 0.5f) / width - 0.5f)
+                    * 6.28318531f;
+                const Vec3 direction{
+                    cos_latitude * std::cos(longitude),
+                    std::sin(latitude),
+                    cos_latitude * std::sin(longitude)};
+                // A photographic material preview uses a bright studio
+                // surround. The old near-black environment left metallic
+                // texels with no diffuse term and made silver look black.
+                const float sky = 0.30f + 0.22f
+                    * std::clamp(direction.y * 0.5f + 0.5f, 0.0f, 1.0f);
+                const float key = key_intensities[level] * std::pow(
+                    std::max(dot(direction, key_direction), 0.0f),
+                    key_exponents[level]);
+                const float fill = fill_intensities[level] * std::pow(
+                    std::max(dot(direction, fill_direction), 0.0f),
+                    fill_exponents[level]);
+                const float rim = 0.55f * std::pow(
+                    std::max(dot(direction, rim_direction), 0.0f),
+                    12.0f / static_cast<float>(level + 1));
+                const size_t offset =
+                    (static_cast<size_t>(y) * width + x) * 4;
+                pixels[offset + 0] = sky * 0.92f + key + fill * 0.78f + rim * 0.72f;
+                pixels[offset + 1] = sky * 0.97f + key + fill * 0.88f + rim * 0.82f;
+                pixels[offset + 2] = sky * 1.08f + key + fill + rim;
+            }
+        }
+
+        glBindTexture(GL_TEXTURE_2D, textures[level]);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, kGlClampToEdge);
+        glTexImage2D(GL_TEXTURE_2D, 0, kGlRgba16f, width, height, 0,
+                     GL_RGBA, GL_FLOAT, pixels.data());
+    }
+    glBindTexture(GL_TEXTURE_2D, 0);
+    caches.emplace(context_key, textures);
+    return textures;
+}
+
+QString resolved_environment_image_path(const std::string& source_path) {
+    QString path = QString::fromStdString(source_path).trimmed();
+    if (path.isEmpty()) return {};
+    QFileInfo info(path);
+    if (!info.exists()) return {};
+    if (info.suffix().compare("exr", Qt::CaseInsensitive) == 0) {
+        QString base = info.completeBaseName();
+        if (base.endsWith("_HDR", Qt::CaseInsensitive)) {
+            base.chop(4);
+        }
+        const QString preview = info.absoluteDir().filePath(
+            base + "_TONEMAPPED.jpg");
+        if (QFileInfo::exists(preview)) return preview;
+    }
+    return info.absoluteFilePath();
+}
+
+std::array<GLuint, 3> image_environment_texture_ids(
+    const std::string& source_path) {
+    QOpenGLContext* context = QOpenGLContext::currentContext();
+    if (!context) return {};
+    const QString resolved = resolved_environment_image_path(source_path);
+    if (resolved.isEmpty()) return {};
+    const void* context_key = context->shareGroup()
+        ? static_cast<const void*>(context->shareGroup())
+        : static_cast<const void*>(context);
+    struct CacheEntry {
+        QString path;
+        std::array<GLuint, 3> textures{};
+    };
+    static std::unordered_map<const void*, CacheEntry> caches;
+    CacheEntry& cache = caches[context_key];
+    if (cache.path == resolved && cache.textures[0] != 0) {
+        return cache.textures;
+    }
+
+    QImage source(resolved);
+    if (source.isNull()) return {};
+    if (cache.textures[0] != 0) {
+        glDeleteTextures(static_cast<GLsizei>(cache.textures.size()),
+                         cache.textures.data());
+        cache.textures = {};
+    }
+    const int sharp_width = std::min(1024, source.width());
+    const int sharp_height = std::max(1,
+        qRound(static_cast<double>(source.height()) * sharp_width
+               / std::max(1, source.width())));
+    const std::array<int, 3> widths{
+        sharp_width, std::min(256, sharp_width), std::min(48, sharp_width)};
+    glGenTextures(static_cast<GLsizei>(cache.textures.size()),
+                  cache.textures.data());
+    for (size_t level = 0; level < cache.textures.size(); ++level) {
+        const int width = std::max(1, widths[level]);
+        const int height = std::max(1,
+            qRound(static_cast<double>(sharp_height) * width / sharp_width));
+        QImage image = source.scaled(
+            width, height, Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
+            .convertToFormat(QImage::Format_RGBA8888)
+            .mirrored(false, true);
+        glBindTexture(GL_TEXTURE_2D, cache.textures[level]);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, kGlClampToEdge);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, image.width(), image.height(),
+                     0, GL_RGBA, GL_UNSIGNED_BYTE, image.constBits());
+    }
+    glBindTexture(GL_TEXTURE_2D, 0);
+    cache.path = resolved;
+    return cache.textures;
+}
+
+std::array<GLuint, 3> studio_environment_texture_ids() {
+    const ViewportLightingSettings& lighting = CMesh3D::GetLightingSettings();
+    if (!lighting.environment_enabled) return {};
+    if (!lighting.environment_path.empty()) {
+        const std::array<GLuint, 3> image =
+            image_environment_texture_ids(lighting.environment_path);
+        if (image[0] != 0) return image;
+    }
+    return procedural_studio_environment_texture_ids();
 }
 
 UV projected_uv_for_face(Vec3 vertex, Vec3 face_normal) {
@@ -1448,8 +1932,6 @@ bool CMesh3D::SplitFaceByVar7(int f1, int v1, int edgeIndex)
         return true;
     if(face.corners.size() != 4)
         return false;
-    CAlfaDoc* pDoc = GetAlfaDoc();
-    pDoc->AddLayer("Faces");
 //    auto pLine1 = std::make_unique<CPolyline>();
 //    MakePolyline(f1, *pLine1);
  //   pLine1->SetName("Face_f1");
@@ -1831,6 +2313,25 @@ const ViewportLightingSettings& CMesh3D::GetLightingSettings() {
     return s_LightingSettings;
 }
 
+std::string CMesh3D::DefaultEnvironmentPath() {
+    const QString root = QDir(
+        QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation))
+        .filePath("Dom3D Pro/HDRI");
+    QDirIterator iterator(
+        root, QStringList{"*_HDR.exr"}, QDir::Files,
+        QDirIterator::Subdirectories);
+    QString first;
+    while (iterator.hasNext()) {
+        const QString path = iterator.next();
+        if (first.isEmpty()) first = path;
+        if (QFileInfo(path).completeBaseName().contains(
+                "IndoorEnvironment", Qt::CaseInsensitive)) {
+            return path.toStdString();
+        }
+    }
+    return first.toStdString();
+}
+
 void CMesh3D::ReloadLightingSettings() {
     QSettings settings("Dom3D", "Dom3D_Pro");
     ViewportLightingSettings defaults;
@@ -1854,6 +2355,17 @@ void CMesh3D::ReloadLightingSettings() {
         settings.value("view/lighting/rim", defaults.rim).toFloat(), 0.0f, 1.0f);
     s_LightingSettings.gamma = std::clamp(
         settings.value("view/lighting/gamma", defaults.gamma).toFloat(), 0.2f, 2.5f);
+    s_LightingSettings.environment_enabled = settings.value(
+        "view/lighting/environmentEnabled", defaults.environment_enabled).toBool();
+    s_LightingSettings.environment_path = settings.value(
+        "view/lighting/environmentPath",
+        QString::fromStdString(DefaultEnvironmentPath())).toString().toStdString();
+    s_LightingSettings.environment_strength = std::clamp(settings.value(
+        "view/lighting/environmentStrength",
+        defaults.environment_strength).toFloat(), 0.0f, 5.0f);
+    s_LightingSettings.environment_rotation_degrees = settings.value(
+        "view/lighting/environmentRotation",
+        defaults.environment_rotation_degrees).toFloat();
 }
 
 CMesh3D::CMesh3D(std::string name)
@@ -1862,11 +2374,145 @@ CMesh3D::CMesh3D(std::string name)
     SetColor(kDefaultMeshObjectColor);
 }
 
+CMesh3D::~CMesh3D() {
+    ReleaseGpuCache();
+}
+
+void CMesh3D::InvalidateGpuCache() const {
+    gpu_cache_dirty_ = true;
+}
+
+void CMesh3D::ReleaseGpuCache() const {
+    QOpenGLContext* context = QOpenGLContext::currentContext();
+    if (context && gpu_context_ == context) {
+        if (QOpenGLFunctions_2_1* functions = current_gl21()) {
+            if (gpu_triangle_buffer_ != 0) {
+                functions->glDeleteBuffers(1, &gpu_triangle_buffer_);
+            }
+            if (gpu_wire_buffer_ != 0) {
+                functions->glDeleteBuffers(1, &gpu_wire_buffer_);
+            }
+        }
+    }
+    gpu_triangle_buffer_ = 0;
+    gpu_wire_buffer_ = 0;
+    gpu_triangle_vertex_count_ = 0;
+    gpu_wire_vertex_count_ = 0;
+    gpu_context_ = nullptr;
+    gpu_cache_dirty_ = true;
+}
+
+bool CMesh3D::EnsureGpuCache() const {
+    QOpenGLContext* context = QOpenGLContext::currentContext();
+    QOpenGLFunctions_2_1* functions = current_gl21();
+    if (!context || !functions || vertices_.empty() || faces_.empty()) {
+        return false;
+    }
+    if (gpu_context_ != context) {
+        gpu_triangle_buffer_ = 0;
+        gpu_wire_buffer_ = 0;
+        gpu_triangle_vertex_count_ = 0;
+        gpu_wire_vertex_count_ = 0;
+        gpu_context_ = context;
+        gpu_cache_dirty_ = true;
+    }
+    if (!gpu_cache_dirty_ && gpu_triangle_buffer_ != 0) return true;
+
+    if (gpu_triangle_buffer_ != 0) {
+        functions->glDeleteBuffers(1, &gpu_triangle_buffer_);
+        gpu_triangle_buffer_ = 0;
+    }
+    if (gpu_wire_buffer_ != 0) {
+        functions->glDeleteBuffers(1, &gpu_wire_buffer_);
+        gpu_wire_buffer_ = 0;
+    }
+
+    std::vector<Vec3> vertex_normals;
+    if (normals_.size() == vertices_.size()) {
+        vertex_normals = normals_;
+    } else {
+        vertex_normals.assign(vertices_.size(), {0.0f, 0.0f, 0.0f});
+        for (const Face& face : faces_) {
+            if (!IsValidFace(face, vertices_.size())) continue;
+            const Vec3 normal = FaceNormal(face);
+            for (const MeshCorner& corner : face.corners) {
+                vertex_normals[corner.v] = vertex_normals[corner.v] + normal;
+            }
+        }
+        for (Vec3& normal : vertex_normals) {
+            normal = normalize(normal);
+            if (dot(normal, normal) <= 0.000001f) normal = {0.0f, 1.0f, 0.0f};
+        }
+    }
+
+    std::vector<GpuVertex> triangles;
+    triangles.reserve(faces_.size() * 3);
+    std::vector<Vec3> wire_vertices;
+    wire_vertices.reserve(faces_.size() * 6);
+    std::unordered_set<unsigned long long> edges;
+    edges.reserve(faces_.size() * 3);
+    for (const Face& face : faces_) {
+        if (!IsValidFace(face, vertices_.size())) continue;
+        const Vec3 face_normal = FaceNormal(face);
+        for (size_t i = 1; i + 1 < face.corners.size(); ++i) {
+            const MeshCorner corners[]{
+                face.corners[0], face.corners[i], face.corners[i + 1]};
+            for (const MeshCorner& corner : corners) {
+                const Vec3& position = vertices_[corner.v];
+                const Vec3& normal = normals_.empty()
+                        || corner.n >= normals_.size()
+                    ? vertex_normals[corner.v] : normals_[corner.n];
+                const UV uv = corner.uv < uvs_.size()
+                    ? uvs_[corner.uv]
+                    : projected_uv_for_face(position, face_normal);
+                triangles.push_back({
+                    {position.x, position.y, position.z},
+                    {normal.x, normal.y, normal.z}, {uv.u, uv.v}});
+            }
+        }
+        for (size_t i = 0; i < face.corners.size(); ++i) {
+            const size_t first = face.corners[i].v;
+            const size_t second = face.corners[(i + 1) % face.corners.size()].v;
+            const size_t edge_min = std::min(first, second);
+            const size_t edge_max = std::max(first, second);
+            const unsigned long long key =
+                (static_cast<unsigned long long>(edge_min) << 32)
+                | static_cast<unsigned long long>(edge_max);
+            if (edges.insert(key).second) {
+                wire_vertices.push_back(vertices_[first]);
+                wire_vertices.push_back(vertices_[second]);
+            }
+        }
+    }
+    if (triangles.empty()) return false;
+
+    functions->glGenBuffers(1, &gpu_triangle_buffer_);
+    functions->glBindBuffer(GL_ARRAY_BUFFER, gpu_triangle_buffer_);
+    functions->glBufferData(
+        GL_ARRAY_BUFFER,
+        static_cast<qopengl_GLsizeiptr>(triangles.size() * sizeof(GpuVertex)),
+        triangles.data(), GL_STATIC_DRAW);
+    gpu_triangle_vertex_count_ = triangles.size();
+    if (!wire_vertices.empty()) {
+        functions->glGenBuffers(1, &gpu_wire_buffer_);
+        functions->glBindBuffer(GL_ARRAY_BUFFER, gpu_wire_buffer_);
+        functions->glBufferData(
+            GL_ARRAY_BUFFER,
+            static_cast<qopengl_GLsizeiptr>(wire_vertices.size() * sizeof(Vec3)),
+            wire_vertices.data(), GL_STATIC_DRAW);
+        gpu_wire_vertex_count_ = wire_vertices.size();
+    }
+    functions->glBindBuffer(GL_ARRAY_BUFFER, 0);
+    gpu_cache_dirty_ = false;
+    return gpu_triangle_buffer_ != 0;
+}
+
 const std::vector<Vec3>& CMesh3D::GetVertices() const {
     return vertices_;
 }
 
 std::vector<Vec3>& CMesh3D::GetVertices() {
+    InvalidateGpuCache();
     return vertices_;
 }
 
@@ -1875,6 +2521,7 @@ const std::vector<CMesh3D::Face>& CMesh3D::GetFaces() const {
 }
 
 std::vector<CMesh3D::Face>& CMesh3D::GetFaces() {
+    InvalidateGpuCache();
     return faces_;
 }
 
@@ -2545,6 +3192,7 @@ bool CMesh3D::SetGeometry(std::vector<Vec3> vertices,
     for (Face& face : faces_) {
         face.normal = FaceNormal(face);
     }
+    InvalidateGpuCache();
     return true;
 }
 
@@ -2585,11 +3233,17 @@ void CMesh3D::Render() {
 
 void CMesh3D::Render3d(bool selected) const {
     const MeshDisplayMode mode = GetDisplayMode();
+    const bool shaded_mode = mode == MeshDisplayMode::SurfaceMaterial
+        || mode == MeshDisplayMode::SurfaceGray
+        || mode == MeshDisplayMode::SurfaceColored;
     const bool zebra = IsZebraAnalysisTarget();
     const SolidDisplayMode solid_mode = zebra
         ? SolidDisplayMode::SurfacesAndEdges
         : CSolid::GetDisplayMode();
-    if (solid_mode == SolidDisplayMode::HiddenLine) {
+    const bool shaded_solid_mode = solid_mode == SolidDisplayMode::SurfacesAndEdges
+        || solid_mode == SolidDisplayMode::SurfacesAndRaisedMesh;
+    const bool rgb_selected = selected && shaded_mode && shaded_solid_mode;
+    if (solid_mode == SolidDisplayMode::HiddenLine && !selected) {
         const Color background = CSolid::GetHiddenLineBackgroundColor();
         RenderHiddenLineDepth(background);
         RenderHiddenLineEdges(false, background, selected);
@@ -2600,11 +3254,11 @@ void CMesh3D::Render3d(bool selected) const {
         || solid_mode == SolidDisplayMode::SurfacesAndRaisedMesh;
     const bool wire_only = solid_mode == SolidDisplayMode::Wireframe
         || solid_mode == SolidDisplayMode::MeshOnly;
-    if (!zebra && mode == MeshDisplayMode::Wire && !solid_requests_fill) {
+    if (!rgb_selected && !zebra && mode == MeshDisplayMode::Wire && !solid_requests_fill) {
         RenderWire(selected, true, nullptr);
         return;
     }
-    if (wire_only) {
+    if (wire_only && !rgb_selected) {
         RenderWire(selected, true, nullptr);
         return;
     }
@@ -2616,14 +3270,14 @@ void CMesh3D::Render3d(bool selected) const {
         material.bump_texture_path.clear();
     }
 
-    // A standalone imported mesh has no separate BRep edge collection: its
-    // polygon edges are the equivalent of Solid edges.  Therefore the Solid
-    // display flyout must explicitly control them too.
-    const bool draw_edges = mode != MeshDisplayMode::SurfaceMaterial
-        || solid_mode == SolidDisplayMode::SurfacesAndEdges
-        || solid_mode == SolidDisplayMode::SurfacesAndRaisedMesh;
-    RenderFaces(selected, draw_edges, &material,
-                mode == MeshDisplayMode::SurfaceColored);
+    // Texture is the finished material presentation.  Imported meshes use
+    // their triangle boundaries as construction mesh lines, not as BRep
+    // silhouette edges.  Let Gray/RGB keep those diagnostic lines, but never
+    // overlay them on Texture: the legacy Dom renderer also showed textured
+    // mesh faces without the triangulation.
+    const bool draw_edges = mode != MeshDisplayMode::SurfaceMaterial;
+    RenderFaces(rgb_selected, draw_edges, &material,
+                rgb_selected || mode == MeshDisplayMode::SurfaceColored);
     if (draw_edges) {
         RenderWire(selected, true, nullptr);
     }
@@ -2651,13 +3305,30 @@ void CMesh3D::RenderFaces(bool selected,
         : flat_color
         ? std::clamp(material_alpha, 0.0f, 1.0f)
         : std::clamp(material_alpha * s_SurfaceOpacity, 0.0f, 1.0f);
-    // Selection is rendered in diagnostic RGB by surface normal.  A bound
-    // color texture would modulate (and usually hide) those RGB colors, so it
-    // must be suppressed for this draw pass without changing the material.
-    const GLuint color_texture = (zebra || selected || diagnostic_rgb)
+    // Selection policy is chosen by the caller through diagnostic_rgb.
+    // Selected bodies/faces use RGB Selected only in Texture, Gray and RGB
+    // display modes; Wire and analysis modes keep their own presentation.
+    const GLuint color_texture = (zebra || diagnostic_rgb)
         ? 0
         : texture_id_for_path(material.color_texture_path);
     const bool has_texture = color_texture != 0;
+    const bool use_pbr = !zebra && !diagnostic_rgb && !flat_color;
+    const GLuint normal_texture = use_pbr
+        ? texture_id_for_path(material.normal_texture_path) : 0;
+    const GLuint roughness_texture = use_pbr
+        ? texture_id_for_path(material.roughness_texture_path) : 0;
+    const GLuint metallic_texture = use_pbr
+        ? texture_id_for_path(material.metallic_texture_path) : 0;
+    const GLuint displacement_texture = use_pbr
+        ? texture_id_for_path(material.displacement_texture_path) : 0;
+    const bool pbr_material = normal_texture != 0 || roughness_texture != 0
+        || metallic_texture != 0 || displacement_texture != 0
+        || material.coat_weight > 0.0001f;
+    const std::array<GLuint, 3> studio_environment = pbr_material
+        ? studio_environment_texture_ids() : std::array<GLuint, 3>{};
+    const bool use_studio_environment =
+        studio_environment[0] != 0 && studio_environment[1] != 0
+        && studio_environment[2] != 0;
     UV texture_uv_min{};
     UV texture_uv_max{};
     if (material.texture_fit_to_surface && !uvs_.empty()) {
@@ -2671,25 +3342,28 @@ void CMesh3D::RenderFaces(bool selected,
         }
     }
 
+    QOpenGLShaderProgram* fast_program = !zebra
+        ? mesh_shader_program() : nullptr;
+    const bool fast_mesh = fast_program && EnsureGpuCache();
     std::vector<Vec3> vertex_normals;
-    if (normals_.size() == vertices_.size()) {
-        vertex_normals = normals_;
-    } else {
-        vertex_normals.assign(vertices_.size(), {0.0f, 0.0f, 0.0f});
-        for (const Face& face : faces_) {
-            if (!IsValidFace(face, vertices_.size())) {
-                continue;
+    if (!fast_mesh) {
+        if (normals_.size() == vertices_.size()) {
+            vertex_normals = normals_;
+        } else {
+            vertex_normals.assign(vertices_.size(), {0.0f, 0.0f, 0.0f});
+            for (const Face& face : faces_) {
+                if (!IsValidFace(face, vertices_.size())) continue;
+                const Vec3 normal = FaceNormal(face);
+                for (const MeshCorner& corner : face.corners) {
+                    vertex_normals[corner.v] =
+                        vertex_normals[corner.v] + normal;
+                }
             }
-            const Vec3 normal = FaceNormal(face);
-            for (const MeshCorner& corner : face.corners) {
-                const size_t index = corner.v;
-                vertex_normals[index] = vertex_normals[index] + normal;
-            }
-        }
-        for (Vec3& normal : vertex_normals) {
-            normal = normalize(normal);
-            if (std::fabs(normal.x) <= 0.00001f && std::fabs(normal.y) <= 0.00001f && std::fabs(normal.z) <= 0.00001f) {
-                normal = {0.0f, 1.0f, 0.0f};
+            for (Vec3& normal : vertex_normals) {
+                normal = normalize(normal);
+                if (dot(normal, normal) <= 0.000001f) {
+                    normal = {0.0f, 1.0f, 0.0f};
+                }
             }
         }
     }
@@ -2711,6 +3385,9 @@ void CMesh3D::RenderFaces(bool selected,
         glBindTexture(GL_TEXTURE_1D, zebra_texture_id());
         glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
     } else if (has_texture) {
+        if (QOpenGLFunctions_2_1* functions = current_gl21()) {
+            functions->glActiveTexture(GL_TEXTURE0);
+        }
         glEnable(GL_TEXTURE_2D);
         glBindTexture(GL_TEXTURE_2D, color_texture);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,
@@ -2726,69 +3403,181 @@ void CMesh3D::RenderFaces(bool selected,
 
     const GLboolean cull_face_was_enabled = glIsEnabled(GL_CULL_FACE);
     glDisable(GL_CULL_FACE);
-    glBegin(GL_TRIANGLES);
-    for (const Face& face : faces_) {
-        if (!IsValidFace(face, vertices_.size())) {
-            continue;
-        }
-        const Vec3 face_normal = FaceNormal(face);
+    if (fast_mesh && fast_program->bind()) {
+        const float angle = deg_to_rad(material.texture_rotation_degrees);
+        fast_program->setUniformValue(
+            "baseColor", QVector4D(color.r, color.g, color.b, alpha));
+        fast_program->setUniformValue("useTexture", has_texture);
+        fast_program->setUniformValue(
+            "diagnosticColor", diagnostic_rgb && !has_texture);
+        fast_program->setUniformValue("selectedObject", selected);
+        fast_program->setUniformValue("flatColor", flat_color);
+        fast_program->setUniformValue("colorTexture", 0);
+        fast_program->setUniformValue("normalTexture", 1);
+        fast_program->setUniformValue("roughnessTexture", 2);
+        fast_program->setUniformValue("metallicTexture", 3);
+        fast_program->setUniformValue("displacementTexture", 4);
+        fast_program->setUniformValue("studioEnvironmentSharp", 5);
+        fast_program->setUniformValue("studioEnvironmentMedium", 6);
+        fast_program->setUniformValue("studioEnvironmentBlurred", 7);
+        fast_program->setUniformValue("useNormalTexture", normal_texture != 0);
+        fast_program->setUniformValue("useRoughnessTexture", roughness_texture != 0);
+        fast_program->setUniformValue("useMetallicTexture", metallic_texture != 0);
+        fast_program->setUniformValue("useDisplacementTexture", displacement_texture != 0);
+        fast_program->setUniformValue("pbrMaterial", pbr_material);
+        fast_program->setUniformValue(
+            "useStudioEnvironment", use_studio_environment);
+        fast_program->setUniformValue(
+            "uvBounds", QVector4D(texture_uv_min.u, texture_uv_min.v,
+                                    texture_uv_max.u, texture_uv_max.v));
+        fast_program->setUniformValue(
+            "uvTransform", QVector4D(
+                material.texture_offset_u, material.texture_offset_v,
+                std::fabs(material.texture_scale_u) <= 0.00001f
+                    ? 1.0f : material.texture_scale_u,
+                std::fabs(material.texture_scale_v) <= 0.00001f
+                    ? 1.0f : material.texture_scale_v));
+        fast_program->setUniformValue("uvRotation", angle);
+        fast_program->setUniformValue(
+            "fitTexture", material.texture_fit_to_surface && !uvs_.empty());
+        fast_program->setUniformValue(
+            "lightDirection", QVector3D(
+                -s_LightingSettings.light_x,
+                -s_LightingSettings.light_y,
+                -s_LightingSettings.light_z));
+        fast_program->setUniformValue(
+            "lightingA", QVector4D(
+                s_LightingSettings.ambient,
+                s_LightingSettings.wrap_light,
+                s_LightingSettings.diffuse,
+                s_LightingSettings.specular));
+        fast_program->setUniformValue(
+            "lightingB", QVector4D(
+                s_LightingSettings.shininess_scale,
+                s_LightingSettings.rim,
+                s_LightingSettings.gamma, 0.0f));
+        fast_program->setUniformValue("materialSpecular", specular_strength);
+        fast_program->setUniformValue("materialShininess", shininess);
+        fast_program->setUniformValue("materialRoughness", std::clamp(material.roughness, 0.04f, 1.0f));
+        fast_program->setUniformValue("materialMetallic", std::clamp(material.metallic, 0.0f, 1.0f));
+        fast_program->setUniformValue("coatWeight", std::clamp(material.coat_weight, 0.0f, 1.0f));
+        fast_program->setUniformValue("coatRoughness", std::clamp(material.coat_roughness, 0.01f, 1.0f));
+        fast_program->setUniformValue("normalStrength", std::clamp(material.normal_strength, 0.0f, 4.0f));
+        fast_program->setUniformValue("displacementScale", std::clamp(material.displacement_scale, 0.0f, 0.25f));
+        fast_program->setUniformValue(
+            "environmentStrength",
+            std::clamp(s_LightingSettings.environment_strength, 0.0f, 5.0f));
+        fast_program->setUniformValue(
+            "environmentRotation",
+            deg_to_rad(s_LightingSettings.environment_rotation_degrees));
 
-        for (size_t i = 1; i + 1 < face.corners.size(); ++i) {
-            const MeshCorner corners[] = {face.corners[0], face.corners[i], face.corners[i + 1]};
-            for (const MeshCorner& corner : corners) {
-                const size_t vertex_index = corner.v;
-                const Vec3& normal = normals_.empty() || corner.n >= normals_.size()
-                    ? vertex_normals[vertex_index]
-                    : normals_[corner.n];
-                const Color shade = zebra
-                    ? Color{1.0f, 1.0f, 1.0f}
-                    : flat_color
-                    ? color
-                    : (((selected || diagnostic_rgb) && !has_texture)
-                        ? normal_rgb_color(normal, selected)
-                        : shaded_color(
-                            color,
-                            normal,
-                            s_ZebraOrthographic
-                                ? s_ZebraForward * -1.0f
-                                : normalize(s_ZebraEye - vertices_[vertex_index]),
-                            s_ZebraUp,
-                            specular_strength,
-                            shininess,
-                            selected,
-                            s_LightingSettings));
-                const Vec3& vertex = vertices_[vertex_index];
-                glNormal3f(normal.x, normal.y, normal.z);
-                glColor4f(shade.r, shade.g, shade.b, alpha);
-                if (zebra && !zebra_shader_active) {
-                    const Vec3 unit_normal = normalize(normal);
-                    const Vec3 direction_to_eye = s_ZebraOrthographic
-                        ? s_ZebraForward * -1.0f
-                        : normalize(s_ZebraEye - vertex);
-                    const Vec3 reflection = normalize(
-                        unit_normal
-                            * (2.0f * dot(unit_normal, direction_to_eye))
-                        - direction_to_eye);
-                    constexpr float kStripeCount = 10.0f;
-                    const float reflection_height =
-                        std::clamp(dot(reflection, s_ZebraUp), -1.0f, 1.0f);
-                    glTexCoord1f(
-                        (reflection_height * 0.5f + 0.5f) * kStripeCount);
-                } else if (has_texture) {
-                    UV base_uv = corner.uv < uvs_.size()
-                        ? uvs_[corner.uv]
-                        : projected_uv_for_face(vertex, face_normal);
-                    if (material.texture_fit_to_surface && !uvs_.empty()) {
-                        base_uv = fit_uv_to_bounds(base_uv, texture_uv_min, texture_uv_max);
-                    }
-                    const UV uv = transform_uv(base_uv, material);
-                    glTexCoord2f(uv.u, uv.v);
+        if (QOpenGLFunctions_2_1* functions = current_gl21()) {
+            const std::array<GLuint, 8> pbr_textures{
+                color_texture, normal_texture, roughness_texture,
+                metallic_texture, displacement_texture,
+                studio_environment[0], studio_environment[1],
+                studio_environment[2]};
+            for (int unit = 0; unit < static_cast<int>(pbr_textures.size()); ++unit) {
+                functions->glActiveTexture(GL_TEXTURE0 + unit);
+                glBindTexture(GL_TEXTURE_2D, pbr_textures[static_cast<size_t>(unit)]);
+                if (pbr_textures[static_cast<size_t>(unit)] != 0) {
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,
+                        unit >= 5 ? GL_REPEAT
+                        : material.texture_fit_to_surface
+                            ? kGlClampToEdge : GL_REPEAT);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,
+                        unit >= 5 ? kGlClampToEdge
+                        : material.texture_fit_to_surface
+                            ? kGlClampToEdge : GL_REPEAT);
                 }
-                glVertex3f(vertex.x, vertex.y, vertex.z);
+            }
+            functions->glActiveTexture(GL_TEXTURE0);
+            functions->glBindBuffer(GL_ARRAY_BUFFER, gpu_triangle_buffer_);
+            functions->glEnableClientState(GL_VERTEX_ARRAY);
+            functions->glEnableClientState(GL_NORMAL_ARRAY);
+            functions->glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+            functions->glVertexPointer(
+                3, GL_FLOAT, sizeof(GpuVertex),
+                reinterpret_cast<const void*>(offsetof(GpuVertex, position)));
+            functions->glNormalPointer(
+                GL_FLOAT, sizeof(GpuVertex),
+                reinterpret_cast<const void*>(offsetof(GpuVertex, normal)));
+            functions->glTexCoordPointer(
+                2, GL_FLOAT, sizeof(GpuVertex),
+                reinterpret_cast<const void*>(offsetof(GpuVertex, uv)));
+            functions->glDrawArrays(
+                GL_TRIANGLES, 0,
+                static_cast<GLsizei>(gpu_triangle_vertex_count_));
+            functions->glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+            functions->glDisableClientState(GL_NORMAL_ARRAY);
+            functions->glDisableClientState(GL_VERTEX_ARRAY);
+            functions->glBindBuffer(GL_ARRAY_BUFFER, 0);
+            for (int unit = 7; unit >= 0; --unit) {
+                functions->glActiveTexture(GL_TEXTURE0 + unit);
+                glBindTexture(GL_TEXTURE_2D, 0);
+            }
+            functions->glActiveTexture(GL_TEXTURE0);
+        }
+        fast_program->release();
+    } else {
+        glBegin(GL_TRIANGLES);
+        for (const Face& face : faces_) {
+            if (!IsValidFace(face, vertices_.size())) continue;
+            const Vec3 face_normal = FaceNormal(face);
+            for (size_t i = 1; i + 1 < face.corners.size(); ++i) {
+                const MeshCorner corners[]{
+                    face.corners[0], face.corners[i], face.corners[i + 1]};
+                for (const MeshCorner& corner : corners) {
+                    const size_t vertex_index = corner.v;
+                    const Vec3& normal = normals_.empty()
+                            || corner.n >= normals_.size()
+                        ? vertex_normals[vertex_index] : normals_[corner.n];
+                    const Color shade = zebra
+                        ? Color{1.0f, 1.0f, 1.0f}
+                        : flat_color ? color
+                        : ((diagnostic_rgb && !has_texture)
+                            ? normal_rgb_color(normal, selected)
+                            : shaded_color(
+                                color, normal,
+                                s_ZebraOrthographic
+                                    ? s_ZebraForward * -1.0f
+                                    : normalize(s_ZebraEye
+                                                - vertices_[vertex_index]),
+                                s_ZebraUp, specular_strength, shininess,
+                                selected, s_LightingSettings));
+                    const Vec3& vertex = vertices_[vertex_index];
+                    glNormal3f(normal.x, normal.y, normal.z);
+                    glColor4f(shade.r, shade.g, shade.b, alpha);
+                    if (zebra && !zebra_shader_active) {
+                        const Vec3 unit_normal = normalize(normal);
+                        const Vec3 direction_to_eye = s_ZebraOrthographic
+                            ? s_ZebraForward * -1.0f
+                            : normalize(s_ZebraEye - vertex);
+                        const Vec3 reflection = normalize(
+                            unit_normal
+                                * (2.0f * dot(unit_normal, direction_to_eye))
+                            - direction_to_eye);
+                        const float reflection_height = std::clamp(
+                            dot(reflection, s_ZebraUp), -1.0f, 1.0f);
+                        glTexCoord1f(
+                            (reflection_height * 0.5f + 0.5f) * 10.0f);
+                    } else if (has_texture) {
+                        UV base_uv = corner.uv < uvs_.size()
+                            ? uvs_[corner.uv]
+                            : projected_uv_for_face(vertex, face_normal);
+                        if (material.texture_fit_to_surface && !uvs_.empty()) {
+                            base_uv = fit_uv_to_bounds(
+                                base_uv, texture_uv_min, texture_uv_max);
+                        }
+                        const UV uv = transform_uv(base_uv, material);
+                        glTexCoord2f(uv.u, uv.v);
+                    }
+                    glVertex3f(vertex.x, vertex.y, vertex.z);
+                }
             }
         }
+        glEnd();
     }
-    glEnd();
     if (cull_face_was_enabled) {
         glEnable(GL_CULL_FACE);
     }
@@ -2843,33 +3632,42 @@ void CMesh3D::RenderWire(bool selected,
         : (selected ? 0.88f : 0.82f);
     glColor4f(wire.r, wire.g, wire.b, alpha);
 
-    std::unordered_set<unsigned long long> drawn_edges;
-    drawn_edges.reserve(faces_.size() * 3);
-
-    glBegin(GL_LINES);
-    for (const Face& face : faces_) {
-        if (!IsValidFace(face, vertices_.size())) {
-            continue;
+    const bool fast_wire = EnsureGpuCache()
+        && gpu_wire_buffer_ != 0 && gpu_wire_vertex_count_ > 0;
+    if (fast_wire) {
+        if (QOpenGLFunctions_2_1* functions = current_gl21()) {
+            functions->glBindBuffer(GL_ARRAY_BUFFER, gpu_wire_buffer_);
+            functions->glEnableClientState(GL_VERTEX_ARRAY);
+            functions->glVertexPointer(3, GL_FLOAT, sizeof(Vec3), nullptr);
+            functions->glDrawArrays(
+                GL_LINES, 0, static_cast<GLsizei>(gpu_wire_vertex_count_));
+            functions->glDisableClientState(GL_VERTEX_ARRAY);
+            functions->glBindBuffer(GL_ARRAY_BUFFER, 0);
         }
-
-        for (size_t i = 0; i < face.corners.size(); ++i) {
-            const size_t a_index = face.corners[i].v;
-            const size_t b_index = face.corners[(i + 1) % face.corners.size()].v;
-            const size_t edge_min = std::min(a_index, b_index);
-            const size_t edge_max = std::max(a_index, b_index);
-            const unsigned long long key = (static_cast<unsigned long long>(edge_min) << 32)
-                | static_cast<unsigned long long>(edge_max);
-            if (!drawn_edges.insert(key).second) {
-                continue;
+    } else {
+        std::unordered_set<unsigned long long> drawn_edges;
+        drawn_edges.reserve(faces_.size() * 3);
+        glBegin(GL_LINES);
+        for (const Face& face : faces_) {
+            if (!IsValidFace(face, vertices_.size())) continue;
+            for (size_t i = 0; i < face.corners.size(); ++i) {
+                const size_t a_index = face.corners[i].v;
+                const size_t b_index =
+                    face.corners[(i + 1) % face.corners.size()].v;
+                const size_t edge_min = std::min(a_index, b_index);
+                const size_t edge_max = std::max(a_index, b_index);
+                const unsigned long long key =
+                    (static_cast<unsigned long long>(edge_min) << 32)
+                    | static_cast<unsigned long long>(edge_max);
+                if (!drawn_edges.insert(key).second) continue;
+                const Vec3& a = vertices_[a_index];
+                const Vec3& b_vertex = vertices_[b_index];
+                glVertex3f(a.x, a.y, a.z);
+                glVertex3f(b_vertex.x, b_vertex.y, b_vertex.z);
             }
-
-            const Vec3& a = vertices_[a_index];
-            const Vec3& b_vertex = vertices_[b_index];
-            glVertex3f(a.x, a.y, a.z);
-            glVertex3f(b_vertex.x, b_vertex.y, b_vertex.z);
         }
+        glEnd();
     }
-    glEnd();
 
     if (hidden) {
         glDisable(GL_LINE_STIPPLE);
@@ -3103,6 +3901,7 @@ void CMesh3D::Translate(Vec3 delta) {
     for (Vec3& vertex : vertices_) {
         vertex = vertex + delta;
     }
+    InvalidateGpuCache();
 }
 
 void CMesh3D::Rotate(Vec3 center, Vec3 axis, float angle) {
@@ -3115,6 +3914,7 @@ void CMesh3D::Rotate(Vec3 center, Vec3 axis, float angle) {
     for (Face& face : faces_) {
         face.normal = normalize(rotate_around_axis(face.normal, axis, angle));
     }
+    InvalidateGpuCache();
 }
 
 void CMesh3D::Scale(Vec3 center, Vec3 axis, float factor) {
@@ -3137,6 +3937,7 @@ void CMesh3D::Scale(Vec3 center, Vec3 axis, float factor) {
     for (Face& face : faces_) {
         face.normal = FaceNormal(face);
     }
+    InvalidateGpuCache();
 }
 
 void CMesh3D::Mirror(Vec3 plane_point, Vec3 plane_normal) {
@@ -3156,6 +3957,7 @@ void CMesh3D::Mirror(Vec3 plane_point, Vec3 plane_normal) {
         std::reverse(face.corners.begin(), face.corners.end());
         face.normal = FaceNormal(face);
     }
+    InvalidateGpuCache();
 }
 
 bool CMesh3D::ApplyAffineTransform(const std::array<double, 16>& matrix) {
@@ -3207,6 +4009,7 @@ bool CMesh3D::ApplyAffineTransform(const std::array<double, 16>& matrix) {
     for (Face& face : faces_) {
         face.normal = FaceNormal(face);
     }
+    InvalidateGpuCache();
     return true;
 }
 
@@ -3808,6 +4611,7 @@ void CMesh3D::Clear() {
     uvs_.clear();
     normals_.clear();
     faces_.clear();
+    InvalidateGpuCache();
 }
 
 bool CMesh3D::IsValidFace(const Face& face, size_t vertex_count) const {

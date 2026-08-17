@@ -68,9 +68,12 @@ set(DOM3D_OPENCASCADE_LIBS
 set(DOM3D_SOURCES
     src/main.cpp
     src/Material.cpp
+    src/render/RenderScene.cpp
+    src/render/BlenderCyclesRenderer.cpp
     src/MaterialLibrary.cpp
     src/FurnitureMaterialFactory.cpp
     src/CAlfaObject.cpp
+    src/DrawingText.cpp
     src/CGroup.cpp
     src/CPart.cpp
     src/CAssembled.cpp
@@ -94,6 +97,7 @@ set(DOM3D_SOURCES
     src/CView3d.cpp
     src/Dom3DProjectSerializer.cpp
     src/CadCurve3D.cpp
+    src/ExchangeIO.cpp
     src/IgesIO.cpp
     src/IgesShapeCollector.cpp
     src/ObjIO.cpp
@@ -124,6 +128,7 @@ set(DOM3D_SOURCES
     src/ui/OpenGLViewport.cpp
     src/ui/PreferencesDialog.cpp
     src/ui/LightingDialog.cpp
+    src/ui/BlenderCyclesDialog.cpp
     src/ui/LanguageManager.cpp
     src/ui/HotkeyManagerDialog.cpp
     src/ui/CommandSearchPopup.cpp
@@ -155,6 +160,7 @@ set(DOM3D_SOURCES
 
 set(DOM3D_HEADERS
     src/CAlfaObject.h
+    src/DrawingText.h
     src/IgesShapeCollector.h
     src/CGroup.h
     src/CPart.h
@@ -165,6 +171,9 @@ set(DOM3D_HEADERS
     src/CFurnitureDrawer.h
     src/CKitchenCabinet.h
     src/Material.h
+    src/render/RenderScene.h
+    src/render/IExternalRenderer.h
+    src/render/BlenderCyclesRenderer.h
     src/MaterialLibrary.h
     src/FurnitureMaterialFactory.h
     src/CAlfaDoc.h
@@ -181,6 +190,7 @@ set(DOM3D_HEADERS
     src/CView3d.h
     src/Dom3DProjectSerializer.h
     src/CadCurve3D.h
+    src/ExchangeIO.h
     src/IgesIO.h
     src/ObjIO.h
     src/OpenGLCompat.h
@@ -211,6 +221,7 @@ set(DOM3D_HEADERS
     src/ui/OpenGLViewport.h
     src/ui/PreferencesDialog.h
     src/ui/LightingDialog.h
+    src/ui/BlenderCyclesDialog.h
     src/ui/LanguageManager.h
     src/ui/HotkeyManagerDialog.h
     src/ui/CommandSearchPopup.h
@@ -397,6 +408,19 @@ if(MSVC)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(PbrMaterialLibraryTests
+        tests/PbrMaterialLibraryTests.cpp
+        src/Material.cpp
+        src/MaterialLibrary.cpp
+    )
+    target_compile_features(PbrMaterialLibraryTests PRIVATE cxx_std_17)
+    target_include_directories(PbrMaterialLibraryTests PRIVATE src)
+    target_link_libraries(PbrMaterialLibraryTests PRIVATE Qt6::Core Qt6::Xml)
+    if(MSVC)
+        target_compile_options(PbrMaterialLibraryTests PRIVATE /W4 /permissive-)
+    endif()
+    add_test(NAME PbrMaterialLibraryTests COMMAND PbrMaterialLibraryTests)
+
     set(CATALOG_IMPORT_TEST_SOURCES ${DOM3D_SOURCES})
     list(REMOVE_ITEM CATALOG_IMPORT_TEST_SOURCES src/main.cpp)
     add_executable(CatalogImportTests
@@ -430,6 +454,39 @@ if(BUILD_TESTING)
     add_test(NAME CatalogImportTests COMMAND CatalogImportTests)
     string(REPLACE ";" "\\;" DOM3D_CTEST_HOST_PATH "$ENV{PATH}")
     set_tests_properties(CatalogImportTests PROPERTIES
+        ENVIRONMENT "PATH=${DOM3D_QT_MSVC2022_PATH}/bin\;${DOM3D_OPENCASCADE_BINARY_DIR}\;${DOM3D_CTEST_HOST_PATH}"
+    )
+
+    add_executable(ExchangeIOTests
+        tests/ExchangeIOTests.cpp
+        ${CATALOG_IMPORT_TEST_SOURCES}
+        ${DOM3D_HEADERS}
+        ${DOM3D_SKETCH_SOURCES}
+    )
+    target_compile_features(ExchangeIOTests PRIVATE cxx_std_17)
+    target_include_directories(ExchangeIOTests PRIVATE
+        src
+        "${DOM3D_OPENCASCADE_INCLUDE_DIR}"
+    )
+    target_link_directories(ExchangeIOTests PRIVATE
+        "${DOM3D_OPENCASCADE_LIBRARY_DIR}"
+    )
+    target_link_libraries(ExchangeIOTests PRIVATE
+        Qt6::Widgets Qt6::OpenGLWidgets Qt6::Xml OpenGL::GL
+        ${DOM3D_OPENCASCADE_LIBS}
+    )
+    if(WIN32)
+        target_link_libraries(ExchangeIOTests PRIVATE comdlg32)
+    endif()
+    if(MSVC)
+        target_compile_options(ExchangeIOTests PRIVATE
+            /W4
+            /permissive-
+            "/FI${CMAKE_CURRENT_SOURCE_DIR}/src/legacy_compat.h"
+        )
+    endif()
+    add_test(NAME ExchangeIOTests COMMAND ExchangeIOTests)
+    set_tests_properties(ExchangeIOTests PROPERTIES
         ENVIRONMENT "PATH=${DOM3D_QT_MSVC2022_PATH}/bin\;${DOM3D_OPENCASCADE_BINARY_DIR}\;${DOM3D_CTEST_HOST_PATH}"
     )
 

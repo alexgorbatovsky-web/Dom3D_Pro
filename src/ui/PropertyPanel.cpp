@@ -43,6 +43,7 @@ public:
     }
 
     std::function<void(const std::vector<double>&)> values_changed;
+    std::function<void(const std::vector<double>&)> editing_finished;
 
 protected:
     QRectF graph_rect() const {
@@ -143,6 +144,7 @@ protected:
     void mouseReleaseEvent(QMouseEvent* event) override {
         if (event->button() == Qt::LeftButton && active_point_ >= 0) {
             apply_mouse_value(event->position().y());
+            if (editing_finished) editing_finished(values_);
             active_point_ = -1;
             update();
             event->accept();
@@ -155,6 +157,7 @@ protected:
             if (delta.x() * delta.x() + delta.y() * delta.y() <= 144.0) {
                 values_[static_cast<size_t>(index)] = 1.0;
                 if (values_changed) values_changed(values_);
+                if (editing_finished) editing_finished(values_);
                 update();
                 event->accept();
                 return;
@@ -254,6 +257,9 @@ bool IsLengthParameter(const ToolParameter& parameter) {
         || id == "depth"
         || id == "length"
         || id == "radius"
+        || id == "radius_start"
+        || id == "radius_end"
+        || id.rfind("radius.point.", 0) == 0
         || id == "diameter"
         || id == "distance"
         || id == "thick"
@@ -306,13 +312,29 @@ bool IsCatalogParameterVisible(const ActiveParametricObject& active,
         return facade_style == 1;
     }
     if (parameter.id == "slx.milling.profile.id"
-        || parameter.id == "slx.milling.guide.id") {
+        || parameter.id == "slx.milling.guide.id"
+        || parameter.id == "milling_depth") {
         return facade_style == 3;
     }
     if (parameter.id == "slx.handle.id") {
         return static_cast<int>(value_of("handle_type", 0.0)) == 3;
     }
     return true;
+}
+
+bool IsFurnitureAssemblyParameterVisible(
+    const ActiveParametricObject& active,
+    const ToolParameter& parameter) {
+    if (active.tool_id != "kitchen_nika_260"
+        && active.tool_id != "kitchen_corner") {
+        return true;
+    }
+    // Kitchen dimensions and animation angles are construction constants.
+    // Keep them in the parametric object for rebuild/save/door interaction,
+    // but present the compact dialog used by the original Dom-3D kitchen.
+    return parameter.id == "facade_style"
+        || parameter.id == "handle_type"
+        || parameter.type == ToolParameterType::Material;
 }
 
 bool IsPlaneParameterVisible(const ActiveParametricObject& active,
@@ -347,6 +369,29 @@ bool IsPlaneParameterVisible(const ActiveParametricObject& active,
             || parameter.id.rfind("p3.", 0) == 0;
     }
     return parameter.id == "offset";
+}
+
+bool IsFilletParameterVisible(const ActiveParametricObject& active,
+                              const ToolParameter& parameter) {
+    if (active.tool_id != "fillet_edge" && active.tool_id != "fillet_all_edges") {
+        return true;
+    }
+    const auto radius_type = std::find_if(
+        active.parameters.begin(), active.parameters.end(),
+        [](const ToolParameter& candidate) { return candidate.id == "radius_type"; });
+    const int mode = radius_type == active.parameters.end()
+        ? 0 : std::clamp(static_cast<int>(radius_type->value), 0, 1);
+    if (parameter.id == "radius") {
+        return mode == 0;
+    }
+    if (parameter.id == "radius_start" || parameter.id == "radius_end") {
+        return mode == 1;
+    }
+    if (parameter.id == "radius.graph"
+        || parameter.id.rfind("radius.point.", 0) == 0) {
+        return false;
+    }
+    return true;
 }
 
 bool IsSliderParameter(const ActiveParametricObject& active,
@@ -428,13 +473,46 @@ void PropertyPanel::Clear() {
 
 void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object) {
     active_object_ = active_object;
+    if (active_object_.tool_id == "cabinet_advanced_slx") {
+        auto thickness = std::find_if(
+            active_object_.parameters.begin(), active_object_.parameters.end(),
+            [](const ToolParameter& parameter) {
+                return parameter.id == "panel_thickness";
+            });
+        auto milling_depth = std::find_if(
+            active_object_.parameters.begin(), active_object_.parameters.end(),
+            [](const ToolParameter& parameter) {
+                return parameter.id == "milling_depth";
+            });
+        if (thickness != active_object_.parameters.end()
+            && milling_depth != active_object_.parameters.end()) {
+            milling_depth->maximum = std::max(
+                milling_depth->minimum, thickness->value - 0.5);
+            milling_depth->value = std::clamp(
+                milling_depth->value,
+                milling_depth->minimum, milling_depth->maximum);
+        }
+    }
+    if (active_object_.tool_id == "fillet_edge"
+        || active_object_.tool_id == "fillet_all_edges") {
+        const auto radius_type = std::find_if(
+            active_object_.parameters.begin(), active_object_.parameters.end(),
+            [](const ToolParameter& parameter) {
+                return parameter.id == "radius_type";
+            });
+        if (radius_type != active_object_.parameters.end()) {
+            radius_type->value = std::clamp(radius_type->value, 0.0, 1.0);
+        }
+    }
     RebuildForm();
 
     for (int i = 0; i < static_cast<int>(active_object_.parameters.size()); ++i) {
         ToolParameter& parameter = active_object_.parameters[static_cast<size_t>(i)];
         if (IsInternalPlacementParameter(parameter)
             || !IsPlaneParameterVisible(active_object_, parameter)
-            || !IsCatalogParameterVisible(active_object_, parameter)) {
+            || !IsFilletParameterVisible(active_object_, parameter)
+            || !IsCatalogParameterVisible(active_object_, parameter)
+            || !IsFurnitureAssemblyParameterVisible(active_object_, parameter)) {
             continue;
         }
 
@@ -556,6 +634,11 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
             for (const std::string& option : parameter.options) {
                 editor->addItem(QString::fromStdString(option));
             }
+            const int material_library_index = editor->count();
+            if (parameter.type == ToolParameterType::Material) {
+                editor->insertSeparator(material_library_index);
+                editor->addItem(QStringLiteral("Library…"));
+            }
             int index = static_cast<int>(parameter.value);
             if (parameter.option_values.size() == parameter.options.size()) {
                 const auto selected = std::find(
@@ -568,9 +651,27 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
             }
             index = std::clamp(index, 0, std::max(0, editor->count() - 1));
             editor->setCurrentIndex(index);
-            connect(editor, &QComboBox::currentIndexChanged, this, [this, i](int index) {
+            connect(editor, &QComboBox::currentIndexChanged, this,
+                    [this, i, editor, material_library_index](int index) {
                 ToolParameter& parameter =
                     active_object_.parameters[static_cast<size_t>(i)];
+                if (parameter.type == ToolParameterType::Material
+                    && index > material_library_index) {
+                    int previous_index = 0;
+                    const auto selected = std::find(
+                        parameter.option_values.begin(),
+                        parameter.option_values.end(),
+                        parameter.value);
+                    if (selected != parameter.option_values.end()) {
+                        previous_index = static_cast<int>(std::distance(
+                            parameter.option_values.begin(), selected));
+                    }
+                    const QSignalBlocker blocker(editor);
+                    editor->setCurrentIndex(previous_index);
+                    emit MaterialLibraryRequested(
+                        QString::fromStdString(parameter.id));
+                    return;
+                }
                 const bool rebuild_plane_form =
                     active_object_.tool_id == "PlaneTool"
                     && parameter.id == "mode";
@@ -578,13 +679,17 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
                     active_object_.tool_id == "cabinet_advanced_slx"
                     && (parameter.id == "facade_style"
                         || parameter.id == "handle_type");
+                const bool rebuild_fillet_form =
+                    (active_object_.tool_id == "fillet_edge"
+                     || active_object_.tool_id == "fillet_all_edges")
+                    && parameter.id == "radius_type";
                 parameter.value = parameter.option_values.size() == parameter.options.size()
                     && index >= 0
                     && static_cast<size_t>(index) < parameter.option_values.size()
                     ? parameter.option_values[static_cast<size_t>(index)]
                     : static_cast<double>(index);
                 emit ParametersChanged();
-                if (rebuild_plane_form || rebuild_catalog_form) {
+                if (rebuild_plane_form || rebuild_catalog_form || rebuild_fillet_form) {
                     QTimer::singleShot(0, this, [this]() {
                         SetActiveObject(active_object_);
                     });
@@ -596,16 +701,24 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
 
         if (parameter.type == ToolParameterType::Graph) {
             auto* edit_graph = new QPushButton(QStringLiteral("Edit…"), this);
-            edit_graph->setToolTip(QStringLiteral(
-                "Edit scale along the guide. Double-click a point to reset it to 1.0."));
+            const bool fillet_law = active_object_.tool_id == "fillet_edge"
+                || active_object_.tool_id == "fillet_all_edges";
+            edit_graph->setToolTip(fillet_law
+                ? QStringLiteral("Edit radius along the edge from 0 to 100%.")
+                : QStringLiteral("Edit scale along the guide. Double-click a point to reset it to 1.0."));
             connect(edit_graph, &QPushButton::clicked, this, [this, i]() {
                 const ToolParameter& graph_parameter =
                     active_object_.parameters[static_cast<size_t>(i)];
-                const std::string prefix = graph_parameter.id.substr(
-                    0, graph_parameter.id.find(".graph")) + ".scale.";
+                const bool fillet_law = active_object_.tool_id == "fillet_edge"
+                    || active_object_.tool_id == "fillet_all_edges";
+                const std::string prefix = fillet_law
+                    ? "radius.point."
+                    : graph_parameter.id.substr(
+                        0, graph_parameter.id.find(".graph")) + ".scale.";
                 std::vector<size_t> parameter_indices;
                 std::vector<double> original_values;
-                for (size_t point = 0; point < 5; ++point) {
+                const size_t point_count = fillet_law ? 6 : 5;
+                for (size_t point = 0; point < point_count; ++point) {
                     const std::string point_id = prefix + std::to_string(point);
                     const auto found = std::find_if(
                         active_object_.parameters.begin(),
@@ -625,13 +738,27 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
                 auto* graph = new ScaleGraphEditor(
                     original_values, graph_parameter.minimum,
                     graph_parameter.maximum, &dialog);
-                graph->values_changed = [this, parameter_indices](
-                                            const std::vector<double>& values) {
+                const auto store_values = [this, parameter_indices](
+                                              const std::vector<double>& values) {
                     for (size_t point = 0; point < parameter_indices.size(); ++point) {
                         active_object_.parameters[parameter_indices[point]].value = values[point];
                     }
-                    emit ParametersChanged();
                 };
+                graph->values_changed = [this, store_values, fillet_law](
+                                            const std::vector<double>& values) {
+                    store_values(values);
+                    // A radius-law fillet is much more expensive than the
+                    // generic scale graphs. Keep the graph responsive while
+                    // dragging and rebuild the solid once on mouse release.
+                    if (!fillet_law) emit ParametersChanged();
+                };
+                if (fillet_law) {
+                    graph->editing_finished = [this, store_values](
+                                                  const std::vector<double>& values) {
+                        store_values(values);
+                        emit ParametersChanged();
+                    };
+                }
                 layout->addWidget(graph);
                 auto* buttons = new QDialogButtonBox(
                     QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
@@ -669,7 +796,34 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
         editor->setValue(parameter.value * display_factor);
         const bool use_drag_label = IsSliderParameter(active_object_, parameter);
         connect(editor, &QDoubleSpinBox::valueChanged, this, [this, i, display_factor](double value) {
-            active_object_.parameters[static_cast<size_t>(i)].value = value / display_factor;
+            ToolParameter& changed =
+                active_object_.parameters[static_cast<size_t>(i)];
+            changed.value = value / display_factor;
+            if (active_object_.tool_id == "cabinet_advanced_slx"
+                && changed.id == "panel_thickness") {
+                const auto milling_depth = std::find_if(
+                    active_object_.parameters.begin(),
+                    active_object_.parameters.end(),
+                    [](const ToolParameter& parameter) {
+                        return parameter.id == "milling_depth";
+                    });
+                if (milling_depth != active_object_.parameters.end()) {
+                    milling_depth->maximum = std::max(
+                        milling_depth->minimum, changed.value - 0.5);
+                    milling_depth->value = std::clamp(
+                        milling_depth->value,
+                        milling_depth->minimum, milling_depth->maximum);
+                    if (auto* depth_editor = findChild<QDoubleSpinBox*>(
+                            QStringLiteral("parameter_milling_depth"))) {
+                        depth_editor->blockSignals(true);
+                        depth_editor->setMaximum(
+                            milling_depth->maximum * display_factor);
+                        depth_editor->setValue(
+                            milling_depth->value * display_factor);
+                        depth_editor->blockSignals(false);
+                    }
+                }
+            }
             emit ParametersChanged();
         });
         if (use_drag_label) {
@@ -749,12 +903,55 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
     button_layout->addStretch();
 
     auto* ok = new QPushButton("OK", buttons);
+    QPushButton* apply = nullptr;
+    if (active_object_.tool_id == "cabinet"
+        || active_object_.tool_id == "cabinet_advanced"
+        || active_object_.tool_id == "cabinet_advanced_slx"
+        || active_object_.tool_id == "cabinet_showcase") {
+        apply = new QPushButton("Apply", buttons);
+        apply->setToolTip("Build the cabinet and keep this panel open");
+        connect(apply, &QPushButton::clicked, this, &PropertyPanel::Applied);
+    }
     auto* cancel = new QPushButton("Cancel", buttons);
     connect(ok, &QPushButton::clicked, this, &PropertyPanel::Accepted);
     connect(cancel, &QPushButton::clicked, this, &PropertyPanel::Canceled);
+    if (apply) {
+        button_layout->addWidget(apply);
+    }
     button_layout->addWidget(ok);
     button_layout->addWidget(cancel);
     form_->addRow(buttons);
+}
+
+void PropertyPanel::SetMaterialParameterValue(
+    const std::string& parameter_id,
+    double value,
+    const std::string& material_name) {
+    const auto found = std::find_if(
+        active_object_.parameters.begin(), active_object_.parameters.end(),
+        [&parameter_id](const ToolParameter& parameter) {
+            return parameter.id == parameter_id
+                && parameter.type == ToolParameterType::Material;
+        });
+    if (found == active_object_.parameters.end()) {
+        return;
+    }
+
+    const auto existing = std::find(
+        found->option_values.begin(), found->option_values.end(), value);
+    if (existing == found->option_values.end()) {
+        found->options.push_back(material_name);
+        found->option_values.push_back(value);
+    } else {
+        const size_t index = static_cast<size_t>(std::distance(
+            found->option_values.begin(), existing));
+        if (index < found->options.size()) {
+            found->options[index] = material_name;
+        }
+    }
+    found->value = value;
+    SetActiveObject(active_object_);
+    emit ParametersChanged();
 }
 
 void PropertyPanel::SetCatalogParameterValue(

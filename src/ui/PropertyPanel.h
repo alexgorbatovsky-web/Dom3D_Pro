@@ -16,16 +16,21 @@ public:
     void Clear();
     void SetActiveObject(const ActiveParametricObject& active_object);
     void UpdateParameterValue(const std::string& parameter_id, double value);
+    void SetMaterialParameterValue(const std::string& parameter_id,
+                                   double value,
+                                   const std::string& material_name);
     void SetCatalogParameterValue(const std::string& parameter_id, double value);
     void FocusParameter(const std::string& parameter_id);
     const ActiveParametricObject& ActiveObject() const;
 
 signals:
     void ParametersChanged();
+    void Applied();
     void Accepted();
     void Canceled();
     void CatalogSelectionRequested(QString parameter_id, bool product);
     void CatalogOrientationHelpRequested(QString parameter_id, bool product);
+    void MaterialLibraryRequested(QString parameter_id);
 
 private:
     void RebuildForm();

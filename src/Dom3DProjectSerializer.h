@@ -6,6 +6,8 @@
 #include <QString>
 #include <QImage>
 
+#include <functional>
+
 struct ProjectViewState {
     Camera camera{};
     bool has_camera = false;
@@ -23,6 +25,8 @@ struct ProjectViewState {
 
 class Dom3DProjectSerializer {
 public:
+    using ProgressCallback = std::function<void(int, const QString&)>;
+
     bool Save(const QString& path,
               const CAlfaDoc& document,
               const QString& active_room,
@@ -33,7 +37,8 @@ public:
               CAlfaDoc& document,
               QString& active_room,
               ProjectViewState& view_state,
-              QString& error) const;
+              QString& error,
+              const ProgressCallback& progress = {}) const;
     bool LoadThumbnail(const QString& path, QImage& thumbnail, QString& error) const;
     bool ImportPart(const QString& path,
                     CAlfaDoc& document,

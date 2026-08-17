@@ -8,6 +8,7 @@ class QtSceneRenderer {
 public:
     void Initialize();
     void SetBackgroundColor(Vec3 color);
+    Vec3 GetBackgroundColor() const { return background_color_; }
     void Render(const CAlfaDoc& document,
                 const Camera& camera,
                 bool orthographic,

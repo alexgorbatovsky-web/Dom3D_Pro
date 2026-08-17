@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <vector>
 #include <string>
 
@@ -123,4 +124,10 @@ private:
     std::vector<CPoint3d> m_Knots;
     std::vector<double> m_Params;
     bool m_InitOutLine;
+    // Rendering samples are independent from the BRep/spline definition.
+    // Keep them until the control points or requested display quality change;
+    // otherwise every kitchen edge evaluates the spline 16 times per frame.
+    mutable std::vector<float> m_DrawVertices;
+    mutable std::uint64_t m_DrawGeometryHash = 0;
+    mutable int m_DrawStepsPerSegment = 0;
 };

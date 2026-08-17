@@ -15,6 +15,7 @@
 #include <vector>
 
 class QDomElement;
+class QByteArray;
 class QString;
 class QXmlStreamWriter;
 class CPolyline;
@@ -100,6 +101,12 @@ public:
 	bool Save(std::ostream& stream) const override;
 	bool Save(QXmlStreamWriter& xml, QString& error) const;
 	static std::unique_ptr<CSolid> Load(const QDomElement& object_element, QString& error);
+	static bool SaveShapePack(const std::vector<const CSolid*>& solids,
+	                          QByteArray& data,
+	                          QString& error);
+	static bool LoadShapePack(const QByteArray& data,
+	                          std::vector<TopoDS_Shape>& shapes,
+	                          QString& error);
 	std::unique_ptr<CAlfaObject> Clone() const override;
 	void Translate(Vec3 delta) override;
 	void Rotate(Vec3 center, Vec3 axis, float angle) override;
@@ -109,6 +116,8 @@ public:
 	void PreviewTranslate(Vec3 delta);
 	void PreviewRotate(Vec3 center, Vec3 axis, float angle);
 	void PreviewScale(Vec3 center, Vec3 axis, float factor);
+	bool CommitPreviewTranslate(Vec3 delta);
+	bool CommitPreviewRotate(Vec3 center, Vec3 axis, float angle);
 	bool ReverseNormals();
 	bool GetBounds(Vec3& min_point, Vec3& max_point) const override;
 
@@ -191,6 +200,7 @@ public:
 	bool BuldMesh(float Deflection);
 	bool ReBuldMesh();
 	bool ReBuldMesh(float Deflection);
+	bool EnsureRenderMesh() const;
 	bool DefineDirTriming(CSurfaceFace* surf, CPolyline* pLine, CPoint3d& pc);
 
 
@@ -243,6 +253,7 @@ static	int NumReadFile;
 //	SERIALIZE_LATER();
 
 private:
+	bool RestoreRenderMeshFromStoredTriangulation();
 /*
 	bool SaveTopoDS_ShapeToStepFile();
 	bool LoadTopoDS_ShapeFromStepFile();

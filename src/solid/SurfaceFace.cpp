@@ -8,6 +8,15 @@
 #include "../SurfaceUVMapping.h"
 #include "../Line2D.h"
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+#include <GL/gl.h>
+
 #include "Poly_Triangulation.hxx"
 #include <Standard_OutOfMemory.hxx>
 #include <BRepTools.hxx>
@@ -42,6 +51,7 @@
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepClass_FaceClassifier.hxx>
 #include <BRep_Tool.hxx>
+#include <ElSLib.hxx>
 #include <GeomAbs_SurfaceType.hxx>
 #include <Poly_Triangle.hxx>
 #include <TopAbs_State.hxx>
@@ -53,11 +63,84 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <utility>
 
 void Step(const char* text);
 
 namespace {
+bool is_untrimmed_planar_quad(const TopoDS_Face& face)
+{
+	if (face.IsNull())
+		return false;
+
+	try {
+		BRepAdaptor_Surface surface(face);
+		if (surface.GetType() != GeomAbs_Plane)
+			return false;
+
+		Standard_Real u_min = 0.0;
+		Standard_Real u_max = 0.0;
+		Standard_Real v_min = 0.0;
+		Standard_Real v_max = 0.0;
+		BRepTools::UVBounds(face, u_min, u_max, v_min, v_max);
+		if (!std::isfinite(u_min) || !std::isfinite(u_max)
+			|| !std::isfinite(v_min) || !std::isfinite(v_max)
+			|| u_max <= u_min || v_max <= v_min) {
+			return false;
+		}
+
+		int edge_count = 0;
+		for (TopExp_Explorer edge_explorer(face, TopAbs_EDGE);
+			edge_explorer.More(); edge_explorer.Next()) {
+			const TopoDS_Edge edge = TopoDS::Edge(edge_explorer.Current());
+			if (!edge.IsNull() && !BRep_Tool::Degenerated(edge))
+				++edge_count;
+		}
+		if (edge_count != 4)
+			return false;
+
+		const double span = std::max(u_max - u_min, v_max - v_min);
+		const double tolerance = std::max(1.0e-7, span * 1.0e-7);
+		unsigned int corner_mask = 0;
+		std::vector<std::pair<double, double>> unique_vertices;
+		for (TopExp_Explorer vertex_explorer(face, TopAbs_VERTEX);
+			vertex_explorer.More(); vertex_explorer.Next()) {
+			const TopoDS_Vertex vertex = TopoDS::Vertex(vertex_explorer.Current());
+			double u = 0.0;
+			double v = 0.0;
+			ElSLib::Parameters(surface.Plane(), BRep_Tool::Pnt(vertex), u, v);
+
+			const bool at_u_min = std::fabs(u - u_min) <= tolerance;
+			const bool at_u_max = std::fabs(u - u_max) <= tolerance;
+			const bool at_v_min = std::fabs(v - v_min) <= tolerance;
+			const bool at_v_max = std::fabs(v - v_max) <= tolerance;
+			if (!(at_u_min || at_u_max) || !(at_v_min || at_v_max))
+				return false;
+
+			bool duplicate = false;
+			for (const auto& existing : unique_vertices) {
+				if (std::fabs(existing.first - u) <= tolerance
+					&& std::fabs(existing.second - v) <= tolerance) {
+					duplicate = true;
+					break;
+				}
+			}
+			if (!duplicate)
+				unique_vertices.emplace_back(u, v);
+
+			if (at_u_min && at_v_min) corner_mask |= 1u;
+			if (at_u_max && at_v_min) corner_mask |= 2u;
+			if (at_u_max && at_v_max) corner_mask |= 4u;
+			if (at_u_min && at_v_max) corner_mask |= 8u;
+		}
+
+		return unique_vertices.size() == 4 && corner_mask == 15u;
+	} catch (const Standard_Failure&) {
+		return false;
+	}
+}
+
 bool mesh_plane_normal(const CMesh3D* mesh, Vec3& normal)
 {
 	if (!mesh)
@@ -1479,7 +1562,9 @@ bool CSurfaceFace::BuldMeshTriangle(float Deflection, float AngDeflection)
 			false,
 			angular_deflection,
 			false);
-		mesher.Perform();
+		// The shape-taking constructor calls Perform() itself.
+		if (!mesher.IsDone())
+			return false;
 		aTriangulation = BRep_Tool::Triangulation(theFace, aLoc, Poly_MeshPurpose_NONE);
 	}
 	if (aTriangulation.IsNull())
@@ -1496,6 +1581,12 @@ bool CSurfaceFace::BuldMeshTriangle(float Deflection, float AngDeflection)
 	const gp_Trsf& transform = aLoc.Transformation();
 	const bool reverseWinding = theFace.Orientation() == TopAbs_REVERSED;
 	BRepAdaptor_Surface analytic_surface(theFace);
+	const bool spherical_surface =
+		analytic_surface.GetType() == GeomAbs_Sphere;
+	gp_Pnt spherical_center;
+	if (spherical_surface) {
+		spherical_center = analytic_surface.Sphere().Location();
+	}
 	bool analytic_normals_valid = aTriangulation->HasUVNodes();
 	for (Standard_Integer nodeIndex = 1; nodeIndex <= aTriangulation->NbNodes(); ++nodeIndex) {
 		gp_Pnt point = aTriangulation->Node(nodeIndex);
@@ -1516,6 +1607,10 @@ bool CSurfaceFace::BuldMeshTriangle(float Deflection, float AngDeflection)
 					uv.X(), uv.Y(), surface_point,
 					derivative_u, derivative_v);
 				gp_Vec normal = derivative_u.Crossed(derivative_v);
+				if (normal.SquareMagnitude() <= 1.0e-24
+					&& spherical_surface) {
+					normal = gp_Vec(spherical_center, point);
+				}
 				if (normal.SquareMagnitude() <= 1.0e-24) {
 					analytic_normals_valid = false;
 					normals.push_back({});
@@ -1610,6 +1705,18 @@ bool CSurfaceFace::IsPlanar() const
 
 	Vec3 normal{};
 	return mesh_plane_normal(pMesh3D, normal);
+}
+
+bool CSurfaceFace::IsSpherical() const
+{
+	if (m_Face.IsNull())
+		return false;
+	try {
+		const TopoDS_Face face = TopoDS::Face(m_Face);
+		return BRepAdaptor_Surface(face).GetType() == GeomAbs_Sphere;
+	} catch (const Standard_Failure&) {
+		return false;
+	}
 }
 
 bool CSurfaceFace::GetCenterAndNormal(Vec3& center, Vec3& normal) const
@@ -1892,16 +1999,25 @@ bool CSurfaceFace::InitEdges3DCoat()
 
 void CSurfaceFace::RenderEdges(const Color& color,
                               const std::vector<int>& selected_edge_indices,
-                              bool draw_regular_edges) const
+                              bool draw_regular_edges,
+                              bool surface_selected) const
 {
-	// Object selection belongs to the shaded surface. Topological edges keep
-	// their regular style until an individual edge is selected.
-	const float width = 0.9f;
-	const float r = std::clamp(color.r, 0.0f, 1.0f);
-	const float g = std::clamp(color.g, 0.0f, 1.0f);
-	const float b = std::clamp(color.b, 0.0f, 1.0f);
+	// Project files can restore a ready triangulation without going through
+	// ReBuldMesh().  Make the topological representation available for both
+	// drawing and edge picking on that path as well.
+	if (!IsInitEdges)
+		const_cast<CSurfaceFace*>(this)->InitEdges();
 
-	if (draw_regular_edges) {
+	const float width = 0.9f;
+	const Color edge_color = surface_selected
+		? CAlfaObject::SelectedColor : color;
+	const float r = std::clamp(edge_color.r, 0.0f, 1.0f);
+	const float g = std::clamp(edge_color.g, 0.0f, 1.0f);
+	const float b = std::clamp(edge_color.b, 0.0f, 1.0f);
+
+	// A closed analytic sphere has only a parameterisation seam and degenerate
+	// pole edges. They are not physical body edges and must not be displayed.
+	if (draw_regular_edges && !IsSpherical()) {
 		for (int i = 0; i < static_cast<int>(m_Edges.size()); ++i) {
 			CSplineCurve* edge = m_Edges[static_cast<size_t>(i)];
 			if (!edge)
@@ -1921,6 +2037,156 @@ void CSurfaceFace::RenderEdges(const Color& color,
 			continue;
 		edge->Draw(1.0f, 0.22f, 0.12f, 5.5f, 24, false, true);
 	}
+}
+
+void CSurfaceFace::RenderContour(const Color& color, bool surface_selected) const
+{
+	if (!pMesh3D)
+		return;
+	const std::vector<Vec3>& vertices = pMesh3D->GetVertices();
+	const std::vector<CMesh3D::Face>& faces = pMesh3D->GetFaces();
+	if (vertices.empty() || faces.empty())
+		return;
+
+	struct ContourEdge {
+		size_t first = 0;
+		size_t second = 0;
+		unsigned char facing_mask = 0;
+		int adjacent_faces = 0;
+		bool edge_on = false;
+	};
+	std::unordered_map<unsigned long long, ContourEdge> contour_edges;
+	contour_edges.reserve(faces.size() * 2);
+
+	GLdouble model_view[16]{};
+	glGetDoublev(GL_MODELVIEW_MATRIX, model_view);
+	const auto eye_point = [&model_view](const Vec3& point) {
+		return Vec3{
+			static_cast<float>(model_view[0] * point.x + model_view[4] * point.y
+				+ model_view[8] * point.z + model_view[12]),
+			static_cast<float>(model_view[1] * point.x + model_view[5] * point.y
+				+ model_view[9] * point.z + model_view[13]),
+			static_cast<float>(model_view[2] * point.x + model_view[6] * point.y
+				+ model_view[10] * point.z + model_view[14])};
+	};
+	const auto eye_vector = [&model_view](const Vec3& vector) {
+		return Vec3{
+			static_cast<float>(model_view[0] * vector.x + model_view[4] * vector.y
+				+ model_view[8] * vector.z),
+			static_cast<float>(model_view[1] * vector.x + model_view[5] * vector.y
+				+ model_view[9] * vector.z),
+			static_cast<float>(model_view[2] * vector.x + model_view[6] * vector.y
+				+ model_view[10] * vector.z)};
+	};
+	const bool spherical = IsSpherical();
+	Vec3 sphere_center{};
+	if (spherical) {
+		try {
+			const gp_Pnt center = BRepAdaptor_Surface(
+				TopoDS::Face(m_Face)).Sphere().Location();
+			sphere_center = {
+				static_cast<float>(center.X()),
+				static_cast<float>(center.Y()),
+				static_cast<float>(center.Z())};
+		} catch (const Standard_Failure&) {
+		}
+	}
+
+	for (const CMesh3D::Face& face : faces) {
+		if (face.deleted || face.corners.size() < 3)
+			continue;
+		const size_t a_index = face.corners[0].v;
+		const size_t b_index = face.corners[1].v;
+		const size_t c_index = face.corners[2].v;
+		if (a_index >= vertices.size() || b_index >= vertices.size()
+			|| c_index >= vertices.size()) {
+			continue;
+		}
+		const Vec3 a = eye_point(vertices[a_index]);
+		const Vec3 b = eye_point(vertices[b_index]);
+		const Vec3 c = eye_point(vertices[c_index]);
+		unsigned char facing = 0u;
+		if (spherical) {
+			const Vec3 world_center =
+				(vertices[a_index] + vertices[b_index] + vertices[c_index])
+				/ 3.0f;
+			const Vec3 eye_center = eye_point(world_center);
+			const Vec3 eye_normal = normalize(
+				eye_vector(normalize(world_center - sphere_center)));
+			const float direction = dot(
+				eye_normal, normalize(eye_center * -1.0f));
+			facing = direction > 0.00001f ? 1u
+				: direction < -0.00001f ? 2u : 0u;
+		} else {
+			const float projected_winding = cross(b - a, c - a).z;
+			facing = projected_winding > 0.0000001f ? 1u
+				: projected_winding < -0.0000001f ? 2u : 0u;
+		}
+
+		for (size_t corner = 0; corner < face.corners.size(); ++corner) {
+			size_t first = face.corners[corner].v;
+			size_t second = face.corners[(corner + 1) % face.corners.size()].v;
+			if (first >= vertices.size() || second >= vertices.size()
+				|| first == second) {
+				continue;
+			}
+			if (first > second)
+				std::swap(first, second);
+			const unsigned long long key =
+				(static_cast<unsigned long long>(first) << 32)
+				| static_cast<unsigned long long>(second);
+			ContourEdge& edge = contour_edges[key];
+			edge.first = first;
+			edge.second = second;
+			edge.facing_mask |= facing;
+			edge.edge_on = edge.edge_on || facing == 0u;
+			++edge.adjacent_faces;
+		}
+	}
+
+	const Color contour_color = surface_selected
+		? CAlfaObject::SelectedColor : color;
+	glPushAttrib(GL_ENABLE_BIT | GL_DEPTH_BUFFER_BIT | GL_LINE_BIT
+		| GL_COLOR_BUFFER_BIT | GL_CURRENT_BIT);
+	glEnable(GL_DEPTH_TEST);
+	glDepthMask(GL_FALSE);
+	glDepthFunc(GL_LEQUAL);
+	glEnable(GL_LINE_SMOOTH);
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	glLineWidth(surface_selected ? 1.7f : 1.15f);
+	glColor4f(
+		std::clamp(contour_color.r, 0.0f, 1.0f),
+		std::clamp(contour_color.g, 0.0f, 1.0f),
+		std::clamp(contour_color.b, 0.0f, 1.0f), 1.0f);
+	glBegin(GL_LINES);
+	for (const auto& item : contour_edges) {
+		const ContourEdge& edge = item.second;
+		// Topological boundary curves are rendered by RenderEdges().  Contours
+		// are the view-dependent internal silhouette between front- and
+		// back-facing mesh regions.
+		if (edge.adjacent_faces < 2
+			|| (edge.facing_mask != 3u && !edge.edge_on)) {
+			continue;
+		}
+		const Vec3& first = vertices[edge.first];
+		const Vec3& second = vertices[edge.second];
+		glVertex3f(first.x, first.y, first.z);
+		glVertex3f(second.x, second.y, second.z);
+	}
+	glEnd();
+	glPopAttrib();
+}
+
+void CSurfaceFace::RenderOutline(
+	const Color& color,
+	const std::vector<int>& selected_edge_indices,
+	bool draw_regular_edges,
+	bool surface_selected) const
+{
+	RenderEdges(color, selected_edge_indices, draw_regular_edges, surface_selected);
+	if (draw_regular_edges)
+		RenderContour(color, surface_selected);
 }
 
 void CSurfaceFace::PreviewTranslate(Vec3 delta)
@@ -1950,6 +2216,62 @@ void CSurfaceFace::PreviewRotate(Vec3 center, Vec3 axis, float angle)
 	for (CSplineCurve* edge : m_Edges) {
 		if (edge)
 			edge->Rotate(&p0, &p1, angle);
+	}
+}
+
+bool CSurfaceFace::CommitPreviewTranslate(Vec3 delta)
+{
+	gp_Trsf transform;
+	transform.SetTranslation(gp_Vec(delta.x, delta.y, delta.z));
+	try {
+		if (!m_Face.IsNull()) {
+			BRepBuilderAPI_Transform face_builder(m_Face, transform, false);
+			if (!face_builder.IsDone() || face_builder.Shape().IsNull())
+				return false;
+			m_Face = face_builder.Shape();
+		}
+		for (TopoDS_Edge& edge : m_TopoEdges) {
+			if (edge.IsNull()) continue;
+			BRepBuilderAPI_Transform edge_builder(edge, transform, false);
+			if (!edge_builder.IsDone() || edge_builder.Shape().IsNull())
+				return false;
+			edge = TopoDS::Edge(edge_builder.Shape());
+		}
+		return true;
+	} catch (const Standard_Failure&) {
+		return false;
+	}
+}
+
+bool CSurfaceFace::CommitPreviewRotate(Vec3 center, Vec3 axis, float angle)
+{
+	const Vec3 unit_axis = normalize(axis);
+	if (std::fabs(angle) <= 0.000001f)
+		return true;
+	if (dot(unit_axis, unit_axis) <= 0.000001f)
+		return false;
+	gp_Trsf transform;
+	transform.SetRotation(
+		gp_Ax1(gp_Pnt(center.x, center.y, center.z),
+		       gp_Dir(unit_axis.x, unit_axis.y, unit_axis.z)),
+		angle);
+	try {
+		if (!m_Face.IsNull()) {
+			BRepBuilderAPI_Transform face_builder(m_Face, transform, false);
+			if (!face_builder.IsDone() || face_builder.Shape().IsNull())
+				return false;
+			m_Face = face_builder.Shape();
+		}
+		for (TopoDS_Edge& edge : m_TopoEdges) {
+			if (edge.IsNull()) continue;
+			BRepBuilderAPI_Transform edge_builder(edge, transform, false);
+			if (!edge_builder.IsDone() || edge_builder.Shape().IsNull())
+				return false;
+			edge = TopoDS::Edge(edge_builder.Shape());
+		}
+		return true;
+	} catch (const Standard_Failure&) {
+		return false;
 	}
 }
 
@@ -2325,6 +2647,10 @@ void CSurfaceFace::UpdateMeshTypeFromBoundary()
 	m_TypeMesh = TRIMMED_MESH;
 	if (Polylines.empty())
 		return;
+	if (is_untrimmed_planar_quad(TopoDS::Face(m_Face))) {
+		m_TypeMesh = REGULAR_MESH;
+		return;
+	}
 
 	m_TypeMesh = REGULAR_MESH;
 	for (CPolyline* line : Polylines) {

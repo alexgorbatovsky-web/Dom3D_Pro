@@ -1,0 +1,6 @@
+LIBRARY "Dom3DThumbnailProvider"
+EXPORTS
+    DllCanUnloadNow PRIVATE
+    DllGetClassObject PRIVATE
+    DllRegisterServer PRIVATE
+    DllUnregisterServer PRIVATE

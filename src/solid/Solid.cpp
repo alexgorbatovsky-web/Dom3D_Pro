@@ -7,6 +7,8 @@
 #include "Poly_Triangulation.hxx"
 #include <Standard_OutOfMemory.hxx>
 #include <BRepTools.hxx>
+#include <BRep_Tool.hxx>
+#include <BRep_Builder.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <AIS_ListOfInteractive.hxx>
 #include <Geom_BSplineSurface.hxx>
@@ -14,6 +16,8 @@
 #include <AIS_InteractiveContext.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Compound.hxx>
+#include <TopoDS_Iterator.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepPrimAPI_MakeSphere.hxx>
@@ -63,6 +67,7 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <sstream>
 #include <tuple>
 #include <unordered_map>
 
@@ -745,6 +750,25 @@ bool apply_shape_transform(TopoDS_Shape& shape, const gp_Trsf& transform)
 	}
 }
 
+bool apply_rigid_shape_transform(TopoDS_Shape& shape,
+	                             const gp_Trsf& transform)
+{
+	if (shape.IsNull())
+		return false;
+	try {
+		// copy=false keeps the original BRep geometry and changes only its
+		// rigid placement.  This is the inexpensive DoTransform path used
+		// after an already-rendered furniture animation.
+		BRepBuilderAPI_Transform builder(shape, transform, false);
+		if (!builder.IsDone() || builder.Shape().IsNull())
+			return false;
+		shape = builder.Shape();
+		return true;
+	} catch (const Standard_Failure&) {
+		return false;
+	}
+}
+
 bool apply_shape_transform(TopoDS_Shape& shape, const gp_GTrsf& transform)
 {
 	if (shape.IsNull())
@@ -861,6 +885,72 @@ bool save_solid_step(const CSolid& solid, QByteArray& step_data, QString& error)
 	return !step_data.isEmpty();
 }
 
+bool save_solid_native_brep(const CSolid& solid,
+                            QByteArray& brep_data,
+                            QString& error)
+{
+	if (solid.m_Shape.IsNull()) {
+		error = "Solid has no BRep shape.";
+		return false;
+	}
+
+	try {
+		// BRepTools is OpenCascade's native topology/geometry serializer.  It
+		// writes directly to memory and avoids launching a STEP translator plus
+		// creating a temporary file for every board in a furniture assembly.
+		std::ostringstream stream(std::ios::out | std::ios::binary);
+		BRepTools::Write(solid.m_Shape, stream);
+		if (!stream) {
+			error = "Could not serialize native BRep geometry.";
+			return false;
+		}
+		const std::string bytes = stream.str();
+		if (bytes.empty()) {
+			error = "Native BRep geometry is empty.";
+			return false;
+		}
+		brep_data = QByteArray(bytes.data(), static_cast<qsizetype>(bytes.size()));
+		return true;
+	} catch (const Standard_Failure& failure) {
+		error = failure.GetMessageString();
+		if (error.isEmpty())
+			error = "OpenCascade failed while saving native BRep geometry.";
+		return false;
+	}
+}
+
+std::unique_ptr<CSolid> load_solid_native_brep(const QByteArray& brep_data,
+                                               QString& error)
+{
+	if (brep_data.isEmpty()) {
+		error = "Native BRep geometry is empty.";
+		return {};
+	}
+
+	try {
+		const std::string bytes(brep_data.constData(),
+		                        static_cast<size_t>(brep_data.size()));
+		std::istringstream stream(bytes, std::ios::in | std::ios::binary);
+		BRep_Builder builder;
+		TopoDS_Shape shape;
+		BRepTools::Read(shape, stream, builder);
+		if (!stream || shape.IsNull()) {
+			error = "Native BRep data does not contain a valid shape.";
+			return {};
+		}
+
+		auto solid = std::make_unique<CSolid>(shape);
+		// As with legacy STEP projects, keep display tessellation lazy.  The
+		// native BRep read itself is fast and only visible bodies create meshes.
+		return solid->InitSurfaces() ? std::move(solid) : nullptr;
+	} catch (const Standard_Failure& failure) {
+		error = failure.GetMessageString();
+		if (error.isEmpty())
+			error = "OpenCascade failed while loading native BRep geometry.";
+		return {};
+	}
+}
+
 std::unique_ptr<CSolid> load_solid_step(const QByteArray& step_data, QString& error)
 {
 	QTemporaryFile temp_file(QDir::tempPath() + "/Dom3DProjectSolidXXXXXX.step");
@@ -896,8 +986,9 @@ std::unique_ptr<CSolid> load_solid_step(const QByteArray& step_data, QString& er
 		}
 
 		auto solid = std::make_unique<CSolid>(shape);
-		solid->ReBuldMesh();
-		return solid;
+		// Project loading restores only the BRep and face metadata.  Each solid
+		// creates its display mesh lazily when it is actually drawn.
+		return solid->InitSurfaces() ? std::move(solid) : nullptr;
 	} catch (const Standard_Failure& failure) {
 		error = failure.GetMessageString();
 		if (error.isEmpty()) {
@@ -1625,6 +1716,70 @@ bool CSolid::BuldMesh(float Deflection)
 		Deflection /= 10.0;
 		if (m_Shape.IsNull())
 			return false;
+
+		// Default Solid rendering is hybrid: natural, untrimmed UV faces are
+		// much cheaper (and cleaner) as CNet quad grids, while genuinely
+		// trimmed faces keep OCCT's robust triangulation.  Previously this path
+		// was available only when the whole Solid had MeshQuadro enabled, so a
+		// simple box was needlessly triangulated on every rebuild.
+		std::vector<bool> regular_mesh_built(m_Surfaces.size(), false);
+		bool prepared_boundaries = true;
+		float global_len_edge_max = 0.0f;
+		for (CSurfaceFace* surface : m_Surfaces) {
+			if (!surface) {
+				prepared_boundaries = false;
+				continue;
+			}
+			surface->TypeGeom = m_TypeGeom;
+			if (!surface->InitEdges() || !surface->InitEdges3DCoat()) {
+				prepared_boundaries = false;
+				continue;
+			}
+			global_len_edge_max = std::max(
+				global_len_edge_max, surface->lenEdgeMax);
+		}
+		if (prepared_boundaries) {
+			if (global_len_edge_max > 0.0f) {
+				for (CSurfaceFace* surface : m_Surfaces)
+					surface->lenEdgeMax = global_len_edge_max;
+			}
+			for (CSurfaceFace* surface : m_Surfaces) {
+				surface->PrepareEdges(Deflection);
+			}
+			sync_surface_edge_polyline_counts(m_Surfaces);
+			for (CSurfaceFace* surface : m_Surfaces) {
+				surface->UpdateMeshTypeFromBoundary();
+			}
+
+			for (size_t i = 0; i < m_Surfaces.size(); ++i) {
+				CSurfaceFace* surface = m_Surfaces[i];
+				if (surface && surface->m_TypeMesh == REGULAR_MESH
+					&& surface->BuildTrimmingMesh(this, Deflection)) {
+					regular_mesh_built[i] = true;
+				}
+			}
+			// Curved neighbouring faces must use identical samples along a
+			// shared topological edge.  Rebuild only regular grids whose step was
+			// raised by the synchronisation pass.
+			sync_regular_surface_mesh_steps(m_Surfaces);
+			for (size_t i = 0; i < m_Surfaces.size(); ++i) {
+				if (!regular_mesh_built[i])
+					continue;
+				CSurfaceFace* surface = m_Surfaces[i];
+				if (!surface->BuildTrimmingMesh(this, Deflection))
+					regular_mesh_built[i] = false;
+			}
+		}
+
+		const bool all_regular = !regular_mesh_built.empty()
+			&& std::all_of(regular_mesh_built.begin(),
+			               regular_mesh_built.end(),
+			               [](bool built) { return built; });
+		if (all_regular) {
+			snap_surface_mesh_seams(m_Surfaces);
+			return true;
+		}
+
 		// Mesh the complete topological shape once.  Meshing every face in
 		// CSurfaceFace::BuldMeshTriangle separately is especially expensive for
 		// swept furniture profiles and also repeats shared-edge calculations.
@@ -1642,7 +1797,8 @@ bool CSolid::BuldMesh(float Deflection)
 				false,
 				angular_deflection,
 				false);
-			mesher.Perform();
+			// This constructor performs meshing automatically. Calling Perform()
+			// again repeats the expensive triangulation pass.
 			if (!mesher.IsDone())
 				return false;
 		} catch (const Standard_Failure&) {
@@ -1651,8 +1807,15 @@ bool CSolid::BuldMesh(float Deflection)
 
 		bool ok = true;
 		for (int i = 0; i < m_Surfaces.size(); i++) {
+			if (regular_mesh_built[static_cast<size_t>(i)])
+				continue;
 			if (!m_Surfaces[i] || !m_Surfaces[i]->BuldMeshTriangle(Deflection, AngDeflection))
 				ok = false;
+		}
+		if (ok && std::any_of(regular_mesh_built.begin(),
+		                      regular_mesh_built.end(),
+		                      [](bool built) { return built; })) {
+			snap_surface_mesh_seams(m_Surfaces);
 		}
 		return ok;
 	}
@@ -1740,6 +1903,8 @@ void CSolid::Clear()
 
 void CSolid::Render3d(bool selected) const
 {
+	if (!EnsureRenderMesh())
+		return;
 	const bool DrawIndexSurf = false;
 	const bool has_selected_subobject = !m_SelectedEdges.empty()
 		|| !m_SelectedFaceIndices.empty();
@@ -1751,9 +1916,26 @@ void CSolid::Render3d(bool selected) const
 		? SolidDisplayMode::Wireframe
 		: GetDisplayMode();
 	const MeshDisplayMode mesh_mode = CMesh3D::GetDisplayMode();
-	const bool draw_faces = mode == SolidDisplayMode::SurfacesAndEdges
+	const bool shaded_mesh_mode = mesh_mode == MeshDisplayMode::SurfaceMaterial
+		|| mesh_mode == MeshDisplayMode::SurfaceGray
+		|| mesh_mode == MeshDisplayMode::SurfaceColored;
+	const bool shaded_solid_mode = mode == SolidDisplayMode::SurfacesAndEdges
+		|| mode == SolidDisplayMode::SurfacesAndRaisedMesh;
+	const bool face_selected = !m_SelectedFaceIndices.empty();
+	// A selected face selects the presentation of its parent body too: the
+	// whole body uses RGB Selected, then the selected face is overlaid in
+	// ordinary RGB so it remains unmistakable.
+	const bool rgb_selected_body = shaded_mesh_mode && shaded_solid_mode
+		&& (solid_selected || face_selected);
+	const bool rgb_selection = rgb_selected_body
+		|| face_selected
+		|| !m_OperationHighlightedSurfaceIndices.empty();
+	const bool normally_draw_faces = mode == SolidDisplayMode::SurfacesAndEdges
 		|| mode == SolidDisplayMode::SurfacesAndRaisedMesh
 		|| mode == SolidDisplayMode::HiddenLine;
+	const bool draw_faces = normally_draw_faces || rgb_selection;
+	const bool draw_base_faces = normally_draw_faces || rgb_selected_body
+		|| !m_OperationHighlightedSurfaceIndices.empty();
 	const bool draw_mesh = mode == SolidDisplayMode::MeshOnly || mode == SolidDisplayMode::SurfacesAndRaisedMesh;
 	const bool draw_edges = (IsEdgeDrawingEnabled()
 		|| mode == SolidDisplayMode::HiddenLine)
@@ -1768,12 +1950,54 @@ void CSolid::Render3d(bool selected) const
 	if (IsSurfaceTransparencyEnabled()) {
 		surface_material.alpha = std::min(surface_material.alpha, 0.62f);
 	}
+	// A routed facade can have a bottom face parallel to the visible front.
+	// Direct lighting alone then gives both faces virtually the same colour,
+	// making a real 10-20 mm groove look like a hairline. Estimate a small
+	// cavity-occlusion factor from the solid's support vertices. This affects
+	// only recessed facade faces and does not re-enable visible mesh edges.
+	std::vector<Vec3> facade_support_points;
+	if (GetName().find("Facade") != std::string::npos) {
+		for (TopExp_Explorer vertex(m_Shape, TopAbs_VERTEX);
+			 vertex.More(); vertex.Next()) {
+			const gp_Pnt point = BRep_Tool::Pnt(
+				TopoDS::Vertex(vertex.Current()));
+			facade_support_points.push_back({
+				static_cast<float>(point.X()),
+				static_cast<float>(point.Y()),
+				static_cast<float>(point.Z())});
+		}
+	}
 //	const Color solid_color = surface_material.diffuse;
 	const Color solid_color = GetColor();
-	const auto material_for_surface = [&surface_material, mesh_mode, mode](const CSurfaceFace& surface) {
+	const auto material_for_surface = [
+		&surface_material, &facade_support_points, mesh_mode, mode](
+			const CSurfaceFace& surface) {
 		Material material = surface.MaterialOverride.enabled
 			? surface.MaterialOverride.material
 			: surface_material;
+		if (!facade_support_points.empty()) {
+			Vec3 center{};
+			Vec3 normal{};
+			if (get_surface_index_label_pose(surface, center, normal)) {
+				normal = normalize(normal);
+				float support = -std::numeric_limits<float>::max();
+				for (const Vec3& point : facade_support_points)
+					support = std::max(support, dot(point, normal));
+				const float recess_depth = std::max(
+					0.0f, support - dot(center, normal));
+				if (recess_depth > 0.25f) {
+					const float cavity = std::clamp(
+						1.0f - recess_depth * 0.03f, 0.68f, 1.0f);
+					material.diffuse.r *= cavity;
+					material.diffuse.g *= cavity;
+					material.diffuse.b *= cavity;
+					material.ambient.r *= cavity;
+					material.ambient.g *= cavity;
+					material.ambient.b *= cavity;
+					material.specular *= 0.85f + 0.15f * cavity;
+				}
+			}
+		}
 		if (mode == SolidDisplayMode::HiddenLine) {
 			material.diffuse = CSolid::s_HiddenLineBackgroundColor;
 			material.alpha = 1.0f;
@@ -1826,7 +2050,7 @@ void CSolid::Render3d(bool selected) const
 		}
 	};
 
-	if (mode == SolidDisplayMode::Wireframe) {
+	if (mode == SolidDisplayMode::Wireframe && !rgb_selection) {
 		for (int i = 0; i < static_cast<int>(m_Surfaces.size()); ++i) {
 			CSurfaceFace* surface = m_Surfaces[static_cast<size_t>(i)];
 			if (!surface) {
@@ -1838,7 +2062,9 @@ void CSolid::Render3d(bool selected) const
 					selected_edges.push_back(edge_ref.second);
 				}
 			}
-			surface->RenderEdges(solid_color, selected_edges);
+			const bool surface_selected = solid_selected || face_selected;
+			surface->RenderOutline(
+				solid_color, selected_edges, true, surface_selected);
 		}
 		draw_surface_indices();
 		return;
@@ -1846,7 +2072,10 @@ void CSolid::Render3d(bool selected) const
 
 	if (!zebra && mesh_mode == MeshDisplayMode::Wire
 		&& mode != SolidDisplayMode::HiddenLine
-		&& mode != SolidDisplayMode::SurfacesAndRaisedMesh) {
+		&& mode != SolidDisplayMode::SurfacesAndRaisedMesh
+		&& !solid_selected
+		&& m_SelectedFaceIndices.empty()
+		&& m_OperationHighlightedSurfaceIndices.empty()) {
 		for (CSurfaceFace* surface : m_Surfaces) {
 			if (surface && surface->pMesh3D) {
 				const Color surface_color = diagnostic_surface_wire_color(*surface, solid_color);
@@ -1866,15 +2095,17 @@ void CSolid::Render3d(bool selected) const
 			|| mode == SolidDisplayMode::SurfacesAndRaisedMesh
 			|| !m_SelectedFaceIndices.empty()
 			|| !m_OperationHighlightedSurfaceIndices.empty();
-		for (CSurfaceFace* surface : m_Surfaces) {
-			if (surface && surface->pMesh3D) {
-				const Material face_material = material_for_surface(*surface);
-				surface->pMesh3D->RenderFaces(
-					solid_selected,
-					offset_base_faces,
-					&face_material,
-					mesh_mode == MeshDisplayMode::SurfaceColored,
-					mode == SolidDisplayMode::HiddenLine);
+		if (draw_base_faces) {
+			for (CSurfaceFace* surface : m_Surfaces) {
+				if (surface && surface->pMesh3D) {
+					const Material face_material = material_for_surface(*surface);
+					surface->pMesh3D->RenderFaces(
+						rgb_selected_body,
+						offset_base_faces,
+						&face_material,
+						rgb_selected_body || mesh_mode == MeshDisplayMode::SurfaceColored,
+						mode == SolidDisplayMode::HiddenLine && !rgb_selected_body);
+				}
 			}
 		}
 		for (int selected_face_index : m_SelectedFaceIndices) {
@@ -1887,7 +2118,9 @@ void CSolid::Render3d(bool selected) const
 				selection_material.light_texture_path.clear();
 				selection_material.bump_texture_path.clear();
 				selection_material.alpha = 1.0f;
-				surface->pMesh3D->RenderFaces(true, false, &selection_material);
+				// Ordinary RGB contrasts with the inverted RGB Selected body.
+				surface->pMesh3D->RenderFaces(
+					false, false, &selection_material, true, false);
 			}
 		}
 		for (int highlighted_surface_index : m_OperationHighlightedSurfaceIndices) {
@@ -1900,7 +2133,8 @@ void CSolid::Render3d(bool selected) const
 				highlight_material.light_texture_path.clear();
 				highlight_material.bump_texture_path.clear();
 				highlight_material.alpha = 1.0f;
-				surface->pMesh3D->RenderFaces(true, false, &highlight_material);
+				surface->pMesh3D->RenderFaces(
+					true, false, &highlight_material, true, false);
 			}
 		}
 	}
@@ -1929,7 +2163,9 @@ void CSolid::Render3d(bool selected) const
 				if (edge_ref.first == i)
 					selected_edges.push_back(edge_ref.second);
 			}
-			surface->RenderEdges(solid_color, selected_edges, draw_edges);
+			const bool surface_selected = solid_selected || face_selected;
+			surface->RenderOutline(
+				solid_color, selected_edges, draw_edges, surface_selected);
 		}
 	}
 	draw_surface_indices();
@@ -1937,6 +2173,8 @@ void CSolid::Render3d(bool selected) const
 
 void CSolid::Render2d(float center_x, float center_y, float scale) const
 {
+	if (!EnsureRenderMesh())
+		return;
 	for (CSurfaceFace* surface : m_Surfaces) {
 		if (surface && surface->pMesh3D) {
 			surface->pMesh3D->Render2d(center_x, center_y, scale);
@@ -1946,6 +2184,8 @@ void CSolid::Render2d(float center_x, float center_y, float scale) const
 
 bool CSolid::HitTest(CurvePoint point, float tolerance) const
 {
+	if (!EnsureRenderMesh())
+		return false;
 	for (CSurfaceFace* surface : m_Surfaces) {
 		if (surface && surface->pMesh3D && surface->pMesh3D->HitTest(point, tolerance)) {
 			return true;
@@ -1963,17 +2203,100 @@ bool CSolid::Save(std::ostream& stream) const
 
 bool CSolid::Save(QXmlStreamWriter& xml, QString& error) const
 {
-	QByteArray step_data;
-	if (!save_solid_step(*this, step_data, error)) {
+	QByteArray brep_data;
+	if (!save_solid_native_brep(*this, brep_data, error)) {
 		return false;
 	}
 
 	xml.writeStartElement("geometry");
-	xml.writeAttribute("kind", "brep-step");
-	xml.writeAttribute("encoding", "base64");
-	xml.writeCharacters(QString::fromLatin1(step_data.toBase64()));
+	xml.writeAttribute("kind", "brep-native");
+	xml.writeAttribute("encoding", "base64-zlib");
+	xml.writeCharacters(QString::fromLatin1(qCompress(brep_data, 6).toBase64()));
 	xml.writeEndElement();
 	return true;
+}
+
+bool CSolid::SaveShapePack(const std::vector<const CSolid*>& solids,
+	                       QByteArray& data,
+	                       QString& error)
+{
+	data.clear();
+	if (solids.empty())
+		return true;
+
+	try {
+		BRep_Builder builder;
+		TopoDS_Compound compound;
+		builder.MakeCompound(compound);
+		for (const CSolid* solid : solids) {
+			if (!solid || solid->m_Shape.IsNull()) {
+				error = "Project BRep pack contains an empty solid.";
+				return false;
+			}
+			builder.Add(compound, solid->m_Shape);
+		}
+
+		std::ostringstream stream(std::ios::out | std::ios::binary);
+		BRepTools::Write(compound, stream);
+		if (!stream) {
+			error = "Could not serialize project BRep pack.";
+			return false;
+		}
+		const std::string bytes = stream.str();
+		if (bytes.empty()) {
+			error = "Project BRep pack is empty.";
+			return false;
+		}
+		data = QByteArray(bytes.data(), static_cast<qsizetype>(bytes.size()));
+		return true;
+	} catch (const Standard_Failure& failure) {
+		error = failure.GetMessageString();
+		if (error.isEmpty())
+			error = "OpenCascade failed while saving project BRep pack.";
+		return false;
+	}
+}
+
+bool CSolid::LoadShapePack(const QByteArray& data,
+	                       std::vector<TopoDS_Shape>& shapes,
+	                       QString& error)
+{
+	shapes.clear();
+	if (data.isEmpty()) {
+		error = "Project BRep pack is empty.";
+		return false;
+	}
+
+	try {
+		const std::string bytes(data.constData(),
+		                        static_cast<size_t>(data.size()));
+		std::istringstream stream(bytes, std::ios::in | std::ios::binary);
+		BRep_Builder builder;
+		TopoDS_Shape packed_shape;
+		BRepTools::Read(packed_shape, stream, builder);
+		if (!stream || packed_shape.IsNull()) {
+			error = "Project BRep pack does not contain valid geometry.";
+			return false;
+		}
+
+		for (TopoDS_Iterator iterator(packed_shape, Standard_False,
+		                              Standard_False);
+		     iterator.More(); iterator.Next()) {
+			const TopoDS_Shape shape = iterator.Value();
+			if (!shape.IsNull())
+				shapes.push_back(shape);
+		}
+		if (shapes.empty()) {
+			error = "Project BRep pack contains no solids.";
+			return false;
+		}
+		return true;
+	} catch (const Standard_Failure& failure) {
+		error = failure.GetMessageString();
+		if (error.isEmpty())
+			error = "OpenCascade failed while loading project BRep pack.";
+		return false;
+	}
 }
 
 std::unique_ptr<CSolid> CSolid::Load(const QDomElement& object_element, QString& error)
@@ -1983,17 +2306,27 @@ std::unique_ptr<CSolid> CSolid::Load(const QDomElement& object_element, QString&
 		error = "Missing XML element 'geometry'.";
 		return {};
 	}
-	if (geometry.attribute("kind") != "brep-step" || geometry.attribute("encoding") != "base64") {
-		error = "Unsupported solid geometry encoding.";
-		return {};
+	const QString kind = geometry.attribute("kind");
+	const QString encoding = geometry.attribute("encoding");
+	const QByteArray encoded = QByteArray::fromBase64(geometry.text().toLatin1());
+	if (kind == "brep-native" && encoding == "base64-zlib") {
+		const QByteArray brep_data = qUncompress(encoded);
+		if (brep_data.isEmpty()) {
+			error = "Native BRep data is empty or damaged.";
+			return {};
+		}
+		return load_solid_native_brep(brep_data, error);
+	}
+	if (kind == "brep-step" && encoding == "base64") {
+		if (encoded.isEmpty()) {
+			error = "Solid STEP data is empty.";
+			return {};
+		}
+		return load_solid_step(encoded, error);
 	}
 
-	const QByteArray step_data = QByteArray::fromBase64(geometry.text().toLatin1());
-	if (step_data.isEmpty()) {
-		error = "Solid STEP data is empty.";
-		return {};
-	}
-	return load_solid_step(step_data, error);
+	error = "Unsupported solid geometry encoding.";
+	return {};
 }
 
 std::unique_ptr<CAlfaObject> CSolid::Clone() const
@@ -2137,6 +2470,8 @@ void CSolid::Mirror(Vec3 plane_point, Vec3 plane_normal)
 
 void CSolid::RenderHiddenLineDepth() const
 {
+	if (!EnsureRenderMesh())
+		return;
 	Material background_material;
 	background_material.diffuse = s_HiddenLineBackgroundColor;
 	background_material.alpha = 1.0f;
@@ -2159,6 +2494,8 @@ void CSolid::RenderHiddenLineDepth() const
 
 void CSolid::RenderHiddenLineEdges(bool hidden) const
 {
+	if (!EnsureRenderMesh())
+		return;
 	const float background_luminance =
 		0.2126f * s_HiddenLineBackgroundColor.r
 		+ 0.7152f * s_HiddenLineBackgroundColor.g
@@ -2193,7 +2530,9 @@ void CSolid::RenderHiddenLineEdges(bool hidden) const
 					selected_edges.push_back(edge_ref.second);
 			}
 		}
-		surface->RenderEdges(edge_color, selected_edges, true);
+		surface->RenderEdges(edge_color, selected_edges, true, false);
+		if (!hidden)
+			surface->RenderContour(edge_color, false);
 	}
 
 	glPopAttrib();
@@ -2230,6 +2569,42 @@ void CSolid::PreviewRotate(Vec3 center, Vec3 axis, float angle)
 		if (surface)
 			surface->PreviewRotate(center, axis, angle);
 	}
+}
+
+bool CSolid::CommitPreviewTranslate(Vec3 delta)
+{
+	gp_Trsf transform;
+	transform.SetTranslation(gp_Vec(delta.x, delta.y, delta.z));
+	if (!apply_rigid_shape_transform(m_Shape, transform))
+		return false;
+	for (CSurfaceFace* surface : m_Surfaces) {
+		if (surface && !surface->CommitPreviewTranslate(delta))
+			return false;
+	}
+	ClearSelectedEdge();
+	return true;
+}
+
+bool CSolid::CommitPreviewRotate(Vec3 center, Vec3 axis, float angle)
+{
+	const Vec3 unit_axis = normalize(axis);
+	if (std::fabs(angle) <= 0.000001f)
+		return true;
+	if (dot(unit_axis, unit_axis) <= 0.000001f)
+		return false;
+	gp_Trsf transform;
+	transform.SetRotation(
+		gp_Ax1(gp_Pnt(center.x, center.y, center.z),
+		       gp_Dir(unit_axis.x, unit_axis.y, unit_axis.z)),
+		angle);
+	if (!apply_rigid_shape_transform(m_Shape, transform))
+		return false;
+	for (CSurfaceFace* surface : m_Surfaces) {
+		if (surface && !surface->CommitPreviewRotate(center, unit_axis, angle))
+			return false;
+	}
+	ClearSelectedEdge();
+	return true;
 }
 
 void CSolid::PreviewScale(Vec3 center, Vec3 axis, float factor)
@@ -2332,6 +2707,61 @@ bool CSolid::ReBuldMesh()
 		}
 	}
 	return ReBuldMesh(Deflection);
+}
+
+bool CSolid::EnsureRenderMesh() const
+{
+	const bool mesh_is_ready = !m_Surfaces.empty()
+		&& std::all_of(m_Surfaces.begin(), m_Surfaces.end(),
+			[](const CSurfaceFace* surface) {
+				// Alloc() creates an empty pMesh3D immediately; IsInitMesh is
+				// the flag that says SetGeometry has actually completed.
+				return surface && surface->pMesh3D && surface->IsInitMesh;
+			});
+	if (mesh_is_ready)
+		return true;
+	if (m_Shape.IsNull())
+		return false;
+	// Native .dom3d BRep packs include OCCT face triangulations.  Loading used
+	// to call ReBuldMesh(), whose BRepTools::Clean() deliberately discarded
+	// those triangles and calculated the whole solid again.  Restore the
+	// renderer meshes directly when every face already has stored geometry.
+	if (const_cast<CSolid*>(this)
+			->RestoreRenderMeshFromStoredTriangulation()) {
+		return true;
+	}
+	return const_cast<CSolid*>(this)->ReBuldMesh();
+}
+
+bool CSolid::RestoreRenderMeshFromStoredTriangulation()
+{
+	if (m_Surfaces.empty() || m_Shape.IsNull())
+		return false;
+
+	// Validate the complete solid first.  A partially restored solid would
+	// otherwise mix an old stored mesh with a newly generated one.
+	for (CSurfaceFace* surface : m_Surfaces) {
+		if (!surface || surface->m_Face.IsNull())
+			return false;
+		TopLoc_Location location;
+		const Handle(Poly_Triangulation) triangulation =
+			BRep_Tool::Triangulation(
+				TopoDS::Face(surface->m_Face), location,
+				Poly_MeshPurpose_NONE);
+		if (triangulation.IsNull() || triangulation->NbNodes() < 3
+			|| triangulation->NbTriangles() < 1) {
+			return false;
+		}
+	}
+
+	for (CSurfaceFace* surface : m_Surfaces) {
+		if (!surface->BuldMeshTriangle(0.1f, AngDeflection)
+			|| !surface->InitEdges()) {
+			return false;
+		}
+	}
+	IsInitEdges = true;
+	return true;
 }
 
 bool CSolid::ReBuldMesh(float Deflection)

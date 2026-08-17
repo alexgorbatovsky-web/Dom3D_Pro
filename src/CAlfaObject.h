@@ -19,6 +19,12 @@ class CAlfaObject {
 public:
     virtual ~CAlfaObject() = default;
 
+    // Shared high-contrast color for selected object geometry.  It follows
+    // the viewport background so selection remains visible in light and dark
+    // themes.
+    static Color SelectedColor;
+    static void UpdateSelectedColorFromBackground(Color background);
+
     unsigned long m_col = 0;
     bool m_selected = false;
 	unsigned long m_id = 0;
@@ -46,6 +52,14 @@ public:
 
     Color GetColor() const;
     virtual void SetColor(Color color);
+    double GetLineWidth() const;
+    void SetLineWidth(double width);
+    const std::string& GetLineStyle() const;
+    void SetLineStyle(std::string style);
+    void ApplyLineAppearance(bool selected,
+                             float selected_width = 5.0f,
+                             float default_width = 2.0f) const;
+    void ResetLineAppearance() const;
     Material GetMaterial() const;
     void SetMaterial(Material material);
     unsigned long GetMaterialId() const;
@@ -66,6 +80,8 @@ private:
     Material material_;
     unsigned long material_id_ = 0;
     bool visible_ = true;
+    double line_width_ = 0.5;
+    std::string line_style_ = "CONTINUOUS";
     std::string parametric_tool_id_;
     std::vector<ParametricParameterValue> parametric_parameters_;
 };
