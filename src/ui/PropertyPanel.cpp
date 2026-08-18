@@ -16,6 +16,7 @@
 #include <QPainterPath>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QScrollArea>
 #include <QSignalBlocker>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -337,6 +338,55 @@ bool IsFurnitureAssemblyParameterVisible(
         || parameter.type == ToolParameterType::Material;
 }
 
+bool IsCompactCabinetTool(const std::string& tool_id) {
+    return tool_id == "cabinet"
+        || tool_id == "cabinet_advanced"
+        || tool_id == "cabinet_advanced_slx"
+        || tool_id == "cabinet_showcase";
+}
+
+bool IsPrimaryCabinetParameter(const ToolParameter& parameter) {
+    // The fourth item is reserved for wall cabinets.  It becomes visible in
+    // the compact panel automatically when the corresponding cabinet tool
+    // exposes one of these placement parameters.
+    return parameter.id == "width"
+        || parameter.id == "height"
+        || parameter.id == "depth"
+        || parameter.id == "facade_type"
+        || parameter.id == "facade_style"
+        || parameter.id == "showcase_facade_type"
+        || parameter.id == "facade_showcase"
+        || parameter.id == "showcase_fill"
+        || parameter.id == "overhead"
+        || parameter.id == "mounting_height"
+        || parameter.id == "height_above_floor"
+        || parameter.id == "overhead_height";
+}
+
+bool IsCabinetPlacementParameterVisible(
+    const ActiveParametricObject& active,
+    const ToolParameter& parameter) {
+    if (!IsCompactCabinetTool(active.tool_id)) {
+        return true;
+    }
+    const auto checked = [&active](const char* id) {
+        const auto found = std::find_if(
+            active.parameters.begin(), active.parameters.end(),
+            [id](const ToolParameter& candidate) {
+                return candidate.id == id;
+            });
+        return found != active.parameters.end() && found->value >= 0.5;
+    };
+    if (parameter.id == "mounting_height") {
+        return checked("overhead");
+    }
+    if (parameter.id == "showcase_fill") {
+        return active.tool_id == "cabinet_showcase"
+            && checked("facade_showcase");
+    }
+    return true;
+}
+
 bool IsPlaneParameterVisible(const ActiveParametricObject& active,
                              const ToolParameter& parameter) {
     if (active.tool_id != "PlaneTool"
@@ -411,6 +461,7 @@ bool IsSliderParameter(const ActiveParametricObject& active,
         || tool_id == "SolidSweptTool"
         || tool_id == "SolidExtrudeFace"
         || tool_id == "SolidDraft"
+        || tool_id == "SolidSheetBend"
         || tool_id == "fillet_edge"
         || tool_id == "fillet_all_edges"
         || tool_id == "ChamferSolid"
@@ -457,9 +508,10 @@ double SliderPositionToValue(int position, double minimum, double maximum) {
 }
 }
 
-PropertyPanel::PropertyPanel(QWidget* parent)
+PropertyPanel::PropertyPanel(QWidget* parent, bool additional_parameters)
     : QWidget(parent),
-      form_(new QFormLayout(this)) {
+      form_(new QFormLayout(this)),
+      additional_parameters_(additional_parameters) {
     form_->setContentsMargins(10, 8, 10, 8);
     form_->setHorizontalSpacing(16);
     Clear();
@@ -512,7 +564,11 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
             || !IsPlaneParameterVisible(active_object_, parameter)
             || !IsFilletParameterVisible(active_object_, parameter)
             || !IsCatalogParameterVisible(active_object_, parameter)
-            || !IsFurnitureAssemblyParameterVisible(active_object_, parameter)) {
+            || !IsFurnitureAssemblyParameterVisible(active_object_, parameter)
+            || !IsCabinetPlacementParameterVisible(active_object_, parameter)
+            || (IsCompactCabinetTool(active_object_.tool_id)
+                && additional_parameters_
+                == IsPrimaryCabinetParameter(parameter))) {
             continue;
         }
 
@@ -619,8 +675,17 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
             auto* editor = new QCheckBox(this);
             editor->setChecked(parameter.value >= 0.5);
             connect(editor, &QCheckBox::toggled, this, [this, i](bool checked) {
-                active_object_.parameters[static_cast<size_t>(i)].value = checked ? 1.0 : 0.0;
+                ToolParameter& changed =
+                    active_object_.parameters[static_cast<size_t>(i)];
+                changed.value = checked ? 1.0 : 0.0;
                 emit ParametersChanged();
+                if (IsCompactCabinetTool(active_object_.tool_id)
+                    && (changed.id == "overhead"
+                        || changed.id == "facade_showcase")) {
+                    QTimer::singleShot(0, this, [this]() {
+                        SetActiveObject(active_object_);
+                    });
+                }
             });
             form_->addRow(QString::fromStdString(parameter.label), editor);
             continue;
@@ -897,6 +962,67 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
         }
     }
 
+    if (IsCompactCabinetTool(active_object_.tool_id)
+        && !additional_parameters_) {
+        auto* other_parameters = new QPushButton("Other Params...", this);
+        other_parameters->setObjectName("other_parameters_button");
+        other_parameters->setToolTip(
+            "Open facade, construction, hardware and material parameters");
+        connect(other_parameters, &QPushButton::clicked, this, [this]() {
+            const ActiveParametricObject original_object = active_object_;
+            QDialog dialog(this);
+            dialog.setWindowTitle("Other Parameters");
+            dialog.resize(430, 650);
+            auto* layout = new QVBoxLayout(&dialog);
+            layout->setContentsMargins(8, 8, 8, 8);
+            auto* scroll = new QScrollArea(&dialog);
+            scroll->setWidgetResizable(true);
+            auto* additional = new PropertyPanel(scroll, true);
+            additional->SetActiveObject(active_object_);
+            scroll->setWidget(additional);
+            layout->addWidget(scroll);
+
+            connect(additional, &PropertyPanel::MaterialLibraryRequested,
+                    this, [this, additional](const QString& parameter_id) {
+                active_object_ = additional->ActiveObject();
+                emit MaterialLibraryRequested(parameter_id);
+                additional->SetActiveObject(active_object_);
+            });
+            connect(additional, &PropertyPanel::CatalogSelectionRequested,
+                    this, [this, additional](const QString& parameter_id,
+                                             bool product) {
+                active_object_ = additional->ActiveObject();
+                emit CatalogSelectionRequested(parameter_id, product);
+                additional->SetActiveObject(active_object_);
+            });
+            connect(additional,
+                    &PropertyPanel::CatalogOrientationHelpRequested,
+                    this, [this](const QString& parameter_id, bool product) {
+                emit CatalogOrientationHelpRequested(parameter_id, product);
+            });
+            connect(additional, &PropertyPanel::Accepted, &dialog,
+                    [this, additional, &dialog]() {
+                active_object_ = additional->ActiveObject();
+                dialog.accept();
+            });
+            connect(additional, &PropertyPanel::Canceled,
+                    &dialog, &QDialog::reject);
+
+            if (dialog.exec() == QDialog::Accepted) {
+                // Rebuild the compact form after this button's callback has
+                // returned; rebuilding it synchronously would delete the
+                // button that is currently emitting clicked().
+                QTimer::singleShot(0, this, [this]() {
+                    emit ParametersChanged();
+                    SetActiveObject(active_object_);
+                });
+            } else {
+                active_object_ = original_object;
+            }
+        });
+        form_->addRow(other_parameters);
+    }
+
     auto* buttons = new QWidget(this);
     auto* button_layout = new QHBoxLayout(buttons);
     button_layout->setContentsMargins(0, 8, 0, 0);
@@ -904,10 +1030,11 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
 
     auto* ok = new QPushButton("OK", buttons);
     QPushButton* apply = nullptr;
-    if (active_object_.tool_id == "cabinet"
+    if (!additional_parameters_
+        && (active_object_.tool_id == "cabinet"
         || active_object_.tool_id == "cabinet_advanced"
         || active_object_.tool_id == "cabinet_advanced_slx"
-        || active_object_.tool_id == "cabinet_showcase") {
+        || active_object_.tool_id == "cabinet_showcase")) {
         apply = new QPushButton("Apply", buttons);
         apply->setToolTip("Build the cabinet and keep this panel open");
         connect(apply, &QPushButton::clicked, this, &PropertyPanel::Applied);

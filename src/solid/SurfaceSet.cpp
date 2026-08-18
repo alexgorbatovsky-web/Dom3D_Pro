@@ -74,6 +74,9 @@ std::unique_ptr<CAlfaObject> CSurfaceSet::Clone() const {
         if (source->MaterialOverride.enabled) {
             copy->SetSurfaceMaterial(i, source->MaterialOverride.material);
         }
+        if (source->MaterialOverride.coating_enabled) {
+            copy->SetSurfaceCoating(i, source->MaterialOverride.coating_material);
+        }
     }
     copy->ReBuldMesh();
     return copy;

@@ -73,7 +73,8 @@ std::unique_ptr<CSolid> make_imported_solid(const TopoDS_Shape& source_shape, in
 std::unique_ptr<CSolid> make_imported_solid(
     const TopoDS_Shape& source_shape,
     int index,
-    int count)
+    int count,
+    bool parallel_meshing = true)
 {
     TopoDS_Shape shape = source_shape;
 
@@ -97,7 +98,7 @@ std::unique_ptr<CSolid> make_imported_solid(
     loaded->SetColor(kDefaultSolidObjectColor);
 
   
-    loaded->ReBuldMesh();
+    loaded->BuildImportedRenderMesh(parallel_meshing);
 
     return loaded;
 }
@@ -238,8 +239,7 @@ bool StepIO::Import(
 
         const int imported_count = static_cast<int>(imported_shapes.size());
         solids.reserve(imported_shapes.size());
-        for (int i = 0; i < imported_count; ++i)
-        {
+        for (int i = 0; i < imported_count; ++i) {
             solids.push_back(make_imported_solid(
                 imported_shapes[static_cast<size_t>(i)],
                 i + 1,

@@ -181,6 +181,9 @@ public:
 	bool SetSurfaceMaterialById(unsigned long surface_id, const Material& material);
 	bool ClearSurfaceMaterial(int surface_index);
 	bool SetSelectedSurfaceMaterial(const Material& material);
+	bool SetSurfaceCoating(int surface_index, const Material& material);
+	bool SetSelectedSurfaceCoating(const Material& material);
+	bool ClearSurfaceCoating(int surface_index);
 	std::vector<int> FindCreatedSurfaceIndices(const TopoDS_Shape& previous_shape) const;
 	void SetOperationHighlightedSurfaces(std::vector<int> surface_indices);
 	void ClearOperationHighlightedSurfaces();
@@ -200,6 +203,7 @@ public:
 	bool BuldMesh(float Deflection);
 	bool ReBuldMesh();
 	bool ReBuldMesh(float Deflection);
+	bool BuildImportedRenderMesh(bool parallel_meshing = true);
 	bool EnsureRenderMesh() const;
 	bool DefineDirTriming(CSurfaceFace* surf, CPolyline* pLine, CPoint3d& pc);
 
@@ -254,6 +258,14 @@ static	int NumReadFile;
 
 private:
 	bool RestoreRenderMeshFromStoredTriangulation();
+	bool CanUseRenderBatch() const;
+	bool EnsureRenderBatch() const;
+	void RenderBatchedEdges(const Color& color, bool selected) const;
+	mutable std::unique_ptr<CMesh3D> m_RenderBatch;
+	mutable std::vector<Vec3> m_RenderBatchEdges;
+	mutable bool m_RenderBatchDirty = true;
+	mutable Material m_RenderBatchUvMaterial;
+	mutable bool m_RenderBatchUvMaterialValid = false;
 /*
 	bool SaveTopoDS_ShapeToStepFile();
 	bool LoadTopoDS_ShapeFromStepFile();

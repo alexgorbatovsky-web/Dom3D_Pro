@@ -141,7 +141,9 @@ int main(int argc, char* argv[]) {
         const QString lower_candidate = candidate.toLower();
         if (lower_candidate.endsWith(QStringLiteral(".dom3d"))
             || lower_candidate.endsWith(QStringLiteral(".d3dm"))
-            || lower_candidate.endsWith(QStringLiteral(".wrk"))) {
+            || lower_candidate.endsWith(QStringLiteral(".wrk"))
+            || lower_candidate.endsWith(QStringLiteral(".step"))
+            || lower_candidate.endsWith(QStringLiteral(".stp"))) {
             startup_project_path = QFileInfo(candidate).absoluteFilePath();
             break;
         }

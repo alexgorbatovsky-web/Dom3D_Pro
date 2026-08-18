@@ -6,6 +6,7 @@
 
 #include <QColorDialog>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QCoreApplication>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
@@ -41,11 +42,62 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <iterator>
+#include <limits>
 #include <map>
 
 namespace {
 constexpr int kEntryIndexRole = Qt::UserRole + 1;
 constexpr int kDocumentIndexRole = Qt::UserRole + 2;
+
+struct RalColor {
+    const char* code;
+    const char* name;
+    Color color;
+};
+
+constexpr RalColor kRalColors[] = {
+    {"1003", "Signal Yellow", {0.9765f, 0.6627f, 0.0000f}},
+    {"1013", "Oyster White", {0.9137f, 0.8980f, 0.8078f}},
+    {"2004", "Pure Orange", {0.9059f, 0.3569f, 0.0706f}},
+    {"3000", "Flame Red", {0.6549f, 0.1608f, 0.1255f}},
+    {"3002", "Carmine Red", {0.6353f, 0.1373f, 0.1137f}},
+    {"3020", "Traffic Red", {0.8000f, 0.0235f, 0.0196f}},
+    {"4005", "Blue Lilac", {0.5137f, 0.3882f, 0.6157f}},
+    {"5002", "Ultramarine Blue", {0.1255f, 0.1294f, 0.3098f}},
+    {"5005", "Signal Blue", {0.0824f, 0.2824f, 0.5373f}},
+    {"5017", "Traffic Blue", {0.0000f, 0.3569f, 0.5490f}},
+    {"5018", "Turquoise Blue", {0.0196f, 0.5451f, 0.5490f}},
+    {"6002", "Leaf Green", {0.1529f, 0.3843f, 0.1882f}},
+    {"6005", "Moss Green", {0.0588f, 0.2627f, 0.2118f}},
+    {"6018", "Yellow Green", {0.3412f, 0.6510f, 0.2235f}},
+    {"7015", "Slate Grey", {0.3059f, 0.3294f, 0.3216f}},
+    {"7016", "Anthracite Grey", {0.2196f, 0.2431f, 0.2588f}},
+    {"7024", "Graphite Grey", {0.2706f, 0.2863f, 0.3059f}},
+    {"7035", "Light Grey", {0.8431f, 0.8431f, 0.8431f}},
+    {"7040", "Window Grey", {0.6157f, 0.6392f, 0.6510f}},
+    {"8017", "Chocolate Brown", {0.2706f, 0.1961f, 0.1804f}},
+    {"9001", "Cream", {0.9137f, 0.8784f, 0.8235f}},
+    {"9003", "Signal White", {0.9569f, 0.9569f, 0.9569f}},
+    {"9005", "Jet Black", {0.0392f, 0.0392f, 0.0510f}},
+    {"9010", "Pure White", {0.9686f, 0.9765f, 0.9373f}},
+};
+
+int closest_ral_index(Color color) {
+    int result = 0;
+    float best = std::numeric_limits<float>::max();
+    for (int i = 0; i < static_cast<int>(std::size(kRalColors)); ++i) {
+        const float dr = color.r - kRalColors[i].color.r;
+        const float dg = color.g - kRalColors[i].color.g;
+        const float db = color.b - kRalColors[i].color.b;
+        const float distance = dr * dr + dg * dg + db * db;
+        if (distance < best) {
+            best = distance;
+            result = i;
+        }
+    }
+    return result;
+}
 
 QString texture_library_path() {
     const QString application_dir = QCoreApplication::applicationDirPath();
@@ -326,6 +378,27 @@ MaterialEditorDialog::MaterialEditorDialog(const QString& library_path,
     form->addRow("Name", name_edit_);
     id_edit_->hide();
 
+    coating_group_ = new QGroupBox("Configurable coating", editor);
+    auto* coating_layout = new QGridLayout(coating_group_);
+    ral_combo_ = new QComboBox(coating_group_);
+    for (const RalColor& ral : kRalColors) {
+        ral_combo_->addItem(
+            QString("RAL %1 — %2").arg(ral.code, ral.name),
+            QString::fromLatin1(ral.code));
+    }
+    lacquered_check_ = new QCheckBox("Glossy lacquer coat", coating_group_);
+    film_type_label_ = new QLabel("Film type", coating_group_);
+    film_type_combo_ = new QComboBox(coating_group_);
+    film_type_combo_->addItem("Matte opaque", 0);
+    film_type_combo_->addItem("Translucent glossy", 1);
+    coating_layout->addWidget(new QLabel("RAL colour", coating_group_), 0, 0);
+    coating_layout->addWidget(ral_combo_, 0, 1);
+    coating_layout->addWidget(lacquered_check_, 1, 0, 1, 2);
+    coating_layout->addWidget(film_type_label_, 2, 0);
+    coating_layout->addWidget(film_type_combo_, 2, 1);
+    coating_group_->hide();
+    form->addRow(coating_group_);
+
     auto* color_row = new QWidget(editor);
     auto* color_layout = new QHBoxLayout(color_row);
     color_layout->setContentsMargins(0, 0, 0, 0);
@@ -427,6 +500,12 @@ MaterialEditorDialog::MaterialEditorDialog(const QString& library_path,
     connect(ambient_button_, &QPushButton::clicked, this, [this]() { PickColor(ambient_button_); });
     connect(diffuse_button_, &QPushButton::clicked, this, [this]() { PickColor(diffuse_button_); });
     connect(emission_button_, &QPushButton::clicked, this, [this]() { PickColor(emission_button_); });
+    connect(ral_combo_, qOverload<int>(&QComboBox::currentIndexChanged),
+            this, [this](int) { ApplyCoatingControls(); });
+    connect(lacquered_check_, &QCheckBox::toggled,
+            this, [this](bool) { ApplyCoatingControls(); });
+    connect(film_type_combo_, qOverload<int>(&QComboBox::currentIndexChanged),
+            this, [this](int) { ApplyCoatingControls(); });
     connect(new_button, &QPushButton::clicked, this, [this]() { CreateNewMaterial(); });
     connect(library_button, &QPushButton::clicked, this, [this]() { LoadLibrary(); });
     connect(export_button, &QPushButton::clicked, this, [this]() { ExportCurrentMaterial(); });
@@ -662,7 +741,104 @@ void MaterialEditorDialog::LoadMaterialToEditor(const Material& material, const 
         texture_rotate_90_check_->setChecked(std::abs(normalized - 90.0) < 0.001);
     }
     texture_fit_to_surface_check_->setChecked(material.texture_fit_to_surface);
+    UpdateCoatingControls(material, candidate_path);
     loading_editor_ = false;
+}
+
+void MaterialEditorDialog::UpdateCoatingControls(
+    const Material& material, const QString& source_path) {
+    const QString identity = source_path + " "
+        + QString::fromStdString(material.name);
+    if (identity.contains("Powder Coating", Qt::CaseInsensitive)) {
+        coating_family_ = 1;
+    } else if (identity.contains("Oracal Film", Qt::CaseInsensitive)) {
+        coating_family_ = 2;
+    } else {
+        coating_family_ = 0;
+    }
+
+    coating_group_->setVisible(coating_family_ != 0);
+    if (coating_family_ == 0) {
+        return;
+    }
+    coating_group_->setTitle(
+        coating_family_ == 1 ? "Powder coating" : "Oracal film");
+    ral_combo_->setCurrentIndex(closest_ral_index(material.diffuse));
+    lacquered_check_->setVisible(coating_family_ == 1);
+    film_type_label_->setVisible(coating_family_ == 2);
+    film_type_combo_->setVisible(coating_family_ == 2);
+    lacquered_check_->setChecked(material.coat_weight > 0.4f);
+    film_type_combo_->setCurrentIndex(material.alpha < 0.99f ? 1 : 0);
+}
+
+void MaterialEditorDialog::ApplyCoatingControls() {
+    if (loading_editor_ || coating_family_ == 0
+        || ral_combo_->currentIndex() < 0) {
+        return;
+    }
+
+    loading_editor_ = true;
+    // A RAL/finish change creates a document variant.  Keep the shipped
+    // library swatch untouched so all 24 reference colours remain available.
+    if (!current_file_path_.isEmpty()) {
+        current_file_path_.clear();
+        selected_document_material_id_ = 0;
+        id_edit_->clear();
+    }
+    const int ral_index = std::clamp(
+        ral_combo_->currentIndex(), 0,
+        static_cast<int>(std::size(kRalColors)) - 1);
+    const RalColor& ral = kRalColors[ral_index];
+    SetColorButton(diffuse_button_, ral.color);
+    SetColorButton(ambient_button_, {
+        ral.color.r * 0.22f,
+        ral.color.g * 0.22f,
+        ral.color.b * 0.22f});
+
+    QString name;
+    if (coating_family_ == 1) {
+        const bool lacquered = lacquered_check_->isChecked();
+        name = QString("Powder Coating RAL %1 %2%3")
+            .arg(ral.code, ral.name,
+                 lacquered ? " Lacquered" : "");
+        alpha_spin_->setValue(1.0);
+        specular_spin_->setValue(lacquered ? 0.82 : 0.32);
+        shininess_spin_->setValue(lacquered ? 110.0 : 42.0);
+        reflectivity_spin_->setValue(lacquered ? 0.14 : 0.04);
+        roughness_spin_->setValue(lacquered ? 0.19 : 0.64);
+        metallic_spin_->setValue(0.0);
+        coat_weight_spin_->setValue(lacquered ? 0.88 : 0.0);
+        coat_roughness_spin_->setValue(lacquered ? 0.055 : 0.12);
+        normal_strength_spin_->setValue(0.12);
+        displacement_scale_spin_->setValue(0.0);
+        normal_texture_edit_->setText(
+            "Powder Coating/Textures/Powder_Wrinkle_NormalGL.png");
+        texture_scale_u_spin_->setValue(0.4);
+        texture_scale_v_spin_->setValue(0.4);
+    } else {
+        const bool translucent = film_type_combo_->currentData().toInt() == 1;
+        name = QString("Oracal Film %1 RAL %2")
+            .arg(translucent ? "Translucent Glossy" : "Matte",
+                 ral.code);
+        alpha_spin_->setValue(translucent ? 0.58 : 1.0);
+        specular_spin_->setValue(translucent ? 0.70 : 0.28);
+        shininess_spin_->setValue(translucent ? 96.0 : 38.0);
+        reflectivity_spin_->setValue(translucent ? 0.12 : 0.03);
+        roughness_spin_->setValue(translucent ? 0.18 : 0.68);
+        metallic_spin_->setValue(0.0);
+        coat_weight_spin_->setValue(translucent ? 0.72 : 0.0);
+        coat_roughness_spin_->setValue(translucent ? 0.055 : 0.12);
+        normal_strength_spin_->setValue(0.0);
+        displacement_scale_spin_->setValue(0.0);
+        color_texture_edit_->clear();
+        normal_texture_edit_->clear();
+        roughness_texture_edit_->clear();
+        metallic_texture_edit_->clear();
+        displacement_texture_edit_->clear();
+    }
+    name_edit_->setText(name);
+    loading_editor_ = false;
+    CommitEditorChanges();
 }
 
 void MaterialEditorDialog::SetCurrentMaterial(const Material& material, const QString& file_path) {

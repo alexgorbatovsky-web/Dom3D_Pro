@@ -3323,7 +3323,9 @@ void CMesh3D::RenderFaces(bool selected,
         ? texture_id_for_path(material.displacement_texture_path) : 0;
     const bool pbr_material = normal_texture != 0 || roughness_texture != 0
         || metallic_texture != 0 || displacement_texture != 0
-        || material.coat_weight > 0.0001f;
+        || material.coat_weight > 0.0001f
+        || std::fabs(material.roughness - 0.5f) > 0.0001f
+        || material.metallic > 0.0001f;
     const std::array<GLuint, 3> studio_environment = pbr_material
         ? studio_environment_texture_ids() : std::array<GLuint, 3>{};
     const bool use_studio_environment =

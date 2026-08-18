@@ -3,6 +3,7 @@
 #include "../render/RenderScene.h"
 
 #include <QDialog>
+#include <QPixmap>
 
 class BlenderCyclesRenderer;
 class QCheckBox;
@@ -14,11 +15,14 @@ class QPlainTextEdit;
 class QProgressBar;
 class QPushButton;
 class QSpinBox;
+class QResizeEvent;
 
 class BlenderCyclesDialog final : public QDialog {
     Q_OBJECT
 public:
-    explicit BlenderCyclesDialog(RenderScene scene, QWidget* parent = nullptr);
+    explicit BlenderCyclesDialog(RenderScene scene,
+                                 QSize initial_image_size = {},
+                                 QWidget* parent = nullptr);
     ~BlenderCyclesDialog() override;
 
 private:
@@ -26,8 +30,13 @@ private:
     void BrowseBlender();
     void BrowseOutput();
     void StartRender();
+    void ViewResult();
+    void UpdatePreview();
     void SetRendering(bool rendering);
     RenderSettings CurrentSettings() const;
+
+protected:
+    void resizeEvent(QResizeEvent* event) override;
 
     RenderScene scene_;
     BlenderCyclesRenderer* renderer_ = nullptr;
@@ -41,10 +50,12 @@ private:
     QCheckBox* denoise_ = nullptr;
     QLineEdit* output_path_ = nullptr;
     QPushButton* render_button_ = nullptr;
+    QPushButton* view_button_ = nullptr;
     QPushButton* cancel_button_ = nullptr;
     QLabel* status_ = nullptr;
     QLabel* preview_ = nullptr;
     QProgressBar* progress_ = nullptr;
     QPlainTextEdit* log_ = nullptr;
+    QPixmap result_pixmap_;
+    QString last_render_path_;
 };
-

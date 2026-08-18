@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 //#include "GLU.h"
 
 namespace {
@@ -18,6 +19,8 @@ void set_color(float r, float g, float b, float a = 1.0f) {
 }
 
 void CView3d::Draw(const CAlfaDoc& document,
+                   Vec3 camera_eye,
+                   Vec3 camera_forward,
                    bool xy_plane_grid,
                    bool show_grid,
                    float grid_size,
@@ -26,7 +29,7 @@ void CView3d::Draw(const CAlfaDoc& document,
     if (show_grid) {
         DrawGrid(xy_plane_grid, grid_size, grid_step, grid_subdivisions);
     }
-    DrawObjects(document);
+    DrawObjects(document, camera_eye, camera_forward);
 }
 
 void CView3d::DrawGrid(bool xy_plane_grid,
@@ -104,7 +107,9 @@ void CView3d::DrawRoom() const {
     glEnd();
 }
 
-void CView3d::DrawObjects(const CAlfaDoc& document) const {
+void CView3d::DrawObjects(const CAlfaDoc& document,
+                          Vec3 camera_eye,
+                          Vec3 camera_forward) const {
     const auto& objects = document.GetObjects();
     const auto is_curve_overlay = [](const CAlfaObject& object) {
         return dynamic_cast<const CPolyline*>(&object)
@@ -127,21 +132,58 @@ void CView3d::DrawObjects(const CAlfaDoc& document) const {
             }
         }
     }
+    const auto is_transparent = [](const CAlfaObject& object) {
+        if (object.GetMaterial().alpha < 0.999f) {
+            return true;
+        }
+        return dynamic_cast<const CSolid*>(&object)
+            && CSolid::IsSurfaceTransparencyEnabled();
+    };
+    const auto object_depth = [&](size_t index) {
+        Vec3 min_point{};
+        Vec3 max_point{};
+        if (!objects[index]->GetBounds(min_point, max_point)) {
+            return -std::numeric_limits<float>::max();
+        }
+        const Vec3 center = (min_point + max_point) * 0.5f;
+        return dot(center - camera_eye, camera_forward);
+    };
+    const auto render_object = [&](size_t index) {
+        const bool selected = document.IsObjectSelectionHighlighted(index);
+        const bool has_selected_point = document.HasSelection()
+            && document.GetSelectedObjectIndex() == index
+            && document.HasSelectedPoint();
+        CMesh3D::SetZebraAnalysisTarget(
+            !has_zebra_selection || selected);
+        objects[index]->Render3d(
+            selected, has_selected_point, document.GetSelectedPointIndex());
+    };
     const auto draw_pass = [&](bool overlay) {
+        std::vector<size_t> transparent_indices;
         for (size_t index = 0; index < objects.size(); ++index) {
             if (!objects[index]
                 || !document.IsObjectVisible(*objects[index])
                 || is_curve_overlay(*objects[index]) != overlay) {
                 continue;
             }
-            const bool selected = document.IsObjectSelectionHighlighted(index);
-            const bool has_selected_point = document.HasSelection()
-                && document.GetSelectedObjectIndex() == index
-                && document.HasSelectedPoint();
-            CMesh3D::SetZebraAnalysisTarget(
-                !has_zebra_selection || selected);
-            objects[index]->Render3d(
-                selected, has_selected_point, document.GetSelectedPointIndex());
+            if (is_transparent(*objects[index])) {
+                transparent_indices.push_back(index);
+            } else {
+                render_object(index);
+            }
+        }
+
+        // Alpha blending is order dependent.  Opaque geometry has already
+        // populated the depth buffer; now composite transparent parts from
+        // back to front while CMesh3D keeps depth testing enabled and depth
+        // writes disabled for their faces.
+        std::stable_sort(
+            transparent_indices.begin(), transparent_indices.end(),
+            [&](size_t lhs, size_t rhs) {
+                return object_depth(lhs) > object_depth(rhs);
+            });
+        for (size_t index : transparent_indices) {
+            render_object(index);
         }
         CMesh3D::SetZebraAnalysisTarget(false);
     };

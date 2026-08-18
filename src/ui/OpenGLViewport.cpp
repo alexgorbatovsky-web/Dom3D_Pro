@@ -1753,6 +1753,12 @@ void OpenGLViewport::SetSolidDimensionEdit(
         const double width_value = parameter_value(parameters, "width", 600.0);
         const double depth_value = parameter_value(parameters, "depth", 560.0);
         const double height_value = parameter_value(parameters, "height", 800.0);
+        const bool overhead =
+            parameter_value(parameters, "overhead", 0.0) >= 0.5;
+        const double mounting_height = overhead
+            ? std::max(0.0, parameter_value(
+                parameters, "mounting_height", 1300.0))
+            : 0.0;
         const double left = -width_value * 0.5;
         const double right = width_value * 0.5;
         const double front = -depth_value * 0.5;
@@ -1761,23 +1767,31 @@ void OpenGLViewport::SetSolidDimensionEdit(
             std::min({width_value, depth_value, height_value}) * 0.10,
             28.0, 70.0);
         add_dimension(
-            CPoint3d(left, front, height_value),
-            CPoint3d(right, front, height_value),
+            CPoint3d(left, front, mounting_height + height_value),
+            CPoint3d(right, front, mounting_height + height_value),
             CPoint3d(0.0, 0.0, 1.0),
             offset,
             "width", "Width", width_value);
         add_dimension(
-            CPoint3d(right, front, 0.0),
-            CPoint3d(right, front, height_value),
+            CPoint3d(right, front, mounting_height),
+            CPoint3d(right, front, mounting_height + height_value),
             CPoint3d(1.0, 0.0, 0.0),
             offset,
             "height", "Height", height_value);
         add_dimension(
-            CPoint3d(right, front, 0.0),
-            CPoint3d(right, back, 0.0),
+            CPoint3d(right, front, mounting_height),
+            CPoint3d(right, back, mounting_height),
             CPoint3d(1.0, 0.0, 0.0),
             offset,
             "depth", "Depth", depth_value);
+        if (overhead) {
+            add_dimension(
+                CPoint3d(left, back, 0.0),
+                CPoint3d(left, back, mounting_height),
+                CPoint3d(-1.0, 0.0, 0.0),
+                offset,
+                "mounting_height", "Height Hanger", mounting_height);
+        }
     } else if (solid_dimension_object_.tool_id == "fillet_edge"
                || solid_dimension_object_.tool_id == "fillet_all_edges") {
         const int radius_mode = std::clamp(static_cast<int>(parameter_value(
@@ -7916,6 +7930,11 @@ void OpenGLViewport::DrawCabinetPreview() {
     const double width_value = parameter_value(parameters, "width", 600.0);
     const double depth_value = parameter_value(parameters, "depth", 560.0);
     const double height_value = parameter_value(parameters, "height", 800.0);
+    const double mounting_height =
+        parameter_value(parameters, "overhead", 0.0) >= 0.5
+        ? std::max(0.0, parameter_value(
+            parameters, "mounting_height", 1300.0))
+        : 0.0;
     if (width_value <= 0.0 || depth_value <= 0.0 || height_value <= 0.0) {
         return;
     }
@@ -7925,10 +7944,12 @@ void OpenGLViewport::DrawCabinetPreview() {
     const double front = -depth_value * 0.5;
     const double back = depth_value * 0.5;
     const CPoint3d corners[8] = {
-        {left, front, 0.0}, {right, front, 0.0},
-        {right, back, 0.0}, {left, back, 0.0},
-        {left, front, height_value}, {right, front, height_value},
-        {right, back, height_value}, {left, back, height_value}
+        {left, front, mounting_height}, {right, front, mounting_height},
+        {right, back, mounting_height}, {left, back, mounting_height},
+        {left, front, mounting_height + height_value},
+        {right, front, mounting_height + height_value},
+        {right, back, mounting_height + height_value},
+        {left, back, mounting_height + height_value}
     };
     const auto vertex = [&corners](int index) {
         const CPoint3d& point = corners[index];

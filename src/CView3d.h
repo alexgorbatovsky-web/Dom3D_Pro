@@ -10,6 +10,8 @@ public:
 	int m_ProjType;
 
     void Draw(const CAlfaDoc& document,
+              Vec3 camera_eye,
+              Vec3 camera_forward,
               bool xy_plane_grid = false,
               bool show_grid = true,
               float grid_size = kDefaultSceneSize,
@@ -23,6 +25,8 @@ private:
                   float grid_step,
                   int grid_subdivisions) const;
     void DrawRoom() const;
-    void DrawObjects(const CAlfaDoc& document) const;
+    void DrawObjects(const CAlfaDoc& document,
+                     Vec3 camera_eye,
+                     Vec3 camera_forward) const;
     void DrawBox(float x, float y, float z, float w, float h, float d, float r, float g, float b) const;
 };

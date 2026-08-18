@@ -272,8 +272,8 @@ RenderScene BuildRenderScene(const CAlfaDoc& document,
         for (int index = 0; index < solid->GetNumSurfaces(); ++index) {
             const CSurfaceFace* surface = solid->GetSurfaceFace(index);
             if (!surface || !surface->pMesh3D) continue;
-            Material material = surface->MaterialOverride.enabled
-                ? surface->MaterialOverride.material : solid->GetMaterial();
+            Material material = ComposeSurfaceMaterial(
+                solid->GetMaterial(), surface->MaterialOverride);
             material.texture_offset_u += surface->TextureTransform.offset_u;
             material.texture_offset_v += surface->TextureTransform.offset_v;
             material.texture_scale_u *= surface->TextureTransform.scale_u;

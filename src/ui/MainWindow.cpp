@@ -16,6 +16,7 @@
 #include "../SmartLine.h"
 #include "../SweptSolidBuilder.h"
 #include "../solid/Solid.h"
+#include "../solid/SheetBendShapeBuilder.h"
 #include "../solid/SurfaceSet.h"
 #include "MaterialEditorDialog.h"
 #include "MaterialDrag.h"
@@ -113,6 +114,8 @@
 #include <QWidgetAction>
 
 #include <BRep_Builder.hxx>
+#include <BRepGProp.hxx>
+#include <GProp_GProps.hxx>
 #include <TopoDS_Compound.hxx>
 
 #include <algorithm>
@@ -1825,8 +1828,14 @@ SolidOperationsDialogResult ShowSolidOperationsDialog(QWidget* parent,
             name_changed();
         }
     });
-    const auto update_delete_state = [list, delete_button]() {
-        delete_button->setEnabled(list->currentItem() && list->currentItem()->data(Qt::UserRole).toInt() > 0);
+    const auto update_delete_state = [current_solid, list, delete_button]() {
+        const int index = list->currentItem()
+            ? list->currentItem()->data(Qt::UserRole).toInt() : -1;
+        const CSolid* edited_solid = current_solid();
+        const ParametricFunction* operation =
+            edited_solid && index >= 0 ? edited_solid->GetOperation(index) : nullptr;
+        delete_button->setEnabled(
+            index > 0 || (operation && operation->ToolId == "SurfaceFilmCoating"));
     };
     update_delete_state();
 
@@ -1866,12 +1875,16 @@ SolidOperationsDialogResult ShowSolidOperationsDialog(QWidget* parent,
         dialog.accept();
     });
     QObject::connect(cancel_button, &QPushButton::clicked, &dialog, &QDialog::reject);
-    QObject::connect(delete_button, &QPushButton::clicked, &dialog, [&dialog, list, name_edit, &result]() {
+    QObject::connect(delete_button, &QPushButton::clicked, &dialog, [&dialog, current_solid, list, name_edit, &result]() {
         if (!list->currentItem()) {
             return;
         }
         const int operation_index = list->currentItem()->data(Qt::UserRole).toInt();
-        if (operation_index <= 0) {
+        const CSolid* edited_solid = current_solid();
+        const ParametricFunction* operation =
+            edited_solid ? edited_solid->GetOperation(operation_index) : nullptr;
+        if (operation_index <= 0
+            && (!operation || operation->ToolId != "SurfaceFilmCoating")) {
             return;
         }
         result.action = SolidOperationsDialogAction::Delete;
@@ -3166,6 +3179,7 @@ MainWindow::MainWindow(QWidget* parent)
             QAction* draft = menu.addAction(ToolIcon("SolidDraft"), "Draft");
             menu.addSeparator();
             QAction* edit_texture = menu.addAction(EditTextureIcon(), "Edit Texture");
+            QAction* apply_film = menu.addAction("Apply Film...");
             QAction* selected = menu.exec(global_position);
         if (selected == fillet || selected == chamfer) {
             // SetSelectionMode performs the Face -> Edges conversion itself.
@@ -3194,6 +3208,8 @@ MainWindow::MainWindow(QWidget* parent)
                 ActivateParametricTool("SolidDraft");
             } else if (selected == edit_texture) {
                 ShowSurfaceTextureEditor();
+            } else if (selected == apply_film) {
+                ShowSurfaceFilmDialog();
             }
         });
     connect(viewport_, &OpenGLViewport::ObjectQuickMenuRequested,
@@ -3894,7 +3910,12 @@ void MainWindow::CompleteStartup(const QString& startup_project_path) {
     // Startup splash is already hidden when this queued call runs, so the
     // project loader or greeting can never appear underneath it.
     if (!startup_project_path.isEmpty()) {
-        OpenProjectFromPath(startup_project_path);
+        const QString lower_path = startup_project_path.toLower();
+        if (lower_path.endsWith(".step") || lower_path.endsWith(".stp")) {
+            ImportFileFromPath(startup_project_path);
+        } else {
+            OpenProjectFromPath(startup_project_path);
+        }
         return;
     }
     ShowGreetingDialog();
@@ -4736,6 +4757,9 @@ void MainWindow::CreateActions() {
     render_menu->addAction("Blender Cycles...", this, [this]() {
         ShowBlenderCyclesDialog();
     });
+    render_menu->addAction("View Last Render", this, [this]() {
+        ViewLastRenderResult();
+    });
 
     view_menu->addAction("Update Scene", this, [this]() {
         viewport_->RefreshSurfaceMeshQuality();
@@ -4992,6 +5016,9 @@ void MainWindow::CreateActions() {
     auto* material_editor_action = add_action("Material Editor...", {}, [this]() {
         ShowMaterialEditor();
     });
+    auto* apply_film_action = add_action("Apply Film...", {}, [this]() {
+        ShowSurfaceFilmDialog();
+    });
     auto* layer_properties_action = add_action("Layer Properties...", {}, [this]() {
         ShowLayerProperties();
     });
@@ -5039,6 +5066,7 @@ void MainWindow::CreateActions() {
     RegisterToolAction(new_sketch_action, "NewSketch");
 
     tools_menu->addAction(material_editor_action);
+    tools_menu->addAction(apply_film_action);
     tools_menu->addAction(layer_properties_action);
     tools_menu->addAction(change_layer_action);
     tools_menu->addAction(create_group_action);
@@ -5563,6 +5591,12 @@ void MainWindow::CreateVerticalToolBar() {
         "Edit Texture", "EditTexture", EditTextureIcon(), "Tex", [this]() {
             ShowSurfaceTextureEditor();
         }, false);
+    add_direct_button("Apply Film", "ApplyFilm", QIcon(), "Film", [this]() {
+        ShowSurfaceFilmDialog();
+    }, false);
+    add_direct_button("View Last Render", "ViewRender", QIcon(), "Rend", [this]() {
+        ViewLastRenderResult();
+    }, false);
     add_direct_button("New Sketch", "NewSketch", NewSketchIcon(), "Sk", [this]() {
         BeginNewSketch();
     });
@@ -9805,6 +9839,10 @@ void MainWindow::SaveMaterialToDocument(const Material& material) {
                     && surface->MaterialOverride.material_id == saved.id) {
                     solid->SetSurfaceMaterial(surface_index, saved);
                 }
+                if (surface && surface->MaterialOverride.coating_enabled
+                    && surface->MaterialOverride.coating_material_id == saved.id) {
+                    solid->SetSurfaceCoating(surface_index, saved);
+                }
             }
         }
     }
@@ -9847,6 +9885,285 @@ void MainWindow::ApplyMaterialToSelection(const Material& material) {
     RefreshSceneTree();
     viewport_->update();
     statusBar()->showMessage(QString("Material applied to %1 object(s)").arg(applied), 1400);
+}
+
+void MainWindow::ShowSurfaceFilmDialog(size_t object_index, int operation_index) {
+    auto& objects = document_.GetObjects();
+    CSolid* solid = nullptr;
+    std::vector<int> surface_indices;
+
+    if (object_index != static_cast<size_t>(-1)) {
+        if (object_index < objects.size()) {
+            solid = dynamic_cast<CSolid*>(objects[object_index].get());
+        }
+        const ParametricFunction* operation =
+            solid && operation_index >= 0 ? solid->GetOperation(operation_index) : nullptr;
+        if (!operation || operation->ToolId != "SurfaceFilmCoating") {
+            statusBar()->showMessage("Film: saved operation is not available", 1600);
+            return;
+        }
+        surface_indices = operation->CreatedSurfaceIndices;
+    } else {
+        solid = document_.GetSelectedFaceSolid();
+        if (solid) {
+            surface_indices = solid->GetSelectedFaceIndices();
+            for (size_t index = 0; index < objects.size(); ++index) {
+                if (objects[index].get() == solid) {
+                    object_index = index;
+                    break;
+                }
+            }
+        }
+    }
+
+    surface_indices.erase(
+        std::remove_if(surface_indices.begin(), surface_indices.end(),
+                       [solid](int index) {
+                           return !solid || index < 0 || index >= solid->GetNumSurfaces();
+                       }),
+        surface_indices.end());
+    std::sort(surface_indices.begin(), surface_indices.end());
+    surface_indices.erase(
+        std::unique(surface_indices.begin(), surface_indices.end()),
+        surface_indices.end());
+    if (!solid || surface_indices.empty()
+        || object_index == static_cast<size_t>(-1)) {
+        statusBar()->showMessage("Apply Film: select one or more solid faces", 1800);
+        return;
+    }
+
+    // Reusing Apply Film on the same face set edits the existing operation
+    // instead of stacking a second coating and another history entry.
+    if (operation_index < 0) {
+        for (int index = solid->GetNumOperations() - 1; index >= 0; --index) {
+            const ParametricFunction* operation = solid->GetOperation(index);
+            if (!operation || operation->ToolId != "SurfaceFilmCoating") {
+                continue;
+            }
+            std::vector<int> operation_surfaces = operation->CreatedSurfaceIndices;
+            std::sort(operation_surfaces.begin(), operation_surfaces.end());
+            operation_surfaces.erase(
+                std::unique(operation_surfaces.begin(), operation_surfaces.end()),
+                operation_surfaces.end());
+            if (operation_surfaces == surface_indices) {
+                operation_index = index;
+                break;
+            }
+        }
+    }
+
+    MaterialLibrary library;
+    library.Load(MaterialLibrary::DefaultLibraryPath());
+    Material matte = Material::DefaultSurface();
+    Material translucent = Material::DefaultGloss();
+    matte.name = "Oracal Film Matte";
+    matte.alpha = 1.0f;
+    matte.roughness = 0.68f;
+    matte.metallic = 0.0f;
+    matte.coat_weight = 0.0f;
+    translucent.name = "Oracal Film Translucent Glossy";
+    translucent.alpha = 0.58f;
+    translucent.specular = 0.85f;
+    translucent.shininess = 180.0f;
+    translucent.reflectivity = 0.18f;
+    translucent.roughness = 0.08f;
+    translucent.metallic = 0.0f;
+    translucent.coat_weight = 1.0f;
+    translucent.coat_roughness = 0.02f;
+
+    struct RalChoice {
+        int code = 0;
+        Color color{};
+    };
+    std::vector<RalChoice> ral_choices;
+    const QRegularExpression ral_expression(QStringLiteral("RAL\\s+(\\d{4})"));
+    for (const MaterialLibrary::Entry& entry : library.Entries()) {
+        const QString material_name = QString::fromStdString(entry.material.name);
+        if (material_name.contains("Oracal Film Matte", Qt::CaseInsensitive)) {
+            matte = entry.material;
+        } else if (material_name.contains("Oracal Film Translucent", Qt::CaseInsensitive)) {
+            translucent = entry.material;
+        }
+        if (!entry.category.contains("Powder Coating", Qt::CaseInsensitive)) {
+            continue;
+        }
+        const QRegularExpressionMatch match = ral_expression.match(material_name);
+        if (!match.hasMatch()) {
+            continue;
+        }
+        const int code = match.captured(1).toInt();
+        if (std::none_of(ral_choices.begin(), ral_choices.end(),
+                         [code](const RalChoice& choice) { return choice.code == code; })) {
+            ral_choices.push_back({code, entry.material.diffuse});
+        }
+    }
+    if (ral_choices.empty()) {
+        ral_choices.push_back({3020, {0.8f, 0.0235f, 0.0196f}});
+    }
+    std::sort(ral_choices.begin(), ral_choices.end(),
+              [](const RalChoice& left, const RalChoice& right) {
+                  return left.code < right.code;
+              });
+
+    int initial_ral = 3020;
+    int initial_type = 0;
+    unsigned long edited_material_id = 0;
+    if (operation_index >= 0) {
+        if (const ParametricFunction* operation = solid->GetOperation(operation_index)) {
+            for (const ParametricParameterValue& parameter : operation->Parameters) {
+                if (parameter.id == "ral") {
+                    initial_ral = static_cast<int>(std::lround(parameter.value));
+                } else if (parameter.id == "film.type") {
+                    initial_type = parameter.value >= 0.5 ? 1 : 0;
+                } else if (parameter.id == "material.id") {
+                    edited_material_id = static_cast<unsigned long>(
+                        std::max(0.0, parameter.value));
+                }
+            }
+        }
+    }
+
+    std::vector<SurfaceMaterialOverride> original_overrides;
+    original_overrides.reserve(surface_indices.size());
+    for (int index : surface_indices) {
+        original_overrides.push_back(solid->GetSurfaceFace(index)->MaterialOverride);
+    }
+
+    double area_mm2 = 0.0;
+    for (int index : surface_indices) {
+        try {
+            const TopoDS_Face face = solid->GetTopoFace(index);
+            if (!face.IsNull()) {
+                GProp_GProps properties;
+                BRepGProp::SurfaceProperties(face, properties);
+                area_mm2 += properties.Mass();
+            }
+        } catch (...) {
+            // A coating is still valid when an imported face cannot report area.
+        }
+    }
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(operation_index >= 0 ? "Edit Oracal Film" : "Apply Oracal Film");
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* form = new QFormLayout();
+    auto* ral_combo = new QComboBox(&dialog);
+    for (const RalChoice& choice : ral_choices) {
+        const QColor swatch = QColor::fromRgbF(choice.color.r, choice.color.g, choice.color.b);
+        QPixmap icon(18, 18);
+        icon.fill(swatch);
+        ral_combo->addItem(QIcon(icon), QString("RAL %1").arg(choice.code), choice.code);
+    }
+    int ral_index = ral_combo->findData(initial_ral);
+    ral_combo->setCurrentIndex(ral_index >= 0 ? ral_index : 0);
+    auto* type_combo = new QComboBox(&dialog);
+    type_combo->addItem("Matte", 0);
+    type_combo->addItem("Translucent glossy", 1);
+    type_combo->setCurrentIndex(std::clamp(initial_type, 0, 1));
+    auto* area_label = new QLabel(
+        area_mm2 > 0.0
+            ? QString("%1 mm²").arg(area_mm2, 0, 'f', 1)
+            : QString("Not available"),
+        &dialog);
+    form->addRow("RAL color", ral_combo);
+    form->addRow("Film type", type_combo);
+    form->addRow("Covered area", area_label);
+    layout->addLayout(form);
+    auto* note = new QLabel(
+        "The film is applied as a thin surface layer over the existing material.",
+        &dialog);
+    note->setWordWrap(true);
+    layout->addWidget(note);
+    auto* buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+    const auto selected_color = [&ral_choices, ral_combo]() {
+        const int code = ral_combo->currentData().toInt();
+        const auto found = std::find_if(
+            ral_choices.begin(), ral_choices.end(),
+            [code](const RalChoice& choice) { return choice.code == code; });
+        return found != ral_choices.end() ? found->color : ral_choices.front().color;
+    };
+    const auto make_film = [&]() {
+        const bool is_translucent = type_combo->currentData().toInt() == 1;
+        Material film = is_translucent ? translucent : matte;
+        const Color color = selected_color();
+        film.id = edited_material_id;
+        film.diffuse = color;
+        film.ambient = {color.r * 0.22f, color.g * 0.22f, color.b * 0.22f};
+        film.emission = {0.0f, 0.0f, 0.0f};
+        film.color_texture_path.clear();
+        film.light_texture_path.clear();
+        film.bump_texture_path.clear();
+        film.normal_texture_path.clear();
+        film.roughness_texture_path.clear();
+        film.metallic_texture_path.clear();
+        film.displacement_texture_path.clear();
+        const int ral = ral_combo->currentData().toInt();
+        film.name = QString("Oracal Film %1 RAL %2")
+            .arg(is_translucent ? "Translucent Glossy" : "Matte")
+            .arg(ral).toStdString();
+        return film;
+    };
+    const auto preview = [&, solid]() {
+        const Material film = make_film();
+        for (int index : surface_indices) {
+            solid->SetSurfaceCoating(index, film);
+        }
+        viewport_->update();
+    };
+
+    if (!undo_redo_.BeginChange()) {
+        statusBar()->showMessage("Apply Film: another edit is active", 1600);
+        return;
+    }
+    connect(ral_combo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            &dialog, [preview](int) { preview(); });
+    connect(type_combo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            &dialog, [preview](int) { preview(); });
+    preview();
+
+    if (dialog.exec() != QDialog::Accepted) {
+        for (size_t i = 0; i < surface_indices.size(); ++i) {
+            if (CSurfaceFace* surface = solid->GetSurfaceFace(surface_indices[i])) {
+                surface->MaterialOverride = original_overrides[i];
+            }
+        }
+        undo_redo_.CancelChange();
+        viewport_->update();
+        return;
+    }
+
+    Material film = make_film();
+    Material& saved_film = document_.UpsertMaterial(std::move(film));
+    for (int index : surface_indices) {
+        solid->SetSurfaceCoating(index, saved_film);
+    }
+    const int ral = ral_combo->currentData().toInt();
+    const int film_type = type_combo->currentData().toInt();
+    const size_t saved_operation_index = operation_index >= 0
+        ? static_cast<size_t>(operation_index)
+        : solid->GetOperationTree().size();
+    solid->SetParametricOperation(
+        saved_operation_index,
+        "SurfaceFilmCoating",
+        QString("Oracal Film — RAL %1").arg(ral).toStdString(),
+        {{"material.id", static_cast<double>(saved_film.id)},
+         {"ral", static_cast<double>(ral)},
+         {"film.type", static_cast<double>(film_type)},
+         {"area.mm2", area_mm2}},
+        surface_indices);
+    undo_redo_.CommitChange(operation_index >= 0 ? "Edit Oracal film" : "Apply Oracal film");
+    UpdateUndoRedoActions();
+    RefreshSceneTree();
+    viewport_->update();
+    statusBar()->showMessage(
+        QString("Oracal film applied to %1 surface(s), area %2 mm²")
+            .arg(surface_indices.size()).arg(area_mm2, 0, 'f', 1),
+        2200);
 }
 
 void MainWindow::BeginTransformTool(TransformOperation operation) {
@@ -11235,6 +11552,169 @@ void MainWindow::CancelPendingTrim(const QString& status_text) {
     }
 }
 
+void MainWindow::ApplySheetBend() {
+    ClearActiveProperties();
+    viewport_->SetTool(ToolMode::Select);
+    viewport_->SetSelectionMode(SelectionMode::Object);
+
+    CSolid* solid = nullptr;
+    CAlfaObject* line_object = nullptr;
+    CPoint3d line_start;
+    CPoint3d line_end;
+    int solid_count = 0;
+    int line_count = 0;
+
+    const auto& objects = document_.GetObjects();
+    for (size_t index : document_.GetSelectedObjectIndices()) {
+        if (index >= objects.size() || !objects[index]) continue;
+        CAlfaObject* object = objects[index].get();
+        if (auto* candidate_solid = dynamic_cast<CSolid*>(object)) {
+            solid = candidate_solid;
+            ++solid_count;
+            continue;
+        }
+        if (auto* polyline = dynamic_cast<CPolyline*>(object)) {
+            if (polyline->GetPointCount() == 2) {
+                line_object = object;
+                line_start = polyline->GetPoints().front();
+                line_end = polyline->GetPoints().back();
+                ++line_count;
+            }
+            continue;
+        }
+        if (auto* sketch = dynamic_cast<CSmartLine*>(object)) {
+            const CLinkLine* segment = sketch->GetNumLines() == 1
+                ? sketch->GetLine(0) : nullptr;
+            if (segment && segment->GetType() != LinkLineType::Bezier
+                && segment->GetType() != LinkLineType::Arc) {
+                line_object = object;
+                line_start = sketch->LocalToWorld(segment->GetStart());
+                line_end = sketch->LocalToWorld(segment->GetEnd());
+                ++line_count;
+            }
+        }
+    }
+
+    if (solid_count != 1 || line_count != 1 || !solid || !line_object) {
+        UpdateActiveToolUi("select");
+        statusBar()->showMessage(
+            "Sheet Bend: select one solid and one two-point directed line",
+            3500);
+        return;
+    }
+
+    QDialog dialog(this);
+    dialog.setWindowTitle("Sheet Bend");
+    auto* layout = new QFormLayout(&dialog);
+    auto* radius = new QDoubleSpinBox(&dialog);
+    radius->setRange(0.001, 1000000.0);
+    radius->setDecimals(3);
+    radius->setSingleStep(0.5);
+    radius->setValue(2.0);
+    radius->setSuffix(" mm");
+    auto* angle = new QDoubleSpinBox(&dialog);
+    angle->setRange(0.01, 178.99);
+    angle->setDecimals(2);
+    angle->setSingleStep(5.0);
+    angle->setValue(90.0);
+    angle->setSuffix(" deg");
+    auto* direction = new QComboBox(&dialog);
+    direction->addItem("Clockwise");
+    direction->addItem("Counterclockwise");
+    layout->addRow("Inner radius", radius);
+    layout->addRow("Bend angle", angle);
+    layout->addRow("Direction", direction);
+    auto* hint = new QLabel(
+        "Direction is viewed from the start of the line towards its end.",
+        &dialog);
+    hint->setWordWrap(true);
+    layout->addRow(hint);
+    auto* buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addRow(buttons);
+    CenterDialogOnCursor(dialog);
+    if (dialog.exec() != QDialog::Accepted) {
+        UpdateActiveToolUi("select");
+        statusBar()->showMessage("Sheet Bend canceled", 1000);
+        return;
+    }
+
+    SheetBendParameters parameters;
+    parameters.line_start_x = line_start.x;
+    parameters.line_start_y = line_start.y;
+    parameters.line_start_z = line_start.z;
+    parameters.line_end_x = line_end.x;
+    parameters.line_end_y = line_end.y;
+    parameters.line_end_z = line_end.z;
+    parameters.inner_radius = radius->value();
+    parameters.angle_degrees = angle->value();
+    parameters.clockwise = direction->currentIndex() == 0;
+
+    TopoDS_Shape bent_shape;
+    std::string error_message;
+    if (!BuildSheetBendShape(
+            solid->m_Shape, parameters, bent_shape, error_message)) {
+        UpdateActiveToolUi("select");
+        statusBar()->showMessage(
+            QString("Sheet Bend: %1")
+                .arg(QString::fromStdString(error_message)),
+            5000);
+        return;
+    }
+
+    if (!undo_redo_.BeginChange()) {
+        UpdateActiveToolUi("select");
+        statusBar()->showMessage("Sheet Bend: unable to start undo record", 3000);
+        return;
+    }
+    TopoDS_Shape original_shape = solid->m_Shape;
+    const bool needs_frozen_base = solid->GetNumOperations() == 0;
+    solid->m_Shape = bent_shape;
+    if (!solid->ReBuldMesh()) {
+        solid->m_Shape = original_shape;
+        solid->ReBuldMesh();
+        undo_redo_.CancelChange();
+        UpdateActiveToolUi("select");
+        statusBar()->showMessage("Sheet Bend: mesh rebuild failed", 3500);
+        return;
+    }
+    std::vector<ParametricParameterValue> saved_parameters{
+        {"point1.x", parameters.line_start_x},
+        {"point1.y", parameters.line_start_y},
+        {"point1.z", parameters.line_start_z},
+        {"point2.x", parameters.line_end_x},
+        {"point2.y", parameters.line_end_y},
+        {"point2.z", parameters.line_end_z},
+        {"radius", parameters.inner_radius},
+        {"angle", parameters.angle_degrees},
+        {"direction", parameters.clockwise ? 0.0 : 1.0}
+    };
+    if (needs_frozen_base) {
+        CSolid frozen_base(original_shape);
+        const size_t base_tool_index = solid->AddBooleanToolCopy(frozen_base);
+        saved_parameters.push_back(
+            {"base.tool.index", static_cast<double>(base_tool_index)});
+    }
+    solid->SetParametricOperation(
+        solid->GetOperationTree().size(),
+        "SolidSheetBend",
+        "Sheet Bend",
+        std::move(saved_parameters));
+    undo_redo_.CommitChangeLazy("Sheet Bend");
+
+    RefreshSceneTree();
+    UpdateActiveToolUi("select");
+    viewport_->update();
+    statusBar()->showMessage(
+        QString("Sheet Bend: R%1, %2 deg, %3")
+            .arg(parameters.inner_radius, 0, 'f', 3)
+            .arg(parameters.angle_degrees, 0, 'f', 2)
+            .arg(parameters.clockwise ? "clockwise" : "counterclockwise"),
+        3000);
+}
+
 void MainWindow::ActivateParametricTool(const std::string& tool_id) {
     const bool curve_edit_tool = tool_id == "CurveJoin"
         || tool_id == "CurveSplit"
@@ -11345,6 +11825,10 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
     }
     if (tool_id == "SolidCylinder") {
         BeginSolidCylinder();
+        return;
+    }
+    if (tool_id == "SolidSheetBend") {
+        ApplySheetBend();
         return;
     }
     if (tool_id == "SolidLowPoly") {
@@ -12638,6 +13122,7 @@ void MainWindow::EditSelectedParametricObject() {
                     && operation->ToolId != "SolidExtrudeFace"
                     && operation->ToolId != "SolidOffsetFace"
                     && operation->ToolId != "SolidDraft"
+                    && operation->ToolId != "SolidSheetBend"
                     && operation->ToolId != "ThickSolidTool"
                     && operation->ToolId != "boolean"
                     && operation->ToolId != "SolidTransform") {
@@ -12749,6 +13234,27 @@ void MainWindow::EditSelectedParametricObject() {
             }
             if (operation_action.action == SolidOperationsDialogAction::Delete) {
                 const size_t object_index = document_.GetSelectedObjectIndex();
+                const ParametricFunction* selected_operation =
+                    solid->GetOperation(operation_action.operation_index);
+                if (selected_operation
+                    && selected_operation->ToolId == "SurfaceFilmCoating") {
+                    const std::vector<int> coated_surfaces =
+                        selected_operation->CreatedSurfaceIndices;
+                    for (int surface_index : coated_surfaces) {
+                        solid->ClearSurfaceCoating(surface_index);
+                    }
+                    if (!solid->RemoveParametricOperation(
+                            static_cast<size_t>(operation_action.operation_index))) {
+                        undo_redo_.CancelChange();
+                        statusBar()->showMessage("Film operation delete failed", 1400);
+                        return;
+                    }
+                    undo_redo_.CommitChange("Delete Oracal film");
+                    UpdateUndoRedoActions();
+                    finish_solid_edit();
+                    statusBar()->showMessage("Oracal film removed", 1200);
+                    return;
+                }
                 if (!solid->RemoveParametricOperation(static_cast<size_t>(operation_action.operation_index))
                     || !tool_registry_.ReplayOperations(object_index, document_)) {
                     undo_redo_.CancelChange();
@@ -12759,6 +13265,16 @@ void MainWindow::EditSelectedParametricObject() {
                 UpdateUndoRedoActions();
                 finish_solid_edit();
                 statusBar()->showMessage("Operation deleted", 1200);
+                return;
+            }
+            const ParametricFunction* selected_operation =
+                solid->GetOperation(operation_action.operation_index);
+            if (selected_operation
+                && selected_operation->ToolId == "SurfaceFilmCoating") {
+                undo_redo_.CancelChange();
+                finish_solid_edit();
+                ShowSurfaceFilmDialog(
+                    edited_object_index, operation_action.operation_index);
                 return;
             }
             undo_redo_.CancelChange();
@@ -13274,6 +13790,7 @@ void MainWindow::AcceptActiveProperties() {
             || active_parametric_object_.tool_id == "SolidExtrudeFace"
             || active_parametric_object_.tool_id == "SolidOffsetFace"
             || active_parametric_object_.tool_id == "SolidDraft"
+            || active_parametric_object_.tool_id == "SolidSheetBend"
             || active_parametric_object_.tool_id == "ThickSolidTool"
             || active_parametric_object_.tool_id == "SolidExtrudeTool"
             || active_parametric_object_.tool_id == "SurfaceOfRevolution"
@@ -14062,10 +14579,25 @@ void MainWindow::ShowBlenderCyclesDialog() {
         document_, viewport_->GetCamera(),
         viewport_->IsOrthographicProjection(),
         viewport_->GetBackgroundColor());
-    auto* dialog = new BlenderCyclesDialog(std::move(scene), this);
+    auto* dialog = new BlenderCyclesDialog(
+        std::move(scene), viewport_->size(), this);
     dialog->show();
     dialog->raise();
     dialog->activateWindow();
+}
+
+void MainWindow::ViewLastRenderResult() {
+    const QString path = QSettings("Dom3D", "Dom3D_Pro")
+        .value("render/lastOutputPath").toString();
+    if (path.isEmpty() || !QFileInfo::exists(path)) {
+        QMessageBox::information(
+            this, "Render Result", "There is no completed render to view yet.");
+        return;
+    }
+    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(path))) {
+        QMessageBox::warning(
+            this, "Render Result", QString("Could not open:\n%1").arg(path));
+    }
 }
 
 void MainWindow::AddReferenceImage(ReferenceImageAxis axis) {
@@ -15214,7 +15746,7 @@ void MainWindow::PopulateToolsPanelForTab(int tab_index) {
     } else if (tab == "Surfaces") {
         tool_ids = {"PlaneTool", "SurfaceRuled", "SurfaceLoft", "SurfaceSweepTwoRails", "SurfaceFourSplines", "SurfaceJoin", "SurfaceReverseNormals", "SurfaceOfRevolution"};
     } else if (tab == "Solid") {
-        tool_ids = {"SolidBeamTool", "SolidBox", "SolidCylinder", "SolidSphereTool", "SolidTorusTool", "SolidPrismTool", "SolidExtrudeTool", "SolidTwoSketches", "SolidSketchFeature", "SolidSweptTool", "SolidSweepTwoRails", "SolidFrameTool", "SolidWireTool", "SolidPolyhedronTool", "TrimByPlane", "TrimBySketch", "TrimBySurface", "SurfaceOfRevolution", "boolean", "fillet_edge", "ChamferSolid", "SolidExtrudeFace", "SolidOffsetFace", "SolidDraft", "ThickSolidTool"};
+        tool_ids = {"SolidBeamTool", "SolidBox", "SolidCylinder", "SolidSphereTool", "SolidTorusTool", "SolidPrismTool", "SolidExtrudeTool", "SolidTwoSketches", "SolidSketchFeature", "SolidSweptTool", "SolidSweepTwoRails", "SolidFrameTool", "SolidWireTool", "SolidPolyhedronTool", "TrimByPlane", "TrimBySketch", "TrimBySurface", "SurfaceOfRevolution", "boolean", "fillet_edge", "ChamferSolid", "SolidExtrudeFace", "SolidOffsetFace", "SolidDraft", "SolidSheetBend", "ThickSolidTool"};
     }
 
     int index = 0;

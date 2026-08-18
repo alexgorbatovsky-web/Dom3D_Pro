@@ -66,6 +66,36 @@
 #include <unordered_map>
 #include <utility>
 
+Material ComposeSurfaceMaterial(
+	const Material& substrate,
+	const SurfaceMaterialOverride& override_data)
+{
+	Material base = override_data.enabled
+		? override_data.material : substrate;
+	if (!override_data.coating_enabled)
+		return base;
+
+	const Material& film = override_data.coating_material;
+	const float coverage = std::clamp(film.alpha, 0.0f, 1.0f);
+	const auto blend_color = [coverage](Color under, Color over) {
+		return Color{
+			under.r * (1.0f - coverage) + over.r * coverage,
+			under.g * (1.0f - coverage) + over.g * coverage,
+			under.b * (1.0f - coverage) + over.b * coverage};
+	};
+
+	Material result = film;
+	result.diffuse = blend_color(base.diffuse, film.diffuse);
+	result.ambient = blend_color(base.ambient, film.ambient);
+	result.emission = blend_color(base.emission, film.emission);
+	// Film attached to an opaque board remains an opaque visible surface.
+	// Its source alpha is coverage, not volume transparency.
+	result.alpha = base.alpha;
+	result.id = override_data.coating_material_id;
+	result.name = film.name + " over " + base.name;
+	return result;
+}
+
 void Step(const char* text);
 
 namespace {

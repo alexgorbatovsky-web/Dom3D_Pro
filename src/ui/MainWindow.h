@@ -112,6 +112,8 @@ private:
     bool HasSelectedGroup() const;
     void SaveMaterialToDocument(const Material& material);
     void ApplyMaterialToSelection(const Material& material);
+    void ShowSurfaceFilmDialog(size_t object_index = static_cast<size_t>(-1),
+                               int operation_index = -1);
     void BeginTransformTool(TransformOperation operation);
     void ShowPreciseMoveDialog();
     void BeginMoveTwoPointEntry();
@@ -165,6 +167,7 @@ private:
     void ShowDrawSplineDialog();
     void ShowSketchPanel();
     void ActivateParametricTool(const std::string& tool_id);
+    void ApplySheetBend();
     bool TryApplyPendingTrim();
     void CancelPendingTrim(const QString& status_text = {});
     void ShowLowPolyTool();
@@ -203,6 +206,7 @@ private:
     void ShowPreferences();
     void ShowLightingDialog();
     void ShowBlenderCyclesDialog();
+    void ViewLastRenderResult();
     void ImportFile();
     void ShowCatalogDialog();
     void AddSelectionToCatalog();

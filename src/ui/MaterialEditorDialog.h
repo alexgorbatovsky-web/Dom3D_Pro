@@ -8,6 +8,9 @@
 
 class QDoubleSpinBox;
 class QCheckBox;
+class QComboBox;
+class QGroupBox;
+class QLabel;
 class QLineEdit;
 class QListWidget;
 class QListWidgetItem;
@@ -52,6 +55,9 @@ private:
     void SaveCurrentMaterial();
     void ApplyCurrentMaterial();
     void CommitEditorChanges();
+    void UpdateCoatingControls(const Material& material,
+                               const QString& source_path);
+    void ApplyCoatingControls();
 
     QString library_path_;
     QString current_file_path_;
@@ -70,6 +76,12 @@ private:
     QPushButton* ambient_button_ = nullptr;
     QPushButton* diffuse_button_ = nullptr;
     QPushButton* emission_button_ = nullptr;
+    QGroupBox* coating_group_ = nullptr;
+    QComboBox* ral_combo_ = nullptr;
+    QCheckBox* lacquered_check_ = nullptr;
+    QLabel* film_type_label_ = nullptr;
+    QComboBox* film_type_combo_ = nullptr;
+    int coating_family_ = 0;
     QDoubleSpinBox* alpha_spin_ = nullptr;
     QDoubleSpinBox* specular_spin_ = nullptr;
     QDoubleSpinBox* shininess_spin_ = nullptr;

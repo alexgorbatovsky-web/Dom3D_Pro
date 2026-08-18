@@ -191,7 +191,7 @@ void BlenderCyclesRenderer::WriteLog(const QString& final_error) {
 QString BlenderCyclesRenderer::PythonScript() {
     return QString::fromUtf8(R"PY(
 import bpy, json, math, os, sys, time, traceback
-from mathutils import Matrix
+from mathutils import Matrix, Vector
 
 def fail(message):
     print("DOM3D_ERROR:", message, file=sys.stderr, flush=True)
@@ -329,7 +329,10 @@ def build_world(scene, data):
         axis_rotate.inputs['Angle'].default_value = math.radians(90.0)
         handedness = nodes.new('ShaderNodeVectorMath')
         handedness.operation = 'MULTIPLY'
-        handedness.inputs[1].default_value = (1.0, -1.0, 1.0)
+        # Blender's equirectangular vertical axis is opposite to the panorama
+        # convention used by the modeling viewport. Flip Z as well as the
+        # camera-space handedness so floor and ceiling stay upright.
+        handedness.inputs[1].default_value = (1.0, -1.0, -1.0)
         hdri_rotate = nodes.new('ShaderNodeVectorRotate')
         hdri_rotate.rotation_type = 'Z_AXIS'
         hdri_rotate.inputs['Angle'].default_value = math.radians(
@@ -342,6 +345,48 @@ def build_world(scene, data):
         links.new(environment.outputs['Color'], background.inputs['Color'])
     elif path:
         print('DOM3D_WARNING: missing HDRI', path, flush=True)
+
+def add_studio_softboxes(scene, camera_object, environment):
+    path = environment.get('hdri_path', '')
+    if environment.get('enabled', False) and path and os.path.isfile(path):
+        return
+    mesh_objects = [obj for obj in scene.objects if obj.type == 'MESH']
+    if not mesh_objects:
+        return
+    corners = [obj.matrix_world @ Vector(corner)
+               for obj in mesh_objects for corner in obj.bound_box]
+    minimum = Vector((min(p.x for p in corners), min(p.y for p in corners),
+                      min(p.z for p in corners)))
+    maximum = Vector((max(p.x for p in corners), max(p.y for p in corners),
+                      max(p.z for p in corners)))
+    center = (minimum + maximum) * 0.5
+    extent = max(maximum.x - minimum.x, maximum.y - minimum.y,
+                 maximum.z - minimum.z, 0.25)
+    orientation = camera_object.matrix_world.to_quaternion()
+    right = orientation @ Vector((1.0, 0.0, 0.0))
+    up = orientation @ Vector((0.0, 1.0, 0.0))
+    forward = orientation @ Vector((0.0, 0.0, -1.0))
+
+    def add_area(name, location, energy, size, color):
+        light_data = bpy.data.lights.new(name, type='AREA')
+        light_data.energy = energy
+        light_data.shape = 'DISK'
+        light_data.size = size
+        light_data.color = color
+        light_object = bpy.data.objects.new(name, light_data)
+        scene.collection.objects.link(light_object)
+        light_object.location = location
+        light_object.rotation_euler = (center - location).to_track_quat('-Z', 'Y').to_euler()
+
+    power = 850.0 * max(extent * extent, 0.25)
+    add_area('Dom3D Key Softbox',
+             center - right * extent * 0.75 + up * extent * 0.85
+                    - forward * extent * 1.15,
+             power, extent * 0.9, (1.0, 0.94, 0.88))
+    add_area('Dom3D Fill Softbox',
+             center + right * extent * 0.95 + up * extent * 0.25
+                    - forward * extent * 0.75,
+             power * 0.38, extent * 1.15, (0.82, 0.90, 1.0))
 
 def main():
     marker = sys.argv.index('--')
@@ -408,15 +453,19 @@ def main():
         (right[1], up[1], -forward[1], position[1]),
         (right[2], up[2], -forward[2], position[2]),
         (0.0, 0.0, 0.0, 1.0)))
+    # Dom3D defines both perspective FOV and orthographic scale vertically.
+    # Blender's AUTO fit interprets ortho_scale as the frame width on a
+    # landscape image, which zooms the Cycles result by the aspect ratio.
+    camera_object_data.sensor_fit = 'VERTICAL'
     if camera_data.get('orthographic', False):
         camera_object_data.type = 'ORTHO'
         camera_object_data.ortho_scale = camera_data['orthographic_scale_mm'] * scale
     else:
         camera_object_data.type = 'PERSP'
-        camera_object_data.sensor_fit = 'VERTICAL'
         camera_object_data.angle = math.radians(camera_data.get('vertical_fov_degrees', 48.0))
     scene.camera = camera_object
     build_world(scene, data['environment'])
+    add_studio_softboxes(scene, camera_object, data['environment'])
     print('DOM3D_SCENE: objects=%d triangles=%d materials=%d Blender=%s' % (
         len(data['meshes']), sum(len(m['triangles']) for m in data['meshes']),
         len(materials), bpy.app.version_string), flush=True)

@@ -51,7 +51,18 @@ struct SurfaceMaterialOverride {
 	bool enabled = false;
 	unsigned long material_id = 0;
 	Material material{};
+	bool coating_enabled = false;
+	unsigned long coating_material_id = 0;
+	Material coating_material{};
 };
+
+// Builds the visible surface material.  A coating is a shader layer over the
+// substrate, not transparent solid geometry: its alpha controls how strongly
+// the film colour covers the base while the resulting face keeps the base
+// opacity.
+Material ComposeSurfaceMaterial(
+	const Material& substrate,
+	const SurfaceMaterialOverride& override_data);
 
 class CSurfaceFace {
 public:

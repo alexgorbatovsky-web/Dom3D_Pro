@@ -141,7 +141,8 @@ QString MaterialLibrary::DefaultLibraryPath() {
 }
 
 QStringList MaterialLibrary::DefaultCategories() {
-    return {"Default", "Plastic", "Paint", "Leather", "Fabric", "Metall", "Glass"};
+    return {"Default", "Plastic", "Paint", "Powder Coating", "Oracal Film",
+            "Leather", "Fabric", "Metall", "Glass"};
 }
 
 bool MaterialLibrary::Load(const QString& root_path) {

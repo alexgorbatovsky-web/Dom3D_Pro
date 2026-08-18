@@ -160,6 +160,11 @@ void write_surface_texture_transforms(QXmlStreamWriter& xml, const CSolid& solid
         if (surface->MaterialOverride.enabled) {
             xml.writeAttribute("materialId", QString::number(surface->MaterialOverride.material_id));
         }
+        if (surface->MaterialOverride.coating_enabled) {
+            xml.writeAttribute(
+                "coatingMaterialId",
+                QString::number(surface->MaterialOverride.coating_material_id));
+        }
     }
     xml.writeEndElement();
 }
@@ -230,6 +235,23 @@ bool read_surface_texture_transforms(const QDomElement& object_element,
                 [material_id](const Material& candidate) { return candidate.id == material_id; });
             if (material != materials.end()) {
                 solid.SetSurfaceMaterial(index, *material);
+            }
+        }
+        if (surface_element.hasAttribute("coatingMaterialId")) {
+            bool material_id_ok = false;
+            const unsigned long material_id = surface_element
+                .attribute("coatingMaterialId").toULong(&material_id_ok);
+            if (!material_id_ok) {
+                error = "Surface coating contains an invalid material ID.";
+                return false;
+            }
+            const auto material = std::find_if(
+                materials.begin(), materials.end(),
+                [material_id](const Material& candidate) {
+                    return candidate.id == material_id;
+                });
+            if (material != materials.end()) {
+                solid.SetSurfaceCoating(index, *material);
             }
         }
     }
@@ -598,6 +620,10 @@ void write_operation_history(QXmlStreamWriter& xml, const CAlfaObject& object) {
             xml.writeStartElement("operation");
             xml.writeAttribute("type", QString::fromStdString(operation->ToolId));
             xml.writeAttribute("status", "parametric");
+            if (!operation->Name.empty()) {
+                xml.writeAttribute(
+                    "name", QString::fromStdString(operation->Name));
+            }
             for (const ParametricParameterValue& parameter : operation->Parameters) {
                 xml.writeEmptyElement("parameter");
                 xml.writeAttribute("name", QString::fromStdString(parameter.id));
@@ -732,7 +758,7 @@ void read_parametric_definition(const QDomElement& object_element, CAlfaObject& 
             }
             solid->SetParametricOperation(operation_index,
                                           tool_id.toStdString(),
-                                          std::string(),
+                                          operation.attribute("name").toStdString(),
                                           parameters,
                                           std::move(created_surface_indices));
         }

@@ -1144,7 +1144,7 @@ TopoDS_Shape CFacadeFurniture::BuildPlanarShape(
     }
 
     const double minimum_side = std::min(width, height);
-    const double frame_width = std::clamp(minimum_side * 0.13, 32.0, 72.0);
+    double frame_width = std::clamp(minimum_side * 0.13, 32.0, 72.0);
     if (width <= 2.0 * frame_width + 2.0
         || height <= 2.0 * frame_width + 2.0) {
         return box_shape(x, y, z, width, thickness, height);
@@ -1156,13 +1156,29 @@ TopoDS_Shape CFacadeFurniture::BuildPlanarShape(
             source_cutter_debug);
     }
 
+    TopoDS_Shape profiled_showcase_frame;
     if (style == KitchenCabinetFacadeStyle::Frame) {
         const double profile_frame_width = std::min(
             60.0, std::max(20.0, minimum_side * 0.5 - 2.0));
-        return translated_shape(
-            cached_profiled_facade(
-                false, width, thickness, height, profile_frame_width),
-            x, y + thickness, z);
+        const TopoDS_Shape profiled = cached_profiled_facade(
+            false, width, thickness, height, profile_frame_width);
+        if (showcase_fill == KitchenCabinetShowcaseFill::None) {
+            return translated_shape(profiled, x, y + thickness, z);
+        }
+        // A showcase Frame uses the same profiled rails as a regular Frame,
+        // but deliberately omits its wooden centre panel.  The glass or
+        // decorative showcase fill is added below as a separate part.
+        if (profiled.ShapeType() == TopAbs_COMPOUND) {
+            TopoDS_Iterator iterator(profiled);
+            if (iterator.More()) {
+                profiled_showcase_frame = translated_shape(
+                    iterator.Value(), x, y + thickness, z);
+            }
+        }
+        if (profiled_showcase_frame.IsNull()) {
+            return {};
+        }
+        frame_width = profile_frame_width;
     }
 
     if (style == KitchenCabinetFacadeStyle::Milano) {
@@ -1183,7 +1199,8 @@ TopoDS_Shape CFacadeFurniture::BuildPlanarShape(
     const double opening_width = width - 2.0 * frame_width;
     const double opening_height = height - 2.0 * frame_width;
     const double fill_y = y + thickness - panel_depth;
-    if (showcase_fill != KitchenCabinetShowcaseFill::Lattice) {
+    if (showcase_fill != KitchenCabinetShowcaseFill::Lattice
+        && showcase_fill != KitchenCabinetShowcaseFill::None) {
         shapes.push_back(box_shape(
             opening_x, fill_y, opening_z,
             opening_width, panel_depth, opening_height));
@@ -1241,9 +1258,13 @@ TopoDS_Shape CFacadeFurniture::BuildPlanarShape(
             shapes.push_back(std::move(stained_pattern));
         }
     }
-    add_rectangular_border(
-        shapes, x, y, z, width, thickness, height, frame_width,
-        round_screen_front ? 2.0 : 0.0);
+    if (profiled_showcase_frame.IsNull()) {
+        add_rectangular_border(
+            shapes, x, y, z, width, thickness, height, frame_width,
+            round_screen_front ? 2.0 : 0.0);
+    } else {
+        shapes.push_back(std::move(profiled_showcase_frame));
+    }
     return compound_shape(shapes);
 }
 

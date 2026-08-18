@@ -26,6 +26,7 @@
 #include "../solid/PolyhedronShapeBuilder.h"
 #include "../solid/SketchFeatureShapeBuilder.h"
 #include "../solid/OffsetFaceShapeBuilder.h"
+#include "../solid/SheetBendShapeBuilder.h"
 #include "../solid/SurfaceSet.h"
 #include "../solid/TrimShapeBuilder.h"
 
@@ -262,6 +263,13 @@ TopoDS_Face first_face(const TopoDS_Shape& shape) {
         return {};
     }
     return TopoDS::Face(explorer.Current());
+}
+
+double cabinet_mounting_height(
+    const std::vector<ToolParameter>& parameters) {
+    return param(parameters, "overhead", 0.0) >= 0.5
+        ? std::max(0.0, param(parameters, "mounting_height", 1300.0))
+        : 0.0;
 }
 
 bool is_planar_surface(const CSurfaceSet& surface) {
@@ -1081,6 +1089,31 @@ double saved_param(const std::vector<ParametricParameterValue>& parameters,
         }
     }
     return fallback;
+}
+
+bool apply_sheet_bend(CSolid& solid,
+                      const std::vector<ParametricParameterValue>& saved_parameters,
+                      const std::vector<ToolParameter>& parameters) {
+    SheetBendParameters bend;
+    bend.line_start_x = saved_param(saved_parameters, "point1.x", 0.0);
+    bend.line_start_y = saved_param(saved_parameters, "point1.y", 0.0);
+    bend.line_start_z = saved_param(saved_parameters, "point1.z", 0.0);
+    bend.line_end_x = saved_param(saved_parameters, "point2.x", 0.0);
+    bend.line_end_y = saved_param(saved_parameters, "point2.y", 0.0);
+    bend.line_end_z = saved_param(saved_parameters, "point2.z", 0.0);
+    bend.inner_radius = param(parameters, "radius", 2.0);
+    bend.angle_degrees = param(parameters, "angle", 90.0);
+    bend.clockwise = param(parameters, "direction", 0.0) < 0.5;
+
+    TopoDS_Shape result;
+    std::string error_message;
+    if (!BuildSheetBendShape(solid.m_Shape, bend, result, error_message)) {
+        return false;
+    }
+    solid.m_Shape = result;
+    solid.ClearSelectedEdge();
+    solid.ClearSelectedFace();
+    return solid.ReBuldMesh();
 }
 
 bool apply_offset_face(CSolid& solid,
@@ -1990,7 +2023,23 @@ bool rebuild_solid_operation_tree(const ToolRegistry& registry,
         return false;
     }
 
-    if (base_operation.tool_id == "SolidExtrudeTool") {
+    if (base_operation.tool_id == "SolidSheetBend") {
+        const int base_tool_index = static_cast<int>(saved_param(
+            base_operation.saved_parameters, "base.tool.index", -1.0));
+        const CSolid* frozen_base = base_tool_index >= 0
+            ? solid->GetBooleanTool(static_cast<size_t>(base_tool_index))
+            : nullptr;
+        if (!frozen_base || frozen_base->m_Shape.IsNull()) {
+            return false;
+        }
+        solid->m_Shape = frozen_base->m_Shape;
+        if (!apply_sheet_bend(
+                *solid,
+                base_operation.saved_parameters,
+                parameters_for_operation(registry, base_operation))) {
+            return false;
+        }
+    } else if (base_operation.tool_id == "SolidExtrudeTool") {
         if (!rebuild_extrude_base(document,
                                   active_object.object_index,
                                   parameters_for_operation(registry, base_operation))) {
@@ -2026,7 +2075,16 @@ bool rebuild_solid_operation_tree(const ToolRegistry& registry,
         const StoredOperation& operation = operations[i];
         const std::vector<TopoDS_Face> faces_before = shape_faces(solid->m_Shape);
         bool history_tracked = false;
-        if (operation.tool_id == "fillet_all_edges") {
+        if (operation.tool_id == "SurfaceFilmCoating") {
+            for (int face_index : operation.created_surface_indices) {
+                if (face_index >= 0
+                    && face_index < static_cast<int>(faces_before.size())) {
+                    operation_created_faces[i].push_back(
+                        faces_before[static_cast<size_t>(face_index)]);
+                }
+            }
+            history_tracked = true;
+        } else if (operation.tool_id == "fillet_all_edges") {
             const std::vector<ToolParameter> parameters = parameters_for_operation(registry, operation);
             const double radius_type = std::clamp(
                 param(parameters, "radius_type", 0.0), 0.0, 1.0);
@@ -2097,6 +2155,13 @@ bool rebuild_solid_operation_tree(const ToolRegistry& registry,
             if (!apply_draft_face(*solid, operation.saved_parameters, parameters)) {
                 return false;
             }
+        } else if (operation.tool_id == "SolidSheetBend") {
+            const std::vector<ToolParameter> parameters =
+                parameters_for_operation(registry, operation);
+            if (!apply_sheet_bend(
+                    *solid, operation.saved_parameters, parameters)) {
+                return false;
+            }
         } else if (operation.tool_id == "ThickSolidTool") {
             const std::vector<ToolParameter> parameters = parameters_for_operation(registry, operation);
             if (!apply_thick_solid(*solid, operation.saved_parameters, parameters)) {
@@ -2146,11 +2211,28 @@ bool rebuild_solid_operation_tree(const ToolRegistry& registry,
         const std::string operation_label = operation.tool_id == "SolidSketchFeature"
             ? registry.LabelFor(operation.tool_id)
             : operation.label;
+        const std::vector<int> final_surface_indices =
+            face_indices_in_shape(operation_created_faces[i], final_faces);
         solid->SetParametricOperation(solid->GetOperationTree().size(),
                                       operation.tool_id,
                                       operation_label,
                                       operation.saved_parameters,
-                                      face_indices_in_shape(operation_created_faces[i], final_faces));
+                                      final_surface_indices);
+        if (operation.tool_id == "SurfaceFilmCoating") {
+            unsigned long material_id = 0;
+            for (const ParametricParameterValue& parameter : operation.saved_parameters) {
+                if (parameter.id == "material.id") {
+                    material_id = static_cast<unsigned long>(
+                        std::max(0.0, parameter.value));
+                    break;
+                }
+            }
+            if (const Material* film = document.FindMaterial(material_id)) {
+                for (int surface_index : final_surface_indices) {
+                    solid->SetSurfaceCoating(surface_index, *film);
+                }
+            }
+        }
     }
     return true;
 }
@@ -2200,6 +2282,9 @@ void copy_solid_surface_appearance(const CAlfaObject& source, CAlfaObject& targe
         target_solid->SetSurfaceTextureTransform(index, transform);
         if (source_surface->MaterialOverride.enabled) {
             target_solid->SetSurfaceMaterial(index, source_surface->MaterialOverride.material);
+        }
+        if (source_surface->MaterialOverride.coating_enabled) {
+            target_solid->SetSurfaceCoating(index, source_surface->MaterialOverride.coating_material);
         }
     }
 }
@@ -2700,6 +2785,14 @@ void create_kitchen_cabinet(CAlfaDoc& document,
     }
     document.AddObject(std::make_unique<CKitchenCabinet>(
         "Kitchen Cabinet", std::move(ids), definition));
+    const double mounting_height = cabinet_mounting_height(parameters);
+    if (mounting_height > 0.0) {
+        if (auto* cabinet = dynamic_cast<CKitchenCabinet*>(
+                document.GetSelectedObject())) {
+            cabinet->Translate(
+                {0.0f, 0.0f, static_cast<float>(mounting_height)});
+        }
+    }
 }
 
 void rebuild_kitchen_cabinet(CAlfaDoc& document,
@@ -2714,6 +2807,19 @@ void rebuild_kitchen_cabinet(CAlfaDoc& document,
         return;
     }
     const KitchenCabinetDefinition definition = kitchen_cabinet_definition(parameters);
+    const double previous_mounting_height =
+        saved_param(cabinet->GetParametricParameters(), "overhead", 0.0) >= 0.5
+        ? std::max(0.0, saved_param(
+            cabinet->GetParametricParameters(), "mounting_height", 1300.0))
+        : 0.0;
+    const double next_mounting_height = cabinet_mounting_height(parameters);
+    CAssembled::TransformMatrix cabinet_transform =
+        cabinet->GetAssemblyTransform();
+    const double mounting_delta =
+        next_mounting_height - previous_mounting_height;
+    cabinet_transform[3] += cabinet_transform[2] * mounting_delta;
+    cabinet_transform[7] += cabinet_transform[6] * mounting_delta;
+    cabinet_transform[11] += cabinet_transform[10] * mounting_delta;
     const auto slx_sketch = [&](const char* id) -> const CSmartLine* {
         const unsigned long object_id = static_cast<unsigned long>(
             std::max(0.0, param(parameters, id, 0.0)));
@@ -2862,16 +2968,32 @@ void rebuild_kitchen_cabinet(CAlfaDoc& document,
     }
     cabinet->SetElementIds(std::move(new_ids));
     cabinet->SetDefinition(definition);
+    cabinet->SetAssemblyTransform(cabinet_transform);
     document.SelectObjectById(cabinet_id);
 }
 
 std::vector<ToolParameter> showcase_cabinet_parameters(
     const std::vector<ToolParameter>& parameters) {
     std::vector<ToolParameter> result = parameters;
+    const bool facade_showcase =
+        param(parameters, "facade_showcase", 0.0) >= 0.5;
+    const double selected_style = std::clamp(
+        param(parameters, "facade_style", 0.0), 0.0, 2.0);
+    for (ToolParameter& parameter : result) {
+        if (parameter.id == "facade_style") {
+            // A Plain showcase uses the simple flat Screen border. Frame
+            // keeps its profiled rails. With the checkbox off, both styles
+            // retain their ordinary non-showcase construction.
+            parameter.value = facade_showcase && selected_style == 0.0
+                ? 2.0 : selected_style;
+        } else if (parameter.id == "showcase_fill") {
+            parameter.value = facade_showcase
+                ? std::clamp(parameter.value, 0.0, 3.0)
+                : static_cast<double>(KitchenCabinetShowcaseFill::None);
+        }
+    }
     result.push_back({
         "body_type", "Body Type", 0.0, 0.0, 6.0, 1.0});
-    result.push_back({
-        "facade_style", "Facade Style", 2.0, 0.0, 4.0, 1.0});
     result.push_back({
         "facade_type", "Facade Type",
         std::clamp(param(parameters, "showcase_facade_type", 0.0), 0.0, 1.0) + 1.0,
@@ -5079,6 +5201,10 @@ ToolRegistry::ToolRegistry() {
                 ToolParameterType::Number, {}, ToolParameterUnit::Length},
             {"depth", "Depth", 560.0, 200.0, 1200.0, 10.0,
                 ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"overhead", "Overhead", 0.0, 0.0, 1.0, 1.0,
+                ToolParameterType::Checkbox},
+            {"mounting_height", "Height Hanger", 1300.0, 0.0, 5000.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
             {"facade_bulge", "Facade Bulge", 280.0, 10.0, 1500.0, 10.0,
                 ToolParameterType::Number, {}, ToolParameterUnit::Length},
             {"radius2_bulge", "Radius-2 Bulge", 120.0, 10.0, 1000.0, 10.0,
@@ -5118,6 +5244,10 @@ ToolRegistry::ToolRegistry() {
             {"height", "Height", 720.0, 300.0, 2600.0, 10.0,
                 ToolParameterType::Number, {}, ToolParameterUnit::Length},
             {"depth", "Depth", 560.0, 200.0, 1200.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"overhead", "Overhead", 0.0, 0.0, 1.0, 1.0,
+                ToolParameterType::Checkbox},
+            {"mounting_height", "Height Hanger", 1300.0, 0.0, 5000.0, 10.0,
                 ToolParameterType::Number, {}, ToolParameterUnit::Length},
             {"panel_thickness", "Panel Thickness", 18.0, 5.0, 100.0, 1.0,
                 ToolParameterType::Number, {}, ToolParameterUnit::Length},
@@ -5184,6 +5314,24 @@ ToolRegistry::ToolRegistry() {
         [](CAlfaDoc& document, size_t index,
            const std::vector<ToolParameter>& parameters) {
             rebuild_simple_chair(document, index, parameters);
+        }
+    });
+
+    tools_.push_back({
+        "SolidSheetBend",
+        "Sheet Bend",
+        {
+            {"radius", "Inner Radius", 2.0, 0.001, 1000000.0, 0.5,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"angle", "Bend Angle", 90.0, 0.01, 178.99, 1.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Angle},
+            {"direction", "Direction", 0.0, 0.0, 1.0, 1.0,
+                ToolParameterType::Combo,
+                {"Clockwise", "Counterclockwise"}}
+        },
+        [](CAlfaDoc&, const std::vector<ToolParameter>&) {
+        },
+        [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {
         }
     });
 
@@ -5256,6 +5404,11 @@ ToolRegistry::ToolRegistry() {
         {
             {"showcase_facade_type", "Facade", 0.0, 0.0, 1.0, 1.0,
                 ToolParameterType::Combo, {"Single Door", "Double Door"}},
+            {"facade_style", "Facade Style", 0.0, 0.0, 2.0, 1.0,
+                ToolParameterType::Combo, {"Screen", "Frame", "Plain"},
+                ToolParameterUnit::None, {2.0, 1.0, 0.0}},
+            {"facade_showcase", "Facade Showcase", 0.0, 0.0, 1.0, 1.0,
+                ToolParameterType::Checkbox},
             {"showcase_fill", "Showcase Fill", 0.0, 0.0, 3.0, 1.0,
                 ToolParameterType::Combo,
                 {"Glass", "Lattice", "Muntin Bars", "Stained Glass"}},
@@ -5264,6 +5417,10 @@ ToolRegistry::ToolRegistry() {
             {"height", "Height", 720.0, 300.0, 2600.0, 10.0,
                 ToolParameterType::Number, {}, ToolParameterUnit::Length},
             {"depth", "Depth", 350.0, 150.0, 1200.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"overhead", "Overhead", 0.0, 0.0, 1.0, 1.0,
+                ToolParameterType::Checkbox},
+            {"mounting_height", "Height Hanger", 1300.0, 0.0, 5000.0, 10.0,
                 ToolParameterType::Number, {}, ToolParameterUnit::Length},
             {"panel_thickness", "Panel Thickness", 18.0, 5.0, 100.0, 1.0,
                 ToolParameterType::Number, {}, ToolParameterUnit::Length},

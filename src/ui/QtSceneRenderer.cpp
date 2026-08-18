@@ -254,7 +254,8 @@ void QtSceneRenderer::Render(const CAlfaDoc& document,
         view_eye, view_forward, view_up, orthographic);
 
     view3d_.Draw(
-        document, xy_plane_view, show_floor_grid,
+        document, view_eye, view_forward,
+        xy_plane_view, show_floor_grid,
         grid_size, grid_step, grid_subdivisions);
     if (show_coordinate_axes) {
         DrawCoordinateAxes(xy_plane_view, grid_size);
@@ -425,10 +426,11 @@ void QtSceneRenderer::CalculateClipPlanes(const CAlfaDoc& document,
     Vec3 up{};
     qt_camera_basis(camera, orthographic, eye, forward, right, up);
 
-    float min_depth = std::numeric_limits<float>::max();
     float max_depth = -std::numeric_limits<float>::max();
+    float nearest_positive_depth = std::numeric_limits<float>::max();
     float scene_extent = 0.0f;
     bool has_scene_bounds = false;
+    bool scene_crosses_eye_plane = false;
 
     for (const auto& object : document.GetObjects()) {
         if (!object || !document.IsObjectVisible(*object)) {
@@ -455,10 +457,19 @@ void QtSceneRenderer::CalculateClipPlanes(const CAlfaDoc& document,
             {max_point.x, max_point.y, max_point.z}
         };
 
+        float object_min_depth = std::numeric_limits<float>::max();
+        float object_max_depth = -std::numeric_limits<float>::max();
         for (const Vec3& corner : corners) {
             const float depth = dot(corner - eye, forward);
-            min_depth = std::min(min_depth, depth);
             max_depth = std::max(max_depth, depth);
+            object_min_depth = std::min(object_min_depth, depth);
+            object_max_depth = std::max(object_max_depth, depth);
+        }
+        if (object_min_depth <= 0.0f && object_max_depth >= 0.0f) {
+            scene_crosses_eye_plane = true;
+        } else if (object_min_depth > 0.0f) {
+            nearest_positive_depth = std::min(
+                nearest_positive_depth, object_min_depth);
         }
     }
 
@@ -474,11 +485,13 @@ void QtSceneRenderer::CalculateClipPlanes(const CAlfaDoc& document,
         return;
     }
 
-    // Keep the near plane in front of the nearest scene corner when possible.
-    // If the camera is inside the scene bounds, fall back to a very small
-    // distance derived from the current zoom instead of clipping at 20 mm.
-    z_near = min_depth > near_floor
-        ? std::max(near_floor, min_depth * 0.25f)
+    // Objects fully behind the eye must not force the near plane down to a
+    // microscopic value: that destroys depth precision for the visible
+    // cabinet.  Only fall back to near_floor when visible bounds actually
+    // cross the camera plane.
+    z_near = !scene_crosses_eye_plane
+            && nearest_positive_depth < std::numeric_limits<float>::max()
+        ? std::max(near_floor, nearest_positive_depth * 0.25f)
         : near_floor;
     const float far_margin = std::max(
         {scene_extent * 0.10f, camera.distance * 0.10f, 0.01f});

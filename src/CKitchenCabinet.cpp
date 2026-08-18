@@ -1327,7 +1327,8 @@ std::vector<std::unique_ptr<CAlfaObject>> CKitchenCabinet::BuildParts(
     auto add_facade = [&add, &definition, facade_color](
                           const std::string& name,
                           TopoDS_Shape shape) {
-        if (definition.facade_style == KitchenCabinetFacadeStyle::Screen
+        if ((definition.facade_style == KitchenCabinetFacadeStyle::Screen
+             || definition.facade_style == KitchenCabinetFacadeStyle::Frame)
             && definition.showcase_fill != KitchenCabinetShowcaseFill::None
             && shape.ShapeType() == TopAbs_COMPOUND) {
             int part_index = 0;

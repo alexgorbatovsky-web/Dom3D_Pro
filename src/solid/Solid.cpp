@@ -74,6 +74,55 @@
 void Step(const char* text);
 
 namespace {
+bool material_uses_render_texture(const Material& material)
+{
+	return !material.color_texture_path.empty()
+		|| !material.light_texture_path.empty()
+		|| !material.bump_texture_path.empty()
+		|| !material.normal_texture_path.empty()
+		|| !material.roughness_texture_path.empty()
+		|| !material.metallic_texture_path.empty()
+		|| !material.displacement_texture_path.empty();
+}
+
+bool same_render_batch_uv_material(
+	const Material& first, const Material& second)
+{
+	return first.texture_offset_u == second.texture_offset_u
+		&& first.texture_offset_v == second.texture_offset_v
+		&& first.texture_scale_u == second.texture_scale_u
+		&& first.texture_scale_v == second.texture_scale_v
+		&& first.texture_rotation_degrees == second.texture_rotation_degrees
+		&& first.texture_fit_to_surface == second.texture_fit_to_surface
+		&& material_uses_render_texture(first)
+			== material_uses_render_texture(second);
+}
+
+UV bake_render_batch_uv(UV uv, UV minimum, UV maximum,
+	const Material& material, bool fit_to_surface)
+{
+	if (fit_to_surface) {
+		const float width = std::max(maximum.u - minimum.u, 0.00001f);
+		const float height = std::max(maximum.v - minimum.v, 0.00001f);
+		uv = {(uv.u - minimum.u) / width, (uv.v - minimum.v) / height};
+	}
+	const float scale_u = std::fabs(material.texture_scale_u) <= 0.00001f
+		? 1.0f : material.texture_scale_u;
+	const float scale_v = std::fabs(material.texture_scale_v) <= 0.00001f
+		? 1.0f : material.texture_scale_v;
+	constexpr float degrees_to_radians = 0.01745329251994329577f;
+	const float angle = material.texture_rotation_degrees * degrees_to_radians;
+	const float cosine = std::cos(angle);
+	const float sine = std::sin(angle);
+	const float centered_u = (uv.u - 0.5f) * scale_u;
+	const float centered_v = (uv.v - 0.5f) * scale_v;
+	return {
+		centered_u * cosine - centered_v * sine
+			+ 0.5f + material.texture_offset_u,
+		centered_u * sine + centered_v * cosine
+			+ 0.5f + material.texture_offset_v};
+}
+
 struct MeshVertexRef {
 	CMesh3D* mesh = nullptr;
 	size_t vertex_index = 0;
@@ -1528,6 +1577,7 @@ bool CSolid::SetSurfaceTextureTransform(int surface_index, const SurfaceTextureT
 	if (!surface)
 		return false;
 	surface->TextureTransform = transform;
+	m_RenderBatchDirty = true;
 	return true;
 }
 
@@ -1578,6 +1628,36 @@ bool CSolid::SetSelectedSurfaceMaterial(const Material& material)
 	for (int surface_index : m_SelectedFaceIndices)
 		changed = SetSurfaceMaterial(surface_index, material) || changed;
 	return changed;
+}
+
+bool CSolid::SetSurfaceCoating(int surface_index, const Material& material)
+{
+	CSurfaceFace* surface = GetSurfaceFace(surface_index);
+	if (!surface)
+		return false;
+	surface->MaterialOverride.coating_enabled = true;
+	surface->MaterialOverride.coating_material_id = material.id;
+	surface->MaterialOverride.coating_material = material;
+	return true;
+}
+
+bool CSolid::SetSelectedSurfaceCoating(const Material& material)
+{
+	bool changed = false;
+	for (int surface_index : m_SelectedFaceIndices)
+		changed = SetSurfaceCoating(surface_index, material) || changed;
+	return changed;
+}
+
+bool CSolid::ClearSurfaceCoating(int surface_index)
+{
+	CSurfaceFace* surface = GetSurfaceFace(surface_index);
+	if (!surface)
+		return false;
+	surface->MaterialOverride.coating_enabled = false;
+	surface->MaterialOverride.coating_material_id = 0;
+	surface->MaterialOverride.coating_material = {};
+	return true;
 }
 
 std::vector<int> CSolid::FindCreatedSurfaceIndices(const TopoDS_Shape& previous_shape) const
@@ -1678,6 +1758,10 @@ bool CSolid::InitEdges()
 
 bool CSolid::InitSurfaces()
 {
+	m_RenderBatch.reset();
+	m_RenderBatchEdges.clear();
+	m_RenderBatchDirty = true;
+	m_RenderBatchUvMaterialValid = false;
 	std::vector<SurfaceTextureTransform> texture_transforms;
 	std::vector<SurfaceMaterialOverride> material_overrides;
 	texture_transforms.reserve(m_Surfaces.size());
@@ -1705,6 +1789,171 @@ bool CSolid::InitSurfaces()
 	}
 	IsSurfaceInit = true;
 	return true;
+}
+
+bool CSolid::CanUseRenderBatch() const
+{
+	if (m_Surfaces.size() < 4)
+		return false;
+	return std::all_of(
+		m_Surfaces.begin(), m_Surfaces.end(),
+		[](const CSurfaceFace* surface) {
+			return surface && surface->pMesh3D && surface->IsInitMesh
+				&& !surface->MaterialOverride.enabled
+				&& !surface->MaterialOverride.coating_enabled;
+		});
+}
+
+bool CSolid::EnsureRenderBatch() const
+{
+	if (!CanUseRenderBatch())
+		return false;
+	const Material source_material = GetMaterial();
+	if (!m_RenderBatchDirty && m_RenderBatch
+		&& m_RenderBatchUvMaterialValid
+		&& same_render_batch_uv_material(
+			m_RenderBatchUvMaterial, source_material)) {
+		return true;
+	}
+
+	std::vector<Vec3> vertices;
+	std::vector<Vec3> normals;
+	std::vector<UV> uvs;
+	std::vector<CMesh3D::Face> faces;
+	std::vector<Vec3> edge_vertices;
+	const bool keep_uvs = material_uses_render_texture(source_material);
+	bool keep_normals = true;
+	for (const CSurfaceFace* surface : m_Surfaces) {
+		const CMesh3D& mesh = *surface->pMesh3D;
+		vertices.reserve(vertices.size() + mesh.GetVertices().size());
+		faces.reserve(faces.size() + mesh.GetFaces().size());
+		if (keep_uvs)
+			uvs.reserve(uvs.size() + mesh.GetUVs().size());
+		if (mesh.GetNormals().empty())
+			keep_normals = false;
+	}
+
+	for (const CSurfaceFace* surface : m_Surfaces) {
+		const CMesh3D& mesh = *surface->pMesh3D;
+		const size_t vertex_offset = vertices.size();
+		const size_t normal_offset = normals.size();
+		const size_t uv_offset = uvs.size();
+		vertices.insert(vertices.end(),
+			mesh.GetVertices().begin(), mesh.GetVertices().end());
+		if (keep_normals) {
+			normals.insert(normals.end(),
+				mesh.GetNormals().begin(), mesh.GetNormals().end());
+		}
+		if (keep_uvs) {
+			const std::vector<UV>& source_uvs = mesh.GetUVs();
+			if (source_uvs.empty())
+				return false;
+			UV minimum = source_uvs.front();
+			UV maximum = source_uvs.front();
+			for (const UV& uv : source_uvs) {
+				minimum.u = std::min(minimum.u, uv.u);
+				minimum.v = std::min(minimum.v, uv.v);
+				maximum.u = std::max(maximum.u, uv.u);
+				maximum.v = std::max(maximum.v, uv.v);
+			}
+			Material mapping_material = source_material;
+			mapping_material.texture_offset_u += surface->TextureTransform.offset_u;
+			mapping_material.texture_offset_v += surface->TextureTransform.offset_v;
+			mapping_material.texture_scale_u *= surface->TextureTransform.scale_u;
+			mapping_material.texture_scale_v *= surface->TextureTransform.scale_v;
+			mapping_material.texture_rotation_degrees +=
+				surface->TextureTransform.rotation_degrees;
+			const bool fit_to_surface =
+				mapping_material.texture_fit_to_surface
+				|| surface->TextureTransform.fit_to_surface;
+			for (const UV& uv : source_uvs) {
+				uvs.push_back(bake_render_batch_uv(
+					uv, minimum, maximum, mapping_material, fit_to_surface));
+			}
+		}
+		for (const CMesh3D::Face& source_face : mesh.GetFaces()) {
+			CMesh3D::Face face = source_face;
+			for (MeshCorner& corner : face.corners) {
+				corner.v += vertex_offset;
+				if (keep_normals)
+					corner.n += normal_offset;
+				if (keep_uvs)
+					corner.uv += uv_offset;
+			}
+			faces.push_back(std::move(face));
+		}
+
+		struct BoundaryEdge {
+			size_t first = 0;
+			size_t second = 0;
+			int uses = 0;
+		};
+		std::unordered_map<unsigned long long, BoundaryEdge> boundaries;
+		boundaries.reserve(mesh.GetFaces().size() * 2);
+		for (const CMesh3D::Face& face : mesh.GetFaces()) {
+			if (face.corners.size() < 2)
+				continue;
+			for (size_t corner_index = 0;
+				 corner_index < face.corners.size(); ++corner_index) {
+				const size_t first = face.corners[corner_index].v;
+				const size_t second = face.corners[
+					(corner_index + 1) % face.corners.size()].v;
+				if (first >= mesh.GetVertices().size()
+					|| second >= mesh.GetVertices().size()) {
+					continue;
+				}
+				const size_t low = std::min(first, second);
+				const size_t high = std::max(first, second);
+				const unsigned long long key =
+					(static_cast<unsigned long long>(low) << 32)
+					| static_cast<unsigned long long>(high);
+				BoundaryEdge& boundary = boundaries[key];
+				boundary.first = first;
+				boundary.second = second;
+				++boundary.uses;
+			}
+		}
+		for (const auto& item : boundaries) {
+			const BoundaryEdge& boundary = item.second;
+			if (boundary.uses != 1)
+				continue;
+			edge_vertices.push_back(mesh.GetVertices()[boundary.first]);
+			edge_vertices.push_back(mesh.GetVertices()[boundary.second]);
+		}
+	}
+
+	auto batch = std::make_unique<CMesh3D>("Solid render batch");
+	if (!batch->SetGeometry(
+			std::move(vertices), std::move(faces), std::move(uvs),
+			std::move(normals))) {
+		return false;
+	}
+	m_RenderBatch = std::move(batch);
+	m_RenderBatchEdges = std::move(edge_vertices);
+	m_RenderBatchDirty = false;
+	m_RenderBatchUvMaterial = source_material;
+	m_RenderBatchUvMaterialValid = true;
+	return true;
+}
+
+void CSolid::RenderBatchedEdges(const Color& color, bool selected) const
+{
+	if (m_RenderBatchEdges.empty())
+		return;
+	const Color edge_color = selected ? CAlfaObject::SelectedColor : color;
+	glEnable(GL_DEPTH_TEST);
+	glDepthFunc(GL_LEQUAL);
+	glLineWidth(selected ? 1.2f : 0.9f);
+	glColor3f(
+		std::clamp(edge_color.r, 0.0f, 1.0f),
+		std::clamp(edge_color.g, 0.0f, 1.0f),
+		std::clamp(edge_color.b, 0.0f, 1.0f));
+	glEnableClientState(GL_VERTEX_ARRAY);
+	glVertexPointer(3, GL_FLOAT, sizeof(Vec3), m_RenderBatchEdges.data());
+	glDrawArrays(
+		GL_LINES, 0, static_cast<GLsizei>(m_RenderBatchEdges.size()));
+	glDisableClientState(GL_VERTEX_ARRAY);
+	glDepthFunc(GL_LESS);
 }
 
 bool CSolid::BuldMesh(float Deflection)
@@ -1969,12 +2218,15 @@ void CSolid::Render3d(bool selected) const
 	}
 //	const Color solid_color = surface_material.diffuse;
 	const Color solid_color = GetColor();
+	const bool render_batch = EnsureRenderBatch();
+	const bool imported_step =
+		GetGroupName().find("STEP") != std::string::npos
+		|| GetName().find("Imported STEP") != std::string::npos;
 	const auto material_for_surface = [
 		&surface_material, &facade_support_points, mesh_mode, mode](
 			const CSurfaceFace& surface) {
-		Material material = surface.MaterialOverride.enabled
-			? surface.MaterialOverride.material
-			: surface_material;
+		Material material = ComposeSurfaceMaterial(
+			surface_material, surface.MaterialOverride);
 		if (!facade_support_points.empty()) {
 			Vec3 center{};
 			Vec3 normal{};
@@ -2028,6 +2280,37 @@ void CSolid::Render3d(bool selected) const
 			|| surface.TextureTransform.fit_to_surface;
 		return material;
 	};
+	Material batch_material = surface_material;
+	if (mode == SolidDisplayMode::HiddenLine) {
+		batch_material.diffuse = CSolid::s_HiddenLineBackgroundColor;
+		batch_material.alpha = 1.0f;
+		batch_material.specular = 0.0f;
+		batch_material.shininess = 4.0f;
+		batch_material.color_texture_path.clear();
+		batch_material.light_texture_path.clear();
+		batch_material.bump_texture_path.clear();
+	} else if (mesh_mode == MeshDisplayMode::SurfaceGray) {
+		batch_material.diffuse = {0.62f, 0.69f, 0.75f};
+		batch_material.alpha = surface_material.alpha;
+		batch_material.specular = 0.24f;
+		batch_material.shininess = 42.0f;
+		batch_material.color_texture_path.clear();
+		batch_material.light_texture_path.clear();
+		batch_material.bump_texture_path.clear();
+	} else if (mesh_mode == MeshDisplayMode::SurfaceColored) {
+		batch_material.color_texture_path.clear();
+		batch_material.light_texture_path.clear();
+		batch_material.bump_texture_path.clear();
+	}
+	// Surface-specific fit/scale/rotation/offset are already baked into the
+	// combined UV array. Keep the draw material neutral so they are not applied
+	// a second time by CMesh3D.
+	batch_material.texture_offset_u = 0.0f;
+	batch_material.texture_offset_v = 0.0f;
+	batch_material.texture_scale_u = 1.0f;
+	batch_material.texture_scale_v = 1.0f;
+	batch_material.texture_rotation_degrees = 0.0f;
+	batch_material.texture_fit_to_surface = false;
 	const auto draw_surface_indices = [this, DrawIndexSurf]() {
 		if (!DrawIndexSurf)
 			return;
@@ -2096,8 +2379,19 @@ void CSolid::Render3d(bool selected) const
 			|| !m_SelectedFaceIndices.empty()
 			|| !m_OperationHighlightedSurfaceIndices.empty();
 		if (draw_base_faces) {
-			for (CSurfaceFace* surface : m_Surfaces) {
-				if (surface && surface->pMesh3D) {
+			if (render_batch) {
+				m_RenderBatch->RenderFaces(
+					rgb_selected_body,
+					offset_base_faces,
+					&batch_material,
+					rgb_selected_body
+						|| mesh_mode == MeshDisplayMode::SurfaceColored,
+					mode == SolidDisplayMode::HiddenLine
+						&& !rgb_selected_body);
+			} else {
+				for (CSurfaceFace* surface : m_Surfaces) {
+					if (!surface || !surface->pMesh3D)
+						continue;
 					const Material face_material = material_for_surface(*surface);
 					surface->pMesh3D->RenderFaces(
 						rgb_selected_body,
@@ -2140,8 +2434,13 @@ void CSolid::Render3d(bool selected) const
 	}
 
 	if (draw_mesh) {
-		for (CSurfaceFace* surface : m_Surfaces) {
-			if (surface && surface->pMesh3D) {
+		if (render_batch) {
+			m_RenderBatch->RenderWire(
+				false, mode == SolidDisplayMode::SurfacesAndRaisedMesh, nullptr);
+		} else {
+			for (CSurfaceFace* surface : m_Surfaces) {
+				if (!surface || !surface->pMesh3D)
+					continue;
 				// Let CMesh3D choose a contrasting wire color. Passing the solid
 				// object color can make the grid identical to the shaded fill.
 				surface->pMesh3D->RenderWire(
@@ -2155,6 +2454,9 @@ void CSolid::Render3d(bool selected) const
 		return;
 	}
 
+	if (render_batch && draw_edges) {
+		RenderBatchedEdges(solid_color, solid_selected || face_selected);
+	}
 	for (int i = 0; i < static_cast<int>(m_Surfaces.size()); ++i) {
 		CSurfaceFace* surface = m_Surfaces[static_cast<size_t>(i)];
 		if (surface) {
@@ -2165,7 +2467,9 @@ void CSolid::Render3d(bool selected) const
 			}
 			const bool surface_selected = solid_selected || face_selected;
 			surface->RenderOutline(
-				solid_color, selected_edges, draw_edges, surface_selected);
+				solid_color, selected_edges,
+				draw_edges && !render_batch && !imported_step,
+				surface_selected);
 		}
 	}
 	draw_surface_indices();
@@ -2350,6 +2654,8 @@ std::unique_ptr<CAlfaObject> CSolid::Clone() const
 			copy->SetSurfaceTextureTransform(i, source_surface->TextureTransform);
 		if (source_surface && source_surface->MaterialOverride.enabled)
 			copy->SetSurfaceMaterial(i, source_surface->MaterialOverride.material);
+		if (source_surface && source_surface->MaterialOverride.coating_enabled)
+			copy->SetSurfaceCoating(i, source_surface->MaterialOverride.coating_material);
 	}
 	copy->ReBuldMesh();
 	return copy;
@@ -2557,6 +2863,7 @@ bool CSolid::ApplyAffineTransform(const std::array<double, 16>& matrix)
 
 void CSolid::PreviewTranslate(Vec3 delta)
 {
+	m_RenderBatchDirty = true;
 	for (CSurfaceFace* surface : m_Surfaces) {
 		if (surface)
 			surface->PreviewTranslate(delta);
@@ -2565,6 +2872,7 @@ void CSolid::PreviewTranslate(Vec3 delta)
 
 void CSolid::PreviewRotate(Vec3 center, Vec3 axis, float angle)
 {
+	m_RenderBatchDirty = true;
 	for (CSurfaceFace* surface : m_Surfaces) {
 		if (surface)
 			surface->PreviewRotate(center, axis, angle);
@@ -2573,6 +2881,7 @@ void CSolid::PreviewRotate(Vec3 center, Vec3 axis, float angle)
 
 bool CSolid::CommitPreviewTranslate(Vec3 delta)
 {
+	m_RenderBatchDirty = true;
 	gp_Trsf transform;
 	transform.SetTranslation(gp_Vec(delta.x, delta.y, delta.z));
 	if (!apply_rigid_shape_transform(m_Shape, transform))
@@ -2587,6 +2896,7 @@ bool CSolid::CommitPreviewTranslate(Vec3 delta)
 
 bool CSolid::CommitPreviewRotate(Vec3 center, Vec3 axis, float angle)
 {
+	m_RenderBatchDirty = true;
 	const Vec3 unit_axis = normalize(axis);
 	if (std::fabs(angle) <= 0.000001f)
 		return true;
@@ -2609,6 +2919,7 @@ bool CSolid::CommitPreviewRotate(Vec3 center, Vec3 axis, float angle)
 
 void CSolid::PreviewScale(Vec3 center, Vec3 axis, float factor)
 {
+	m_RenderBatchDirty = true;
 	for (CSurfaceFace* surface : m_Surfaces) {
 		if (surface)
 			surface->PreviewScale(center, axis, factor);
@@ -2707,6 +3018,60 @@ bool CSolid::ReBuldMesh()
 		}
 	}
 	return ReBuldMesh(Deflection);
+}
+
+bool CSolid::BuildImportedRenderMesh(bool parallel_meshing)
+{
+	if (m_Shape.IsNull() || !InitSurfaces())
+		return false;
+
+	float public_deflection = 0.1f;
+	Bnd_Box bounds;
+	BRepBndLib::Add(m_Shape, bounds);
+	if (!bounds.IsVoid()) {
+		Standard_Real xmin = 0.0;
+		Standard_Real ymin = 0.0;
+		Standard_Real zmin = 0.0;
+		Standard_Real xmax = 0.0;
+		Standard_Real ymax = 0.0;
+		Standard_Real zmax = 0.0;
+		bounds.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+		const double dx = xmax - xmin;
+		const double dy = ymax - ymin;
+		const double dz = zmax - zmin;
+		const double diagonal = std::sqrt(dx * dx + dy * dy + dz * dz);
+		if (std::isfinite(diagonal)) {
+			public_deflection = static_cast<float>(
+				std::clamp(diagonal * 0.01, 0.1, 1000.0));
+		}
+	}
+
+	const Standard_Real linear_deflection =
+		std::max<Standard_Real>(public_deflection / 10.0f, 0.0001);
+	const Standard_Real angular_deflection =
+		std::clamp<Standard_Real>(AngDeflection, 0.01, 1.0);
+	try {
+		BRepTools::Clean(m_Shape);
+		BRepMesh_IncrementalMesh mesher(
+			m_Shape, linear_deflection, false, angular_deflection,
+			parallel_meshing);
+		if (!mesher.IsDone())
+			return false;
+	} catch (const Standard_Failure&) {
+		return false;
+	}
+
+	bool ok = true;
+	for (CSurfaceFace* surface : m_Surfaces) {
+		if (!surface
+			|| !surface->BuldMeshTriangle(
+				static_cast<float>(linear_deflection), AngDeflection)
+			|| !surface->InitEdges()) {
+			ok = false;
+		}
+	}
+	IsInitEdges = ok;
+	return ok;
 }
 
 bool CSolid::EnsureRenderMesh() const

@@ -5,6 +5,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDialogButtonBox>
+#include <QDesktopServices>
 #include <QDoubleSpinBox>
 #include <QDir>
 #include <QFileDialog>
@@ -17,16 +18,23 @@
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QResizeEvent>
 #include <QSettings>
 #include <QSpinBox>
 #include <QStandardPaths>
+#include <QTimer>
 #include <QVBoxLayout>
+#include <QUrl>
 
-BlenderCyclesDialog::BlenderCyclesDialog(RenderScene scene, QWidget* parent)
+#include <algorithm>
+
+BlenderCyclesDialog::BlenderCyclesDialog(RenderScene scene,
+                                         QSize initial_image_size,
+                                         QWidget* parent)
     : QDialog(parent), scene_(std::move(scene)) {
     setWindowTitle("Blender Cycles Render");
     setAttribute(Qt::WA_DeleteOnClose);
-    resize(900, 760);
+    resize(1080, 820);
 
     auto* layout = new QVBoxLayout(this);
     auto* summary = new QLabel(QString(
@@ -68,8 +76,10 @@ BlenderCyclesDialog::BlenderCyclesDialog(RenderScene scene, QWidget* parent)
         spin->setRange(64, 16384);
         spin->setSingleStep(64);
     }
-    width_->setValue(1280);
-    height_->setValue(720);
+    width_->setValue(initial_image_size.isValid()
+        ? std::clamp(initial_image_size.width(), 64, 16384) : 1280);
+    height_->setValue(initial_image_size.isValid()
+        ? std::clamp(initial_image_size.height(), 64, 16384) : 720);
     size_layout->addWidget(width_);
     size_layout->addWidget(new QLabel("×", size_row));
     size_layout->addWidget(height_);
@@ -94,6 +104,12 @@ BlenderCyclesDialog::BlenderCyclesDialog(RenderScene scene, QWidget* parent)
     output_path_->setText(QDir(
         QStandardPaths::writableLocation(QStandardPaths::PicturesLocation))
         .filePath("Dom3D_Cycles.png"));
+    last_render_path_ = QSettings("Dom3D", "Dom3D_Pro")
+        .value("render/lastOutputPath").toString();
+    if (QFileInfo::exists(last_render_path_)) {
+        output_path_->setText(last_render_path_);
+        result_pixmap_.load(last_render_path_);
+    }
     layout->addLayout(form);
 
     progress_ = new QProgressBar(this);
@@ -104,7 +120,7 @@ BlenderCyclesDialog::BlenderCyclesDialog(RenderScene scene, QWidget* parent)
     layout->addWidget(status_);
 
     preview_ = new QLabel(this);
-    preview_->setMinimumHeight(260);
+    preview_->setMinimumHeight(340);
     preview_->setAlignment(Qt::AlignCenter);
     preview_->setStyleSheet("QLabel { background:#111; border:1px solid #444; }");
     preview_->setText("Cycles result will appear here");
@@ -118,16 +134,20 @@ BlenderCyclesDialog::BlenderCyclesDialog(RenderScene scene, QWidget* parent)
 
     auto* buttons = new QDialogButtonBox(this);
     render_button_ = buttons->addButton("Render", QDialogButtonBox::AcceptRole);
+    view_button_ = buttons->addButton("View Result", QDialogButtonBox::ActionRole);
     cancel_button_ = buttons->addButton("Cancel Render", QDialogButtonBox::RejectRole);
     auto* close = buttons->addButton(QDialogButtonBox::Close);
     cancel_button_->setEnabled(false);
+    view_button_->setEnabled(!result_pixmap_.isNull());
     connect(render_button_, &QPushButton::clicked, this, &BlenderCyclesDialog::StartRender);
+    connect(view_button_, &QPushButton::clicked, this, &BlenderCyclesDialog::ViewResult);
     connect(cancel_button_, &QPushButton::clicked, this, [this]() {
         if (renderer_) renderer_->Cancel();
     });
     connect(close, &QPushButton::clicked, this, &QDialog::close);
     layout->addWidget(buttons);
     ApplyPreset(0);
+    QTimer::singleShot(0, this, &BlenderCyclesDialog::UpdatePreview);
 }
 
 BlenderCyclesDialog::~BlenderCyclesDialog() {
@@ -189,9 +209,12 @@ void BlenderCyclesDialog::StartRender() {
     connect(renderer_, &BlenderCyclesRenderer::RenderFinished,
             this, [this](const QString& path, double seconds) {
         SetRendering(false);
-        const QPixmap image(path);
-        preview_->setPixmap(image.scaled(
-            preview_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        last_render_path_ = path;
+        QSettings("Dom3D", "Dom3D_Pro")
+            .setValue("render/lastOutputPath", path);
+        result_pixmap_.load(path);
+        UpdatePreview();
+        view_button_->setEnabled(!result_pixmap_.isNull());
         status_->setText(QString("Finished in %1 s — %2")
                          .arg(seconds, 0, 'f', 1).arg(path));
     });
@@ -211,6 +234,37 @@ void BlenderCyclesDialog::StartRender() {
         SetRendering(false);
         QMessageBox::warning(this, "Blender Cycles", error);
     }
+}
+
+void BlenderCyclesDialog::ViewResult() {
+    const QString path = !last_render_path_.isEmpty()
+        ? last_render_path_ : output_path_->text().trimmed();
+    if (path.isEmpty() || !QFileInfo::exists(path)) {
+        QMessageBox::information(
+            this, "Render Result", "There is no completed render to view yet.");
+        return;
+    }
+    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(path))) {
+        QMessageBox::warning(
+            this, "Render Result", QString("Could not open:\n%1").arg(path));
+    }
+}
+
+void BlenderCyclesDialog::UpdatePreview() {
+    if (result_pixmap_.isNull() || !preview_) {
+        return;
+    }
+    const QSize available = preview_->contentsRect().size();
+    if (available.width() <= 0 || available.height() <= 0) {
+        return;
+    }
+    preview_->setPixmap(result_pixmap_.scaled(
+        available, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+}
+
+void BlenderCyclesDialog::resizeEvent(QResizeEvent* event) {
+    QDialog::resizeEvent(event);
+    UpdatePreview();
 }
 
 void BlenderCyclesDialog::SetRendering(bool rendering) {

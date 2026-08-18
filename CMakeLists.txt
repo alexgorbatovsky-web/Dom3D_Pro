@@ -28,7 +28,17 @@ find_package(OpenGL REQUIRED)
 
 set(DOM3D_OPENCASCADE_INCLUDE_DIR "C:/OpenCascade/opencascade_build/inc" CACHE PATH "OpenCascade include directory")
 set(DOM3D_OPENCASCADE_LIBRARY_DIR "C:/OpenCascade/opencascade_build/win64/vc14/libd" CACHE PATH "OpenCascade library directory")
-set(DOM3D_OPENCASCADE_BINARY_DIR "C:/OpenCascade/opencascade_build/win64/vc14/bind" CACHE PATH "OpenCascade runtime DLL directory")
+set(_dom3d_occ_runtime_default "C:/OpenCascade/opencascade_build/win64/vc14/bin")
+if(NOT EXISTS "${_dom3d_occ_runtime_default}/TKSTEP.dll")
+    # The local OCCT tree may contain only Debug core DLLs.  FreeCAD 0.20
+    # ships ABI-compatible OCCT 7.6 Release DLLs, which avoid the extremely
+    # slow validation and trace output of the Debug STEP translator.
+    set(_dom3d_occ_runtime_default "C:/Program Files/FreeCAD 0.20/bin")
+endif()
+if(NOT EXISTS "${_dom3d_occ_runtime_default}/TKSTEP.dll")
+    set(_dom3d_occ_runtime_default "C:/OpenCascade/opencascade_build/win64/vc14/bind")
+endif()
+set(DOM3D_OPENCASCADE_BINARY_DIR "${_dom3d_occ_runtime_default}" CACHE PATH "OpenCascade runtime DLL directory")
 
 if(NOT EXISTS "${DOM3D_OPENCASCADE_INCLUDE_DIR}/TopoDS_Shape.hxx")
     message(FATAL_ERROR
@@ -106,6 +116,7 @@ set(DOM3D_SOURCES
     src/ThreeDSIO.cpp
     src/solid/BeamShapeBuilder.cpp
     src/solid/PlaneShapeBuilder.cpp
+    src/solid/SheetBendShapeBuilder.cpp
     src/solid/OffsetFaceShapeBuilder.cpp
     src/solid/PolyhedronShapeBuilder.cpp
     src/solid/SketchFeatureShapeBuilder.cpp
@@ -167,6 +178,7 @@ set(DOM3D_HEADERS
     src/CAssembled.h
     src/CFacadeFurniture.h
     src/solid/FacadeFrameShapeBuilder.h
+    src/solid/SheetBendShapeBuilder.h
     src/CFurnitureAssemblies.h
     src/CFurnitureDrawer.h
     src/CKitchenCabinet.h
@@ -338,7 +350,7 @@ target_link_libraries(Dom3D_Pro PRIVATE Qt6::Widgets Qt6::OpenGLWidgets Qt6::Xml
 
 if(WIN32)
     file(GLOB DOM3D_OPENCASCADE_RUNTIME_DLLS
-        "${DOM3D_OPENCASCADE_BINARY_DIR}/*.dll"
+        "${DOM3D_OPENCASCADE_BINARY_DIR}/TK*.dll"
     )
     add_custom_command(TARGET Dom3D_Pro POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different

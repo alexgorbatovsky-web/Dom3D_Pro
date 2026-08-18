@@ -11,7 +11,8 @@ class PropertyPanel : public QWidget {
     Q_OBJECT
 
 public:
-    explicit PropertyPanel(QWidget* parent = nullptr);
+    explicit PropertyPanel(QWidget* parent = nullptr,
+                           bool additional_parameters = false);
 
     void Clear();
     void SetActiveObject(const ActiveParametricObject& active_object);
@@ -37,4 +38,5 @@ private:
 
     QFormLayout* form_ = nullptr;
     ActiveParametricObject active_object_;
+    bool additional_parameters_ = false;
 };

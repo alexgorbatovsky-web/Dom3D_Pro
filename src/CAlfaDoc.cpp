@@ -8126,6 +8126,10 @@ bool CAlfaDoc::DeleteMaterial(unsigned long id) {
                     && surface->MaterialOverride.material_id == id) {
                     solid->ClearSurfaceMaterial(surface_index);
                 }
+                if (surface && surface->MaterialOverride.coating_enabled
+                    && surface->MaterialOverride.coating_material_id == id) {
+                    solid->ClearSurfaceCoating(surface_index);
+                }
             }
         }
     }
