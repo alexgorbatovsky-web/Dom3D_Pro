@@ -2,6 +2,9 @@
 #include "Solid.h"
 #include "SolidTool.h"
 #include "../SurfaceUVMapping.h"
+#include "../Plane.h"
+#include "../Point3d.h"
+#include "../Vector.h"
 
 
 #include "Poly_Triangulation.hxx"
@@ -23,6 +26,7 @@
 #include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <Poly.hxx>
@@ -37,10 +41,13 @@
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
+#include <BRepCheck_Analyzer.hxx>
 #include <Geom_BezierCurve.hxx>
+#include <BRepOffsetAPI_MakeThickSolid.hxx>
 #include <BRepBuilderAPI_GTransform.hxx>
 #include <Bnd_Box.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepAdaptor_Surface.hxx>
 #include <gp_Ax1.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Dir.hxx>
@@ -1055,6 +1062,56 @@ bool IsEqual(double val1, double val2, float delta)
 	return false;
 }
 
+TopoDS_Shape CSolid::Shell(CSurfaceFace* surf, double dist,
+	                        std::string* error)
+{
+	if (error)
+		error->clear();
+	const auto fail = [error](const std::string& message) {
+		if (error)
+			*error = message;
+		return TopoDS_Shape{};
+	};
+
+	if (!surf || surf->m_Face.IsNull())
+		return fail("A valid surface is required");
+	if (std::fabs(dist) <= 1.0e-9)
+		return fail("Shell distance must be different from zero");
+
+	try {
+		if (surf->m_Face.ShapeType() != TopAbs_FACE)
+			return fail("The selected geometry is not a surface face");
+
+		BRepOffsetAPI_MakeThickSolid builder;
+		builder.MakeThickSolidBySimple(TopoDS::Face(surf->m_Face), dist);
+		if (!builder.IsDone() || builder.Shape().IsNull())
+			return fail("OpenCascade could not offset the surface");
+
+		TopoDS_Shape result = builder.Shape();
+		if (!BRepCheck_Analyzer(result).IsValid())
+			return fail("The generated shell is not a valid shape");
+
+		Standard_Integer solid_count = 0;
+		for (TopExp_Explorer solids(result, TopAbs_SOLID);
+		     solids.More(); solids.Next()) {
+			++solid_count;
+		}
+		if (solid_count == 0)
+			return fail("The generated shell is not a closed solid");
+
+		GProp_GProps properties;
+		BRepGProp::VolumeProperties(result, properties);
+		if (std::fabs(properties.Mass()) <= 1.0e-9)
+			return fail("The generated shell has no enclosed volume");
+		return result;
+	} catch (const Standard_Failure& failure) {
+		const char* message = failure.GetMessageString();
+		return fail(message && *message
+			? std::string(message)
+			: "OpenCascade failed while creating the shell");
+	}
+}
+
 
 //=======================================
 
@@ -2002,7 +2059,23 @@ bool CSolid::BuldMesh(float Deflection)
 
 			for (size_t i = 0; i < m_Surfaces.size(); ++i) {
 				CSurfaceFace* surface = m_Surfaces[i];
-				if (surface && surface->m_TypeMesh == REGULAR_MESH
+				bool supports_legacy_regular_mesh = false;
+				if (surface && surface->m_TypeMesh == REGULAR_MESH) {
+					try {
+						const GeomAbs_SurfaceType type = BRepAdaptor_Surface(
+							TopoDS::Face(surface->m_Face)).GetType();
+						// PipeShell lateral faces are commonly B-Spline surfaces.
+						// The legacy UV grid connects distant parameter rows on
+						// these faces and produces the large triangle fans visible
+						// in Swept Solid. OCCT triangulates them correctly.
+						supports_legacy_regular_mesh =
+							type != GeomAbs_BSplineSurface
+							&& type != GeomAbs_BezierSurface;
+					} catch (const Standard_Failure&) {
+						supports_legacy_regular_mesh = false;
+					}
+				}
+				if (supports_legacy_regular_mesh
 					&& surface->BuildTrimmingMesh(this, Deflection)) {
 					regular_mesh_built[i] = true;
 				}
@@ -2657,7 +2730,12 @@ std::unique_ptr<CAlfaObject> CSolid::Clone() const
 		if (source_surface && source_surface->MaterialOverride.coating_enabled)
 			copy->SetSurfaceCoating(i, source_surface->MaterialOverride.coating_material);
 	}
-	copy->ReBuldMesh();
+	// TopoDS_Shape copies share OCCT's immutable topology and any stored
+	// triangulation.  ReBuldMesh() first discards that triangulation and can
+	// spend tens of seconds remeshing a complex imported IGES surface.  A
+	// clone used by Undo only needs an equivalent render mesh, so restore the
+	// stored triangles (or use the adaptive imported-mesh fallback) instead.
+	copy->EnsureRenderMesh();
 	return copy;
 }
 
@@ -2771,6 +2849,124 @@ void CSolid::Mirror(Vec3 plane_point, Vec3 plane_normal)
 		                      "SolidTransform",
 		                      "Mirror",
 		                      transform_parameters(3, {}, plane_point, unit_normal, 0.0, -1.0));
+	}
+}
+
+bool CSolid::MoveShape(TopoDS_Shape& shape, CVector dir, double dist)
+{
+	if (shape.IsNull()
+		|| !std::isfinite(dir.l) || !std::isfinite(dir.m)
+		|| !std::isfinite(dir.n) || !std::isfinite(dist))
+		return false;
+
+	const double dir_length = std::sqrt(
+		dir.l * dir.l + dir.m * dir.m + dir.n * dir.n);
+	if (dir_length <= 1.0e-12)
+		return false;
+	if (std::abs(dist) <= 1.0e-12)
+		return true;
+
+	try {
+		gp_Trsf transform;
+		transform.SetTranslation(gp_Vec(
+			dir.l * dist / dir_length,
+			dir.m * dist / dir_length,
+			dir.n * dist / dir_length));
+		BRepBuilderAPI_Transform builder(shape, transform, Standard_True);
+		if (!builder.IsDone() || builder.Shape().IsNull())
+			return false;
+		shape = builder.Shape();
+		return true;
+	}
+	catch (const Standard_Failure&) {
+		return false;
+	}
+}
+
+bool CSolid::RotateShape(TopoDS_Shape& shape, CPoint3d center,
+	CVector dir, double angle)
+{
+	if (shape.IsNull()
+		|| !std::isfinite(center.x) || !std::isfinite(center.y)
+		|| !std::isfinite(center.z) || !std::isfinite(dir.l)
+		|| !std::isfinite(dir.m) || !std::isfinite(dir.n)
+		|| !std::isfinite(angle))
+		return false;
+
+	const double dir_length = std::sqrt(
+		dir.l * dir.l + dir.m * dir.m + dir.n * dir.n);
+	if (dir_length <= 1.0e-12)
+		return false;
+	if (std::abs(angle) <= 1.0e-12)
+		return true;
+
+	try {
+		gp_Trsf transform;
+		transform.SetRotation(
+			gp_Ax1(gp_Pnt(center.x, center.y, center.z),
+				gp_Dir(dir.l / dir_length,
+				       dir.m / dir_length,
+				       dir.n / dir_length)),
+			angle);
+		BRepBuilderAPI_Transform builder(shape, transform, Standard_True);
+		if (!builder.IsDone() || builder.Shape().IsNull())
+			return false;
+		shape = builder.Shape();
+		return true;
+	}
+	catch (const Standard_Failure&) {
+		return false;
+	}
+}
+
+bool CSolid::MirrorShape(TopoDS_Shape& shape, CPlane plane)
+{
+	if (shape.IsNull()
+		|| !std::isfinite(plane.a) || !std::isfinite(plane.b)
+		|| !std::isfinite(plane.c) || !std::isfinite(plane.d))
+		return false;
+
+	const double normal_length_squared =
+		plane.a * plane.a + plane.b * plane.b + plane.c * plane.c;
+	if (normal_length_squared <= 1.0e-24)
+		return false;
+
+	const double normal_length = std::sqrt(normal_length_squared);
+	const double point_scale = -plane.d / normal_length_squared;
+	try {
+		gp_Trsf transform;
+		transform.SetMirror(gp_Ax2(
+			gp_Pnt(plane.a * point_scale,
+			       plane.b * point_scale,
+			       plane.c * point_scale),
+			gp_Dir(plane.a / normal_length,
+			       plane.b / normal_length,
+			       plane.c / normal_length)));
+		BRepBuilderAPI_Transform builder(shape, transform, Standard_True);
+		if (!builder.IsDone() || builder.Shape().IsNull())
+			return false;
+		shape = builder.Shape();
+		return true;
+	}
+	catch (const Standard_Failure&) {
+		return false;
+	}
+}
+
+TopoDS_Shape CSolid::CopyShape(TopoDS_Shape& shape)
+{
+	if (shape.IsNull())
+		return {};
+
+	try {
+		BRepBuilderAPI_Copy builder(
+			shape, Standard_True, Standard_True);
+		if (!builder.IsDone() || builder.Shape().IsNull())
+			return {};
+		return builder.Shape();
+	}
+	catch (const Standard_Failure&) {
+		return {};
 	}
 }
 
@@ -3095,7 +3291,12 @@ bool CSolid::EnsureRenderMesh() const
 			->RestoreRenderMeshFromStoredTriangulation()) {
 		return true;
 	}
-	return const_cast<CSolid*>(this)->ReBuldMesh();
+	// Older projects can contain imported IGES/STEP faces without stored
+	// triangulation.  ReBuldMesh() routes SurfaceSet through the legacy
+	// MeshQuadro trimming algorithm; a single complex NURBS face can keep the
+	// UI blocked for minutes.  The import path already uses OCCT's adaptive,
+	// parallel mesher, so use the same robust fallback while opening projects.
+	return const_cast<CSolid*>(this)->BuildImportedRenderMesh(true);
 }
 
 bool CSolid::RestoreRenderMeshFromStoredTriangulation()

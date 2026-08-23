@@ -1,11 +1,14 @@
 #include "CFacadeFurniture.h"
 #include "BezierSpline.h"
+#include "CBSpline.h"
 #include "SketchProfileBuilder.h"
 #include "SketchArcLine.h"
 #include "SmartLine.h"
 #include "SweptSolidBuilder.h"
+#include "Vector.h"
 #include "CAlfaDoc.h"
 #include "solid/FacadeFrameShapeBuilder.h"
+#include "iges/SplineCurve.h"
 
 #ifdef Coord
 #undef Coord
@@ -42,6 +45,7 @@
 #include <BRepGProp.hxx>
 #include <Bnd_Box.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepCheck_Analyzer.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Circ.hxx>
@@ -106,6 +110,76 @@ TopoDS_Shape fillet_front_edges(const TopoDS_Shape& shape,
     }
     fillet.Build();
     return fillet.IsDone() ? fillet.Shape() : shape;
+}
+
+TopoDS_Shape rounded_plain_facade_shape(
+    double x, double y, double z,
+    double width, double thickness, double height) {
+    constexpr double corner_radius = 3.0;
+    TopoDS_Shape panel;
+    // Build an exact R3 rounded rectangle and extrude it through the panel
+    // thickness.  This is more robust than asking the 3-D fillet solver to
+    // resolve four mutually connected corner edges at once.
+    try {
+        constexpr double inverse_sqrt_two = 0.7071067811865475;
+        const double right = x + width;
+        const double top = z + height;
+        const auto point = [y](double px, double pz) {
+            return gp_Pnt(px, y, pz);
+        };
+        BRepBuilderAPI_MakeWire wire;
+        wire.Add(BRepBuilderAPI_MakeEdge(
+            point(x + corner_radius, z),
+            point(right - corner_radius, z)).Edge());
+        wire.Add(BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(
+            point(right - corner_radius, z),
+            point(right - corner_radius * (1.0 - inverse_sqrt_two),
+                  z + corner_radius * (1.0 - inverse_sqrt_two)),
+            point(right, z + corner_radius)).Value()).Edge());
+        wire.Add(BRepBuilderAPI_MakeEdge(
+            point(right, z + corner_radius),
+            point(right, top - corner_radius)).Edge());
+        wire.Add(BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(
+            point(right, top - corner_radius),
+            point(right - corner_radius * (1.0 - inverse_sqrt_two),
+                  top - corner_radius * (1.0 - inverse_sqrt_two)),
+            point(right - corner_radius, top)).Value()).Edge());
+        wire.Add(BRepBuilderAPI_MakeEdge(
+            point(right - corner_radius, top),
+            point(x + corner_radius, top)).Edge());
+        wire.Add(BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(
+            point(x + corner_radius, top),
+            point(x + corner_radius * (1.0 - inverse_sqrt_two),
+                  top - corner_radius * (1.0 - inverse_sqrt_two)),
+            point(x, top - corner_radius)).Value()).Edge());
+        wire.Add(BRepBuilderAPI_MakeEdge(
+            point(x, top - corner_radius),
+            point(x, z + corner_radius)).Edge());
+        wire.Add(BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(
+            point(x, z + corner_radius),
+            point(x + corner_radius * (1.0 - inverse_sqrt_two),
+                  z + corner_radius * (1.0 - inverse_sqrt_two)),
+            point(x + corner_radius, z)).Value()).Edge());
+        wire.Build();
+        if (wire.IsDone()) {
+            BRepBuilderAPI_MakeFace face(wire.Wire());
+            face.Build();
+            if (face.IsDone()) {
+                BRepPrimAPI_MakePrism prism(
+                    face.Face(), gp_Vec(0.0, thickness, 0.0));
+                prism.Build();
+                if (prism.IsDone()) panel = prism.Shape();
+            }
+        }
+    } catch (const Standard_Failure&) {
+        panel.Nullify();
+    }
+    if (panel.IsNull()) {
+        panel = box_shape(x, y, z, width, thickness, height);
+    }
+
+    // Then soften the complete perimeter of the outward/front face.
+    return fillet_front_edges(panel, y, corner_radius);
 }
 
 TopoDS_Shape compound_shape(const std::vector<TopoDS_Shape>& shapes) {
@@ -286,41 +360,38 @@ bool apply_legacy_profile_fillet(CSmartLine& profile,
     return profile.AddFillet(first_line, radius);
 }
 
-TopoDS_Shape milano_frame_shape(double x,
-                                double y,
-                                double z,
-                                double width,
-                                double thickness,
-                                double height,
-                                double frame_width) {
+std::unique_ptr<CSmartLine> create_milano_profile(double frame_width) {
+    if (frame_width <= 0.0) {
+        return {};
+    }
+
     const double scale = frame_width / 60.0;
     const auto point = [scale](double u, double v) {
         return CPoint3d(u * scale, v * scale, 0.0);
     };
-    CSmartLine profile("Milano_4");
-    profile.AddLine(std::make_unique<CLinkLine>(
+    auto profile = std::make_unique<CSmartLine>("Milano_4");
+    profile->AddLine(std::make_unique<CLinkLine>(
         point(0.0, 0.0), point(0.0, 5.0)));
-    profile.AddLine(std::make_unique<CLinkLine>(
+    profile->AddLine(std::make_unique<CLinkLine>(
         point(0.0, 5.0), point(2.0, 5.0)));
-    profile.AddLine(std::make_unique<CLinkLine>(
+    profile->AddLine(std::make_unique<CLinkLine>(
         point(2.0, 5.0), point(4.0, 8.0)));
-    profile.AddLine(std::make_unique<CBezierSpline>(
+    profile->AddLine(std::make_unique<CBezierSpline>(
         point(4.0, 8.0), point(13.9, 13.2226),
         point(41.881, 13.2226), point(51.3, 8.0)));
-    profile.AddLine(std::make_unique<CBezierSpline>(
+    profile->AddLine(std::make_unique<CBezierSpline>(
         point(51.3, 8.0), point(53.0, 10.0),
         point(55.0, 10.0), point(57.0, 8.0)));
-    profile.AddLine(std::make_unique<CLinkLine>(
+    profile->AddLine(std::make_unique<CLinkLine>(
         point(57.0, 8.0), point(60.0, 8.0)));
-    profile.AddLine(std::make_unique<CLinkLine>(
+    profile->AddLine(std::make_unique<CLinkLine>(
         point(60.0, 8.0), point(60.0, 0.0)));
-    profile.AddLine(std::make_unique<CLinkLine>(
+    profile->AddLine(std::make_unique<CLinkLine>(
         point(60.0, 0.0), point(0.0, 0.0)));
-    // Facade profiles are authored in the global XY plane.  Their placement
-    // on a particular facade is a separate operation performed below.  This
-    // keeps a debug copy of the sketch natural and reusable.
-    if (!profile.SetClosed(true)
-        || !profile.SetCoordinateSystem(
+    // Keep the reusable section in the global XY plane. Placement on a
+    // particular facade guide is a separate operation.
+    if (!profile->SetClosed(true)
+        || !profile->SetCoordinateSystem(
             CPoint3d(0.0, 0.0, 0.0),
             CPoint3d(1.0, 0.0, 0.0),
             CPoint3d(0.0, 0.0, 1.0))) {
@@ -329,25 +400,39 @@ TopoDS_Shape milano_frame_shape(double x,
 
     LegacyProfileSelection selection;
     selection.num_pnt = 1;
-    if (!apply_legacy_profile_fillet(profile, selection, 1.0 * scale)) {
+    if (!apply_legacy_profile_fillet(*profile, selection, 1.0 * scale)) {
         return {};
     }
     selection.num_line = 2;
-    if (!apply_legacy_profile_fillet(profile, selection, 2.0 * scale)) {
+    if (!apply_legacy_profile_fillet(*profile, selection, 2.0 * scale)) {
         return {};
     }
     selection.num_line = 5;
-    if (!apply_legacy_profile_fillet(profile, selection, 1.0 * scale)) {
+    if (!apply_legacy_profile_fillet(*profile, selection, 1.0 * scale)) {
         return {};
     }
-    [[maybe_unused]] CSmartLine profile_cpy = profile.MakeCopy();
+    return profile;
+}
+
+TopoDS_Shape milano_frame_shape(double x,
+                                double y,
+                                double z,
+                                double width,
+                                double thickness,
+                                double height,
+                                double frame_width) {
+    std::unique_ptr<CSmartLine> profile = create_milano_profile(frame_width);
+    if (!profile) {
+        return {};
+    }
+    [[maybe_unused]] CSmartLine profile_cpy = profile->MakeCopy();
     // Debug example:
  //   CAlfaDoc* pDoc = GetAlfaDoc();
   //  pDoc->AddObject(std::make_unique<CSmartLine>(std::move(profile_cpy)));
 
     TopoDS_Face profile_face;
     Vec3 profile_normal{};
-    if (!BuildSketchProfileFace(profile, profile_face, profile_normal)) {
+    if (!BuildSketchProfileFace(*profile, profile_face, profile_normal)) {
         return {};
     }
     // Map local profile coordinates (U,V,0) to the first frame corner:
@@ -841,22 +926,63 @@ TopoDS_Shape cut_milled_panel(
     return result;
 }
 
+double milled_track_inset(double width,
+                          double height,
+                          double outward_growth = 0.0) {
+    const double minimum_side = std::min(width, height);
+    return std::max(
+        20.0,
+        std::clamp(minimum_side * 0.16, 45.0, 82.0)
+            - std::max(0.0, outward_growth));
+}
+
+TopoDS_Shape cut_milled_showcase_opening(
+    const TopoDS_Shape& panel,
+    double x,
+    double y,
+    double z,
+    double width,
+    double thickness,
+    double height,
+    double opening_inset) {
+    const double opening_width = width - 2.0 * opening_inset;
+    const double opening_height = height - 2.0 * opening_inset;
+    if (panel.IsNull() || opening_width <= 1.0 || opening_height <= 1.0) {
+        return {};
+    }
+    try {
+        BRepPrimAPI_MakeBox opening(
+            gp_Pnt(x + opening_inset, y - 1.0, z + opening_inset),
+            opening_width, thickness + 2.0, opening_height);
+        opening.Build();
+        if (!opening.IsDone()) return {};
+        BRepAlgoAPI_Cut cut(panel, opening.Shape());
+        cut.SetFuzzyValue(0.02);
+        cut.SetRunParallel(false);
+        cut.Build();
+        return cut.IsDone() && !cut.Shape().IsNull()
+            ? cut.Shape() : TopoDS_Shape{};
+    } catch (const Standard_Failure&) {
+        return {};
+    }
+}
+
 TopoDS_Shape milled_facade_shape(double x,
                                  double y,
                                  double z,
                                  double width,
                                  double thickness,
                                  double height,
-                                 CSmartLine* source_cutter_debug) {
+                                 CSmartLine* source_cutter_debug,
+                                 double track_outward_growth = 0.0) {
     TopoDS_Shape panel = fillet_front_edges(
         box_shape(x, y, z, width, thickness, height), y, 7.0);
     if (panel.IsNull()) {
         return {};
     }
 
-    const double minimum_side = std::min(width, height);
-    const double track_inset = std::clamp(
-        minimum_side * 0.16, 45.0, 82.0);
+    const double track_inset = milled_track_inset(
+        width, height, track_outward_growth);
     if (width <= 2.0 * (track_inset + 15.0)
         || height <= 2.0 * (track_inset + 15.0)) {
         return panel;
@@ -1128,6 +1254,319 @@ bool CFacadeFurniture::IsValidStyle(KitchenCabinetFacadeStyle style) {
         || style == KitchenCabinetFacadeStyle::Milano;
 }
 
+std::unique_ptr<CSmartLine> CFacadeFurniture::CreateMilanoProfile(
+    double frame_width) {
+    return create_milano_profile(frame_width);
+}
+
+namespace {
+double legacy_vector_length(const CPoint3d& value) {
+    return std::sqrt(value.x * value.x
+        + value.y * value.y + value.z * value.z);
+}
+
+bool normalize_legacy_vector(CPoint3d& value) {
+    const double length = legacy_vector_length(value);
+    if (length <= 1.0e-12) return false;
+    value.x /= length;
+    value.y /= length;
+    value.z /= length;
+    return true;
+}
+
+CPoint3d legacy_cross(const CPoint3d& left, const CPoint3d& right) {
+    return CPoint3d(
+        left.y * right.z - left.z * right.y,
+        left.z * right.x - left.x * right.z,
+        left.x * right.y - left.y * right.x);
+}
+
+bool build_legacy_guide_adapter(const CSplineCurve& guide,
+                                CBSpline& adapter,
+                                CPoint3d& start,
+                                CPoint3d& tangent,
+                                CPoint3d& plane_normal,
+                                std::string* error) {
+    const auto fail = [error](const char* message) {
+        if (error) *error = message;
+        return false;
+    };
+    if (guide.np() < 2) {
+        return fail("Swept guide spline must contain at least two points.");
+    }
+
+    // The legacy evaluator predates const-correctness. GetPoint7d does not
+    // alter the spline definition, so confine the compatibility cast here.
+    CSplineCurve& evaluator = const_cast<CSplineCurve&>(guide);
+    CPoint7d start_data{};
+    if (!evaluator.GetPoint7d(0.0, &start_data)) {
+        return fail("Could not evaluate the guide start and tangent.");
+    }
+    start = CPoint3d(start_data.x, start_data.y, start_data.z);
+    tangent = CPoint3d(start_data.l, start_data.m, start_data.n);
+    if (!normalize_legacy_vector(tangent)) {
+        return fail("The guide has no valid tangent at its start.");
+    }
+
+    const int segment_count = guide.np() - 1;
+    adapter.Clear();
+    adapter.SetCurveType(SplineCurveType::Nurbs);
+    adapter.SetDegree(3);
+    adapter.AddPoint(start);
+    for (int segment = 0; segment < segment_count; ++segment) {
+        const CPoint7d* first = guide.P(segment);
+        const CPoint7d* second = guide.P(segment + 1);
+        if (!first || !second) {
+            return fail("The legacy guide contains an invalid segment.");
+        }
+        CPoint3d first_point(first->x, first->y, first->z);
+        CPoint3d second_point(second->x, second->y, second->z);
+        CPoint3d first_direction(first->l, first->m, first->n);
+        CPoint3d second_direction(second->l, second->m, second->n);
+        const double segment_length = second->s - first->s;
+        if (!normalize_legacy_vector(first_direction)
+            || !normalize_legacy_vector(second_direction)
+            || !std::isfinite(segment_length)
+            || segment_length <= 1.0e-12) {
+            return fail("The legacy guide contains an invalid cubic segment.");
+        }
+        const double handle_length = segment_length / 3.0;
+        adapter.AddPoint(first_point
+            + first_direction * handle_length);
+        adapter.AddPoint(second_point
+            - second_direction * handle_length);
+        adapter.AddPoint(second_point);
+    }
+
+    // Expanded cubic NURBS knot vector. Each internal knot has multiplicity
+    // three, exactly joining the original cubic Bezier segments without any
+    // sampling or curve fitting. All weights remain one.
+    std::vector<double> knots;
+    knots.reserve(adapter.GetPointCount() + 4);
+    knots.insert(knots.end(), 4, 0.0);
+    for (int segment = 1; segment < segment_count; ++segment) {
+        knots.insert(knots.end(), 3, static_cast<double>(segment));
+    }
+    knots.insert(knots.end(), 4, static_cast<double>(segment_count));
+    if (!adapter.SetKnots(std::move(knots))) {
+        return fail("Could not create the cubic NURBS knot vector.");
+    }
+
+    // Determine the plane from the exact start tangent and points evaluated
+    // on the exact legacy curve. Guide2 is planar, so this also fixes the roll
+    // reference without relying on an arbitrary global axis.
+    bool has_normal = false;
+    for (int index = 1; index < guide.np(); ++index) {
+        const CPoint3d* point = guide.Pnt(index);
+        if (!point) continue;
+        plane_normal = legacy_cross(tangent, *point - start);
+        if (normalize_legacy_vector(plane_normal)) {
+            has_normal = true;
+            break;
+        }
+    }
+    if (!has_normal) {
+        CPoint3d reference = std::abs(tangent.z) < 0.9
+            ? CPoint3d(0.0, 0.0, 1.0)
+            : CPoint3d(0.0, 1.0, 0.0);
+        plane_normal = legacy_cross(tangent, reference);
+        if (!normalize_legacy_vector(plane_normal)) {
+            return fail("Could not determine the guide plane.");
+        }
+    }
+
+    return true;
+}
+}
+
+std::unique_ptr<CBSpline> CFacadeFurniture::CreateNurbsGuide(
+    const CSplineCurve* guide,
+    std::string* error) {
+    if (error) error->clear();
+    if (!guide) {
+        if (error) *error = "Swept guide spline is null.";
+        return {};
+    }
+    auto result = std::make_unique<CBSpline>("Legacy cubic NURBS guide");
+    CPoint3d start;
+    CPoint3d tangent;
+    CPoint3d plane_normal;
+    if (!build_legacy_guide_adapter(
+            *guide, *result, start, tangent, plane_normal, error)) {
+        return {};
+    }
+    return result;
+}
+
+std::unique_ptr<CSmartLine> CFacadeFurniture::PlaceSweptProfile(
+    const CSmartLine* profile,
+    const CSplineCurve* guide,
+    double angle,
+    double dx,
+    double dy,
+    std::string* error) {
+    if (error) error->clear();
+    const auto fail = [error](const char* message) {
+        if (error) *error = message;
+        return std::unique_ptr<CSmartLine>{};
+    };
+    if (!profile) return fail("Swept profile is null.");
+    if (!guide) return fail("Swept guide spline is null.");
+    if (!std::isfinite(angle) || !std::isfinite(dx) || !std::isfinite(dy)) {
+        return fail("Swept angle and offsets must be finite numbers.");
+    }
+    if (!profile->IsClosed() || profile->GetNumLines() < 2) {
+        return fail("Swept profile must be a non-empty closed sketch.");
+    }
+
+    CBSpline adapter("Swept legacy guide");
+    CPoint3d origin;
+    CPoint3d tangent;
+    CPoint3d guide_normal;
+    if (!build_legacy_guide_adapter(
+            *guide, adapter, origin, tangent, guide_normal, error)) {
+        return {};
+    }
+
+    CPoint3d base_x = legacy_cross(guide_normal, tangent);
+    if (!normalize_legacy_vector(base_x)) {
+        return fail("Could not construct the guide start frame.");
+    }
+    CPoint3d base_y = legacy_cross(tangent, base_x);
+    if (!normalize_legacy_vector(base_y)) {
+        return fail("Could not construct the guide start frame.");
+    }
+    origin = origin + base_x * dx + base_y * dy;
+    const double radians = angle * 3.14159265358979323846 / 180.0;
+    CPoint3d target_x = base_x * std::cos(radians)
+        + base_y * std::sin(radians);
+
+    auto placed = std::make_unique<CSmartLine>(profile->MakeCopy());
+    if (!placed->SetCoordinateSystem(origin, target_x, tangent)) {
+        return fail("Could not place the profile at the guide start.");
+    }
+    return placed;
+}
+
+TopoDS_Shape CFacadeFurniture::BuildSweptProfile(
+    const CSmartLine* profile,
+    const CSplineCurve* guide,
+    double angle,
+    double dx,
+    double dy,
+    std::string* error) {
+    if (error) error->clear();
+    const auto fail = [error](const char* message) {
+        if (error) *error = message;
+        return TopoDS_Shape{};
+    };
+
+    if (!profile) {
+        return fail("Swept profile is null.");
+    }
+    if (!guide) {
+        return fail("Swept guide spline is null.");
+    }
+    if (!std::isfinite(angle) || !std::isfinite(dx) || !std::isfinite(dy)) {
+        return fail("Swept angle and offsets must be finite numbers.");
+    }
+    if (!profile->IsClosed() || profile->GetNumLines() < 2) {
+        return fail("Swept profile must be a non-empty closed sketch.");
+    }
+    if (guide->np() < 2) {
+        return fail("Swept guide spline must contain at least two points.");
+    }
+
+    CBSpline guide_adapter("Swept legacy guide");
+    CPoint3d guide_start;
+    CPoint3d guide_tangent;
+    CPoint3d guide_normal;
+    if (!build_legacy_guide_adapter(
+            *guide, guide_adapter, guide_start,
+            guide_tangent, guide_normal, error)) return {};
+
+    std::unique_ptr<CSmartLine> placed_profile = PlaceSweptProfile(
+        profile, guide, angle, dx, dy, error);
+    if (!placed_profile) return {};
+
+    TopoDS_Shape result = BuildSweptSolidShape(
+        *placed_profile, guide_adapter, 1,
+        0.0, 0.0, 0.0, {}, {}, false, true);
+    if (result.IsNull()) {
+        return fail("Open Cascade could not build the swept solid.");
+    }
+    if (!TopExp_Explorer(result, TopAbs_SOLID).More()) {
+        return fail("Open Cascade sweep did not produce a solid.");
+    }
+    // BuildMillingSweepShape has already run BRepCheck_Analyzer before
+    // returning this shape. Repeating the complete topological validation is
+    // expensive for a Milano section and provides no additional information.
+    return result;
+}
+
+TopoDS_Shape CFacadeFurniture::BuildExtrude(
+    const CSmartLine* profile,
+    const CVector& dir,
+    double dist,
+    std::string* error) {
+    if (error) error->clear();
+    const auto fail = [error](const char* message) {
+        if (error) *error = message;
+        return TopoDS_Shape{};
+    };
+
+    if (!profile) {
+        return fail("Extrude profile is null.");
+    }
+    if (!profile->IsClosed() || profile->GetNumLines() < 2) {
+        return fail("Extrude profile must be a non-empty closed sketch.");
+    }
+    if (!std::isfinite(dir.l)
+        || !std::isfinite(dir.m)
+        || !std::isfinite(dir.n)
+        || !std::isfinite(dist)) {
+        return fail("Extrude direction and distance must be finite numbers.");
+    }
+    const double direction_length = std::sqrt(
+        dir.l * dir.l + dir.m * dir.m + dir.n * dir.n);
+    if (direction_length <= 1.0e-12) {
+        return fail("Extrude direction has zero length.");
+    }
+    if (std::abs(dist) <= 1.0e-12) {
+        return fail("Extrude distance must be non-zero.");
+    }
+
+    TopoDS_Face profile_face;
+    Vec3 profile_normal{};
+    if (!BuildSketchProfileFace(
+            *profile, profile_face, profile_normal)
+        || profile_face.IsNull()) {
+        return fail("Could not build a face from the extrude profile.");
+    }
+
+    const double scale = dist / direction_length;
+    const gp_Vec extrusion(
+        dir.l * scale, dir.m * scale, dir.n * scale);
+    try {
+        BRepPrimAPI_MakePrism prism(
+            profile_face, extrusion, false, true);
+        prism.Build();
+        if (!prism.IsDone() || prism.Shape().IsNull()) {
+            return fail("Open Cascade could not extrude the profile.");
+        }
+        const TopoDS_Shape result = prism.Shape();
+        if (!TopExp_Explorer(result, TopAbs_SOLID).More()) {
+            return fail("Open Cascade extrusion did not produce a solid.");
+        }
+        if (!BRepCheck_Analyzer(result).IsValid()) {
+            return fail("Open Cascade produced an invalid extruded solid.");
+        }
+        return result;
+    } catch (const Standard_Failure&) {
+        return fail("Open Cascade failed while extruding the profile.");
+    }
+}
+
 TopoDS_Shape CFacadeFurniture::BuildPlanarShape(
     KitchenCabinetFacadeStyle style,
     double x,
@@ -1140,7 +1579,8 @@ TopoDS_Shape CFacadeFurniture::BuildPlanarShape(
     KitchenCabinetShowcaseFill showcase_fill,
     CSmartLine* source_cutter_debug) {
     if (style == KitchenCabinetFacadeStyle::Plain) {
-        return box_shape(x, y, z, width, thickness, height);
+        return rounded_plain_facade_shape(
+            x, y, z, width, thickness, height);
     }
 
     const double minimum_side = std::min(width, height);
@@ -1150,13 +1590,31 @@ TopoDS_Shape CFacadeFurniture::BuildPlanarShape(
         return box_shape(x, y, z, width, thickness, height);
     }
 
+    TopoDS_Shape profiled_showcase_frame;
     if (style == KitchenCabinetFacadeStyle::Milled) {
-        return milled_facade_shape(
+        constexpr double showcase_track_growth = 10.0;
+        const bool showcase =
+            showcase_fill != KitchenCabinetShowcaseFill::None;
+        TopoDS_Shape milled = milled_facade_shape(
             x, y, z, width, thickness, height,
-            source_cutter_debug);
+            source_cutter_debug,
+            showcase ? showcase_track_growth : 0.0);
+        if (!showcase || milled.IsNull()) {
+            return milled;
+        }
+
+        // The cutter profile is 15 mm wide on the inner side of its guide.
+        // Use that inner boundary for the through opening. Moving the guide
+        // outward by 10 mm enlarges both the routing contour and the glass.
+        frame_width = milled_track_inset(
+            width, height, showcase_track_growth) + 15.0;
+        profiled_showcase_frame = cut_milled_showcase_opening(
+            milled, x, y, z, width, thickness, height, frame_width);
+        if (profiled_showcase_frame.IsNull()) {
+            return milled;
+        }
     }
 
-    TopoDS_Shape profiled_showcase_frame;
     if (style == KitchenCabinetFacadeStyle::Frame) {
         const double profile_frame_width = std::min(
             60.0, std::max(20.0, minimum_side * 0.5 - 2.0));
@@ -1189,7 +1647,23 @@ TopoDS_Shape CFacadeFurniture::BuildPlanarShape(
         if (facade.IsNull()) {
             return box_shape(x, y, z, width, thickness, height);
         }
-        return translated_shape(facade, x, y + thickness, z);
+        if (showcase_fill == KitchenCabinetShowcaseFill::None) {
+            return translated_shape(facade, x, y + thickness, z);
+        }
+        // Milano is also available in Cabinet Showcase. Keep its profiled
+        // perimeter and replace the ordinary centre panel with the selected
+        // glass/decorative fill, just like the Frame facade does above.
+        if (facade.ShapeType() == TopAbs_COMPOUND) {
+            TopoDS_Iterator iterator(facade);
+            if (iterator.More()) {
+                profiled_showcase_frame = translated_shape(
+                    iterator.Value(), x, y + thickness, z);
+            }
+        }
+        if (profiled_showcase_frame.IsNull()) {
+            return {};
+        }
+        frame_width = profile_frame_width;
     }
 
     std::vector<TopoDS_Shape> shapes;
@@ -1199,8 +1673,12 @@ TopoDS_Shape CFacadeFurniture::BuildPlanarShape(
     const double opening_width = width - 2.0 * frame_width;
     const double opening_height = height - 2.0 * frame_width;
     const double fill_y = y + thickness - panel_depth;
+    const bool solid_screen_panel =
+        style == KitchenCabinetFacadeStyle::Screen
+        && showcase_fill == KitchenCabinetShowcaseFill::None;
     if (showcase_fill != KitchenCabinetShowcaseFill::Lattice
-        && showcase_fill != KitchenCabinetShowcaseFill::None) {
+        && (showcase_fill != KitchenCabinetShowcaseFill::None
+            || solid_screen_panel)) {
         shapes.push_back(box_shape(
             opening_x, fill_y, opening_z,
             opening_width, panel_depth, opening_height));

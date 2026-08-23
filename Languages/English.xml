@@ -7297,6 +7297,26 @@ The parameter was changed to Double Door.</Text>
     <Text>Ruled Surface:select the required geometry and continue</Text>
   </TextItem>
   <TextItem>
+    <ID>Auto_SHELL_TOOL</ID>
+    <Text>Shell</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Auto_SHELL_PARAMETERS</ID>
+    <Text>Shell Parameters</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Auto_SHELL_ADJUST</ID>
+    <Text>Shell:adjust the distance and continue</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Auto_SHELL_FAILED</ID>
+    <Text>Shell:operation failed; check the surface and distance</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Auto_SHELL_SELECT</ID>
+    <Text>Shell:select one surface face and continue</Text>
+  </TextItem>
+  <TextItem>
     <ID>Auto_879666EEAA0F16</ID>
     <Text>Run Trim Test</Text>
   </TextItem>

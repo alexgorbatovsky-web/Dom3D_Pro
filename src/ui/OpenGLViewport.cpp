@@ -7,6 +7,7 @@
 #include "../BezierSpline.h"
 #include "../CPolyline.h"
 #include "../CPart.h"
+#include "../CAssembled.h"
 #include "../DrawingText.h"
 #include "../SmartLine.h"
 #include "../solid/Solid.h"
@@ -19,9 +20,12 @@
 #include <QDragMoveEvent>
 #include <QDropEvent>
 #include <QKeyEvent>
+#include <QImage>
+#include <QLabel>
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPixmap>
 #include <QSettings>
 #include <QSurfaceFormat>
@@ -308,6 +312,99 @@ QCursor captured_point_cursor() {
     return QCursor(pixmap, 12, 12);
 }
 
+QCursor zoom_rect_cursor() {
+    constexpr int size = 32;
+    constexpr qreal center = 11.5;
+    QPixmap pixmap(size, size);
+    pixmap.fill(Qt::transparent);
+
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setBrush(Qt::NoBrush);
+
+    const auto draw_symbol = [&painter](const QColor& color,
+                                        qreal lens_width,
+                                        qreal handle_width) {
+        painter.setPen(QPen(
+            color, lens_width, Qt::SolidLine,
+            Qt::RoundCap, Qt::RoundJoin));
+        painter.drawEllipse(QPointF(center, center), 8.5, 8.5);
+        painter.drawLine(QPointF(8.5, 8.5), QPointF(14.5, 14.5));
+        painter.drawLine(QPointF(14.5, 8.5), QPointF(8.5, 14.5));
+
+        painter.setPen(QPen(
+            color, handle_width, Qt::SolidLine,
+            Qt::RoundCap, Qt::RoundJoin));
+        painter.drawLine(QPointF(18.0, 18.0), QPointF(27.5, 27.5));
+    };
+
+    // A dark outline keeps the white symbol visible over light furniture,
+    // while the white inner stroke stays clear over the black viewport.
+    draw_symbol(QColor(0, 0, 0), 3.5, 5.0);
+    draw_symbol(QColor(255, 255, 255), 1.25, 1.75);
+    return QCursor(pixmap, 12, 12);
+}
+
+QCursor orbit_cursor() {
+    QPixmap pixmap(32, 32);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setBrush(Qt::NoBrush);
+
+    QPainterPath arrows;
+    arrows.moveTo(5.0, 14.0);
+    arrows.cubicTo(8.0, 5.0, 22.0, 5.0, 27.0, 14.0);
+    arrows.moveTo(27.0, 18.0);
+    arrows.cubicTo(23.0, 27.0, 9.0, 27.0, 5.0, 18.0);
+    painter.setPen(QPen(
+        Qt::black, 4.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    painter.drawPath(arrows);
+    painter.setPen(QPen(
+        Qt::white, 1.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    painter.drawPath(arrows);
+
+    const QPolygonF upper_head{
+        QPointF(27.0, 14.0), QPointF(21.0, 13.0), QPointF(25.0, 8.5)};
+    const QPolygonF lower_head{
+        QPointF(5.0, 18.0), QPointF(11.0, 19.0), QPointF(7.0, 23.5)};
+    painter.setPen(QPen(Qt::black, 1.5, Qt::SolidLine, Qt::RoundCap));
+    painter.setBrush(Qt::white);
+    painter.drawPolygon(upper_head);
+    painter.drawPolygon(lower_head);
+    return QCursor(pixmap, 16, 16);
+}
+
+QCursor pan_scene_cursor() {
+    QPixmap pixmap(32, 32);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+
+    const QLineF axes[] = {
+        {QPointF(16.0, 5.0), QPointF(16.0, 27.0)},
+        {QPointF(5.0, 16.0), QPointF(27.0, 16.0)}
+    };
+    painter.setPen(QPen(
+        Qt::black, 4.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    for (const QLineF& axis : axes) painter.drawLine(axis);
+    painter.setPen(QPen(
+        Qt::white, 1.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    for (const QLineF& axis : axes) painter.drawLine(axis);
+
+    const QPolygonF heads[] = {
+        {{16.0, 2.0}, {11.5, 8.0}, {20.5, 8.0}},
+        {{16.0, 30.0}, {11.5, 24.0}, {20.5, 24.0}},
+        {{2.0, 16.0}, {8.0, 11.5}, {8.0, 20.5}},
+        {{30.0, 16.0}, {24.0, 11.5}, {24.0, 20.5}}
+    };
+    painter.setPen(QPen(
+        Qt::black, 1.5, Qt::SolidLine, Qt::SquareCap, Qt::RoundJoin));
+    painter.setBrush(Qt::white);
+    for (const QPolygonF& head : heads) painter.drawPolygon(head);
+    return QCursor(pixmap, 16, 16);
+}
+
 CPoint3d scale_dimension_point(const CPoint3d& point, double factor) {
     return {point.x * factor, point.y * factor, point.z * factor};
 }
@@ -500,6 +597,10 @@ OpenGLViewport::OpenGLViewport(QWidget* parent)
     setMouseTracking(true);
     setAcceptDrops(true);
     setMinimumSize(640, 420);
+    walk_mini_map_overlay_ = new QLabel(this);
+    walk_mini_map_overlay_->setAttribute(Qt::WA_TransparentForMouseEvents);
+    walk_mini_map_overlay_->setScaledContents(false);
+    walk_mini_map_overlay_->hide();
     QSettings settings;
     QColor background_color(
         settings.value("view/backgroundColor", QStringLiteral("#0e1114")).toString());
@@ -523,6 +624,10 @@ void OpenGLViewport::SetTool(ToolMode tool) {
     const bool cancel_sketch_face_selection =
         sketch_waiting_for_face_ && tool != ToolMode::SketchRectangle;
     tool_ = tool;
+    if (walk_mini_map_overlay_) {
+        walk_mini_map_overlay_->setVisible(tool_ == ToolMode::Walk);
+        if (tool_ == ToolMode::Walk) walk_mini_map_overlay_->raise();
+    }
     ClearHoveredSolidEdge();
     if (tool_ != ToolMode::Boolean) {
         has_boolean_body_ = false;
@@ -603,7 +708,17 @@ void OpenGLViewport::RestoreDefaultToolCursor() {
         return;
     }
 
-    if (tool_ == ToolMode::Select
+    if (panning_ || pan_navigation_modifier_down_) {
+        setCursor(pan_scene_cursor());
+    } else if (orbiting_ || alt_orbiting_
+               || alt_navigation_modifier_down_
+               || tool_ == ToolMode::Orbit) {
+        setCursor(orbit_cursor());
+    } else if (tool_ == ToolMode::Walk) {
+        setCursor(Qt::OpenHandCursor);
+    } else if (tool_ == ToolMode::ZoomRect) {
+        setCursor(zoom_rect_cursor());
+    } else if (tool_ == ToolMode::Select
         || tool_ == ToolMode::Transform
         || tool_ == ToolMode::Boolean
         || tool_ == ToolMode::FaceExtrude
@@ -613,7 +728,6 @@ void OpenGLViewport::RestoreDefaultToolCursor() {
         || tool_ == ToolMode::DrawBSpline
         || tool_ == ToolMode::DrawSpline
         || tool_ == ToolMode::EditPoint
-        || tool_ == ToolMode::ZoomRect
         || tool_ == ToolMode::SketchRectangle
         || tool_ == ToolMode::SketchPolyline
         || tool_ == ToolMode::SketchBezier
@@ -880,10 +994,10 @@ void OpenGLViewport::FitToDocument() {
     viewport_camera_basis(camera_, forward, right, up);
 
     constexpr float kFitPadding = 1.12f;
-    constexpr float kPerspectiveFovY = 48.0f;
     const float aspect = static_cast<float>(std::max(1, width()))
         / static_cast<float>(std::max(1, height()));
-    const float tan_half_fov = std::tan(deg_to_rad(kPerspectiveFovY) * 0.5f);
+    const float tan_half_fov = std::tan(
+        deg_to_rad(camera_.vertical_fov_degrees) * 0.5f);
     float fitted_distance = kMinimumCameraDistance;
 
     const Vec3 corners[] = {
@@ -972,7 +1086,6 @@ void OpenGLViewport::RefreshSurfaceMeshQuality() {
         return;
     }
 
-    constexpr float kPerspectiveFovY = 48.0f;
     const float viewport_height = static_cast<float>(std::max(1, height()));
     float world_per_pixel = 0.0f;
     if (orthographic_projection_) {
@@ -981,7 +1094,8 @@ void OpenGLViewport::RefreshSurfaceMeshQuality() {
         world_per_pixel = (2.0f * half_height) / viewport_height;
     } else {
         world_per_pixel = (2.0f * camera_.distance
-            * std::tan(deg_to_rad(kPerspectiveFovY) * 0.5f)) / viewport_height;
+            * std::tan(deg_to_rad(camera_.vertical_fov_degrees) * 0.5f))
+            / viewport_height;
     }
 
     QSettings settings("Dom3D", "Dom3D_Pro");
@@ -1022,8 +1136,26 @@ Camera OpenGLViewport::GetCamera() const {
 }
 
 void OpenGLViewport::SetCamera(const Camera& camera) {
+    const float previous_fov = camera_.vertical_fov_degrees;
     camera_ = camera;
+    camera_.vertical_fov_degrees = std::clamp(
+        camera_.vertical_fov_degrees, 20.0f, 100.0f);
     rotation_pivot_enabled_ = false;
+    if (std::fabs(previous_fov - camera_.vertical_fov_degrees) > 0.001f) {
+        emit CameraFieldOfViewChanged(camera_.vertical_fov_degrees);
+    }
+    update();
+}
+
+float OpenGLViewport::GetVerticalFovDegrees() const {
+    return camera_.vertical_fov_degrees;
+}
+
+void OpenGLViewport::SetVerticalFovDegrees(float degrees) {
+    const float value = std::clamp(degrees, 20.0f, 100.0f);
+    if (std::fabs(camera_.vertical_fov_degrees - value) <= 0.001f) return;
+    camera_.vertical_fov_degrees = value;
+    emit CameraFieldOfViewChanged(value);
     update();
 }
 
@@ -2036,6 +2168,27 @@ void OpenGLViewport::BeginPick3DPointOnObject(
     point_pick_object_id_ = object_id;
 }
 
+void OpenGLViewport::BeginPickArchitectureWall(const QString& prompt) {
+    picking_xy_point_ = false;
+    picking_3d_point_ = false;
+    picking_architecture_wall_ = true;
+    orbiting_ = false;
+    alt_orbiting_ = false;
+    panning_ = false;
+    zooming_ = false;
+    setCursor(Qt::CrossCursor);
+    emit StatusTextChanged(prompt.isEmpty()
+        ? "Window / Door: click the approximate position on a visible wall"
+        : prompt);
+    setFocus();
+}
+
+void OpenGLViewport::CancelArchitectureWallPick() {
+    if (!picking_architecture_wall_) return;
+    picking_architecture_wall_ = false;
+    RestoreDefaultToolCursor();
+}
+
 void OpenGLViewport::SetPointPickMarkers(const std::vector<CPoint3d>& points) {
     point_pick_markers_ = points;
     update();
@@ -2196,20 +2349,30 @@ void OpenGLViewport::paintGL() {
         const QPixmap sphere = MaterialDrag::SpherePixmap(material_drag_preview_, 58, true);
         painter.drawPixmap(material_drag_pos_ - QPoint(sphere.width() / 2, sphere.height() / 2), sphere);
     }
+    if (tool_ == ToolMode::Walk) {
+        DrawWalkMiniMap();
+    }
     DrawFPS();
 
     if (!first_frame_rendered_) {
         first_frame_rendered_ = true;
         emit FirstFrameRendered();
     }
-
 }
 
 void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
     last_mouse_ = event->pos();
 
+    if (tool_ == ToolMode::Walk
+        && event->button() == Qt::LeftButton
+        && PlaceWalkCameraFromMiniMap(event->pos())) {
+        event->accept();
+        return;
+    }
+
     if (event->button() == Qt::MiddleButton) {
         panning_ = true;
+        setCursor(pan_scene_cursor());
         return;
     }
 
@@ -2222,6 +2385,7 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
         orbiting_ = false;
         alt_orbiting_ = false;
         zooming_ = false;
+        setCursor(pan_scene_cursor());
         event->accept();
         return;
     }
@@ -2265,6 +2429,13 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
         return;
     }
 
+    if (tool_ == ToolMode::Walk) {
+        orbiting_ = true;
+        setCursor(Qt::ClosedHandCursor);
+        event->accept();
+        return;
+    }
+
     if (picking_rotation_axis_) {
         Vec3 axis_start{};
         Vec3 axis_end{};
@@ -2281,6 +2452,55 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
             emit StatusTextChanged(
                 "Rotate: point to a coordinate axis, straight segment, or straight edge");
         }
+        event->accept();
+        return;
+    }
+
+    if (picking_architecture_wall_) {
+        const DomPoint screen_point{event->pos().x(), event->pos().y()};
+        const Vec3 camera_forward = normalize(camera_.target
+            - camera_position(camera_, orthographic_projection_));
+        auto project_world = [this, camera_forward](
+                                 Vec3 world, DomPoint& screen, float& depth) {
+            depth = dot(
+                world - camera_position(camera_, orthographic_projection_),
+                camera_forward);
+            return depth > 0.0f && renderer_.WorldToScreen(
+                world, camera_, orthographic_projection_,
+                width(), height(), screen);
+        };
+        CSolid* wall = document_->FindSolidAtScreen(
+            screen_point, project_world);
+        Vec3 minimum{};
+        Vec3 maximum{};
+        if (!wall || !wall->GetBounds(minimum, maximum)) {
+            emit StatusTextChanged(
+                "Window / Door: click a visible room wall");
+            event->accept();
+            return;
+        }
+
+        const bool along_x = maximum.x - minimum.x
+            >= maximum.y - minimum.y;
+        const Vec3 plane_point{
+            (minimum.x + maximum.x) * 0.5f,
+            (minimum.y + maximum.y) * 0.5f,
+            (minimum.z + maximum.z) * 0.5f};
+        const Vec3 plane_normal = along_x
+            ? Vec3{0.0f, 1.0f, 0.0f}
+            : Vec3{1.0f, 0.0f, 0.0f};
+        CPoint3d picked{};
+        if (!ScreenToWorldPlane(
+                event->pos(), plane_point, plane_normal, picked)) {
+            emit StatusTextChanged(
+                "Window / Door: this wall cannot be placed from the current view");
+            event->accept();
+            return;
+        }
+        document_->EnsureObjectId(*wall);
+        picking_architecture_wall_ = false;
+        RestoreDefaultToolCursor();
+        emit ArchitectureWallPicked(wall->m_id, picked);
         event->accept();
         return;
     }
@@ -2485,6 +2705,7 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
         dragging_transform_ = false;
         active_transform_axis_ = TransformAxis::None;
         highlighted_transform_axis_ = TransformAxis::None;
+        setCursor(orbit_cursor());
         return;
     }
 
@@ -3047,6 +3268,21 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
         cursor_world_valid);
     const QPoint delta = event->pos() - last_mouse_;
 
+    if (event->buttons() == Qt::NoButton) {
+        pan_navigation_modifier_down_ =
+            event->modifiers().testFlag(Qt::ControlModifier);
+        alt_navigation_modifier_down_ =
+            event->modifiers().testFlag(Qt::AltModifier)
+            && !xy_plane_view_enabled_ && !sketch_active_;
+        if (tool_ == ToolMode::Orbit
+            || pan_navigation_modifier_down_
+            || alt_navigation_modifier_down_) {
+            RestoreDefaultToolCursor();
+            last_mouse_ = event->pos();
+            return;
+        }
+    }
+
     if (tool_ == ToolMode::DrawSpline
         && drawing_spline_stroke_
         && event->buttons().testFlag(Qt::LeftButton)) {
@@ -3477,14 +3713,48 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
         && !editing_sketch_
         && !dragging_solid_dimension_grip_
         && highlighted_solid_dimension_grip_.isEmpty()) {
-        const CAlfaObject* hovered_object = FindObjectForMaterialAt(event->pos());
-        const bool hovering_handle = hovered_object
-            && hovered_object->GetName().find("Handle") != std::string::npos
-            && (hovered_object->GetName().find("Cabinet") != std::string::npos
-                || hovered_object->GetName().find("Drawer") != std::string::npos
-                || hovered_object->GetName().rfind("Single Facade", 0) == 0
-                || hovered_object->GetName().rfind("Nika ", 0) == 0
-                || hovered_object->GetName().rfind("Corner ", 0) == 0);
+        // The pointing cursor is needed only for interactive furniture
+        // handles.  FindObjectForMaterialAt() tests every triangle in every
+        // solid and was previously called for every idle mouse move.  A room
+        // containing an imported IGES kettle could therefore appear complete
+        // and then freeze for more than a minute.  Test the small set of
+        // handle bodies directly instead.
+        const DomPoint screen_point{event->pos().x(), event->pos().y()};
+        auto project_world = [this](Vec3 world, DomPoint& screen, float& depth) {
+            Vec3 forward{};
+            Vec3 right{};
+            Vec3 up{};
+            viewport_camera_basis(camera_, forward, right, up);
+            depth = dot(
+                world - camera_position(camera_, orthographic_projection_),
+                forward);
+            return depth > 0.0f && renderer_.WorldToScreen(
+                world, camera_, orthographic_projection_, width(), height(),
+                screen);
+        };
+        bool hovering_handle = false;
+        float best_depth = std::numeric_limits<float>::max();
+        for (const auto& object : document_->GetObjects()) {
+            const auto* solid = object
+                ? dynamic_cast<const CSolid*>(object.get()) : nullptr;
+            if (!solid || !document_->IsObjectSelectable(*solid)) continue;
+            const std::string& name = solid->GetName();
+            if (name.find("Handle") == std::string::npos
+                || (name.find("Cabinet") == std::string::npos
+                    && name.find("Drawer") == std::string::npos
+                    && name.rfind("Single Facade", 0) != 0
+                    && name.rfind("Nika ", 0) != 0
+                    && name.rfind("Corner ", 0) != 0)) {
+                continue;
+            }
+            float depth = 0.0f;
+            if (solid->HitTestMeshScreen(
+                    screen_point, project_world, depth)
+                && depth < best_depth) {
+                best_depth = depth;
+                hovering_handle = true;
+            }
+        }
         if (hovering_handle != hovering_furniture_handle_) {
             hovering_furniture_handle_ = hovering_handle;
             if (hovering_handle) {
@@ -3501,7 +3771,13 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
         } else {
             const float yaw_delta = -static_cast<float>(delta.x()) * 0.35f;
             const float pitch_delta = static_cast<float>(delta.y()) * 0.25f;
-            if (orbit_mode_ == OrbitMode::Architectural) {
+            if (tool_ == ToolMode::Walk) {
+                const Vec3 eye = camera_position(camera_);
+                architectural_orbit_camera(camera_, yaw_delta, pitch_delta);
+                const Vec3 forward = normalize(rotate(
+                    camera_.orientation, {0.0f, 0.0f, -1.0f}));
+                camera_.target = eye + forward * camera_.distance;
+            } else if (orbit_mode_ == OrbitMode::Architectural) {
                 architectural_orbit_camera(camera_, yaw_delta, pitch_delta);
             } else {
                 cad_orbit_camera(camera_, yaw_delta, pitch_delta);
@@ -3525,7 +3801,9 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
             world_per_pixel = (2.0f * half_height) / static_cast<float>(viewport_height);
         } else {
             const float depth = std::max(0.001f, dot(camera_.target - camera_position(camera_, orthographic_projection_), forward));
-            world_per_pixel = (2.0f * depth * std::tan(deg_to_rad(48.0f) * 0.5f)) / static_cast<float>(viewport_height);
+            world_per_pixel = (2.0f * depth * std::tan(
+                deg_to_rad(camera_.vertical_fov_degrees) * 0.5f))
+                / static_cast<float>(viewport_height);
         }
         camera_.target = camera_.target - right * (static_cast<float>(delta.x()) * world_per_pixel)
             + up * (static_cast<float>(delta.y()) * world_per_pixel);
@@ -3764,6 +4042,37 @@ void OpenGLViewport::mouseReleaseEvent(QMouseEvent* event) {
 }
 
 void OpenGLViewport::keyPressEvent(QKeyEvent* event) {
+    if (event->key() == Qt::Key_Control) {
+        pan_navigation_modifier_down_ = true;
+        RestoreDefaultToolCursor();
+    } else if (event->key() == Qt::Key_Alt
+               && !xy_plane_view_enabled_ && !sketch_active_) {
+        alt_navigation_modifier_down_ = true;
+        RestoreDefaultToolCursor();
+    }
+
+    if (tool_ == ToolMode::Walk
+        && (event->key() == Qt::Key_Left
+            || event->key() == Qt::Key_Right
+            || event->key() == Qt::Key_Up
+            || event->key() == Qt::Key_Down)) {
+        MoveWalkCamera(event->key(), event->modifiers());
+        event->accept();
+        return;
+    }
+    if (tool_ == ToolMode::Walk && event->key() == Qt::Key_Escape) {
+        SetTool(ToolMode::Orbit);
+        emit StatusTextChanged("Walk camera finished. Orbit camera is active");
+        event->accept();
+        return;
+    }
+    if (event->key() == Qt::Key_Escape && picking_architecture_wall_) {
+        CancelArchitectureWallPick();
+        emit ArchitectureWallPickCanceled();
+        emit StatusTextChanged("Window / Door placement canceled");
+        event->accept();
+        return;
+    }
     if (event->key() == Qt::Key_C && picking_3d_point_) {
         picking_3d_point_ = false;
         RestoreDefaultToolCursor();
@@ -4122,6 +4431,17 @@ void OpenGLViewport::keyPressEvent(QKeyEvent* event) {
     }
 
     QOpenGLWidget::keyPressEvent(event);
+}
+
+void OpenGLViewport::keyReleaseEvent(QKeyEvent* event) {
+    if (event->key() == Qt::Key_Control) {
+        pan_navigation_modifier_down_ = false;
+        RestoreDefaultToolCursor();
+    } else if (event->key() == Qt::Key_Alt) {
+        alt_navigation_modifier_down_ = false;
+        RestoreDefaultToolCursor();
+    }
+    QOpenGLWidget::keyReleaseEvent(event);
 }
 
 void OpenGLViewport::wheelEvent(QWheelEvent* event) {
@@ -4897,7 +5217,9 @@ void OpenGLViewport::HandleTransformDrag(const QPoint& point, Qt::KeyboardModifi
                 * 2.0f) / static_cast<float>(viewport_height);
         } else {
             const float depth = std::max(0.001f, dot(center - camera_position(camera_, orthographic_projection_), forward));
-            world_per_pixel = (2.0f * depth * std::tan(deg_to_rad(48.0f) * 0.5f)) / static_cast<float>(viewport_height);
+            world_per_pixel = (2.0f * depth * std::tan(
+                deg_to_rad(camera_.vertical_fov_degrees) * 0.5f))
+                / static_cast<float>(viewport_height);
         }
 
         const Vec3 delta = right * (mouse_dx * world_per_pixel) - up * (mouse_dy * world_per_pixel);
@@ -6287,7 +6609,8 @@ bool OpenGLViewport::ScreenToSketchPlane(const QPoint& point, CPoint3d& result) 
         ray_origin = camera_position(camera_, orthographic_projection_) + right * (ndc_x * half_width) + up * (ndc_y * half_height);
         ray_direction = forward;
     } else {
-        const float tan_half_fov = std::tan(deg_to_rad(48.0f) * 0.5f);
+        const float tan_half_fov = std::tan(
+            deg_to_rad(camera_.vertical_fov_degrees) * 0.5f);
         ray_direction = normalize(forward + right * (ndc_x * aspect * tan_half_fov) + up * (ndc_y * tan_half_fov));
     }
 
@@ -6795,7 +7118,8 @@ bool OpenGLViewport::ScreenToWorldPlane(const QPoint& point, Vec3 plane_point, V
         ray_origin = camera_position(camera_, orthographic_projection_) + right * (ndc_x * half_width) + up * (ndc_y * half_height);
         ray_direction = forward;
     } else {
-        const float tan_half_fov = std::tan(deg_to_rad(48.0f) * 0.5f);
+        const float tan_half_fov = std::tan(
+            deg_to_rad(camera_.vertical_fov_degrees) * 0.5f);
         ray_direction = normalize(forward + right * (ndc_x * aspect * tan_half_fov) + up * (ndc_y * tan_half_fov));
     }
 
@@ -6875,7 +7199,8 @@ bool OpenGLViewport::ScreenToPlaneY(const QPoint& point, double y, CPoint3d& res
         ray_origin = camera_position(camera_, orthographic_projection_) + right * (ndc_x * half_width) + up * (ndc_y * half_height);
         ray_direction = forward;
     } else {
-        const float tan_half_fov = std::tan(deg_to_rad(48.0f) * 0.5f);
+        const float tan_half_fov = std::tan(
+            deg_to_rad(camera_.vertical_fov_degrees) * 0.5f);
         ray_direction = normalize(forward + right * (ndc_x * aspect * tan_half_fov) + up * (ndc_y * tan_half_fov));
     }
 
@@ -6914,7 +7239,8 @@ bool OpenGLViewport::ScreenToViewPlane(const QPoint& point, Vec3 plane_point, CP
         ray_origin = camera_position(camera_, orthographic_projection_) + right * (ndc_x * half_width) + up * (ndc_y * half_height);
         ray_direction = forward;
     } else {
-        const float tan_half_fov = std::tan(deg_to_rad(48.0f) * 0.5f);
+        const float tan_half_fov = std::tan(
+            deg_to_rad(camera_.vertical_fov_degrees) * 0.5f);
         ray_direction = normalize(forward + right * (ndc_x * aspect * tan_half_fov) + up * (ndc_y * tan_half_fov));
     }
 
@@ -8425,6 +8751,260 @@ void OpenGLViewport::DrawCoordinateAxisLabels() {
         draw_label(z_screen, QColor(55, 85, 255), "Z");
     }
 }
+
+std::vector<OpenGLViewport::WalkRoomFootprint>
+OpenGLViewport::WalkRoomFootprints() const {
+    std::vector<WalkRoomFootprint> result;
+    if (!document_) return result;
+
+    for (const auto& object : document_->GetObjects()) {
+        const auto* room = object
+            ? dynamic_cast<const CAssembled*>(object.get()) : nullptr;
+        if (!room || room->GetParametricToolId() != "room"
+            || !document_->IsObjectVisible(*room)
+            || room->GetElementIds().empty()) {
+            continue;
+        }
+        const CAlfaObject* floor = document_->FindObjectById(
+            room->GetElementIds().front());
+        Vec3 minimum{};
+        Vec3 maximum{};
+        if (!floor || !document_->IsObjectVisible(*floor)
+            || !floor->GetBounds(minimum, maximum)) {
+            continue;
+        }
+        if (maximum.x - minimum.x > 1.0f
+            && maximum.y - minimum.y > 1.0f) {
+            result.push_back({minimum, maximum});
+        }
+    }
+    return result;
+}
+
+QRectF OpenGLViewport::WalkMiniMapRect() const {
+    const qreal map_width = std::max(150, std::min(240, width() - 24));
+    const qreal map_height = std::max(120, std::min(190, height() - 24));
+    return QRectF(12.0, 12.0, map_width, map_height);
+}
+
+bool OpenGLViewport::WalkMiniMapTransform(
+    QRectF& content_rect,
+    Vec3& world_minimum,
+    Vec3& world_maximum,
+    std::vector<WalkRoomFootprint>& footprints) const {
+    footprints = WalkRoomFootprints();
+    if (footprints.empty()) return false;
+
+    world_minimum = footprints.front().minimum;
+    world_maximum = footprints.front().maximum;
+    for (const WalkRoomFootprint& room : footprints) {
+        world_minimum.x = std::min(world_minimum.x, room.minimum.x);
+        world_minimum.y = std::min(world_minimum.y, room.minimum.y);
+        world_maximum.x = std::max(world_maximum.x, room.maximum.x);
+        world_maximum.y = std::max(world_maximum.y, room.maximum.y);
+    }
+
+    const QRectF panel = WalkMiniMapRect();
+    const QRectF available = panel.adjusted(12.0, 30.0, -12.0, -12.0);
+    const qreal world_width = std::max(
+        1.0, static_cast<double>(world_maximum.x - world_minimum.x));
+    const qreal world_height = std::max(
+        1.0, static_cast<double>(world_maximum.y - world_minimum.y));
+    const qreal scale = std::min(
+        available.width() / world_width,
+        available.height() / world_height);
+    const qreal draw_width = world_width * scale;
+    const qreal draw_height = world_height * scale;
+    content_rect = QRectF(
+        available.center().x() - draw_width * 0.5,
+        available.center().y() - draw_height * 0.5,
+        draw_width,
+        draw_height);
+    return true;
+}
+
+void OpenGLViewport::DrawWalkMiniMap() {
+    const QRectF panel = WalkMiniMapRect();
+    QImage overlay(panel.size().toSize(), QImage::Format_ARGB32_Premultiplied);
+    overlay.fill(Qt::transparent);
+    QPainter painter(&overlay);
+    painter.translate(-panel.topLeft());
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.fillRect(panel, QColor(16, 18, 22));
+    painter.setPen(QPen(QColor(186, 174, 196), 1.0));
+    painter.setBrush(Qt::NoBrush);
+    painter.drawRoundedRect(panel, 5.0, 5.0);
+    painter.setPen(QColor(235, 235, 238));
+    QFont title_font = painter.font();
+    title_font.setBold(true);
+    painter.setFont(title_font);
+    painter.drawText(panel.adjusted(10.0, 5.0, -8.0, 0.0),
+                     Qt::AlignLeft | Qt::AlignTop,
+                     "Walk - click to enter room");
+
+    QRectF content;
+    Vec3 world_minimum{};
+    Vec3 world_maximum{};
+    std::vector<WalkRoomFootprint> footprints;
+    if (!WalkMiniMapTransform(
+            content, world_minimum, world_maximum, footprints)) {
+        painter.setFont(QFont());
+        painter.setPen(QColor(180, 180, 185));
+        painter.drawText(panel.adjusted(10.0, 35.0, -10.0, -10.0),
+                         Qt::AlignCenter | Qt::TextWordWrap,
+                         "No visible Room");
+        painter.end();
+        walk_mini_map_overlay_->setGeometry(panel.toAlignedRect());
+        walk_mini_map_overlay_->setPixmap(QPixmap::fromImage(overlay));
+        walk_mini_map_overlay_->show();
+        walk_mini_map_overlay_->raise();
+        return;
+    }
+
+    const auto world_to_map = [&](Vec3 world) {
+        const double x_ratio = (world.x - world_minimum.x)
+            / std::max(1.0f, world_maximum.x - world_minimum.x);
+        const double y_ratio = (world.y - world_minimum.y)
+            / std::max(1.0f, world_maximum.y - world_minimum.y);
+        return QPointF(content.left() + x_ratio * content.width(),
+                       content.bottom() - y_ratio * content.height());
+    };
+
+    painter.setFont(QFont());
+    painter.setPen(QPen(QColor(229, 219, 202), 2.0));
+    painter.setBrush(QColor(94, 82, 68));
+    for (const WalkRoomFootprint& room : footprints) {
+        QRectF room_rect = content;
+        if (footprints.size() > 1) {
+            const QPointF top_left = world_to_map(
+                {room.minimum.x, room.maximum.y, 0.0f});
+            const QPointF bottom_right = world_to_map(
+                {room.maximum.x, room.minimum.y, 0.0f});
+            room_rect = QRectF(top_left, bottom_right).normalized();
+        }
+        painter.drawRect(room_rect);
+        const qreal wall_inset = std::min(
+            7.0, std::min(room_rect.width(), room_rect.height()) * 0.08);
+        painter.setBrush(QColor(35, 38, 42));
+        painter.drawRect(room_rect.adjusted(
+            wall_inset, wall_inset, -wall_inset, -wall_inset));
+        painter.setBrush(QColor(94, 82, 68));
+    }
+
+    const Vec3 eye = camera_position(camera_);
+    Vec3 forward = normalize(rotate(
+        camera_.orientation, {0.0f, 0.0f, -1.0f}));
+    forward.z = 0.0f;
+    forward = normalize(forward);
+    const QPointF camera_point = world_to_map(eye);
+    const qreal arrow_length = 18.0;
+    const QPointF arrow_end(
+        camera_point.x() + forward.x * arrow_length,
+        camera_point.y() - forward.y * arrow_length);
+    painter.setPen(QPen(QColor(255, 72, 62), 2.5));
+    painter.setBrush(QColor(255, 72, 62));
+    painter.drawLine(camera_point, arrow_end);
+    painter.drawEllipse(camera_point, 4.5, 4.5);
+    painter.end();
+    walk_mini_map_overlay_->setGeometry(panel.toAlignedRect());
+    walk_mini_map_overlay_->setPixmap(QPixmap::fromImage(overlay));
+    walk_mini_map_overlay_->show();
+    walk_mini_map_overlay_->raise();
+}
+
+bool OpenGLViewport::PlaceWalkCameraFromMiniMap(const QPoint& point) {
+    if (!WalkMiniMapRect().contains(point)) return false;
+
+    QRectF content;
+    Vec3 world_minimum{};
+    Vec3 world_maximum{};
+    std::vector<WalkRoomFootprint> footprints;
+    if (!WalkMiniMapTransform(
+            content, world_minimum, world_maximum, footprints)) {
+        emit StatusTextChanged("Walk: create or show a Room first");
+        return true;
+    }
+    if (!content.contains(point)) return true;
+
+    const double x_ratio = (point.x() - content.left()) / content.width();
+    const double y_ratio = (content.bottom() - point.y()) / content.height();
+    Vec3 requested{
+        static_cast<float>(world_minimum.x
+            + x_ratio * (world_maximum.x - world_minimum.x)),
+        static_cast<float>(world_minimum.y
+            + y_ratio * (world_maximum.y - world_minimum.y)),
+        0.0f};
+
+    const WalkRoomFootprint* selected_room = nullptr;
+    for (const WalkRoomFootprint& room : footprints) {
+        if (requested.x >= room.minimum.x && requested.x <= room.maximum.x
+            && requested.y >= room.minimum.y && requested.y <= room.maximum.y) {
+            selected_room = &room;
+            break;
+        }
+    }
+    if (!selected_room) {
+        emit StatusTextChanged("Walk: click inside a room on the map");
+        return true;
+    }
+
+    const float inset_x = std::min(
+        250.0f, (selected_room->maximum.x - selected_room->minimum.x) * 0.1f);
+    const float inset_y = std::min(
+        250.0f, (selected_room->maximum.y - selected_room->minimum.y) * 0.1f);
+    requested.x = std::clamp(
+        requested.x,
+        selected_room->minimum.x + inset_x,
+        selected_room->maximum.x - inset_x);
+    requested.y = std::clamp(
+        requested.y,
+        selected_room->minimum.y + inset_y,
+        selected_room->maximum.y - inset_y);
+    requested.z = selected_room->maximum.z + 1600.0f;
+
+    Vec3 forward = rotate(camera_.orientation, {0.0f, 0.0f, -1.0f});
+    forward.z = 0.0f;
+    forward = normalize(forward);
+    if (dot(forward, forward) <= 0.00001f) {
+        forward = {0.0f, -1.0f, 0.0f};
+    }
+    camera_.distance = 2500.0f;
+    camera_.orientation = z_up_orientation_from_forward(
+        forward, rotate(camera_.orientation, {1.0f, 0.0f, 0.0f}));
+    camera_.target = requested + forward * camera_.distance;
+    emit StatusTextChanged(
+        "Walk: arrows move, left mouse rotates, click the map to relocate, Esc exits");
+    update();
+    return true;
+}
+
+void OpenGLViewport::MoveWalkCamera(
+    int key, Qt::KeyboardModifiers modifiers) {
+    Vec3 forward = rotate(camera_.orientation, {0.0f, 0.0f, -1.0f});
+    forward.z = 0.0f;
+    forward = normalize(forward);
+    if (dot(forward, forward) <= 0.00001f) {
+        forward = {0.0f, -1.0f, 0.0f};
+    }
+    Vec3 right = rotate(camera_.orientation, {1.0f, 0.0f, 0.0f});
+    right.z = 0.0f;
+    right = normalize(right);
+    if (dot(right, right) <= 0.00001f) {
+        right = normalize(cross(forward, {0.0f, 0.0f, 1.0f}));
+    }
+
+    float step = 150.0f;
+    if (modifiers.testFlag(Qt::ShiftModifier)) step = 50.0f;
+    if (modifiers.testFlag(Qt::ControlModifier)) step = 500.0f;
+    Vec3 delta{};
+    if (key == Qt::Key_Left) delta = right * -step;
+    if (key == Qt::Key_Right) delta = right * step;
+    if (key == Qt::Key_Up) delta = forward * step;
+    if (key == Qt::Key_Down) delta = forward * -step;
+    camera_.target = camera_.target + delta;
+    update();
+}
+
 void OpenGLViewport::UpdateFPS()
 {
     int now = static_cast<int>(GetTickCount64());
@@ -8453,5 +9033,7 @@ void OpenGLViewport::DrawFPS()
     painter.setFont(fps_font);
     QString fps_text = DomTranslate("FPS: %1").arg(m_fps, 0, 'f', 1);
     painter.setPen(Qt::yellow);
-	painter.drawText(QPoint(10, 20), fps_text);
+    const int text_y = tool_ == ToolMode::Walk
+        ? static_cast<int>(WalkMiniMapRect().bottom()) + 20 : 20;
+	painter.drawText(QPoint(10, text_y), fps_text);
 }

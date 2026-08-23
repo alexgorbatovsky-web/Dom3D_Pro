@@ -26,6 +26,7 @@ public:
 
 signals:
     void ParametersChanged();
+    void MaterialParameterChanged(const QString& parameter_id);
     void Applied();
     void Accepted();
     void Canceled();

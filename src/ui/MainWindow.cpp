@@ -24,6 +24,7 @@
 #include "PreferencesDialog.h"
 #include "LightingDialog.h"
 #include "BlenderCyclesDialog.h"
+#include "NativeRaytraceDialog.h"
 #include "../render/RenderScene.h"
 #include "LanguageManager.h"
 #include "HotkeyManagerDialog.h"
@@ -1271,6 +1272,30 @@ QIcon ZoomRectIcon() {
     painter.drawEllipse(QRectF(8.0, 8.0, 8.0, 8.0));
     painter.drawLine(QPointF(14.3, 14.3), QPointF(19.0, 19.0));
     painter.end();
+    return QIcon(pixmap);
+}
+
+QIcon WalkCameraIcon() {
+    QPixmap pixmap(24, 24);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(QPen(QColor(48, 52, 57), 1.7, Qt::SolidLine,
+                        Qt::RoundCap, Qt::RoundJoin));
+    painter.setBrush(QColor(214, 222, 228));
+    painter.drawRoundedRect(QRectF(3.0, 5.5, 12.0, 10.0), 2.0, 2.0);
+    QPainterPath lens;
+    lens.moveTo(15.0, 8.0);
+    lens.lineTo(21.0, 5.5);
+    lens.lineTo(21.0, 15.5);
+    lens.lineTo(15.0, 13.0);
+    lens.closeSubpath();
+    painter.setBrush(QColor(102, 166, 206));
+    painter.drawPath(lens);
+    painter.setPen(QPen(QColor(218, 63, 54), 1.8,
+                        Qt::SolidLine, Qt::RoundCap));
+    painter.drawLine(QPointF(6.0, 19.0), QPointF(10.0, 16.0));
+    painter.drawLine(QPointF(10.0, 16.0), QPointF(14.0, 19.0));
     return QIcon(pixmap);
 }
 
@@ -2711,9 +2736,10 @@ MainWindow::MainWindow(QWidget* parent)
             TryStartLivePolylineExtrudeFromSelection();
         } else if (active_parametric_object_.tool_id == "SurfaceOfRevolution") {
             TryStartLivePolylineRevolveFromSelection();
-        } else if (active_parametric_object_.tool_id == "SurfaceRuled") {
-            // The generated surface is the live preview. Keep its parameter
-            // panel open while the user inspects/selects the result.
+        } else if (active_parametric_object_.tool_id == "SurfaceRuled"
+                   || active_parametric_object_.tool_id == "SolidShell") {
+            // The generated surface/solid is the live preview. Keep its
+            // parameter panel open while the user inspects the result.
         } else if (active_parametric_object_.tool_id != "ThickSolidTool"
             && active_parametric_object_.tool_id != "TrimByPlane"
             && active_parametric_object_.tool_id != "TrimBySketch"
@@ -2812,6 +2838,10 @@ MainWindow::MainWindow(QWidget* parent)
                 2200);
         }
     });
+    connect(viewport_, &OpenGLViewport::ArchitectureWallPicked,
+            this, &MainWindow::CompleteArchitectureOpeningPlacement);
+    connect(viewport_, &OpenGLViewport::ArchitectureWallPickCanceled,
+            this, &MainWindow::CancelArchitectureOpeningPlacement);
     connect(viewport_, &OpenGLViewport::XYPointPicked, this, [this](CPoint3d point) {
         if (drawing_text_placement_pending_) {
             CompleteDrawingTextPlacement(point);
@@ -3345,6 +3375,8 @@ MainWindow::MainWindow(QWidget* parent)
         }
         if (tool == ToolMode::Orbit) {
             UpdateActiveToolUi("orbit");
+        } else if (tool == ToolMode::Walk) {
+            UpdateActiveToolUi("walk");
         } else if (tool == ToolMode::ZoomRect) {
             UpdateActiveToolUi("zoom_rect");
         } else if (tool == ToolMode::Select) {
@@ -3649,6 +3681,110 @@ MainWindow::MainWindow(QWidget* parent)
         } else {
             statusBar()->showMessage("Object rebuilt", 1200);
         }
+    });
+    connect(property_panel_, &PropertyPanel::MaterialParameterChanged, this,
+            [this](const QString& parameter_id) {
+        active_parametric_object_ = property_panel_->ActiveObject();
+        const std::string id = parameter_id.toStdString();
+
+        if (!IsCabinetTool(active_parametric_object_.tool_id)
+            || !active_parametric_edit_existing_
+            || active_parametric_object_.object_index
+                   >= document_.GetObjects().size()) {
+            if (IsCabinetTool(active_parametric_object_.tool_id)) {
+                active_cabinet_parameters_dirty_ = true;
+                viewport_->SetSolidDimensionEdit(active_parametric_object_);
+                viewport_->SetCabinetPreviewVisible(true);
+                viewport_->update();
+                statusBar()->showMessage(
+                    "Cabinet material selected. Press Apply to build.");
+            } else {
+                tool_registry_.Rebuild(active_parametric_object_, document_);
+                RefreshSceneTree();
+                viewport_->update();
+            }
+            return;
+        }
+
+        auto* assembly = dynamic_cast<CAssembled*>(
+            document_.GetObjects()[active_parametric_object_.object_index].get());
+        if (!assembly) {
+            return;
+        }
+
+        struct MaterialState {
+            unsigned long object_id = 0;
+            Material material;
+            unsigned long material_id = 0;
+        };
+        const auto capture_materials = [this](const CAssembled& source) {
+            std::vector<MaterialState> states;
+            states.reserve(source.GetElementIds().size());
+            for (unsigned long object_id : source.GetElementIds()) {
+                const CAlfaObject* object = document_.FindObjectById(object_id);
+                if (object) {
+                    states.push_back({
+                        object_id, object->GetMaterial(), object->GetMaterialId()});
+                }
+            }
+            return states;
+        };
+
+        const unsigned long assembly_id = assembly->m_id;
+        const std::string tool_id = assembly->GetParametricToolId();
+        const std::vector<ParametricParameterValue> before_parameters =
+            assembly->GetParametricParameters();
+        const std::vector<MaterialState> before_materials =
+            capture_materials(*assembly);
+
+        if (!tool_registry_.ApplyFurnitureMaterialParameter(
+                active_parametric_object_, document_, id)) {
+            active_cabinet_parameters_dirty_ = true;
+            statusBar()->showMessage(
+                "Material will be applied when the cabinet is rebuilt", 1800);
+            return;
+        }
+
+        assembly = dynamic_cast<CAssembled*>(
+            document_.FindObjectById(assembly_id));
+        if (!assembly) {
+            return;
+        }
+        const std::vector<ParametricParameterValue> after_parameters =
+            assembly->GetParametricParameters();
+        const std::vector<MaterialState> after_materials =
+            capture_materials(*assembly);
+        const auto apply_state = [assembly_id, tool_id](
+                                     CAlfaDoc& document,
+                                     const std::vector<MaterialState>& materials,
+                                     const std::vector<ParametricParameterValue>& parameters) {
+            auto* target = dynamic_cast<CAssembled*>(
+                document.FindObjectById(assembly_id));
+            if (!target) {
+                return false;
+            }
+            target->SetParametricDefinition(tool_id, parameters);
+            for (const MaterialState& state : materials) {
+                CAlfaObject* object = document.FindObjectById(state.object_id);
+                if (!object) {
+                    continue;
+                }
+                object->SetMaterial(state.material);
+                object->SetMaterialId(state.material_id);
+            }
+            return true;
+        };
+        undo_redo_.RecordCommand(
+            "Change cabinet material",
+            [before_materials, before_parameters, apply_state](CAlfaDoc& document) {
+                return apply_state(document, before_materials, before_parameters);
+            },
+            [after_materials, after_parameters, apply_state](CAlfaDoc& document) {
+                return apply_state(document, after_materials, after_parameters);
+            });
+        UpdateUndoRedoActions();
+        viewport_->update();
+        statusBar()->showMessage("Cabinet material applied", 1200);
     });
     connect(property_panel_, &PropertyPanel::MaterialLibraryRequested, this,
             [this](const QString& parameter_id) {
@@ -4077,6 +4213,25 @@ void MainWindow::StartFurnitureInteraction(unsigned long object_id) {
                 facade_name.find("Left Facade") != std::string::npos;
             const bool right_door =
                 facade_name.find("Right Facade") != std::string::npos;
+            std::set<unsigned long> preview_leaf_ids;
+            std::function<void(unsigned long)> append_preview_leaves;
+            append_preview_leaves = [&](unsigned long object_id) {
+                const CAlfaObject* object =
+                    document_.FindObjectById(object_id);
+                if (!object) {
+                    return;
+                }
+                if (const auto* group = dynamic_cast<const CGroup*>(object)) {
+                    for (unsigned long detail_id : group->GetElementIds()) {
+                        append_preview_leaves(detail_id);
+                    }
+                    return;
+                }
+                if (dynamic_cast<const CSolid*>(object)
+                    && preview_leaf_ids.insert(object_id).second) {
+                    furniture_animation_preview_ids_.push_back(object_id);
+                }
+            };
             for (unsigned long child_id : cabinet->GetElementIds()) {
                 const CAlfaObject* child = document_.FindObjectById(child_id);
                 if (!child) {
@@ -4089,7 +4244,11 @@ void MainWindow::StartFurnitureInteraction(unsigned long object_id) {
                         ? child_name.find("Right Facade") != std::string::npos
                         : child_name.find("Facade") != std::string::npos;
                 if (same_door) {
-                    furniture_animation_preview_ids_.push_back(child_id);
+                    // Milano radius facades are CFacadeFurniture groups made
+                    // from five solids. PreviewRotate operates on CSolid, so
+                    // expand matching facade groups to their leaf details;
+                    // direct handle solids are collected by the same path.
+                    append_preview_leaves(child_id);
                 }
             }
             furniture_animation_preview_value_ =
@@ -4757,6 +4916,9 @@ void MainWindow::CreateActions() {
     render_menu->addAction("Blender Cycles...", this, [this]() {
         ShowBlenderCyclesDialog();
     });
+    render_menu->addAction("Dom3D Native Raytrace...", this, [this]() {
+        ShowNativeRaytraceDialog();
+    });
     render_menu->addAction("View Last Render", this, [this]() {
         ViewLastRenderResult();
     });
@@ -4974,6 +5136,27 @@ void MainWindow::CreateActions() {
     projection_status_label_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     projection_status_label_->setStyleSheet("QLabel { color: #777777; padding-right: 4px; }");
     statusBar()->addPermanentWidget(projection_status_label_);
+    camera_fov_spin_ = new QDoubleSpinBox(this);
+    camera_fov_spin_->setRange(20.0, 100.0);
+    camera_fov_spin_->setDecimals(0);
+    camera_fov_spin_->setSingleStep(1.0);
+    camera_fov_spin_->setPrefix("FOV ");
+    camera_fov_spin_->setSuffix(QString::fromUtf8("\u00b0"));
+    camera_fov_spin_->setValue(viewport_->GetVerticalFovDegrees());
+    camera_fov_spin_->setMinimumWidth(88);
+    camera_fov_spin_->setToolTip(
+        "Vertical camera field of view. Default: 50 degrees. Used by Walk and Render.");
+    statusBar()->addPermanentWidget(camera_fov_spin_);
+    connect(camera_fov_spin_, qOverload<double>(&QDoubleSpinBox::valueChanged),
+            this, [this](double value) {
+                viewport_->SetVerticalFovDegrees(static_cast<float>(value));
+            });
+    connect(viewport_, &OpenGLViewport::CameraFieldOfViewChanged,
+            this, [this](float value) {
+                if (!camera_fov_spin_) return;
+                const QSignalBlocker blocker(camera_fov_spin_);
+                camera_fov_spin_->setValue(value);
+            });
     UpdateProjectionStatus();
 
     auto* transparent_solid_action = view_menu->addAction("Transparent Solid Surfaces", this, [this](bool checked) {
@@ -4987,6 +5170,11 @@ void MainWindow::CreateActions() {
     transparent_solid_action->setChecked(CSolid::IsSurfaceTransparencyEnabled());
 
     auto* orbit_action = add_action("Orbit", {}, [this]() { SetTool(ToolMode::Orbit, "Orbit camera"); });
+    auto* walk_action = add_action("Walk Through Room", {}, [this]() {
+        SetTool(ToolMode::Walk,
+                "Walk: click inside a room on the map; arrows move; left mouse rotates; Esc exits");
+    });
+    walk_action->setIcon(WalkCameraIcon());
     auto* select_action = add_action("Select", {}, [this]() { SetTool(ToolMode::Select, "Select objects"); });
     auto* zoom_rect_action = add_action("Zoom By Rect", QKeySequence(Qt::Key_F2), [this]() {
         SetTool(ToolMode::ZoomRect, "Zoom By Rect: drag the area to enlarge");
@@ -5052,6 +5240,7 @@ void MainWindow::CreateActions() {
             CommandSearchPopup::Show(this);
         });
     RegisterToolAction(orbit_action, "orbit");
+    RegisterToolAction(walk_action, "walk");
     RegisterToolAction(select_action, "select");
     RegisterToolAction(zoom_rect_action, "zoom_rect");
     zoom_rect_action->setIcon(ZoomRectIcon());
@@ -5079,6 +5268,7 @@ void MainWindow::CreateActions() {
     tools_menu->addAction(find_command_action);
     tools_menu->addSeparator();
     tools_menu->addAction(orbit_action);
+    tools_menu->addAction(walk_action);
     tools_menu->addAction(select_action);
     tools_menu->addAction(zoom_rect_action);
     tools_menu->addAction(curve_action);
@@ -5504,6 +5694,10 @@ void MainWindow::CreateVerticalToolBar() {
 
     add_direct_button("Orbit camera", "orbit", ToolIcon("orbit"), "Or", [this]() {
         SetTool(ToolMode::Orbit, "Orbit camera");
+    });
+    add_direct_button("Walk through room", "walk", WalkCameraIcon(), "Walk", [this]() {
+        SetTool(ToolMode::Walk,
+                "Walk: click inside a room on the map; arrows move; left mouse rotates; Esc exits");
     });
     add_direct_button("Select objects", "select", ToolIcon("select"), "Sel", [this]() {
         SetTool(ToolMode::Select, "Select objects");
@@ -6637,9 +6831,17 @@ void MainWindow::SetTool(ToolMode tool, const QString& status_text) {
         viewport_->SetSelectionConfirmationMode(false);
     }
     ClearActiveProperties();
+    if (tool == ToolMode::Walk) {
+        viewport_->SetOrthographicProjection(false);
+        viewport_->SetXYPlaneViewEnabled(false);
+        viewport_->SetOrbitMode(OrbitMode::Architectural);
+        UpdateProjectionStatus();
+    }
     viewport_->SetTool(tool);
     if (tool == ToolMode::Orbit) {
         UpdateActiveToolUi("orbit");
+    } else if (tool == ToolMode::Walk) {
+        UpdateActiveToolUi("walk");
     } else if (tool == ToolMode::ZoomRect) {
         UpdateActiveToolUi("zoom_rect");
     } else if (tool == ToolMode::Select) {
@@ -9855,11 +10057,57 @@ void MainWindow::ApplyMaterialToSelection(const Material& material) {
     if (CSolid* solid = document_.GetSelectedFaceSolid();
         solid && !solid->GetSelectedFaceIndices().empty()) {
         const Material& document_material = document_.UpsertMaterial(material);
-        const int face_count = static_cast<int>(solid->GetSelectedFaceIndices().size());
+        struct FaceMaterialChange {
+            int surface_index = -1;
+            SurfaceMaterialOverride before;
+            SurfaceMaterialOverride after;
+        };
+        const unsigned long solid_id = solid->m_id;
+        std::vector<FaceMaterialChange> changes;
+        changes.reserve(solid->GetSelectedFaceIndices().size());
+        for (int surface_index : solid->GetSelectedFaceIndices()) {
+            const CSurfaceFace* surface = solid->GetSurfaceFace(surface_index);
+            if (surface) {
+                changes.push_back({surface_index, surface->MaterialOverride, {}});
+            }
+        }
         solid->SetSelectedSurfaceMaterial(document_material);
-        RecordDocumentChange("Apply material");
+        for (FaceMaterialChange& change : changes) {
+            const CSurfaceFace* surface = solid->GetSurfaceFace(change.surface_index);
+            if (surface) change.after = surface->MaterialOverride;
+        }
+        const auto apply_face_materials = [solid_id](
+            CAlfaDoc& document,
+            const std::vector<FaceMaterialChange>& values,
+            bool use_after) {
+            auto* target = dynamic_cast<CSolid*>(
+                document.FindObjectById(solid_id));
+            if (!target) return false;
+            bool changed = false;
+            for (const FaceMaterialChange& value : values) {
+                CSurfaceFace* surface = target->GetSurfaceFace(
+                    value.surface_index);
+                if (!surface) continue;
+                surface->MaterialOverride = use_after
+                    ? value.after : value.before;
+                changed = true;
+            }
+            return changed;
+        };
+        if (!changes.empty()) {
+            undo_redo_.RecordCommand(
+                "Apply material",
+                [changes, apply_face_materials](CAlfaDoc& document) {
+                    return apply_face_materials(document, changes, false);
+                },
+                [changes, apply_face_materials](CAlfaDoc& document) {
+                    return apply_face_materials(document, changes, true);
+                });
+            UpdateUndoRedoActions();
+        }
         viewport_->update();
-        statusBar()->showMessage(QString("Material applied to %1 surface(s)").arg(face_count), 1400);
+        statusBar()->showMessage(QString("Material applied to %1 surface(s)")
+            .arg(changes.size()), 1400);
         return;
     }
     const std::vector<size_t> selected_indices = document_.GetSelectedObjectIndices();
@@ -9870,21 +10118,58 @@ void MainWindow::ApplyMaterialToSelection(const Material& material) {
 
     const Material& document_material = document_.UpsertMaterial(material);
     auto& objects = document_.GetObjects();
-    int applied = 0;
+    struct ObjectMaterialChange {
+        unsigned long object_id = 0;
+        Material before;
+        unsigned long before_id = 0;
+        Material after;
+        unsigned long after_id = 0;
+    };
+    std::vector<ObjectMaterialChange> changes;
+    changes.reserve(selected_indices.size());
     for (size_t index : selected_indices) {
         if (index < objects.size() && objects[index]) {
+            ObjectMaterialChange change;
+            change.object_id = objects[index]->m_id;
+            change.before = objects[index]->GetMaterial();
+            change.before_id = objects[index]->GetMaterialId();
             objects[index]->SetMaterial(document_material);
             objects[index]->SetMaterialId(document_material.id);
-            ++applied;
+            change.after = objects[index]->GetMaterial();
+            change.after_id = objects[index]->GetMaterialId();
+            changes.push_back(std::move(change));
         }
     }
 
-    if (applied > 0) {
-        RecordDocumentChange("Apply material");
+    const auto apply_object_materials = [](
+        CAlfaDoc& document,
+        const std::vector<ObjectMaterialChange>& values,
+        bool use_after) {
+        bool changed = false;
+        for (const ObjectMaterialChange& value : values) {
+            CAlfaObject* object = document.FindObjectById(value.object_id);
+            if (!object) continue;
+            object->SetMaterial(use_after ? value.after : value.before);
+            object->SetMaterialId(use_after
+                ? value.after_id : value.before_id);
+            changed = true;
+        }
+        return changed;
+    };
+    if (!changes.empty()) {
+        undo_redo_.RecordCommand(
+            "Apply material",
+            [changes, apply_object_materials](CAlfaDoc& document) {
+                return apply_object_materials(document, changes, false);
+            },
+            [changes, apply_object_materials](CAlfaDoc& document) {
+                return apply_object_materials(document, changes, true);
+            });
+        UpdateUndoRedoActions();
     }
-    RefreshSceneTree();
     viewport_->update();
-    statusBar()->showMessage(QString("Material applied to %1 object(s)").arg(applied), 1400);
+    statusBar()->showMessage(QString("Material applied to %1 object(s)")
+        .arg(changes.size()), 1400);
 }
 
 void MainWindow::ShowSurfaceFilmDialog(size_t object_index, int operation_index) {
@@ -11715,6 +12000,49 @@ void MainWindow::ApplySheetBend() {
         3000);
 }
 
+void MainWindow::CompleteArchitectureOpeningPlacement(
+    unsigned long wall_id, CPoint3d point) {
+    if (pending_architecture_opening_tool_id_.empty()) return;
+    const std::string tool_id = pending_architecture_opening_tool_id_;
+    active_parametric_object_ =
+        tool_registry_.ActivateArchitectureOpening(
+            tool_id, document_, wall_id, point);
+    if (active_parametric_object_.tool_id.empty()) {
+        viewport_->BeginPickArchitectureWall(
+            "Window / Door: click a visible room wall");
+        statusBar()->showMessage(
+            "Window / Door: the clicked object is not a visible room wall");
+        return;
+    }
+
+    pending_architecture_opening_tool_id_.clear();
+    active_parametric_edit_existing_ = false;
+    property_panel_->SetActiveObject(active_parametric_object_);
+    ShowPropertyPanelAtCursor(
+        QString::fromStdString(tool_registry_.LabelFor(tool_id)));
+    document_.ClearSelection();
+    viewport_->SetTool(ToolMode::Select);
+    UpdateActiveToolUi(tool_id);
+    RefreshSceneTree();
+    viewport_->update();
+    statusBar()->showMessage(
+        QString("%1 placed on wall; adjust the exact distance with the slider")
+            .arg(QString::fromStdString(tool_registry_.LabelFor(tool_id))),
+        2600);
+}
+
+void MainWindow::CancelArchitectureOpeningPlacement() {
+    if (pending_architecture_opening_tool_id_.empty()) return;
+    pending_architecture_opening_tool_id_.clear();
+    active_parametric_object_ = {};
+    active_parametric_edit_existing_ = false;
+    property_panel_->Clear();
+    if (properties_dock_) properties_dock_->hide();
+    viewport_->SetTool(ToolMode::Select);
+    UpdateActiveToolUi("select");
+    statusBar()->showMessage("Window / Door placement canceled", 1400);
+}
+
 void MainWindow::ActivateParametricTool(const std::string& tool_id) {
     const bool curve_edit_tool = tool_id == "CurveJoin"
         || tool_id == "CurveSplit"
@@ -11727,8 +12055,28 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         CancelCurveEditCommand();
     }
     active_parametric_edit_existing_ = false;
+    if (tool_id != "window" && tool_id != "door") {
+        viewport_->CancelArchitectureWallPick();
+        pending_architecture_opening_tool_id_.clear();
+    }
     if (tool_id != "SolidLowPoly") {
         low_poly_pick_pending_ = false;
+    }
+    if (tool_id == "window" || tool_id == "door") {
+        ClearActiveProperties();
+        if (tool_registry_.HasVisibleArchitectureWalls(document_)) {
+            pending_architecture_opening_tool_id_ = tool_id;
+            document_.ClearSelection();
+            viewport_->SetTool(ToolMode::Select);
+            viewport_->SetSelectionMode(SelectionMode::Object);
+            viewport_->BeginPickArchitectureWall(
+                QString("%1: click the approximate position on a visible wall")
+                    .arg(QString::fromStdString(
+                        tool_registry_.LabelFor(tool_id))));
+            UpdateActiveToolUi(tool_id);
+            return;
+        }
+        pending_architecture_opening_tool_id_.clear();
     }
     if (tool_id == "PlaneTool") {
         ClearActiveProperties();
@@ -12664,7 +13012,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         active_parametric_object_ = tool_registry_.PrepareParametricObject(
             tool_id, document_, parameters);
         active_cabinet_parameters_dirty_ = true;
-    } else {
+    } else if (tool_id != "SurfaceRuled" && tool_id != "SolidShell") {
         if (IsFurnitureAssemblyTool(tool_id)) {
             undo_redo_.BeginChange();
         }
@@ -12723,6 +13071,53 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
             "Ruled Surface:adjust the required parameters and continue");
         return;
     }
+    if (tool_id == "SolidShell") {
+        ClearActiveProperties();
+        CSolid* source = document_.HasSelectedSolidFace()
+            ? document_.GetSelectedFaceSolid()
+            : document_.GetSelectedSolid();
+        int face_index = source && source->HasSelectedFace()
+            ? source->GetSelectedFaceIndex() : -1;
+        if (source && face_index < 0 && source->GetNumSurfaces() == 1) {
+            face_index = 0;
+        }
+        if (!source || face_index < 0 || !source->GetSurfaceFace(face_index)) {
+            UpdateActiveToolUi("select");
+            statusBar()->showMessage(
+                "Shell:select one surface face and continue", 2400);
+            return;
+        }
+
+        document_.EnsureObjectId(*source);
+        const ToolDefinition* definition = tool_registry_.Find(tool_id);
+        std::vector<ToolParameter> parameters = definition
+            ? definition->defaults : std::vector<ToolParameter>{};
+        for (ToolParameter& parameter : parameters) {
+            if (parameter.id == "surface.id") {
+                parameter.value = static_cast<double>(source->m_id);
+            } else if (parameter.id == "face.index") {
+                parameter.value = static_cast<double>(face_index);
+            }
+        }
+        active_parametric_object_ = tool_registry_.CreateParametricObject(
+            tool_id, document_, parameters);
+        if (active_parametric_object_.tool_id.empty()) {
+            UpdateActiveToolUi("select");
+            statusBar()->showMessage(
+                "Shell:operation failed; check the surface and distance", 2600);
+            return;
+        }
+        property_panel_->SetActiveObject(active_parametric_object_);
+        ShowPropertyPanelAtCursor("Shell");
+        viewport_->SetTool(ToolMode::Select);
+        viewport_->SetSelectionMode(SelectionMode::Object);
+        UpdateActiveToolUi(tool_id);
+        RefreshSceneTree();
+        viewport_->update();
+        statusBar()->showMessage(
+            "Shell:adjust the distance and continue");
+        return;
+    }
     if (!active_parametric_object_.tool_id.empty()) {
         property_panel_->SetActiveObject(active_parametric_object_);
         ShowPropertyPanelAtCursor(QString::fromStdString(tool_registry_.LabelFor(tool_id)));
@@ -12745,7 +13140,8 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         IsFurnitureAssemblyTool(active_parametric_object_.tool_id)
             ? ToolMode::Orbit
             : ToolMode::Select);
-    if ((tool_id == "chair" || tool_id == "chair_simple" || tool_id == "table" || tool_id == "desk" || tool_id == "drawer_box" || tool_id == "single_drawer" || tool_id == "single_facade" || tool_id == "kitchen_nika_260" || tool_id == "kitchen_corner")
+    if ((tool_id == "room" || tool_id == "window" || tool_id == "door"
+         || tool_id == "chair" || tool_id == "chair_simple" || tool_id == "table" || tool_id == "desk" || tool_id == "drawer_box" || tool_id == "single_drawer" || tool_id == "single_facade" || tool_id == "kitchen_nika_260" || tool_id == "kitchen_corner")
         && !active_parametric_object_.tool_id.empty()) {
         viewport_->FitToDocument();
     }
@@ -13701,6 +14097,9 @@ void MainWindow::AcceptActiveProperties() {
     const bool created_ruled_surface =
         !active_parametric_edit_existing_
         && active_parametric_object_.tool_id == "SurfaceRuled";
+    const bool created_shell =
+        !active_parametric_edit_existing_
+        && active_parametric_object_.tool_id == "SolidShell";
     if (!active_parametric_edit_existing_
         && IsCabinetTool(active_parametric_object_.tool_id)
         && active_parametric_object_.object_index
@@ -13981,6 +14380,9 @@ void MainWindow::AcceptActiveProperties() {
     if (created_ruled_surface) {
         RecordDocumentChange("Create ruled surface");
     }
+    if (created_shell) {
+        RecordDocumentChange("Create shell");
+    }
 
     active_parametric_object_ = {};
     active_parametric_edit_existing_ = false;
@@ -14123,6 +14525,7 @@ void MainWindow::CancelActiveProperties() {
             }
             document_.ClearSelection();
         }
+        tool_registry_.RebuildArchitectureRooms(document_);
     }
 
     if (canceling_new_furniture) {
@@ -14250,6 +14653,8 @@ QIcon MainWindow::ToolIcon(const std::string& key) const {
         return LoftSurfaceIcon();
     } else if (icon_key == "SurfaceRuled") {
         return LoftSurfaceIcon();
+    } else if (icon_key == "SolidShell") {
+        return QIcon(":/icons/ThickSolidTool.png");
     } else if (icon_key == "SurfaceSweepTwoRails") {
         return QIcon(":/icons/SurfaceSweepTwoRails.png");
     } else if (icon_key == "SurfaceFourSplines") {
@@ -14281,6 +14686,8 @@ QIcon MainWindow::ToolIcon(const std::string& key) const {
         icon_key = "cabinet";
     } else if (icon_key == "PlaneTool") {
         icon_key = "SurfaceOfRevolution";
+    } else if (icon_key == "room") {
+        icon_key = "stair";
     } else if (icon_key == "SolidOffsetFace") {
         icon_key = "SolidExtrudeFace";
     }
@@ -14580,6 +14987,18 @@ void MainWindow::ShowBlenderCyclesDialog() {
         viewport_->IsOrthographicProjection(),
         viewport_->GetBackgroundColor());
     auto* dialog = new BlenderCyclesDialog(
+        std::move(scene), viewport_->size(), this);
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
+}
+
+void MainWindow::ShowNativeRaytraceDialog() {
+    RenderScene scene = BuildRenderScene(
+        document_, viewport_->GetCamera(),
+        viewport_->IsOrthographicProjection(),
+        viewport_->GetBackgroundColor());
+    auto* dialog = new NativeRaytraceDialog(
         std::move(scene), viewport_->size(), this);
     dialog->show();
     dialog->raise();
@@ -15579,6 +15998,7 @@ void MainWindow::DeleteSelected() {
     }
     undo_redo_.BeginChange();
     if (document_.DeleteSelectedPoint() || document_.DeleteSelectedObject()) {
+        tool_registry_.RebuildArchitectureRooms(document_);
         undo_redo_.CommitChange("Delete selected");
         UpdateUndoRedoActions();
         ClearActiveProperties();
@@ -15734,7 +16154,7 @@ void MainWindow::PopulateToolsPanelForTab(int tab_index) {
 
     std::vector<std::string> tool_ids;
     if (tab == "Architecture") {
-        tool_ids = {"stair", "window", "door"};
+        tool_ids = {"room", "window", "door"};
     } else if (tab == "Furniture") {
         tool_ids = {"chair_simple", "chair", "cabinet", "cabinet_advanced",
                     "cabinet_showcase", "cabinet_advanced_slx",
@@ -15746,7 +16166,7 @@ void MainWindow::PopulateToolsPanelForTab(int tab_index) {
     } else if (tab == "Surfaces") {
         tool_ids = {"PlaneTool", "SurfaceRuled", "SurfaceLoft", "SurfaceSweepTwoRails", "SurfaceFourSplines", "SurfaceJoin", "SurfaceReverseNormals", "SurfaceOfRevolution"};
     } else if (tab == "Solid") {
-        tool_ids = {"SolidBeamTool", "SolidBox", "SolidCylinder", "SolidSphereTool", "SolidTorusTool", "SolidPrismTool", "SolidExtrudeTool", "SolidTwoSketches", "SolidSketchFeature", "SolidSweptTool", "SolidSweepTwoRails", "SolidFrameTool", "SolidWireTool", "SolidPolyhedronTool", "TrimByPlane", "TrimBySketch", "TrimBySurface", "SurfaceOfRevolution", "boolean", "fillet_edge", "ChamferSolid", "SolidExtrudeFace", "SolidOffsetFace", "SolidDraft", "SolidSheetBend", "ThickSolidTool"};
+        tool_ids = {"SolidBeamTool", "SolidBox", "SolidCylinder", "SolidSphereTool", "SolidTorusTool", "SolidPrismTool", "SolidExtrudeTool", "SolidTwoSketches", "SolidSketchFeature", "SolidSweptTool", "SolidSweepTwoRails", "SolidFrameTool", "SolidWireTool", "SolidPolyhedronTool", "TrimByPlane", "TrimBySketch", "TrimBySurface", "SurfaceOfRevolution", "boolean", "fillet_edge", "ChamferSolid", "SolidExtrudeFace", "SolidOffsetFace", "SolidDraft", "SolidSheetBend", "ThickSolidTool", "SolidShell"};
     }
 
     int index = 0;

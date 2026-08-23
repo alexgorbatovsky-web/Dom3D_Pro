@@ -9,6 +9,7 @@
 
 #include <QOpenGLWidget>
 #include <QColor>
+#include <QRectF>
 #include <QString>
 #include <QStringList>
 
@@ -16,6 +17,7 @@
 #include <vector>
 
 class QKeyEvent;
+class QLabel;
 
 class OpenGLViewport : public QOpenGLWidget {
     Q_OBJECT
@@ -56,6 +58,8 @@ public:
     void SetOrthographicProjection(bool enabled);
     Camera GetCamera() const;
     void SetCamera(const Camera& camera);
+    float GetVerticalFovDegrees() const;
+    void SetVerticalFovDegrees(float degrees);
     void SetRotationPivot(CPoint3d point);
     void ClearRotationPivot();
     bool HasRotationPivot() const;
@@ -112,6 +116,8 @@ public:
     void BeginPickXYPoint(const QString& prompt = {});
     void BeginPick3DPoint(const QString& prompt = {});
     void BeginPick3DPointOnObject(unsigned long object_id, const QString& prompt = {});
+    void BeginPickArchitectureWall(const QString& prompt = {});
+    void CancelArchitectureWallPick();
     void SetPointPickMarkers(const std::vector<CPoint3d>& points);
     void ClearPointPickMarkers();
     void BeginPickRotationAxis();
@@ -145,12 +151,15 @@ signals:
     void BooleanFinished();
     void MaterialPicked(const Material& material);
     void ToolModeChanged(ToolMode tool);
+    void CameraFieldOfViewChanged(float degrees);
     void XYPointPicked(CPoint3d point);
     void XYPointPickCanceled();
     void Point3DPicked(CPoint3d point);
     void Point3DPickFinished();
     void Point3DPickCloseRequested();
     void Point3DPickCanceled();
+    void ArchitectureWallPicked(unsigned long wall_id, CPoint3d point);
+    void ArchitectureWallPickCanceled();
     void RotationAxisPicked(CPoint3d start, CPoint3d end);
     void RotationAxisPickCanceled();
     void SolidBoxRectangleFinished(std::vector<ToolParameter> parameters);
@@ -176,6 +185,7 @@ protected:
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
+    void keyReleaseEvent(QKeyEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dragMoveEvent(QDragMoveEvent* event) override;
@@ -280,6 +290,19 @@ private:
     void DrawSolidDimensions();
     void DrawPointToPointMeasurement();
     void DrawPointPickMarkers();
+    struct WalkRoomFootprint {
+        Vec3 minimum{};
+        Vec3 maximum{};
+    };
+    std::vector<WalkRoomFootprint> WalkRoomFootprints() const;
+    QRectF WalkMiniMapRect() const;
+    bool WalkMiniMapTransform(QRectF& content_rect,
+                              Vec3& world_minimum,
+                              Vec3& world_maximum,
+                              std::vector<WalkRoomFootprint>& footprints) const;
+    void DrawWalkMiniMap();
+    bool PlaceWalkCameraFromMiniMap(const QPoint& point);
+    void MoveWalkCamera(int key, Qt::KeyboardModifiers modifiers);
     bool ApplyMaterialDrop(const QPoint& point, const Material& material);
     CAlfaObject* FindObjectForMaterialAt(const QPoint& point);
     void CaptureCurvePointChangeBefore();
@@ -292,6 +315,7 @@ private:
     };
 
     CAlfaDoc* document_ = nullptr;
+    QLabel* walk_mini_map_overlay_ = nullptr;
     QtSceneRenderer renderer_;
     Camera camera_;
     Vec3 rotation_pivot_previous_target_{};
@@ -308,6 +332,8 @@ private:
     bool orbiting_ = false;
     bool alt_orbiting_ = false;
     bool panning_ = false;
+    bool alt_navigation_modifier_down_ = false;
+    bool pan_navigation_modifier_down_ = false;
     bool zooming_ = false;
     QPoint right_button_press_{};
     bool right_button_dragged_ = false;
@@ -349,6 +375,7 @@ private:
     bool selection_confirmation_mode_ = false;
     bool picking_xy_point_ = false;
     bool picking_3d_point_ = false;
+    bool picking_architecture_wall_ = false;
     unsigned long point_pick_object_id_ = 0;
     bool picking_rotation_axis_ = false;
     bool rotation_axis_hover_valid_ = false;

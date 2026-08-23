@@ -89,6 +89,8 @@ public:
     void printToFile(std::string Name);
     bool MakePolylineByQtyKnots(CPolyline* pline, int Qty);
     bool Create(CPolyline* pline);
+	bool TrimByPlane(CPlane* pl, CPoint3d* pc);
+    bool Offset(double offset);
 
 public:
     bool ShowPoints;

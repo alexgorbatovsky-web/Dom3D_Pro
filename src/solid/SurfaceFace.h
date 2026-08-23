@@ -14,6 +14,7 @@ class CPolyline;
 class CPoint8d;
 class CSurface;
 class CSplineCurve;
+class CVector;
 class TopoDS_Face;
 class Poly_Triangulation;
 class CMesh3D_XL;
@@ -72,6 +73,7 @@ public:
 	virtual ~CSurfaceFace();
 
 	bool BuldMeshTriangle(float Deflection, float AngDeflection);
+	bool CreateRuled(CSplineCurve* gener, CVector& dir, double dist);
 	bool InitEdges();
 	bool InitEdges3DCoat();
 	bool BuldMesh(float Deflection, bool MeshQuadro);

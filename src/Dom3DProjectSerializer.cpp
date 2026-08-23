@@ -277,6 +277,8 @@ void write_view_state(QXmlStreamWriter& xml, const ProjectViewState& view_state)
 
     xml.writeStartElement("camera");
     xml.writeAttribute("distance", QString::number(view_state.camera.distance, 'g', 9));
+    xml.writeAttribute("verticalFovDegrees", QString::number(
+        view_state.camera.vertical_fov_degrees, 'g', 9));
 
     xml.writeEmptyElement("target");
     xml.writeAttribute("x", QString::number(view_state.camera.target.x, 'g', 9));
@@ -326,6 +328,12 @@ bool read_view_state(const QDomElement& metadata, ProjectViewState& view_state, 
     if (!read_float_attr(camera_element, "distance", camera.distance, error, false)) {
         return false;
     }
+    if (!read_float_attr(camera_element, "verticalFovDegrees",
+                         camera.vertical_fov_degrees, error, false)) {
+        return false;
+    }
+    camera.vertical_fov_degrees = std::clamp(
+        camera.vertical_fov_degrees, 20.0f, 100.0f);
 
     const QDomElement target_element = camera_element.firstChildElement("target");
     if (!target_element.isNull()) {

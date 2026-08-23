@@ -5,6 +5,7 @@
 #include "../ReferenceImage.h"
 #include "../solid/Solid.h"
 #include "../solid/SurfaceFace.h"
+#include "../solid/SurfaceSet.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -66,10 +67,12 @@ int append_material(RenderScene& scene, Material material) {
 void append_mesh(RenderScene& scene,
                  const CMesh3D& source,
                  Material material,
-                 const QString& name) {
+                 const QString& name,
+                 bool independent_surface_patch = false) {
     if (source.GetVertices().empty()) return;
     RenderMesh mesh;
     mesh.name = name;
+    mesh.independent_surface_patch = independent_surface_patch;
     mesh.material_index = append_material(scene, material);
     mesh.vertices = source.GetVertices();
 
@@ -85,6 +88,16 @@ void append_mesh(RenderScene& scene,
             uv_max.v = std::max(uv_max.v, uv.v);
         }
     }
+    // Generated CAD meshes use millimetres for planar UV coordinates, but
+    // analytic curved surfaces can mix units: a cylinder, for example, has
+    // an angular U coordinate and a millimetre V coordinate.  Scaling both
+    // axes when only one is physical collapses the angular coordinate and
+    // stretches the texture into long horizontal streaks. Convert each
+    // physical axis independently; normalized/radian axes stay unchanged.
+    const bool millimeter_u = has_uvs && !material.texture_fit_to_surface
+        && uv_max.u - uv_min.u > 64.0f;
+    const bool millimeter_v = has_uvs && !material.texture_fit_to_surface
+        && uv_max.v - uv_min.v > 64.0f;
 
     for (const CMesh3D::Face& face : source.GetFaces()) {
         if (face.deleted || face.corners.size() < 3) continue;
@@ -107,6 +120,8 @@ void append_mesh(RenderScene& scene,
                 UV uv{};
                 if (has_uvs && mesh_corner.uv < source.GetUVs().size()) {
                     uv = source.GetUVs()[mesh_corner.uv];
+                    if (millimeter_u) uv.u *= 0.001f;
+                    if (millimeter_v) uv.v *= 0.001f;
                     if (material.texture_fit_to_surface) {
                         uv.u = (uv.u - uv_min.u)
                             / std::max(uv_max.u - uv_min.u, 0.00001f);
@@ -132,6 +147,9 @@ QJsonObject material_json(const Material& material) {
     object["base_color"] = color_json(material.diffuse);
     object["emission"] = color_json(material.emission);
     object["alpha"] = material.alpha;
+    object["specular"] = material.specular;
+    object["shininess"] = material.shininess;
+    object["reflectivity"] = material.reflectivity;
     object["metallic"] = material.metallic;
     object["roughness"] = material.roughness;
     object["coat_weight"] = material.coat_weight;
@@ -144,6 +162,31 @@ QJsonObject material_json(const Material& material) {
     object["normal_texture"] = resolved_texture_path(material, material.normal_texture_path);
     object["bump_texture"] = resolved_texture_path(material, material.bump_texture_path);
     object["displacement_texture"] = resolved_texture_path(material, material.displacement_texture_path);
+    return object;
+}
+
+QJsonObject light_json(const RenderLight& light) {
+    QJsonObject object;
+    object["enabled"] = light.enabled;
+    object["type"] = light.type == RenderLight::Type::Spot
+        ? "SPOT" : light.type == RenderLight::Type::Directional
+            ? "DIRECTIONAL" : "OMNI";
+    object["position"] = vector_json(light.position);
+    object["direction"] = vector_json(light.direction);
+    object["ambient"] = color_json(light.ambient);
+    object["diffuse"] = color_json(light.diffuse);
+    object["specular"] = color_json(light.specular);
+    object["hotspot"] = light.hotspot_radians;
+    object["falloff"] = light.falloff_radians;
+    object["spot_exponent"] = light.spot_exponent;
+    object["range"] = light.range;
+    object["constant_attenuation"] = light.constant_attenuation;
+    object["linear_attenuation"] = light.linear_attenuation;
+    object["quadratic_attenuation"] = light.quadratic_attenuation;
+    object["size"] = light.size;
+    object["shadow_density"] = light.shadow_density;
+    object["casts_shadows"] = light.casts_shadows;
+    object["attenuation_enabled"] = light.attenuation_enabled;
     return object;
 }
 }
@@ -191,11 +234,26 @@ bool RenderScene::SaveJson(const QString& path,
     settings_json["transparent_background"] = settings.transparent_background;
     settings_json["device"] = settings.device == RenderSettings::Device::CPU
         ? "CPU" : settings.device == RenderSettings::Device::GPU ? "GPU" : "AUTO";
+    settings_json["lighting_preset"] =
+        settings.lighting_preset == RenderSettings::LightingPreset::Exterior
+        ? "EXTERIOR"
+        : settings.lighting_preset == RenderSettings::LightingPreset::Studio
+            ? "STUDIO" : "INTERIOR";
     settings_json["output_file"] = settings.output_file;
     settings_json["view_transform"] = settings.view_transform;
     settings_json["look"] = settings.look;
     settings_json["exposure"] = settings.exposure;
+    settings_json["environment_strength"] = settings.environment_strength;
+    settings_json["interior_light_strength"] = settings.interior_light_strength;
+    settings_json["light_mode"] = settings.light_mode
+        == RenderSettings::LightMode::Customize ? "CUSTOMIZE" : "AUTO";
     root["settings"] = settings_json;
+
+    QJsonArray lights_json;
+    for (const RenderLight& light : settings.custom_lights) {
+        lights_json.push_back(light_json(light));
+    }
+    root["lights"] = lights_json;
 
     QJsonArray materials_json;
     for (const Material& material : materials) materials_json.push_back(material_json(material));
@@ -206,6 +264,8 @@ bool RenderScene::SaveJson(const QString& path,
         QJsonObject mesh_json;
         mesh_json["name"] = mesh.name;
         mesh_json["material"] = mesh.material_index;
+        mesh_json["independent_surface_patch"] =
+            mesh.independent_surface_patch;
         QJsonArray vertices_json;
         for (Vec3 vertex : mesh.vertices) vertices_json.push_back(vector_json(vertex));
         mesh_json["vertices"] = vertices_json;
@@ -250,6 +310,7 @@ RenderScene BuildRenderScene(const CAlfaDoc& document,
     camera_basis(camera, scene.camera.forward, scene.camera.right, scene.camera.up);
     scene.camera.position = camera_position(camera, orthographic);
     scene.camera.orthographic = orthographic;
+    scene.camera.vertical_fov_degrees = camera.vertical_fov_degrees;
     scene.camera.orthographic_scale_mm = std::max(0.1f, camera.distance * 0.84f);
     scene.environment.background_color = background_color;
     const ViewportLightingSettings& lighting = CMesh3D::GetLightingSettings();
@@ -269,6 +330,8 @@ RenderScene BuildRenderScene(const CAlfaDoc& document,
         }
         const auto* solid = dynamic_cast<const CSolid*>(object.get());
         if (!solid) continue;
+        const bool independent_surface_patch =
+            dynamic_cast<const CSurfaceSet*>(solid) != nullptr;
         for (int index = 0; index < solid->GetNumSurfaces(); ++index) {
             const CSurfaceFace* surface = solid->GetSurfaceFace(index);
             if (!surface || !surface->pMesh3D) continue;
@@ -284,7 +347,7 @@ RenderScene BuildRenderScene(const CAlfaDoc& document,
             append_mesh(scene, *surface->pMesh3D, material,
                 QString("%1 Surface %2")
                     .arg(QString::fromStdString(solid->GetName()))
-                    .arg(index + 1));
+                    .arg(index + 1), independent_surface_patch);
         }
     }
     return scene;

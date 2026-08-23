@@ -26,6 +26,17 @@ if(NOT Qt6_FOUND)
 endif()
 find_package(OpenGL REQUIRED)
 
+set(DOM3D_RAYTRACE_SOURCE_DIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/../raytrace-0.1"
+    CACHE PATH "Original Dom3D raytrace source directory")
+if(NOT EXISTS "${DOM3D_RAYTRACE_SOURCE_DIR}/CMakeLists.txt")
+    message(FATAL_ERROR
+        "Original Dom3D raytrace sources were not found at:\n"
+        "  ${DOM3D_RAYTRACE_SOURCE_DIR}")
+endif()
+add_subdirectory("${DOM3D_RAYTRACE_SOURCE_DIR}"
+                 "${CMAKE_BINARY_DIR}/original-raytrace")
+
 set(DOM3D_OPENCASCADE_INCLUDE_DIR "C:/OpenCascade/opencascade_build/inc" CACHE PATH "OpenCascade include directory")
 set(DOM3D_OPENCASCADE_LIBRARY_DIR "C:/OpenCascade/opencascade_build/win64/vc14/libd" CACHE PATH "OpenCascade library directory")
 set(_dom3d_occ_runtime_default "C:/OpenCascade/opencascade_build/win64/vc14/bin")
@@ -80,6 +91,7 @@ set(DOM3D_SOURCES
     src/Material.cpp
     src/render/RenderScene.cpp
     src/render/BlenderCyclesRenderer.cpp
+    src/render/NativeRaytraceRenderer.cpp
     src/MaterialLibrary.cpp
     src/FurnitureMaterialFactory.cpp
     src/CAlfaObject.cpp
@@ -103,6 +115,7 @@ set(DOM3D_SOURCES
     src/SurfaceUVMapping.cpp
     src/CBSpline.cpp
     src/CPolyline.cpp
+    src/Conic.cpp
     src/CView2d.cpp
     src/CView3d.cpp
     src/Dom3DProjectSerializer.cpp
@@ -140,6 +153,8 @@ set(DOM3D_SOURCES
     src/ui/PreferencesDialog.cpp
     src/ui/LightingDialog.cpp
     src/ui/BlenderCyclesDialog.cpp
+    src/ui/NativeRaytraceDialog.cpp
+    src/ui/RenderLightEditorDialog.cpp
     src/ui/LanguageManager.cpp
     src/ui/HotkeyManagerDialog.cpp
     src/ui/CommandSearchPopup.cpp
@@ -186,6 +201,7 @@ set(DOM3D_HEADERS
     src/render/RenderScene.h
     src/render/IExternalRenderer.h
     src/render/BlenderCyclesRenderer.h
+    src/render/NativeRaytraceRenderer.h
     src/MaterialLibrary.h
     src/FurnitureMaterialFactory.h
     src/CAlfaDoc.h
@@ -198,6 +214,7 @@ set(DOM3D_HEADERS
     src/Net.h
     src/CBSpline.h
     src/CPolyline.h
+    src/Conic.h
     src/CView2d.h
     src/CView3d.h
     src/Dom3DProjectSerializer.h
@@ -234,6 +251,8 @@ set(DOM3D_HEADERS
     src/ui/PreferencesDialog.h
     src/ui/LightingDialog.h
     src/ui/BlenderCyclesDialog.h
+    src/ui/NativeRaytraceDialog.h
+    src/ui/RenderLightEditorDialog.h
     src/ui/LanguageManager.h
     src/ui/HotkeyManagerDialog.h
     src/ui/CommandSearchPopup.h
@@ -335,10 +354,18 @@ set_target_properties(Dom3D_Pro PROPERTIES
     VS_DEBUGGER_ENVIRONMENT "PATH=${DOM3D_QT_MSVC2022_PATH}/bin;${DOM3D_OPENCASCADE_BINARY_DIR};%PATH%"
 )
 
-source_group("Source Files" FILES ${DOM3D_SOURCES})
-source_group("Header Files" FILES ${DOM3D_HEADERS})
-source_group("Sketch" FILES ${DOM3D_SKETCH_SOURCES})
-source_group("Sketch Migration (staged)" FILES ${DOM3D_SKETCH_MIGRATION_FILES})
+# Mirror the real source tree in Visual Studio Solution Explorer. Sources and
+# headers intentionally stay together, matching their folders on disk.
+set(DOM3D_IDE_FILES
+    ${DOM3D_SOURCES}
+    ${DOM3D_HEADERS}
+    ${DOM3D_SKETCH_SOURCES}
+    ${DOM3D_SKETCH_MIGRATION_FILES}
+)
+source_group(
+    TREE "${CMAKE_CURRENT_SOURCE_DIR}"
+    FILES ${DOM3D_IDE_FILES}
+)
 
 target_compile_features(Dom3D_Pro PRIVATE cxx_std_17)
 if(MSVC)
@@ -346,7 +373,14 @@ if(MSVC)
 endif()
 target_include_directories(Dom3D_Pro PRIVATE "${DOM3D_OPENCASCADE_INCLUDE_DIR}")
 target_link_directories(Dom3D_Pro PRIVATE "${DOM3D_OPENCASCADE_LIBRARY_DIR}")
-target_link_libraries(Dom3D_Pro PRIVATE Qt6::Widgets Qt6::OpenGLWidgets Qt6::Xml OpenGL::GL ${DOM3D_OPENCASCADE_LIBS})
+target_link_libraries(Dom3D_Pro PRIVATE Qt6::Widgets Qt6::OpenGLWidgets Qt6::Xml OpenGL::GL raytrace ${DOM3D_OPENCASCADE_LIBS})
+if(MSVC)
+    # Keep an address map next to the executable so Windows crash dumps from
+    # optimized builds can be resolved even when no debugger was attached.
+    target_link_options(Dom3D_Pro PRIVATE
+        "/MAP:$<TARGET_FILE_DIR:Dom3D_Pro>/Dom3D_Pro.map"
+        "/MAPINFO:EXPORTS")
+endif()
 
 if(WIN32)
     file(GLOB DOM3D_OPENCASCADE_RUNTIME_DLLS
@@ -420,6 +454,28 @@ if(MSVC)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(PropertyPanelTests
+        tests/PropertyPanelTests.cpp
+        src/ui/PropertyPanel.cpp
+        src/ui/PropertyPanel.h
+        src/ui/MeasurementUnits.cpp
+        src/ui/MeasurementUnits.h
+    )
+    target_compile_features(PropertyPanelTests PRIVATE cxx_std_17)
+    target_include_directories(PropertyPanelTests PRIVATE
+        src
+        "${DOM3D_OPENCASCADE_INCLUDE_DIR}"
+    )
+    target_link_libraries(PropertyPanelTests PRIVATE Qt6::Widgets)
+    if(MSVC)
+        target_compile_options(PropertyPanelTests PRIVATE
+            /W4
+            /permissive-
+            "/FI${CMAKE_CURRENT_SOURCE_DIR}/src/legacy_compat.h"
+        )
+    endif()
+    add_test(NAME PropertyPanelTests COMMAND PropertyPanelTests)
+
     add_executable(PbrMaterialLibraryTests
         tests/PbrMaterialLibraryTests.cpp
         src/Material.cpp
@@ -451,6 +507,7 @@ if(BUILD_TESTING)
     )
     target_link_libraries(CatalogImportTests PRIVATE
         Qt6::Widgets Qt6::OpenGLWidgets Qt6::Xml OpenGL::GL
+        raytrace
         ${DOM3D_OPENCASCADE_LIBS}
     )
     if(WIN32)
@@ -485,6 +542,7 @@ if(BUILD_TESTING)
     )
     target_link_libraries(ExchangeIOTests PRIVATE
         Qt6::Widgets Qt6::OpenGLWidgets Qt6::Xml OpenGL::GL
+        raytrace
         ${DOM3D_OPENCASCADE_LIBS}
     )
     if(WIN32)

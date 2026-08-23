@@ -288,6 +288,15 @@ public:
                              double length,
                              int direction_axis,
                              bool reverse_normal);
+    bool CreateShellFromSurface(unsigned long surface_id,
+                                int face_index,
+                                double distance,
+                                std::string* error_message = nullptr);
+    bool RebuildShellFromSurface(size_t object_index,
+                                 unsigned long surface_id,
+                                 int face_index,
+                                 double distance,
+                                 std::string* error_message = nullptr);
     bool CreateFourSplineSurfaceFromSelection();
     bool RebuildFourSplineSurface(size_t object_index,
                                   unsigned long first_id,

@@ -792,3 +792,122 @@ bool CSplineCurve::Create(CPolyline* pline)
     Build();
     return true;
 }
+
+bool CSplineCurve::TrimByPlane(CPlane* pl, CPoint3d* pk)
+{
+    int i, nn = 0;
+    CPoint7d p0;
+    //	CVertex7d* pt = NULL;
+    CPoint7d* pt = new CPoint7d[np() * 2];
+    if (!pt)
+        return false;
+
+
+    int num_p = 0;
+    double	delta = pk->x * pl->a + pk->y * pl->b + pk->z * pl->c + pl->d;
+    if (fabs(delta) < DDELTA) {
+        message_error_("Control point on the plat!!!");
+        return false;
+    }
+    double	de2 = 0;
+    for (i = 0; i < np() - 1; i++) {
+        double	de1 = P(i)->x * pl->a + P(i)->y * pl->b + P(i)->z * pl->c + pl->d;
+        de2 = P(i + 1)->x * pl->a + P(i + 1)->y * pl->b + P(i + 1)->z * pl->c + pl->d;
+        if ((de1 > 0 && de2 < 0) || (de1 < 0 && de2>0)) {		/*	crossing	*/
+            if (fabs(de1) < DDELTA || fabs(de2) < DDELTA) { 	/* plat follow point */
+                if (fabs(de1) < DDELTA) {
+                    num_p++;
+                    if (pt == NULL) {
+                        message_error_(IDS_BAD_ALLOC_MEMORY);
+                        return false;
+                    }
+                    pt[nn++] = *P(i);
+                }
+                else {
+                    if ((de1 > 0 && delta > 0) || (de1 < 0 && delta < 0)) {
+                        num_p++;
+                        if (pt == NULL) {
+                            message_error_(IDS_BAD_ALLOC_MEMORY);
+                            return false;
+                        }
+                        pt[nn++] = *P(i);
+                    }
+                }
+            }
+            else {		/* plat no follow point */
+                if ((de1 > 0 && delta > 0) || (de1 < 0 && delta < 0)) {
+                    num_p++;
+                    if (pt == NULL) {
+                        message_error_(IDS_BAD_ALLOC_MEMORY);
+                        return false;
+                    }
+                    pt[nn++] = *P(i);
+                }
+                Localized_point(i, 1, pl, &p0);
+                num_p++;
+                if (pt == NULL) {
+                    message_error_(IDS_BAD_ALLOC_MEMORY);
+                    return false;
+                }
+                pt[nn++] = p0;
+            }
+        }
+        else				/*	no crossing	*/
+            if ((de1 > 0 && delta > 0) || (de1 < 0 && delta < 0)) {	/*	1-st point	*/
+                num_p++;
+                if (pt == NULL) {
+                    message_error_(IDS_BAD_ALLOC_MEMORY);
+                    return false;
+                }
+                pt[nn++] = *P(i);
+            }
+            else
+                if (fabs(de1) < DDELTA) {         	/* plat follow 1-st point */
+                    num_p++;
+                    if (pt == NULL) {
+                        message_error_(IDS_BAD_ALLOC_MEMORY);
+                        return false;
+                    }
+                    pt[nn++] = *P(i);
+                }
+    }
+    /*********** end main cycle *********************/
+
+    if ((de2 > 0 && delta > 0) || (de2 < 0 && delta < 0)) {	/*	2-nd point	*/
+        num_p++;
+        pt[nn++] = *P(i);
+    }
+    else
+        if (fabs(de2) < DDELTA) {         	/* plat follow 2-nd point */
+            num_p++;
+            if (pt == NULL) {
+                message_error_(IDS_BAD_ALLOC_MEMORY);
+                return false;
+            }
+            pt[nn++] = *P(i);
+        }
+    if (nn < 2) {
+        message_error_("num point <2!");
+        return false;
+    }
+    if (Realloc(num_p))
+        return false;
+
+    for (i = 0; i < num_p; i++)
+        m_p7[i] = pt[i];
+
+    delete[] pt;
+    Build();
+    return true;
+}
+
+bool CSplineCurve::Offset(double offset)
+{
+    for (int i = 0; i < m_n; i++) {
+        CPoint3d p1(Pnt(i)->x, Pnt(i)->y, Pnt(i)->z);
+        CPoint3d p2 = p1;
+        p2.Move((CVector*)&P(i)->l, 10);
+        P(i)->Offset(offset, &p1, &p2);
+    }
+    return Update();
+}

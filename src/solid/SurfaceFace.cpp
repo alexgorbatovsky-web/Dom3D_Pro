@@ -46,7 +46,10 @@
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
+#include <BRepCheck_Analyzer.hxx>
 #include <Geom_BezierCurve.hxx>
+#include <GeomAPI_Interpolate.hxx>
+#include <TColgp_HArray1OfPnt.hxx>
 #include <BRepBuilderAPI_GTransform.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepClass_FaceClassifier.hxx>
@@ -1575,6 +1578,85 @@ CSurfaceFace::CSurfaceFace(TopoDS_Shape shape)
 	m_Face = shape;
 }
 
+bool CSurfaceFace::CreateRuled(CSplineCurve* gener, CVector& dir, double dist)
+{
+	if (!gener || gener->np() < 2 || !std::isfinite(dist)
+		|| std::fabs(dist) <= 1.0e-9)
+		return false;
+
+	const double direction_length = std::sqrt(
+		dir.l * dir.l + dir.m * dir.m + dir.n * dir.n);
+	if (!std::isfinite(direction_length) || direction_length <= 1.0e-12)
+		return false;
+
+	try {
+		// CSplineCurve is the legacy piecewise spline used by the facade
+		// builders. Evaluate its already-trimmed parameter range and interpolate
+		// one smooth OCCT curve before sweeping it along the requested vector.
+		const bool periodic = gener->IsClosed();
+		const int sample_count = std::max(64, (gener->np() - 1) * 24 + 1);
+		Handle(TColgp_HArray1OfPnt) samples =
+			new TColgp_HArray1OfPnt(1, sample_count);
+		const double last_parameter = static_cast<double>(gener->np() - 1);
+		for (int index = 0; index < sample_count; ++index) {
+			const double denominator = periodic
+				? static_cast<double>(sample_count)
+				: static_cast<double>(sample_count - 1);
+			CPoint3d point;
+			if (!gener->GetPoint(
+					last_parameter * static_cast<double>(index) / denominator,
+					&point)
+				|| !std::isfinite(point.x)
+				|| !std::isfinite(point.y)
+				|| !std::isfinite(point.z)) {
+				return false;
+			}
+			samples->SetValue(index + 1, gp_Pnt(point.x, point.y, point.z));
+		}
+
+		GeomAPI_Interpolate interpolation(samples, periodic, 1.0e-7);
+		interpolation.Perform();
+		if (!interpolation.IsDone() || interpolation.Curve().IsNull())
+			return false;
+
+		BRepBuilderAPI_MakeEdge edge_builder(interpolation.Curve());
+		if (!edge_builder.IsDone())
+			return false;
+
+		const double scale = dist / direction_length;
+		BRepPrimAPI_MakePrism prism(
+			edge_builder.Edge(),
+			gp_Vec(dir.l * scale, dir.m * scale, dir.n * scale),
+			Standard_False, Standard_True);
+		prism.Build();
+		if (!prism.IsDone() || prism.Shape().IsNull())
+			return false;
+
+		TopoDS_Face ruled_face;
+		if (prism.Shape().ShapeType() == TopAbs_FACE) {
+			ruled_face = TopoDS::Face(prism.Shape());
+		} else {
+			TopExp_Explorer faces(prism.Shape(), TopAbs_FACE);
+			if (!faces.More())
+				return false;
+			ruled_face = TopoDS::Face(faces.Current());
+			faces.Next();
+			if (faces.More())
+				return false;
+		}
+		if (ruled_face.IsNull() || !BRepCheck_Analyzer(ruled_face).IsValid())
+			return false;
+
+		m_Face = ruled_face;
+		IsInitMesh = false;
+		IsTrimmed = false;
+		m_TypeMesh = REGULAR_MESH;
+		return InitEdges();
+	} catch (const Standard_Failure&) {
+		return false;
+	}
+}
+
 
 bool CSurfaceFace::BuldMeshTriangle(float Deflection, float AngDeflection)
 {
@@ -2337,21 +2419,25 @@ bool CSurfaceFace::HitTestEdgeScreen(DomPoint point,
 
 	for (int edge_i = 0; edge_i < static_cast<int>(m_Edges.size()); ++edge_i) {
 		CSplineCurve* edge = m_Edges[static_cast<size_t>(edge_i)];
-		if (!edge || edge->np() < 1)
+		if (!edge || edge->np() < 2)
 			continue;
 
-		const int steps = std::max(1, (edge->np() - 1) * 16);
 		DomPoint previous_screen{};
 		bool has_previous = false;
 
-		for (int step = 0; step <= steps; ++step) {
-			const double s = (static_cast<double>(edge->np() - 1) * static_cast<double>(step)) / static_cast<double>(steps);
-			CPoint3d p;
-			if (!edge->GetPoint(s, &p))
+		// InitEdges() already samples every OCCT topological curve into 18
+		// screen-picking points.  Calling the legacy INKM spline evaluator 16
+		// additional times between every pair made a kitchen-sized document do
+		// millions of expensive evaluations on a single mouse move.  The stored
+		// points are the original curve samples and are sufficiently dense for
+		// pixel-tolerance edge picking.
+		for (int point_index = 0; point_index < edge->np(); ++point_index) {
+			const CPoint3d* p = edge->Pnt(point_index);
+			if (!p)
 				continue;
 
 			DomPoint current_screen{};
-			if (!world_to_screen({static_cast<float>(p.x), static_cast<float>(p.y), static_cast<float>(p.z)}, current_screen)) {
+			if (!world_to_screen({static_cast<float>(p->x), static_cast<float>(p->y), static_cast<float>(p->z)}, current_screen)) {
 				has_previous = false;
 				continue;
 			}

@@ -1,6 +1,7 @@
 #include "BlenderCyclesDialog.h"
 
 #include "../render/BlenderCyclesRenderer.h"
+#include "RenderLightEditorDialog.h"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -63,9 +64,30 @@ BlenderCyclesDialog::BlenderCyclesDialog(RenderScene scene,
 
     preset_ = new QComboBox(this);
     preset_->addItems({"Preview", "Final", "Custom"});
-    form->addRow("Preset", preset_);
+    form->addRow("Quality", preset_);
     connect(preset_, qOverload<int>(&QComboBox::currentIndexChanged),
             this, &BlenderCyclesDialog::ApplyPreset);
+
+    lighting_preset_ = new QComboBox(this);
+    lighting_preset_->addItems({"Interior", "Exterior", "Studio"});
+    lighting_preset_->setToolTip(
+        "Interior: window and ceiling light. Exterior: environment only. "
+        "Studio: neutral softboxes.");
+    form->addRow("Lighting", lighting_preset_);
+
+    auto* light_mode_row = new QWidget(this);
+    auto* light_mode_layout = new QHBoxLayout(light_mode_row);
+    light_mode_layout->setContentsMargins(0, 0, 0, 0);
+    light_mode_ = new QComboBox(light_mode_row);
+    light_mode_->addItems({"Auto", "Customize"});
+    customize_lights_ = new QPushButton("Sources...", light_mode_row);
+    light_mode_layout->addWidget(light_mode_, 1);
+    light_mode_layout->addWidget(customize_lights_);
+    form->addRow("Light sources", light_mode_row);
+    connect(customize_lights_, &QPushButton::clicked,
+            this, &BlenderCyclesDialog::EditLights);
+    connect(light_mode_, qOverload<int>(&QComboBox::currentIndexChanged),
+            this, [this](int index) { customize_lights_->setEnabled(index == 1); });
 
     auto* size_row = new QWidget(this);
     auto* size_layout = new QHBoxLayout(size_row);
@@ -95,10 +117,25 @@ BlenderCyclesDialog::BlenderCyclesDialog(RenderScene scene,
     denoise_->setChecked(true);
     device_ = new QComboBox(this);
     device_->addItems({"Auto", "GPU", "CPU"});
+    exposure_ = new QDoubleSpinBox(this);
+    exposure_->setRange(-5.0, 5.0);
+    exposure_->setDecimals(1);
+    exposure_->setSingleStep(0.1);
+    environment_strength_ = new QDoubleSpinBox(this);
+    environment_strength_->setRange(0.0, 5.0);
+    environment_strength_->setDecimals(2);
+    environment_strength_->setSingleStep(0.05);
+    interior_light_strength_ = new QDoubleSpinBox(this);
+    interior_light_strength_->setRange(0.0, 5.0);
+    interior_light_strength_->setDecimals(2);
+    interior_light_strength_->setSingleStep(0.1);
     form->addRow("Samples", samples_);
     form->addRow("Noise Threshold", noise_threshold_);
     form->addRow("Denoise", denoise_);
     form->addRow("Device", device_);
+    form->addRow("Exposure", exposure_);
+    form->addRow("Environment", environment_strength_);
+    form->addRow("Interior light", interior_light_strength_);
 
     add_path_row("Output PNG", output_path_, [this]() { BrowseOutput(); });
     output_path_->setText(QDir(
@@ -113,8 +150,9 @@ BlenderCyclesDialog::BlenderCyclesDialog(RenderScene scene,
     layout->addLayout(form);
 
     progress_ = new QProgressBar(this);
-    progress_->setRange(0, 1);
+    progress_->setRange(0, 100);
     progress_->setValue(0);
+    progress_->setFormat("%p%");
     status_ = new QLabel("Ready", this);
     layout->addWidget(progress_);
     layout->addWidget(status_);
@@ -147,7 +185,33 @@ BlenderCyclesDialog::BlenderCyclesDialog(RenderScene scene,
     connect(close, &QPushButton::clicked, this, &QDialog::close);
     layout->addWidget(buttons);
     ApplyPreset(0);
+    QSettings render_settings("Dom3D", "Dom3D_Pro");
+    custom_lights_ = RenderLightEditorDialog::Load(
+        render_settings, RenderLightEditorDialog::Defaults(scene_));
+    light_mode_->setCurrentIndex(std::clamp(
+        render_settings.value("render/lightMode", 0).toInt(), 0, 1));
+    customize_lights_->setEnabled(light_mode_->currentIndex() == 1);
+    const int lighting_index = std::clamp(
+        render_settings.value("render/lightingPreset", 0).toInt(), 0, 2);
+    lighting_preset_->setCurrentIndex(lighting_index);
+    ApplyLightingPreset(lighting_index);
+    exposure_->setValue(render_settings.value(
+        "render/exposure", exposure_->value()).toDouble());
+    environment_strength_->setValue(render_settings.value(
+        "render/environmentStrength", environment_strength_->value()).toDouble());
+    interior_light_strength_->setValue(render_settings.value(
+        "render/interiorLightStrength", interior_light_strength_->value()).toDouble());
+    connect(lighting_preset_, qOverload<int>(&QComboBox::currentIndexChanged),
+            this, &BlenderCyclesDialog::ApplyLightingPreset);
     QTimer::singleShot(0, this, &BlenderCyclesDialog::UpdatePreview);
+}
+
+void BlenderCyclesDialog::EditLights() {
+    RenderLightEditorDialog dialog(custom_lights_, this);
+    if (dialog.exec() != QDialog::Accepted) return;
+    custom_lights_ = dialog.Lights();
+    QSettings settings("Dom3D", "Dom3D_Pro");
+    RenderLightEditorDialog::Save(settings, custom_lights_);
 }
 
 BlenderCyclesDialog::~BlenderCyclesDialog() {
@@ -163,6 +227,22 @@ void BlenderCyclesDialog::ApplyPreset(int index) {
         samples_->setValue(512);
         noise_threshold_->setValue(0.01);
         denoise_->setChecked(true);
+    }
+}
+
+void BlenderCyclesDialog::ApplyLightingPreset(int index) {
+    if (index == 0) {
+        exposure_->setValue(-1.0);
+        environment_strength_->setValue(0.15);
+        interior_light_strength_->setValue(0.45);
+    } else if (index == 1) {
+        exposure_->setValue(0.0);
+        environment_strength_->setValue(1.0);
+        interior_light_strength_->setValue(0.0);
+    } else {
+        exposure_->setValue(-0.2);
+        environment_strength_->setValue(0.15);
+        interior_light_strength_->setValue(0.8);
     }
 }
 
@@ -193,6 +273,19 @@ RenderSettings BlenderCyclesDialog::CurrentSettings() const {
         ? RenderSettings::Device::GPU
         : device_->currentIndex() == 2
             ? RenderSettings::Device::CPU : RenderSettings::Device::Auto;
+    settings.lighting_preset = lighting_preset_->currentIndex() == 1
+        ? RenderSettings::LightingPreset::Exterior
+        : lighting_preset_->currentIndex() == 2
+            ? RenderSettings::LightingPreset::Studio
+            : RenderSettings::LightingPreset::Interior;
+    settings.view_transform = "AgX";
+    settings.look = "Medium High Contrast";
+    settings.exposure = exposure_->value();
+    settings.environment_strength = environment_strength_->value();
+    settings.interior_light_strength = interior_light_strength_->value();
+    settings.light_mode = light_mode_->currentIndex() == 1
+        ? RenderSettings::LightMode::Customize : RenderSettings::LightMode::Auto;
+    settings.custom_lights = custom_lights_;
     return settings;
 }
 
@@ -204,11 +297,24 @@ void BlenderCyclesDialog::StartRender() {
             log_, &QPlainTextEdit::appendPlainText);
     connect(renderer_, &BlenderCyclesRenderer::RenderStarted, this, [this]() {
         SetRendering(true);
-        status_->setText("Blender Cycles is rendering...");
+        status_->setText("Starting Blender Cycles — 0%");
+    });
+    connect(renderer_, &BlenderCyclesRenderer::RenderProgress, this,
+            [this](int percent, const QString& stage) {
+        progress_->setValue(std::clamp(percent, 0, 100));
+        status_->setText(QString("%1 — %2%").arg(stage).arg(percent));
+    });
+    connect(renderer_, &BlenderCyclesRenderer::PreviewUpdated, this,
+            [this](const QString& path) {
+        QPixmap preview(path);
+        if (preview.isNull()) return;
+        result_pixmap_ = preview;
+        UpdatePreview();
     });
     connect(renderer_, &BlenderCyclesRenderer::RenderFinished,
             this, [this](const QString& path, double seconds) {
         SetRendering(false);
+        progress_->setValue(100);
         last_render_path_ = path;
         QSettings("Dom3D", "Dom3D_Pro")
             .setValue("render/lastOutputPath", path);
@@ -229,8 +335,16 @@ void BlenderCyclesDialog::StartRender() {
         SetRendering(false);
         status_->setText("Render canceled");
     });
+    const RenderSettings settings = CurrentSettings();
+    QSettings render_settings("Dom3D", "Dom3D_Pro");
+    render_settings.setValue("render/lightingPreset", lighting_preset_->currentIndex());
+    render_settings.setValue("render/exposure", settings.exposure);
+    render_settings.setValue("render/environmentStrength", settings.environment_strength);
+    render_settings.setValue("render/interiorLightStrength", settings.interior_light_strength);
+    render_settings.setValue("render/lightMode", light_mode_->currentIndex());
+    RenderLightEditorDialog::Save(render_settings, custom_lights_);
     QString error;
-    if (!renderer_->StartRender(scene_, CurrentSettings(), &error)) {
+    if (!renderer_->StartRender(scene_, settings, &error)) {
         SetRendering(false);
         QMessageBox::warning(this, "Blender Cycles", error);
     }
@@ -270,6 +384,6 @@ void BlenderCyclesDialog::resizeEvent(QResizeEvent* event) {
 void BlenderCyclesDialog::SetRendering(bool rendering) {
     render_button_->setEnabled(!rendering);
     cancel_button_->setEnabled(rendering);
-    progress_->setRange(0, rendering ? 0 : 1);
-    if (!rendering) progress_->setValue(1);
+    progress_->setRange(0, 100);
+    progress_->setValue(rendering ? 0 : progress_->value());
 }

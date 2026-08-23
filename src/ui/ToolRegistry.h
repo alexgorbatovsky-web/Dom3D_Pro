@@ -61,6 +61,12 @@ public:
     const std::vector<ToolDefinition>& Tools() const;
     const ToolDefinition* Find(const std::string& id) const;
     ActiveParametricObject Activate(const std::string& id, CAlfaDoc& document) const;
+    bool HasVisibleArchitectureWalls(CAlfaDoc& document) const;
+    ActiveParametricObject ActivateArchitectureOpening(
+        const std::string& id,
+        CAlfaDoc& document,
+        unsigned long wall_id,
+        CPoint3d approximate_point) const;
     ActiveParametricObject CreateParametricObject(const std::string& id,
                                                   CAlfaDoc& document,
                                                   const std::vector<ToolParameter>& parameters) const;
@@ -78,11 +84,16 @@ public:
     ActiveParametricObject ApplyOffsetFaceToSelection(CAlfaDoc& document) const;
     bool ApplyOffsetFaceOnce(CAlfaDoc& document, double distance) const;
     void Rebuild(const ActiveParametricObject& active_object, CAlfaDoc& document) const;
+    bool ApplyFurnitureMaterialParameter(
+        const ActiveParametricObject& active_object,
+        CAlfaDoc& document,
+        const std::string& parameter_id) const;
     bool ReplayOperations(size_t object_index, CAlfaDoc& document) const;
     bool ReplayProfileDependents(unsigned long profile_id, CAlfaDoc& document) const;
     bool ReplayAllProfileDependents(CAlfaDoc& document) const;
     bool ReplayAllTrimDependents(CAlfaDoc& document,
                                  unsigned long cutter_id = 0) const;
+    void RebuildArchitectureRooms(CAlfaDoc& document) const;
     ActiveParametricObject ActiveObjectFromDocument(size_t object_index,
                                                     const CAlfaObject& object,
                                                     size_t operation_index = 0,

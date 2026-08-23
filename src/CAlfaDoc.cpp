@@ -2549,6 +2549,49 @@ bool CAlfaDoc::FindSolidEdgeAtScreen(
             continue;
         }
 
+        // Reject bodies whose projected bounds are nowhere near the cursor.
+        // Edge mode used to evaluate every spline of every cabinet part on
+        // each mouse move, even when the part was on the other side of the
+        // viewport.  Use all eight corners so perspective projection remains
+        // conservative; if a corner is behind the camera, keep the body.
+        Vec3 minimum{};
+        Vec3 maximum{};
+        if (solid->GetBounds(minimum, maximum)) {
+            const Vec3 corners[] = {
+                {minimum.x, minimum.y, minimum.z},
+                {maximum.x, minimum.y, minimum.z},
+                {minimum.x, maximum.y, minimum.z},
+                {maximum.x, maximum.y, minimum.z},
+                {minimum.x, minimum.y, maximum.z},
+                {maximum.x, minimum.y, maximum.z},
+                {minimum.x, maximum.y, maximum.z},
+                {maximum.x, maximum.y, maximum.z}
+            };
+            int screen_min_x = std::numeric_limits<int>::max();
+            int screen_min_y = std::numeric_limits<int>::max();
+            int screen_max_x = std::numeric_limits<int>::min();
+            int screen_max_y = std::numeric_limits<int>::min();
+            bool all_projected = true;
+            for (const Vec3& corner : corners) {
+                DomPoint projected{};
+                if (!world_to_screen(corner, projected)) {
+                    all_projected = false;
+                    break;
+                }
+                screen_min_x = std::min(screen_min_x, projected.x);
+                screen_min_y = std::min(screen_min_y, projected.y);
+                screen_max_x = std::max(screen_max_x, projected.x);
+                screen_max_y = std::max(screen_max_y, projected.y);
+            }
+            if (all_projected
+                && (point.x < screen_min_x - tolerance
+                    || point.x > screen_max_x + tolerance
+                    || point.y < screen_min_y - tolerance
+                    || point.y > screen_max_y + tolerance)) {
+                continue;
+            }
+        }
+
         int candidate_surface = -1;
         int candidate_edge = -1;
         float candidate_distance = best_distance;
@@ -5849,6 +5892,61 @@ bool CAlfaDoc::RebuildRuledSurface(size_t object_index,
     if (shape.IsNull()) return false;
     surface->m_Shape = shape;
     return surface->ReBuldMesh();
+}
+
+bool CAlfaDoc::CreateShellFromSurface(unsigned long surface_id,
+                                      int face_index,
+                                      double distance,
+                                      std::string* error_message) {
+    auto* source = dynamic_cast<CSolid*>(FindObjectById(surface_id));
+    CSurfaceFace* face = source ? source->GetSurfaceFace(face_index) : nullptr;
+    if (!face) {
+        if (error_message) *error_message = "The source surface was not found";
+        return false;
+    }
+
+    TopoDS_Shape shape = CSolid::Shell(face, distance, error_message);
+    if (shape.IsNull()) return false;
+
+    auto shell = std::make_unique<CSolid>(shape);
+    shell->SetName("Shell");
+    shell->SetColor(source->GetColor());
+    shell->SetMaterial(source->GetMaterial());
+    shell->SetMaterialId(source->GetMaterialId());
+    shell->m_LayerID = source->m_LayerID;
+    if (!shell->ReBuldMesh()) {
+        if (error_message) *error_message = "The shell display mesh could not be built";
+        return false;
+    }
+    AddObject(std::move(shell));
+    return true;
+}
+
+bool CAlfaDoc::RebuildShellFromSurface(size_t object_index,
+                                       unsigned long surface_id,
+                                       int face_index,
+                                       double distance,
+                                       std::string* error_message) {
+    if (object_index >= objects_.size()) {
+        if (error_message) *error_message = "The shell object was not found";
+        return false;
+    }
+    auto* shell = dynamic_cast<CSolid*>(objects_[object_index].get());
+    auto* source = dynamic_cast<CSolid*>(FindObjectById(surface_id));
+    CSurfaceFace* face = source ? source->GetSurfaceFace(face_index) : nullptr;
+    if (!shell || shell == source || !face) {
+        if (error_message) *error_message = "The source surface was not found";
+        return false;
+    }
+
+    TopoDS_Shape shape = CSolid::Shell(face, distance, error_message);
+    if (shape.IsNull()) return false;
+    shell->m_Shape = shape;
+    if (!shell->ReBuldMesh()) {
+        if (error_message) *error_message = "The shell display mesh could not be built";
+        return false;
+    }
+    return true;
 }
 
 bool CAlfaDoc::CreateFourSplineSurfaceFromSelection() {

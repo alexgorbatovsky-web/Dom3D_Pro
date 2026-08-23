@@ -21,6 +21,9 @@ class QXmlStreamWriter;
 class CPolyline;
 class CSurface;
 class CSplineCurve;
+class CVector;
+class CPoint3d;
+class CPlane;
 class TopoDS_Face;
 class Poly_Triangulation;
 class CMesh3D_XL;
@@ -112,6 +115,13 @@ public:
 	void Rotate(Vec3 center, Vec3 axis, float angle) override;
 	void Scale(Vec3 center, Vec3 axis, float factor) override;
 	void Mirror(Vec3 plane_point, Vec3 plane_normal) override;
+	static bool MoveShape(TopoDS_Shape& shape, CVector dir, double dist);
+	static bool RotateShape(TopoDS_Shape& shape, CPoint3d center,
+	                        CVector dir, double angle);
+	static bool MirrorShape(TopoDS_Shape& shape, CPlane plane);
+	static TopoDS_Shape CopyShape(TopoDS_Shape& shape);
+	static TopoDS_Shape Shell(CSurfaceFace* surf, double dist,
+	                         std::string* error = nullptr);
 	bool ApplyAffineTransform(const std::array<double, 16>& matrix);
 	void PreviewTranslate(Vec3 delta);
 	void PreviewRotate(Vec3 center, Vec3 axis, float angle);

@@ -46,11 +46,14 @@
 #include <GProp_GProps.hxx>
 #include <Standard_Failure.hxx>
 #include <TColgp_Array1OfPnt.hxx>
+#include <TColStd_Array1OfInteger.hxx>
+#include <TColStd_Array1OfReal.hxx>
 #include <TopoDS_Shape.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Wire.hxx>
 #include <TopoDS.hxx>
 #include <TopAbs_ShapeEnum.hxx>
+#include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Ax1.hxx>
@@ -62,6 +65,7 @@
 #include <gp_GTrsf.hxx>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <vector>
@@ -154,6 +158,67 @@ bool initial_guide_frame(const CAlfaObject& guide,
         : CPoint3d(0.0, 1.0, 0.0);
     guide_normal = cross(tangent, reference);
     return normalize(guide_normal);
+}
+
+bool section_is_authored_at_guide_start(const CSmartLine& section,
+                                        const CAlfaObject& guide) {
+    CPoint3d guide_origin;
+    CPoint3d guide_tangent;
+    CPoint3d guide_normal;
+    if (!initial_guide_frame(
+            guide, guide_origin, guide_tangent, guide_normal)) {
+        return false;
+    }
+    const std::vector<CPoint3d> points = section.GetProfilePointsWorld();
+    if (points.size() < 3) return false;
+
+    const CPoint3d section_origin = points.front();
+    CPoint3d first_direction;
+    CPoint3d section_normal;
+    bool has_first_direction = false;
+    bool has_normal = false;
+    for (std::size_t index = 1; index < points.size(); ++index) {
+        CPoint3d direction = subtract(points[index], section_origin);
+        if (!has_first_direction && normalize(direction)) {
+            first_direction = direction;
+            has_first_direction = true;
+            continue;
+        }
+        if (has_first_direction) {
+            section_normal = cross(first_direction, direction);
+            if (normalize(section_normal)) {
+                has_normal = true;
+                break;
+            }
+        }
+    }
+    if (!has_normal) return false;
+    CPoint3d minimum = points.front();
+    CPoint3d maximum = points.front();
+    for (const CPoint3d& point : points) {
+        minimum.x = std::min(minimum.x, point.x);
+        minimum.y = std::min(minimum.y, point.y);
+        minimum.z = std::min(minimum.z, point.z);
+        maximum.x = std::max(maximum.x, point.x);
+        maximum.y = std::max(maximum.y, point.y);
+        maximum.z = std::max(maximum.z, point.z);
+    }
+    const double diagonal = std::sqrt(dot3(
+        subtract(maximum, minimum), subtract(maximum, minimum)));
+    const double tolerance = std::max(1.0e-4, diagonal * 1.0e-3);
+    const double plane_distance = std::abs(dot3(
+        subtract(guide_origin, section_origin), section_normal));
+    const bool start_is_at_section =
+        guide_origin.x >= minimum.x - tolerance
+        && guide_origin.x <= maximum.x + tolerance
+        && guide_origin.y >= minimum.y - tolerance
+        && guide_origin.y <= maximum.y + tolerance
+        && guide_origin.z >= minimum.z - tolerance
+        && guide_origin.z <= maximum.z + tolerance;
+    // Preserve a section only when it has actually been moved to the start.
+    // A remote sketch may share the same infinite plane and still requires
+    // automatic placement and alignment normal to the first guide tangent.
+    return plane_distance <= tolerance && start_is_at_section;
 }
 
 TopoDS_Wire place_section_at_guide_start(const TopoDS_Wire& section_wire,
@@ -391,7 +456,67 @@ TopoDS_Wire build_bspline_wire(const CBSpline& spline) {
         return {};
     }
 
-    const int sample_count = std::max(24, static_cast<int>(spline.GetPointCount()) * 16);
+    const std::vector<double>& expanded_knots = spline.GetKnots();
+    const int degree = spline.GetDegree();
+    if ((spline.GetCurveType() == SplineCurveType::Nurbs
+         || !expanded_knots.empty())
+        && expanded_knots.size()
+            == spline.GetPointCount() + static_cast<std::size_t>(degree) + 1) {
+        std::vector<double> unique_knots;
+        std::vector<int> multiplicities;
+        for (double knot : expanded_knots) {
+            if (unique_knots.empty()
+                || std::abs(knot - unique_knots.back()) > 1.0e-12) {
+                unique_knots.push_back(knot);
+                multiplicities.push_back(1);
+            } else {
+                ++multiplicities.back();
+            }
+        }
+        if (unique_knots.size() >= 2) {
+            TColgp_Array1OfPnt poles(
+                1, static_cast<Standard_Integer>(spline.GetPointCount()));
+            TColStd_Array1OfReal weights(1, poles.Upper());
+            const std::vector<double>& source_weights = spline.GetWeights();
+            for (Standard_Integer index = 1; index <= poles.Upper(); ++index) {
+                const CPoint3d& point = spline.GetPoints()[
+                    static_cast<std::size_t>(index - 1)];
+                poles.SetValue(index, gp_Pnt(point.x, point.y, point.z));
+                weights.SetValue(index,
+                    static_cast<std::size_t>(index - 1) < source_weights.size()
+                        ? source_weights[static_cast<std::size_t>(index - 1)]
+                        : 1.0);
+            }
+            TColStd_Array1OfReal knots(
+                1, static_cast<Standard_Integer>(unique_knots.size()));
+            TColStd_Array1OfInteger mults(1, knots.Upper());
+            for (Standard_Integer index = 1; index <= knots.Upper(); ++index) {
+                knots.SetValue(index, unique_knots[
+                    static_cast<std::size_t>(index - 1)]);
+                mults.SetValue(index, multiplicities[
+                    static_cast<std::size_t>(index - 1)]);
+            }
+            try {
+                const Handle(Geom_BSplineCurve) exact_curve =
+                    new Geom_BSplineCurve(
+                        poles, weights, knots, mults, degree, false);
+                BRepBuilderAPI_MakeEdge edge_builder(exact_curve);
+                if (!edge_builder.IsDone()) return {};
+                BRepBuilderAPI_MakeWire wire_builder(edge_builder.Edge());
+                return wire_builder.IsDone()
+                    ? wire_builder.Wire() : TopoDS_Wire{};
+            } catch (const Standard_Failure&) {
+                return {};
+            }
+        }
+    }
+
+    // Fitting thousands of points is extremely expensive in
+    // GeomAPI_PointsToBSpline and adds no useful precision for a smooth guide.
+    // Keep enough samples for cabinet geometry while bounding sweep rebuild
+    // time for Bezier chains with many control points.
+    const int sample_count = std::clamp(
+        static_cast<int>(spline.GetPointCount()) * 4, 24, 128);
     TColgp_Array1OfPnt samples(1, sample_count);
     for (int index = 0; index < sample_count; ++index) {
         const float parameter = static_cast<float>(index) / static_cast<float>(sample_count - 1);
@@ -849,7 +974,8 @@ TopoDS_Shape BuildMillingSweepShape(const TopoDS_Wire& section_wire,
                                     const TopoDS_Wire& guide_wire,
                                     const Vec3& guide_normal,
                                     int transition_mode,
-                                    bool require_evolved) {
+                                    bool require_evolved,
+                                    bool preserve_section_orientation) {
     if (section_wire.IsNull() || guide_wire.IsNull()) {
         return {};
     }
@@ -907,7 +1033,19 @@ TopoDS_Shape BuildMillingSweepShape(const TopoDS_Wire& section_wire,
             sweep.SetMode(gp_Dir(
                 guide_normal.x, guide_normal.y, guide_normal.z));
             sweep.SetTransitionMode(mode);
-            sweep.Add(section_wire, false, correct_section);
+            if (preserve_section_orientation) {
+                TopExp_Explorer first_edge(guide_wire, TopAbs_EDGE);
+                if (!first_edge.More()) return {};
+                const TopoDS_Vertex start_vertex = TopExp::FirstVertex(
+                    TopoDS::Edge(first_edge.Current()), true);
+                if (start_vertex.IsNull()) return {};
+                // Pin the authored section to the first spine vertex. Without
+                // this explicit correspondence PipeShell may choose another
+                // intersection and roll an asymmetric profile.
+                sweep.Add(section_wire, start_vertex, false, false);
+            } else {
+                sweep.Add(section_wire, false, correct_section);
+            }
             if (!sweep.IsReady()) return {};
             sweep.Build();
             if (!sweep.IsDone() || !sweep.MakeSolid()) return {};
@@ -927,7 +1065,13 @@ TopoDS_Shape BuildMillingSweepShape(const TopoDS_Wire& section_wire,
     // their authored orientation before falling back to other corner rules.
     const BRepBuilderAPI_TransitionMode requested =
         transition_mode_from_index(transition_mode);
-    for (const bool correction : {true, false}) {
+    const std::array<bool, 2> correction_order =
+        preserve_section_orientation
+        ? std::array<bool, 2>{false, true}
+        : std::array<bool, 2>{true, false};
+    const int correction_count = preserve_section_orientation ? 1 : 2;
+    for (int index = 0; index < correction_count; ++index) {
+        const bool correction = correction_order[index];
         TopoDS_Shape result = attempt(requested, correction);
         if (!result.IsNull()) return result;
     }
@@ -935,7 +1079,8 @@ TopoDS_Shape BuildMillingSweepShape(const TopoDS_Wire& section_wire,
              BRepBuilderAPI_RightCorner,
              BRepBuilderAPI_Transformed}) {
         if (fallback == requested) continue;
-        for (const bool correction : {true, false}) {
+        for (int index = 0; index < correction_count; ++index) {
+            const bool correction = correction_order[index];
             TopoDS_Shape result = attempt(fallback, correction);
             if (!result.IsNull()) return result;
         }
@@ -949,6 +1094,13 @@ bool BuildPlacedSweptSectionSketch(const CSmartLine& section,
                                    double delta_x,
                                    double delta_y,
                                    double angle_degrees) {
+    if (std::abs(delta_x) <= kGeometryTolerance
+        && std::abs(delta_y) <= kGeometryTolerance
+        && std::abs(angle_degrees) <= kGeometryTolerance
+        && section_is_authored_at_guide_start(section, guide)) {
+        placed_section = section.MakeCopy();
+        return true;
+    }
     CPoint3d target_origin;
     CPoint3d target_z;
     CPoint3d guide_normal;
@@ -984,7 +1136,8 @@ TopoDS_Shape BuildSweptSolidShape(const CSmartLine& section,
                                   double angle_degrees,
                                   const std::vector<double>& width_scales,
                                   const std::vector<double>& height_scales,
-                                  bool require_evolved) {
+                                  bool require_evolved,
+                                  bool force_authored_section) {
     if (!section.IsClosed()) {
         return {};
     }
@@ -998,8 +1151,17 @@ TopoDS_Shape BuildSweptSolidShape(const CSmartLine& section,
     if (source_section_wire.IsNull()) {
         return {};
     }
-    const TopoDS_Wire section_wire = place_section_at_guide_start(
-        source_section_wire, section, guide, delta_x, delta_y, angle_degrees);
+    const bool preserve_section_orientation =
+        std::abs(delta_x) <= kGeometryTolerance
+        && std::abs(delta_y) <= kGeometryTolerance
+        && std::abs(angle_degrees) <= kGeometryTolerance
+        && (force_authored_section
+            || section_is_authored_at_guide_start(section, guide));
+    const TopoDS_Wire section_wire = preserve_section_orientation
+        ? source_section_wire
+        : place_section_at_guide_start(
+            source_section_wire, section, guide,
+            delta_x, delta_y, angle_degrees);
     if (section_wire.IsNull()) {
         return {};
     }
@@ -1077,7 +1239,8 @@ TopoDS_Shape BuildSweptSolidShape(const CSmartLine& section,
         }
         return BuildMillingSweepShape(
             section_wire, guide_wire, guide_normal, transition_mode,
-            require_evolved && !guide_sketch);
+            require_evolved && !guide_sketch,
+            preserve_section_orientation);
     } catch (const Standard_Failure&) {
         return {};
     }

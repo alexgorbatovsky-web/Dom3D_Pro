@@ -90,6 +90,7 @@ struct Camera {
     Vec3 target{0.0f, 1.2f, 0.0f};
     Quaternion orientation{kDefaultCameraOrientation};
     float distance = kDefaultCameraDistance;
+    float vertical_fov_degrees = 50.0f;
 };
 
 struct DomRect {
@@ -114,6 +115,7 @@ struct ToolbarButton {
 
 enum class ToolMode {
     Orbit,
+    Walk,
     ZoomRect,
     DrawCurve,
     Select,

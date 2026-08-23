@@ -277,6 +277,8 @@ bool IsIntegerParameter(const ToolParameter& parameter) {
     return id == "qty"
         || id == "shelf_count"
         || id == "drawer_count"
+        || id == "vertical_bars"
+        || id == "horizontal_bars"
         || id == "spline.degree";
 }
 
@@ -292,6 +294,8 @@ bool IsInternalPlacementParameter(const ToolParameter& parameter) {
             && parameter.type != ToolParameterType::CatalogSketch
             && parameter.type != ToolParameterType::CatalogProduct)
         || parameter.id == "cutter.id"
+        || parameter.id == "surface.id"
+        || parameter.id == "host.wall.id"
         || parameter.id == "face.index"
         || parameter.id == "boolean.body_id"
         || parameter.id == "boolean.tool_index";
@@ -352,11 +356,13 @@ bool IsPrimaryCabinetParameter(const ToolParameter& parameter) {
     return parameter.id == "width"
         || parameter.id == "height"
         || parameter.id == "depth"
+        || parameter.id == "body_type"
         || parameter.id == "facade_type"
         || parameter.id == "facade_style"
         || parameter.id == "showcase_facade_type"
         || parameter.id == "facade_showcase"
         || parameter.id == "showcase_fill"
+        || parameter.id == "facade_material_id"
         || parameter.id == "overhead"
         || parameter.id == "mounting_height"
         || parameter.id == "height_above_floor"
@@ -468,10 +474,14 @@ bool IsSliderParameter(const ActiveParametricObject& active,
         || tool_id == "ThickSolidTool"
         || tool_id == "SurfaceOfRevolution"
         || tool_id == "SurfaceRuled"
+        || tool_id == "SolidShell"
         || tool_id == "cabinet"
         || tool_id == "cabinet_advanced"
         || tool_id == "cabinet_advanced_slx"
         || tool_id == "cabinet_showcase"
+        || tool_id == "room"
+        || tool_id == "window"
+        || tool_id == "door"
         || tool_id == "table"
         || tool_id == "desk"
         || tool_id == "drawer_box";
@@ -525,6 +535,34 @@ void PropertyPanel::Clear() {
 
 void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object) {
     active_object_ = active_object;
+    if (active_object_.tool_id == "cabinet_advanced"
+        || active_object_.tool_id == "cabinet_advanced_slx") {
+        const auto body_type = std::find_if(
+            active_object_.parameters.begin(), active_object_.parameters.end(),
+            [](const ToolParameter& parameter) {
+                return parameter.id == "body_type";
+            });
+        const auto facade_style = std::find_if(
+            active_object_.parameters.begin(), active_object_.parameters.end(),
+            [](const ToolParameter& parameter) {
+                return parameter.id == "facade_style";
+            });
+        if (body_type != active_object_.parameters.end()
+            && facade_style != active_object_.parameters.end()) {
+            const int body = static_cast<int>(std::lround(body_type->value));
+            const bool radius_body =
+                body == 2 || body == 4 || body == 5 || body == 6;
+            if (radius_body) {
+                facade_style->options = {"Plain", "Milano"};
+                facade_style->option_values = {0.0, 4.0};
+                facade_style->value = facade_style->value == 4.0 ? 4.0 : 0.0;
+            } else {
+                facade_style->options = {
+                    "Plain", "Frame", "Screen", "Milled", "Milano"};
+                facade_style->option_values = {0.0, 1.0, 2.0, 3.0, 4.0};
+            }
+        }
+    }
     if (active_object_.tool_id == "cabinet_advanced_slx") {
         auto thickness = std::find_if(
             active_object_.parameters.begin(), active_object_.parameters.end(),
@@ -731,8 +769,15 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
                         previous_index = static_cast<int>(std::distance(
                             parameter.option_values.begin(), selected));
                     }
-                    const QSignalBlocker blocker(editor);
-                    editor->setCurrentIndex(previous_index);
+                    // MaterialLibraryRequested is delivered synchronously.
+                    // Its receiver may rebuild this panel (the nested
+                    // "Other Parameters" panel does), deleting `editor`.
+                    // Destroy the blocker before emitting so its destructor
+                    // never dereferences an already deleted QObject.
+                    {
+                        const QSignalBlocker blocker(editor);
+                        editor->setCurrentIndex(previous_index);
+                    }
                     emit MaterialLibraryRequested(
                         QString::fromStdString(parameter.id));
                     return;
@@ -741,9 +786,12 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
                     active_object_.tool_id == "PlaneTool"
                     && parameter.id == "mode";
                 const bool rebuild_catalog_form =
-                    active_object_.tool_id == "cabinet_advanced_slx"
-                    && (parameter.id == "facade_style"
-                        || parameter.id == "handle_type");
+                    ((active_object_.tool_id == "cabinet_advanced"
+                      || active_object_.tool_id == "cabinet_advanced_slx")
+                     && parameter.id == "body_type")
+                    || (active_object_.tool_id == "cabinet_advanced_slx"
+                        && (parameter.id == "facade_style"
+                            || parameter.id == "handle_type"));
                 const bool rebuild_fillet_form =
                     (active_object_.tool_id == "fillet_edge"
                      || active_object_.tool_id == "fillet_all_edges")
@@ -982,11 +1030,15 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
             scroll->setWidget(additional);
             layout->addWidget(scroll);
 
+            QString requested_material_id;
             connect(additional, &PropertyPanel::MaterialLibraryRequested,
-                    this, [this, additional](const QString& parameter_id) {
+                    &dialog, [this, additional, &dialog,
+                              &requested_material_id](const QString& parameter_id) {
                 active_object_ = additional->ActiveObject();
-                emit MaterialLibraryRequested(parameter_id);
-                additional->SetActiveObject(active_object_);
+                requested_material_id = parameter_id;
+                // Finish the modal callback before the library can assign a
+                // material and rebuild the outer compact panel.
+                dialog.accept();
             });
             connect(additional, &PropertyPanel::CatalogSelectionRequested,
                     this, [this, additional](const QString& parameter_id,
@@ -1008,7 +1060,12 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
             connect(additional, &PropertyPanel::Canceled,
                     &dialog, &QDialog::reject);
 
-            if (dialog.exec() == QDialog::Accepted) {
+            const int result = dialog.exec();
+            if (!requested_material_id.isEmpty()) {
+                emit MaterialLibraryRequested(requested_material_id);
+                return;
+            }
+            if (result == QDialog::Accepted) {
                 // Rebuild the compact form after this button's callback has
                 // returned; rebuilding it synchronously would delete the
                 // button that is currently emitting clicked().
@@ -1078,7 +1135,7 @@ void PropertyPanel::SetMaterialParameterValue(
     }
     found->value = value;
     SetActiveObject(active_object_);
-    emit ParametersChanged();
+    emit MaterialParameterChanged(QString::fromStdString(parameter_id));
 }
 
 void PropertyPanel::SetCatalogParameterValue(

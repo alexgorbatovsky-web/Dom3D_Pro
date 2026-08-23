@@ -34,6 +34,7 @@
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRep_Builder.hxx>
+#include <BRep_Tool.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepBuilderAPI_GTransform.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
@@ -69,10 +70,13 @@
 #include <TColgp_Array1OfPnt2d.hxx>
 #include <Standard_Failure.hxx>
 #include <TopAbs_ShapeEnum.hxx>
+#include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_ListIteratorOfListOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <TopoDS_Face.hxx>
+#include <TopoDS_Edge.hxx>
+#include <TopoDS_Vertex.hxx>
 
 #include <QApplication>
 #include <QEventLoop>
@@ -82,8 +86,10 @@
 #include <TopoDS.hxx>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <memory>
 #include <set>
 
@@ -2745,6 +2751,27 @@ KitchenCabinetDefinition kitchen_cabinet_definition(
     return definition;
 }
 
+bool radius_milano_facade_detail(
+    const std::string& name, std::string& facade_name) {
+    static const std::array<const char*, 5> suffixes{{
+        " Bottom Profile", " Top Profile", " Right Profile",
+        " Left Profile", " Center Panel"}};
+    if (name.find("Radius") == std::string::npos
+        || name.find("Facade") == std::string::npos) {
+        return false;
+    }
+    for (const char* suffix : suffixes) {
+        const size_t suffix_length = std::char_traits<char>::length(suffix);
+        if (name.size() >= suffix_length
+            && name.compare(name.size() - suffix_length,
+                            suffix_length, suffix) == 0) {
+            facade_name = name.substr(0, name.size() - suffix_length);
+            return true;
+        }
+    }
+    return false;
+}
+
 void create_kitchen_cabinet(CAlfaDoc& document,
                             const std::vector<ToolParameter>& parameters) {
     FurnitureMaterialFactory::EnsureStandardMaterials(document);
@@ -2777,10 +2804,28 @@ void create_kitchen_cabinet(CAlfaDoc& document,
     apply_slx_catalog_handle(document, parameters, parts);
     std::vector<unsigned long> ids;
     ids.reserve(parts.size());
+    std::map<std::string, std::vector<unsigned long>> facade_detail_ids;
     for (auto& part : parts) {
+        const std::string part_name = part ? part->GetName() : std::string{};
         document.AddObject(std::move(part));
         if (CAlfaObject* added = document.GetSelectedObject()) {
-            ids.push_back(added->m_id);
+            std::string facade_name;
+            if (radius_milano_facade_detail(part_name, facade_name)) {
+                facade_detail_ids[facade_name].push_back(added->m_id);
+            } else {
+                ids.push_back(added->m_id);
+            }
+        }
+    }
+    for (auto& [facade_name, detail_ids] : facade_detail_ids) {
+        if (detail_ids.size() != 5) {
+            ids.insert(ids.end(), detail_ids.begin(), detail_ids.end());
+            continue;
+        }
+        document.AddObject(std::make_unique<CFacadeFurniture>(
+            facade_name, std::move(detail_ids)));
+        if (CAlfaObject* facade = document.GetSelectedObject()) {
+            ids.push_back(facade->m_id);
         }
     }
     document.AddObject(std::make_unique<CKitchenCabinet>(
@@ -2847,7 +2892,49 @@ void rebuild_kitchen_cabinet(CAlfaDoc& document,
     assign_furniture_materials(document, replacements, parameters, "cabinet");
     apply_slx_catalog_handle(document, parameters, replacements);
     const unsigned long cabinet_id = cabinet->m_id;
-    const std::vector<unsigned long> old_ids = cabinet->GetElementIds();
+    const std::vector<unsigned long> cabinet_child_ids = cabinet->GetElementIds();
+
+    struct ExistingFacadeAssembly {
+        unsigned long id = 0;
+        size_t object_index = 0;
+        std::string name;
+        bool used = false;
+    };
+    std::vector<ExistingFacadeAssembly> existing_facade_assemblies;
+    std::vector<unsigned long> old_ids;
+    for (unsigned long id : cabinet_child_ids) {
+        const size_t child_index = document.FindObjectIndexById(id);
+        auto* facade = child_index < objects.size()
+            ? dynamic_cast<CAssembled*>(objects[child_index].get())
+            : nullptr;
+        std::string facade_name;
+        const bool radius_facade_assembly = facade
+            && facade->GetElementIds().size() == 5
+            && std::all_of(
+                facade->GetElementIds().begin(), facade->GetElementIds().end(),
+                [&document, &facade_name](unsigned long detail_id) {
+                    const CAlfaObject* detail =
+                        document.FindObjectById(detail_id);
+                    std::string detail_facade_name;
+                    if (!detail || !radius_milano_facade_detail(
+                            detail->GetName(), detail_facade_name)) {
+                        return false;
+                    }
+                    if (facade_name.empty()) {
+                        facade_name = detail_facade_name;
+                    }
+                    return facade_name == detail_facade_name;
+                });
+        if (!radius_facade_assembly) {
+            old_ids.push_back(id);
+            continue;
+        }
+        existing_facade_assemblies.push_back(
+            {id, child_index, facade_name, false});
+        old_ids.insert(old_ids.end(),
+                       facade->GetElementIds().begin(),
+                       facade->GetElementIds().end());
+    }
 
     struct ExistingCabinetPart {
         unsigned long id = 0;
@@ -2961,6 +3048,56 @@ void rebuild_kitchen_cabinet(CAlfaDoc& document,
             objects[existing.object_index].reset();
         }
     }
+
+    std::vector<unsigned long> grouped_ids;
+    grouped_ids.reserve(new_ids.size());
+    std::map<std::string, std::vector<unsigned long>> facade_detail_ids;
+    for (unsigned long id : new_ids) {
+        CAlfaObject* part = document.FindObjectById(id);
+        std::string facade_name;
+        if (part
+            && radius_milano_facade_detail(part->GetName(), facade_name)) {
+            facade_detail_ids[facade_name].push_back(id);
+        } else {
+            grouped_ids.push_back(id);
+        }
+    }
+    for (auto& [facade_name, detail_ids] : facade_detail_ids) {
+        if (detail_ids.size() != 5) {
+            grouped_ids.insert(
+                grouped_ids.end(), detail_ids.begin(), detail_ids.end());
+            continue;
+        }
+        auto existing_facade = std::find_if(
+            existing_facade_assemblies.begin(),
+            existing_facade_assemblies.end(),
+            [&facade_name](const ExistingFacadeAssembly& candidate) {
+                return !candidate.used && candidate.name == facade_name;
+            });
+        if (existing_facade != existing_facade_assemblies.end()) {
+            existing_facade->used = true;
+            auto* facade = existing_facade->object_index < objects.size()
+                ? dynamic_cast<CAssembled*>(
+                    objects[existing_facade->object_index].get())
+                : nullptr;
+            if (facade) {
+                facade->SetElementIds(std::move(detail_ids));
+                grouped_ids.push_back(existing_facade->id);
+                continue;
+            }
+        }
+        document.AddObject(std::make_unique<CFacadeFurniture>(
+            facade_name, std::move(detail_ids)));
+        if (CAlfaObject* facade = document.GetSelectedObject()) {
+            grouped_ids.push_back(facade->m_id);
+        }
+    }
+    for (const ExistingFacadeAssembly& existing : existing_facade_assemblies) {
+        if (!existing.used && existing.object_index < objects.size()) {
+            objects[existing.object_index].reset();
+        }
+    }
+    new_ids = std::move(grouped_ids);
     cabinet = cabinet_index < objects.size()
         ? dynamic_cast<CKitchenCabinet*>(objects[cabinet_index].get()) : nullptr;
     if (!cabinet || cabinet->m_id != cabinet_id) {
@@ -2978,7 +3115,7 @@ std::vector<ToolParameter> showcase_cabinet_parameters(
     const bool facade_showcase =
         param(parameters, "facade_showcase", 0.0) >= 0.5;
     const double selected_style = std::clamp(
-        param(parameters, "facade_style", 0.0), 0.0, 2.0);
+        param(parameters, "facade_style", 0.0), 0.0, 4.0);
     for (ToolParameter& parameter : result) {
         if (parameter.id == "facade_style") {
             // A Plain showcase uses the simple flat Screen border. Frame
@@ -3406,7 +3543,7 @@ DrawerBoxDefinition drawer_box_definition(
     result.slide_clearance = std::clamp(
         param(parameters, "slide_clearance", 13.0), 5.0, 40.0);
     result.facade_type = std::clamp(
-        static_cast<int>(param(parameters, "facade_type", 0.0)), 0, 9);
+        static_cast<int>(param(parameters, "facade_type", 0.0)), 0, 4);
     result.handle_type = std::clamp(
         static_cast<int>(param(parameters, "handle_type", 0.0)), 0, 3);
     result.drawer_count = std::clamp(
@@ -3565,7 +3702,7 @@ std::vector<std::unique_ptr<CAlfaObject>> single_drawer_parts(
     drawer.facade_thickness = facade_thickness;
     drawer.facade_style = param(parameters, "facade_style", 0.0) >= 0.5
         ? FurnitureDrawerFacadeStyle::Frame
-        : FurnitureDrawerFacadeStyle::Slab;
+        : FurnitureDrawerFacadeStyle::Plain;
     drawer.make_handle = handle_type != 3;
     drawer.round_handle = handle_type == 2;
     drawer.handle_height_ratio = 0.62;
@@ -3669,7 +3806,9 @@ void rebuild_component_assembly(
             replacements[index]->SetMaterial(old_part.GetMaterial());
             replacements[index]->SetMaterialId(old_part.GetMaterialId());
         }
-        copy_solid_surface_appearance(old_part, *replacements[index]);
+        if (tool_id != "room") {
+            copy_solid_surface_appearance(old_part, *replacements[index]);
+        }
         replacements[index]->SetVisible(old_part.IsVisible());
         objects[part_index] = std::move(replacements[index]);
         new_ids.push_back(old_ids[index]);
@@ -3689,6 +3828,762 @@ void rebuild_component_assembly(
     if (!assembly || assembly->m_id != assembly_id) return;
     assembly->SetElementIds(std::move(new_ids));
     document.SelectObjectById(assembly_id);
+}
+
+struct ArchitectureWallPlacement {
+    bool attached = false;
+    bool along_x = true;
+    double local_inward_sign = 1.0;
+    Vec3 minimum{};
+    Vec3 maximum{};
+};
+
+unsigned long architecture_host_wall_id(
+    const std::vector<ToolParameter>& parameters) {
+    return static_cast<unsigned long>(
+        std::max(0.0, param(parameters, "host.wall.id", 0.0)));
+}
+
+bool is_room_wall_name(const std::string& name) {
+    return name == "Room Front Wall" || name == "Room Back Wall"
+        || name == "Room Left Wall" || name == "Room Right Wall";
+}
+
+std::vector<unsigned long> visible_room_wall_ids(CAlfaDoc& document) {
+    std::vector<unsigned long> result;
+    for (const auto& object : document.GetObjects()) {
+        auto* room = dynamic_cast<CAssembled*>(object.get());
+        if (!room || room->GetParametricToolId() != "room"
+            || !room->IsVisible()) {
+            continue;
+        }
+        for (const unsigned long element_id : room->GetElementIds()) {
+            auto* wall = dynamic_cast<CSolid*>(
+                document.FindObjectById(element_id));
+            if (!wall || !wall->IsVisible()
+                || !is_room_wall_name(wall->GetName())) {
+                continue;
+            }
+            document.EnsureObjectId(*wall);
+            result.push_back(wall->m_id);
+        }
+    }
+    return result;
+}
+
+unsigned long selected_room_wall_id(CAlfaDoc& document) {
+    auto* wall = dynamic_cast<CSolid*>(document.GetSelectedObject());
+    if (!wall || !is_room_wall_name(wall->GetName())) return 0;
+    document.EnsureObjectId(*wall);
+    for (const auto& object : document.GetObjects()) {
+        const auto* room = dynamic_cast<const CAssembled*>(object.get());
+        if (!room || room->GetParametricToolId() != "room") continue;
+        const auto& ids = room->GetElementIds();
+        if (std::find(ids.begin(), ids.end(), wall->m_id) != ids.end()) {
+            return wall->m_id;
+        }
+    }
+    return 0;
+}
+
+void set_tool_parameter_value(
+    std::vector<ToolParameter>& parameters,
+    const std::string& id,
+    double value) {
+    const auto found = std::find_if(
+        parameters.begin(), parameters.end(), [&id](const ToolParameter& parameter) {
+            return parameter.id == id;
+        });
+    if (found != parameters.end()) found->value = value;
+}
+
+ArchitectureWallPlacement architecture_wall_placement(
+    CAlfaDoc& document,
+    const std::vector<ToolParameter>& parameters) {
+    ArchitectureWallPlacement placement;
+    const unsigned long wall_id = architecture_host_wall_id(parameters);
+    const auto* wall = dynamic_cast<const CSolid*>(document.FindObjectById(wall_id));
+    if (!wall || !is_room_wall_name(wall->GetName())
+        || !wall->GetBounds(placement.minimum, placement.maximum)) {
+        return placement;
+    }
+    placement.attached = true;
+    placement.along_x =
+        placement.maximum.x - placement.minimum.x
+        >= placement.maximum.y - placement.minimum.y;
+    const std::string& wall_name = wall->GetName();
+    if (wall_name == "Room Back Wall"
+        || wall_name == "Room Left Wall") {
+        placement.local_inward_sign = -1.0;
+    }
+    return placement;
+}
+
+void transform_architecture_parts(
+    std::vector<std::unique_ptr<CAlfaObject>>& parts,
+    const ArchitectureWallPlacement& placement) {
+    const auto transform = [&parts](const gp_Trsf& operation) {
+        for (auto& part : parts) {
+            auto* solid = dynamic_cast<CSolid*>(part.get());
+            if (!solid || solid->m_Shape.IsNull()) continue;
+            BRepBuilderAPI_Transform builder(solid->m_Shape, operation, true);
+            builder.Build();
+            if (!builder.IsDone() || builder.Shape().IsNull()) continue;
+            solid->Clear();
+            solid->m_Shape = builder.Shape();
+            solid->InitSurfaces();
+            solid->ReBuldMesh();
+        }
+    };
+
+    if (!placement.attached) {
+        gp_Trsf lay_on_xy;
+        lay_on_xy.SetRotation(
+            gp_Ax1(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(1.0, 0.0, 0.0)),
+            -3.14159265358979323846 * 0.5);
+        transform(lay_on_xy);
+        return;
+    }
+
+    if (!placement.along_x) {
+        gp_Trsf turn;
+        turn.SetRotation(
+            gp_Ax1(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0)),
+            3.14159265358979323846 * 0.5);
+        transform(turn);
+    }
+
+    gp_Trsf move;
+    if (placement.along_x) {
+        move.SetTranslation(gp_Vec(
+            placement.minimum.x,
+            (placement.minimum.y + placement.maximum.y) * 0.5,
+            0.0));
+    } else {
+        move.SetTranslation(gp_Vec(
+            (placement.minimum.x + placement.maximum.x) * 0.5,
+            placement.minimum.y,
+            0.0));
+    }
+    transform(move);
+}
+
+bool cut_architecture_opening(
+    CSolid& wall,
+    const std::vector<ParametricParameterValue>& parameters,
+    const std::string& tool_id) {
+    Vec3 minimum{};
+    Vec3 maximum{};
+    if (wall.m_Shape.IsNull() || !wall.GetBounds(minimum, maximum)) {
+        return false;
+    }
+    const double width = std::max(
+        tool_id == "window" ? 300.0 : 500.0,
+        saved_param(parameters, "width", tool_id == "window" ? 1000.0 : 900.0));
+    const double height = std::max(
+        tool_id == "window" ? 300.0 : 1000.0,
+        saved_param(parameters, "height", tool_id == "window" ? 1300.0 : 2000.0));
+    const double distance = saved_param(
+        parameters, "distance_along_wall", tool_id == "window" ? 1800.0 : 1270.0);
+    const double bottom = std::max(0.0, saved_param(
+        parameters,
+        tool_id == "window" ? "distance_from_floor" : "distance_to_floor",
+        tool_id == "window" ? 900.0 : 100.0));
+    const bool along_x = maximum.x - minimum.x >= maximum.y - minimum.y;
+    constexpr double margin = 20.0;
+    TopoDS_Shape cutter;
+    if (along_x) {
+        cutter = component_box(
+            minimum.x + distance - width * 0.5,
+            minimum.y - margin,
+            bottom,
+            width,
+            maximum.y - minimum.y + 2.0 * margin,
+            height);
+    } else {
+        cutter = component_box(
+            minimum.x - margin,
+            minimum.y + distance - width * 0.5,
+            bottom,
+            maximum.x - minimum.x + 2.0 * margin,
+            width,
+            height);
+    }
+    if (cutter.IsNull()) return false;
+    BRepAlgoAPI_Cut cut(wall.m_Shape, cutter);
+    cut.Build();
+    if (!cut.IsDone() || cut.Shape().IsNull()) return false;
+    wall.Clear();
+    wall.m_Shape = cut.Shape();
+    wall.InitSurfaces();
+    return wall.ReBuldMesh();
+}
+
+unsigned long ensure_room_material(
+    CAlfaDoc& document,
+    const std::string& name,
+    const std::string& texture_path,
+    Color diffuse,
+    float roughness) {
+    if (Material* existing = document.FindMaterial(name, true)) {
+        return existing->id;
+    }
+    Material material;
+    material.id = 0;
+    material.name = name;
+    material.diffuse = diffuse;
+    material.ambient = {
+        diffuse.r * 0.28f,
+        diffuse.g * 0.28f,
+        diffuse.b * 0.28f};
+    material.specular = 0.12f;
+    material.shininess = 18.0f;
+    material.roughness = roughness;
+    material.color_texture_path = texture_path;
+    return document.UpsertMaterial(std::move(material)).id;
+}
+
+unsigned long ensure_room_ceiling_material(CAlfaDoc& document) {
+    Material* material = document.FindMaterial(
+        "Room Ceiling White Paint", true);
+    if (!material) {
+        Material ceiling;
+        ceiling.id = 0;
+        ceiling.name = "Room Ceiling White Paint";
+        material = &document.UpsertMaterial(std::move(ceiling));
+    }
+    material->diffuse = {1.0f, 0.99f, 0.96f};
+    material->ambient = {0.72f, 0.71f, 0.68f};
+    material->emission = {0.08f, 0.08f, 0.07f};
+    material->specular = 0.08f;
+    material->shininess = 12.0f;
+    material->roughness = 0.88f;
+    return material->id;
+}
+
+unsigned long ensure_room_window_glass_material(CAlfaDoc& document) {
+    if (Material* existing = document.FindMaterial(
+            "Room Window Clear Glass", true)) {
+        return existing->id;
+    }
+    Material glass;
+    glass.id = 0;
+    glass.name = "Room Window Clear Glass";
+    glass.ambient = {0.10f, 0.13f, 0.15f};
+    glass.diffuse = {0.64f, 0.82f, 0.92f};
+    glass.alpha = 0.18f;
+    glass.specular = 0.88f;
+    glass.shininess = 110.0f;
+    glass.reflectivity = 0.18f;
+    glass.roughness = 0.025f;
+    return document.UpsertMaterial(std::move(glass)).id;
+}
+
+unsigned long ensure_room_window_sill_material(CAlfaDoc& document) {
+    if (Material* existing = document.FindMaterial(
+            "Room Window Sill White", true)) {
+        return existing->id;
+    }
+    Material sill;
+    sill.id = 0;
+    sill.name = "Room Window Sill White";
+    sill.ambient = {0.70f, 0.70f, 0.68f};
+    sill.diffuse = {0.96f, 0.95f, 0.92f};
+    sill.specular = 0.22f;
+    sill.shininess = 34.0f;
+    sill.roughness = 0.38f;
+    return document.UpsertMaterial(std::move(sill)).id;
+}
+
+void apply_room_materials(
+    CAlfaDoc& document,
+    std::vector<std::unique_ptr<CAlfaObject>>& parts,
+    double left,
+    double front,
+    double length,
+    double width,
+    double wall_thickness) {
+    const unsigned long wall_material_id = ensure_room_material(
+        document,
+        "Room Wall Textile 24708",
+        "texture/textiles/24708.jpg",
+        {0.78f, 0.76f, 0.70f},
+        0.78f);
+    const unsigned long floor_material_id = ensure_room_material(
+        document,
+        "Room Floor Unopark Merbau",
+        "texture/parquet/Unopark_Merbau.jpg",
+        {0.45f, 0.25f, 0.12f},
+        0.56f);
+    ensure_room_window_glass_material(document);
+    const unsigned long ceiling_material_id = parts.size() > 5
+        ? ensure_room_ceiling_material(document) : 0;
+    const Material* wall_material = document.FindMaterial(wall_material_id);
+    const Material* floor_material = document.FindMaterial(floor_material_id);
+    if (!wall_material || !floor_material || parts.size() < 5) return;
+
+    if (auto* floor_solid = dynamic_cast<CSolid*>(parts[0].get())) {
+        floor_solid->SetMaterial(*floor_material);
+        floor_solid->SetMaterialId(floor_material->id);
+    }
+    if (parts.size() > 5) {
+        const Material* ceiling_material =
+            document.FindMaterial(ceiling_material_id);
+        if (!ceiling_material) return;
+        if (auto* ceiling_solid = dynamic_cast<CSolid*>(parts[5].get())) {
+            ceiling_solid->SetMaterial(*ceiling_material);
+            ceiling_solid->SetMaterialId(ceiling_material->id);
+        }
+    }
+
+    const std::array<std::pair<int, double>, 4> inner_planes{{
+        {1, front + wall_thickness},
+        {1, front + width - wall_thickness},
+        {0, left + wall_thickness},
+        {0, left + length - wall_thickness}
+    }};
+    constexpr double plane_tolerance = 0.25;
+    for (size_t wall_index = 0; wall_index < inner_planes.size(); ++wall_index) {
+        auto* wall_solid = dynamic_cast<CSolid*>(
+            parts[wall_index + 1].get());
+        if (!wall_solid) continue;
+        const int axis = inner_planes[wall_index].first;
+        const double plane = inner_planes[wall_index].second;
+        for (int surface_index = 0;
+             surface_index < wall_solid->GetNumSurfaces();
+             ++surface_index) {
+            Vec3 center{};
+            Vec3 normal{};
+            if (!wall_solid->GetFaceCenterAndNormal(
+                    surface_index, center, normal)) {
+                continue;
+            }
+            const double coordinate = axis == 0 ? center.x : center.y;
+            if (std::abs(coordinate - plane) <= plane_tolerance) {
+                wall_solid->SetSurfaceMaterial(
+                    surface_index, *wall_material);
+            }
+        }
+    }
+}
+
+std::vector<std::unique_ptr<CAlfaObject>> room_parts(
+    CAlfaDoc& document,
+    const std::vector<ToolParameter>& parameters,
+    const CAssembled* existing_room = nullptr) {
+    const double length = std::max(500.0, param(parameters, "length", 6000.0));
+    const double width = std::max(500.0, param(parameters, "width", 4000.0));
+    const double height = std::max(300.0, param(parameters, "height", 2900.0));
+    const double wall = std::clamp(
+        param(parameters, "wall_thickness", 200.0), 20.0,
+        std::min(length, width) * 0.45);
+    const double floor = std::clamp(
+        param(parameters, "floor_thickness", 120.0), 10.0, 500.0);
+    const bool ceiling = param(parameters, "ceiling", 0.0) >= 0.5;
+
+    const double left = -length * 0.5;
+    const double front = -width * 0.5;
+    const Color wall_color{0.82f, 0.78f, 0.72f};
+    const Color floor_color{0.48f, 0.30f, 0.16f};
+    const Color ceiling_color{0.92f, 0.92f, 0.90f};
+    std::vector<std::unique_ptr<CAlfaObject>> parts;
+    const auto add_box = [&parts](const std::string& name,
+                                  double x, double y, double z,
+                                  double dx, double dy, double dz,
+                                  Color color) {
+        parts.push_back(component_solid(
+            name, component_box(x, y, z, dx, dy, dz), color));
+    };
+
+    add_box("Room Floor", left, front, -floor,
+            length, width, floor, floor_color);
+    add_box("Room Front Wall", left, front, 0.0,
+            length, wall, height, wall_color);
+    add_box("Room Back Wall", left, front + width - wall, 0.0,
+            length, wall, height, wall_color);
+    add_box("Room Left Wall", left, front + wall, 0.0,
+            wall, width - 2.0 * wall, height, wall_color);
+    add_box("Room Right Wall", left + length - wall, front + wall, 0.0,
+            wall, width - 2.0 * wall, height, wall_color);
+    if (ceiling) {
+        add_box("Room Ceiling", left, front, height,
+                length, width, floor, ceiling_color);
+    }
+
+    if (existing_room) {
+        const std::vector<unsigned long>& wall_ids = existing_room->GetElementIds();
+        const size_t count = std::min(parts.size(), wall_ids.size());
+        for (size_t part_index = 1; part_index < count; ++part_index) {
+            auto* wall_solid = dynamic_cast<CSolid*>(parts[part_index].get());
+            if (!wall_solid || !is_room_wall_name(wall_solid->GetName())) continue;
+            const unsigned long host_id = wall_ids[part_index];
+            for (const auto& object : document.GetObjects()) {
+                if (!object) continue;
+                const std::string& tool_id = object->GetParametricToolId();
+                if (tool_id != "window" && tool_id != "door") continue;
+                const auto& saved = object->GetParametricParameters();
+                if (static_cast<unsigned long>(std::max(
+                        0.0, saved_param(saved, "host.wall.id", 0.0)))
+                    != host_id) {
+                    continue;
+                }
+                cut_architecture_opening(*wall_solid, saved, tool_id);
+            }
+        }
+    }
+    apply_room_materials(
+        document, parts, left, front, length, width, wall);
+    if (std::any_of(parts.begin(), parts.end(),
+                    [](const auto& part) { return !part; })) {
+        return {};
+    }
+    return parts;
+}
+
+TopoDS_Shape window_sill_shape(double x,
+                               double y,
+                               double z,
+                               double width,
+                               double depth,
+                               double thickness) {
+    constexpr double corner_radius = 15.0;
+    constexpr double top_edge_radius = 5.0;
+    constexpr double inverse_sqrt_two = 0.7071067811865475;
+    const double radius = std::min(
+        corner_radius, std::min(width, depth) * 0.45);
+    if (width <= 2.0 * radius || depth <= 2.0 * radius
+        || thickness <= 0.0) {
+        return component_box(x, y, z, width, depth, thickness);
+    }
+
+    const double right = x + width;
+    const double back = y + depth;
+    const auto point = [z](double px, double py) {
+        return gp_Pnt(px, py, z);
+    };
+    try {
+        BRepBuilderAPI_MakeWire wire;
+        wire.Add(BRepBuilderAPI_MakeEdge(
+            point(x + radius, y), point(right - radius, y)).Edge());
+        wire.Add(BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(
+            point(right - radius, y),
+            point(right - radius * (1.0 - inverse_sqrt_two),
+                  y + radius * (1.0 - inverse_sqrt_two)),
+            point(right, y + radius)).Value()).Edge());
+        wire.Add(BRepBuilderAPI_MakeEdge(
+            point(right, y + radius), point(right, back - radius)).Edge());
+        wire.Add(BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(
+            point(right, back - radius),
+            point(right - radius * (1.0 - inverse_sqrt_two),
+                  back - radius * (1.0 - inverse_sqrt_two)),
+            point(right - radius, back)).Value()).Edge());
+        wire.Add(BRepBuilderAPI_MakeEdge(
+            point(right - radius, back), point(x + radius, back)).Edge());
+        wire.Add(BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(
+            point(x + radius, back),
+            point(x + radius * (1.0 - inverse_sqrt_two),
+                  back - radius * (1.0 - inverse_sqrt_two)),
+            point(x, back - radius)).Value()).Edge());
+        wire.Add(BRepBuilderAPI_MakeEdge(
+            point(x, back - radius), point(x, y + radius)).Edge());
+        wire.Add(BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(
+            point(x, y + radius),
+            point(x + radius * (1.0 - inverse_sqrt_two),
+                  y + radius * (1.0 - inverse_sqrt_two)),
+            point(x + radius, y)).Value()).Edge());
+        wire.Build();
+        if (!wire.IsDone()) return {};
+        BRepBuilderAPI_MakeFace face(wire.Wire());
+        face.Build();
+        if (!face.IsDone()) return {};
+        BRepPrimAPI_MakePrism prism(
+            face.Face(), gp_Vec(0.0, 0.0, thickness));
+        prism.Build();
+        if (!prism.IsDone()) return {};
+
+        TopoDS_Shape panel = prism.Shape();
+        BRepFilletAPI_MakeFillet fillet(panel);
+        int edge_count = 0;
+        const double top_z = z + thickness;
+        for (TopExp_Explorer explorer(panel, TopAbs_EDGE);
+             explorer.More(); explorer.Next()) {
+            const TopoDS_Edge edge = TopoDS::Edge(explorer.Current());
+            TopoDS_Vertex first_vertex;
+            TopoDS_Vertex last_vertex;
+            TopExp::Vertices(edge, first_vertex, last_vertex);
+            if (first_vertex.IsNull() || last_vertex.IsNull()) continue;
+            const gp_Pnt first = BRep_Tool::Pnt(first_vertex);
+            const gp_Pnt last = BRep_Tool::Pnt(last_vertex);
+            if (std::abs(first.Z() - top_z) <= 1.0e-5
+                && std::abs(last.Z() - top_z) <= 1.0e-5) {
+                fillet.Add(top_edge_radius, edge);
+                ++edge_count;
+            }
+        }
+        if (edge_count > 0) {
+            fillet.Build();
+            if (fillet.IsDone() && !fillet.Shape().IsNull()) {
+                return fillet.Shape();
+            }
+        }
+        return panel;
+    } catch (const Standard_Failure&) {
+        return component_box(x, y, z, width, depth, thickness);
+    }
+}
+
+std::vector<std::unique_ptr<CAlfaObject>> window_parts(
+    CAlfaDoc& document,
+    const std::vector<ToolParameter>& parameters) {
+    const ArchitectureWallPlacement placement =
+        architecture_wall_placement(document, parameters);
+    const double width = std::max(300.0, param(parameters, "width", 1000.0));
+    const double height = std::max(300.0, param(parameters, "height", 1300.0));
+    const double frame_width = std::clamp(
+        param(parameters, "frame_width", 60.0), 15.0,
+        std::min(width, height) * 0.22);
+    const double frame_depth = std::clamp(
+        param(parameters, "frame_thickness", 60.0), 15.0, 300.0);
+    const double center = placement.attached
+        ? param(parameters, "distance_along_wall", 1800.0) : 0.0;
+    const double sill = placement.attached
+        ? std::max(0.0, param(parameters, "distance_from_floor", 900.0))
+        : 0.0;
+    const double split = std::clamp(param(parameters, "factor", 0.5), 0.1, 0.9);
+    const bool wood = param(parameters, "wood_construction", 0.0) >= 0.5;
+    const bool reverse = param(parameters, "reverse", 0.0) >= 0.5;
+    const double sill_projection = std::clamp(
+        param(parameters, "sill_projection", 50.0), 0.0, 500.0);
+    const double sill_thickness = std::clamp(
+        param(parameters, "sill_thickness", 30.0), 5.0, 100.0);
+    const double sill_side_extension = std::clamp(
+        param(parameters, "sill_side_extension", 50.0), 0.0, 500.0);
+    const int vertical_bars = std::clamp(
+        static_cast<int>(param(parameters, "vertical_bars", 0.0)), 0, 12);
+    const int horizontal_bars = std::clamp(
+        static_cast<int>(param(parameters, "horizontal_bars", 0.0)), 0, 12);
+
+    const double left = center - width * 0.5;
+    const double y = -frame_depth * 0.5;
+    const double opening_width = width - 2.0 * frame_width;
+    const double opening_height = height - 2.0 * frame_width;
+    const double mullion_width = std::clamp(frame_width * 0.55, 18.0, 50.0);
+    const double mullion_x = left + frame_width
+        + opening_width * split - mullion_width * 0.5;
+    const Color frame_color = wood
+        ? Color{0.54f, 0.34f, 0.17f}
+        : Color{0.66f, 0.52f, 0.68f};
+    const Color glass_color{0.23f, 0.82f, 0.90f};
+    std::vector<std::unique_ptr<CAlfaObject>> parts;
+    const auto add_box = [&parts](const std::string& name,
+                                  double x, double by, double z,
+                                  double dx, double dy, double dz,
+                                  Color color) {
+        parts.push_back(component_solid(
+            name, component_box(x, by, z, dx, dy, dz), color));
+    };
+
+    add_box("Window Frame Left", left, y, sill,
+            frame_width, frame_depth, height, frame_color);
+    add_box("Window Frame Right", left + width - frame_width, y, sill,
+            frame_width, frame_depth, height, frame_color);
+    add_box("Window Frame Bottom", left + frame_width, y, sill,
+            opening_width, frame_depth, frame_width, frame_color);
+    add_box("Window Frame Top", left + frame_width, y,
+            sill + height - frame_width,
+            opening_width, frame_depth, frame_width, frame_color);
+    add_box("Window Center Mullion", mullion_x, y - 1.0,
+            sill + frame_width,
+            mullion_width, frame_depth + 2.0, opening_height, frame_color);
+
+    const double glass_depth = std::clamp(frame_depth * 0.12, 4.0, 12.0);
+    const double glass_y = y + (frame_depth - glass_depth) * 0.5;
+    add_box("Window Glass Left", left + frame_width, glass_y,
+            sill + frame_width,
+            std::max(1.0, mullion_x - (left + frame_width)),
+            glass_depth, opening_height, glass_color);
+    add_box("Window Glass Right", mullion_x + mullion_width, glass_y,
+            sill + frame_width,
+            std::max(1.0, left + width - frame_width
+                - (mullion_x + mullion_width)),
+            glass_depth, opening_height, glass_color);
+
+    const double bar = std::clamp(frame_width * 0.24, 8.0, 24.0);
+    for (int index = 1; index <= vertical_bars; ++index) {
+        const double x = left + frame_width
+            + opening_width * index / (vertical_bars + 1.0) - bar * 0.5;
+        add_box("Window Vertical Muntin " + std::to_string(index),
+                x, y - 2.0, sill + frame_width,
+                bar, frame_depth + 4.0, opening_height, frame_color);
+    }
+    for (int index = 1; index <= horizontal_bars; ++index) {
+        const double z = sill + frame_width
+            + opening_height * index / (horizontal_bars + 1.0) - bar * 0.5;
+        add_box("Window Horizontal Muntin " + std::to_string(index),
+                left + frame_width, y - 2.0, z,
+                opening_width, frame_depth + 4.0, bar, frame_color);
+    }
+
+    const double wall_depth = placement.attached
+        ? (placement.along_x
+            ? placement.maximum.y - placement.minimum.y
+            : placement.maximum.x - placement.minimum.x)
+        : frame_depth;
+    const double sill_depth = wall_depth + sill_projection;
+    const double sill_y = placement.local_inward_sign > 0.0
+        ? -wall_depth * 0.5
+        : -wall_depth * 0.5 - sill_projection;
+    parts.push_back(component_solid(
+        "Window Sill",
+        window_sill_shape(
+            left - sill_side_extension,
+            sill_y,
+            sill - sill_thickness + 2.0,
+            width + 2.0 * sill_side_extension,
+            sill_depth,
+            sill_thickness),
+        {0.96f, 0.95f, 0.92f}));
+
+    const unsigned long glass_material_id =
+        ensure_room_window_glass_material(document);
+    const unsigned long sill_material_id =
+        ensure_room_window_sill_material(document);
+    const Material* glass_material =
+        document.FindMaterial(glass_material_id);
+    const Material* sill_material = document.FindMaterial(sill_material_id);
+    if (!glass_material || !sill_material) return {};
+    for (auto& part : parts) {
+        if (!part) continue;
+        if (part->GetName().rfind("Window Glass ", 0) == 0) {
+            part->SetMaterial(*glass_material);
+            part->SetMaterialId(glass_material->id);
+        } else if (part->GetName() == "Window Sill") {
+            part->SetMaterial(*sill_material);
+            part->SetMaterialId(sill_material->id);
+        }
+    }
+    if (std::any_of(parts.begin(), parts.end(),
+                    [](const auto& part) { return !part; })) {
+        return {};
+    }
+    (void)reverse;
+    transform_architecture_parts(parts, placement);
+    return parts;
+}
+
+Color door_material_color(int material) {
+    switch (material) {
+    case 1: return {0.42f, 0.23f, 0.10f};
+    case 2: return {0.72f, 0.53f, 0.28f};
+    case 3: return {0.88f, 0.88f, 0.86f};
+    case 4: return {0.48f, 0.50f, 0.52f};
+    default: return {0.66f, 0.44f, 0.24f};
+    }
+}
+
+std::vector<std::unique_ptr<CAlfaObject>> door_parts(
+    CAlfaDoc& document,
+    const std::vector<ToolParameter>& parameters) {
+    const ArchitectureWallPlacement placement =
+        architecture_wall_placement(document, parameters);
+    const int type = std::clamp(
+        static_cast<int>(param(parameters, "type", 0.0)), 0, 2);
+    const double center = placement.attached
+        ? param(parameters, "distance_along_wall", 1270.0) : 0.0;
+    const double width = std::max(500.0, param(parameters, "width", 900.0));
+    const double height = std::max(1000.0, param(parameters, "height", 2000.0));
+    const double floor = placement.attached
+        ? std::max(0.0, param(parameters, "distance_to_floor", 100.0))
+        : 0.0;
+    const bool reverse = param(parameters, "reverse", 0.0) >= 0.5;
+    const bool double_door = param(parameters, "double_door", 0.0) >= 0.5;
+    const bool door_frame = param(parameters, "door_frame", 1.0) >= 0.5;
+    const int handle_side = std::clamp(
+        static_cast<int>(param(parameters, "handle_side", 1.0)), 0, 1);
+    const int handle_type = std::clamp(
+        static_cast<int>(param(parameters, "handle_type", 0.0)), 0, 2);
+    const int material = std::clamp(
+        static_cast<int>(param(parameters, "material", 0.0)), 0, 4);
+
+    const double frame_width = 60.0;
+    const double frame_depth = 100.0;
+    const double leaf_depth = 42.0;
+    const double left = center - width * 0.5;
+    const double y = -leaf_depth * 0.5;
+    const Color wood_color = door_material_color(material);
+    const Color frame_color = material == 4
+        ? Color{0.48f, 0.50f, 0.52f} : Color{0.59f, 0.39f, 0.20f};
+    const Color glass_color{0.34f, 0.78f, 0.86f};
+    const Color handle_color{0.70f, 0.71f, 0.72f};
+    std::vector<std::unique_ptr<CAlfaObject>> parts;
+    const auto add_box = [&parts](const std::string& name,
+                                  double x, double by, double z,
+                                  double dx, double dy, double dz,
+                                  Color color) {
+        parts.push_back(component_solid(
+            name, component_box(x, by, z, dx, dy, dz), color));
+    };
+
+    if (door_frame) {
+        add_box("Door Frame Left", left - frame_width, -frame_depth * 0.5, floor,
+                frame_width, frame_depth, height + frame_width, frame_color);
+        add_box("Door Frame Right", left + width, -frame_depth * 0.5, floor,
+                frame_width, frame_depth, height + frame_width, frame_color);
+        add_box("Door Frame Top", left, -frame_depth * 0.5, floor + height,
+                width, frame_depth, frame_width, frame_color);
+    }
+
+    if (type != 2) {
+        const int leaf_count = double_door ? 2 : 1;
+        const double gap = double_door ? 5.0 : 0.0;
+        const double leaf_width = (width - gap) / leaf_count;
+        for (int leaf = 0; leaf < leaf_count; ++leaf) {
+            const double leaf_left = left + leaf * (leaf_width + gap);
+            const std::string prefix = leaf_count == 2
+                ? (leaf == 0 ? "Door Left Leaf " : "Door Right Leaf ")
+                : "Door Leaf ";
+            if (type == 0) {
+                const double rail = std::clamp(width * 0.09, 55.0, 95.0);
+                add_box(prefix + "Left Rail", leaf_left, y, floor,
+                        rail, leaf_depth, height, wood_color);
+                add_box(prefix + "Right Rail", leaf_left + leaf_width - rail, y, floor,
+                        rail, leaf_depth, height, wood_color);
+                add_box(prefix + "Bottom Rail", leaf_left + rail, y, floor,
+                        leaf_width - 2.0 * rail, leaf_depth, rail, wood_color);
+                add_box(prefix + "Top Rail", leaf_left + rail, y,
+                        floor + height - rail,
+                        leaf_width - 2.0 * rail, leaf_depth, rail, wood_color);
+                add_box(prefix + "Glass", leaf_left + rail,
+                        y + (leaf_depth - 8.0) * 0.5, floor + rail,
+                        leaf_width - 2.0 * rail, 8.0,
+                        height - 2.0 * rail, glass_color);
+            } else {
+                add_box(prefix + "Panel", leaf_left, y, floor,
+                        leaf_width, leaf_depth, height, wood_color);
+            }
+        }
+
+        if (handle_type != 2) {
+            const double handle_x = handle_side == 0
+                ? left + 90.0 : left + width - 110.0;
+            const double handle_z = floor + std::clamp(height * 0.48, 850.0, 1100.0);
+            if (handle_type == 0) {
+                const double handle_y = reverse ? y + leaf_depth : y - 28.0;
+                add_box("Door Round Handle", handle_x, handle_y, handle_z,
+                        24.0, 28.0, 24.0, handle_color);
+            } else {
+                const double handle_y = reverse ? y + leaf_depth : y - 28.0;
+                add_box("Door Lever Handle", handle_x, handle_y, handle_z,
+                        90.0, 28.0, 18.0, handle_color);
+            }
+        }
+    }
+    if (parts.empty() || std::any_of(parts.begin(), parts.end(),
+                    [](const auto& part) { return !part; })) {
+        return {};
+    }
+    transform_architecture_parts(parts, placement);
+    return parts;
 }
 
 NikaKitchenDefinition nika_kitchen_definition(
@@ -3718,7 +4613,7 @@ NikaKitchenDefinition nika_kitchen_definition(
                   result.base_height - result.leg_height,
                   result.upper_height}) * 0.15);
     result.facade_style = std::clamp(
-        static_cast<int>(param(parameters, "facade_style", 2.0)), 0, 2);
+        static_cast<int>(param(parameters, "facade_style", 4.0)), 0, 4);
     result.handle_type = std::clamp(
         static_cast<int>(param(parameters, "handle_type", 0.0)), 0, 3);
     const std::array<const char*, 8> door_angle_ids{
@@ -3878,11 +4773,8 @@ std::vector<unsigned long> add_nika_hierarchy(
             definition.facade_type = module == 3
                 ? KitchenCabinetFacadeType::DoubleDoor
                 : KitchenCabinetFacadeType::SingleDoor;
-            definition.facade_style = kitchen.facade_style == 0
-                ? KitchenCabinetFacadeStyle::Plain
-                : kitchen.facade_style == 1
-                    ? KitchenCabinetFacadeStyle::Frame
-                    : KitchenCabinetFacadeStyle::Milano;
+            definition.facade_style = static_cast<KitchenCabinetFacadeStyle>(
+                std::clamp(kitchen.facade_style, 0, 4));
             if (showcase) {
                 definition.facade_style = KitchenCabinetFacadeStyle::Screen;
                 definition.showcase_fill = KitchenCabinetShowcaseFill::Glass;
@@ -4219,12 +5111,117 @@ TopoDS_Shape table_leg_shape(double x, double y, double height,
     }
 }
 
+bool table_edge_joins_points(const TopoDS_Edge& edge,
+                             const gp_Pnt& first,
+                             const gp_Pnt& second,
+                             double tolerance = 1.0e-5) {
+    TopoDS_Vertex first_vertex;
+    TopoDS_Vertex last_vertex;
+    TopExp::Vertices(edge, first_vertex, last_vertex);
+    if (first_vertex.IsNull() || last_vertex.IsNull()) return false;
+    const gp_Pnt edge_first = BRep_Tool::Pnt(first_vertex);
+    const gp_Pnt edge_last = BRep_Tool::Pnt(last_vertex);
+    return (edge_first.Distance(first) <= tolerance
+            && edge_last.Distance(second) <= tolerance)
+        || (edge_first.Distance(second) <= tolerance
+            && edge_last.Distance(first) <= tolerance);
+}
+
+TopoDS_Shape round_table_top(const TopoDS_Shape& source,
+                             double bottom_z,
+                             double top_z) {
+    if (source.IsNull()) return {};
+    constexpr double corner_radius = 15.0;
+    constexpr double face_radius = 5.0;
+    constexpr double tolerance = 1.0e-5;
+
+    // First operation: round the four plan-view corners by their vertical
+    // edges. Keep the original endpoint pairs because the other three edges
+    // remain unchanged after each individual fillet.
+    std::vector<std::pair<gp_Pnt, gp_Pnt>> corner_edges;
+    for (TopExp_Explorer explorer(source, TopAbs_EDGE);
+         explorer.More(); explorer.Next()) {
+        const TopoDS_Edge edge = TopoDS::Edge(explorer.Current());
+        TopoDS_Vertex first_vertex;
+        TopoDS_Vertex last_vertex;
+        TopExp::Vertices(edge, first_vertex, last_vertex);
+        if (first_vertex.IsNull() || last_vertex.IsNull()) continue;
+        const gp_Pnt first = BRep_Tool::Pnt(first_vertex);
+        const gp_Pnt last = BRep_Tool::Pnt(last_vertex);
+        const bool vertical = std::abs(first.X() - last.X()) <= tolerance
+            && std::abs(first.Y() - last.Y()) <= tolerance;
+        const bool spans_top =
+            (std::abs(first.Z() - bottom_z) <= tolerance
+             && std::abs(last.Z() - top_z) <= tolerance)
+            || (std::abs(last.Z() - bottom_z) <= tolerance
+                && std::abs(first.Z() - top_z) <= tolerance);
+        if (vertical && spans_top) {
+            corner_edges.emplace_back(first, last);
+        }
+    }
+
+    TopoDS_Shape rounded_corners = source;
+    for (const auto& endpoints : corner_edges) {
+        TopoDS_Edge target;
+        for (TopExp_Explorer explorer(rounded_corners, TopAbs_EDGE);
+             explorer.More(); explorer.Next()) {
+            const TopoDS_Edge edge = TopoDS::Edge(explorer.Current());
+            if (table_edge_joins_points(
+                    edge, endpoints.first, endpoints.second)) {
+                target = edge;
+                break;
+            }
+        }
+        if (target.IsNull()) continue;
+        try {
+            BRepFilletAPI_MakeFillet fillet(rounded_corners);
+            fillet.Add(corner_radius, target);
+            fillet.Build();
+            if (fillet.IsDone() && !fillet.Shape().IsNull()) {
+                rounded_corners = fillet.Shape();
+            }
+        } catch (const Standard_Failure&) {
+            // Continue with the remaining corners.
+        }
+    }
+
+    // Second operation: soften the complete perimeter of the upper face.
+    try {
+        BRepFilletAPI_MakeFillet fillet(rounded_corners);
+        int edge_count = 0;
+        for (TopExp_Explorer explorer(rounded_corners, TopAbs_EDGE);
+             explorer.More(); explorer.Next()) {
+            const TopoDS_Edge edge = TopoDS::Edge(explorer.Current());
+            TopoDS_Vertex first_vertex;
+            TopoDS_Vertex last_vertex;
+            TopExp::Vertices(edge, first_vertex, last_vertex);
+            if (first_vertex.IsNull() || last_vertex.IsNull()) continue;
+            const gp_Pnt first = BRep_Tool::Pnt(first_vertex);
+            const gp_Pnt last = BRep_Tool::Pnt(last_vertex);
+            if (std::abs(first.Z() - top_z) <= tolerance
+                && std::abs(last.Z() - top_z) <= tolerance) {
+                fillet.Add(face_radius, edge);
+                ++edge_count;
+            }
+        }
+        if (edge_count > 0) {
+            fillet.Build();
+            if (fillet.IsDone() && !fillet.Shape().IsNull()) {
+                return fillet.Shape();
+            }
+        }
+    } catch (const Standard_Failure&) {
+    }
+    return rounded_corners;
+}
+
 TopoDS_Shape table_top_shape(const TableGeometry& geometry) {
     const double z = geometry.height - geometry.top;
     if (!geometry.arc_top) {
-        return table_box_shape(
+        return round_table_top(table_box_shape(
             -geometry.width * 0.5, -geometry.depth * 0.5, z,
-            geometry.width, geometry.depth, geometry.top);
+            geometry.width, geometry.depth, geometry.top),
+            z, geometry.height);
     }
     try {
         const gp_Pnt front_left(-geometry.width * 0.5, -geometry.depth * 0.5, z);
@@ -4256,7 +5253,9 @@ TopoDS_Shape table_top_shape(const TableGeometry& geometry) {
         }
         BRepPrimAPI_MakePrism prism(face.Face(), gp_Vec(0.0, 0.0, geometry.top));
         prism.Build();
-        return prism.IsDone() ? prism.Shape() : TopoDS_Shape();
+        return prism.IsDone()
+            ? round_table_top(prism.Shape(), z, geometry.height)
+            : TopoDS_Shape();
     } catch (...) {
         return {};
     }
@@ -4932,6 +5931,33 @@ ToolRegistry::ToolRegistry() {
     });
 
     tools_.push_back({
+        "SolidShell",
+        "Shell",
+        {
+            {"distance", "Distance", 18.0, -1000.0, 1000.0, 0.1,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"surface.id", "Surface ID", 0.0, 0.0, 4294967295.0, 1.0},
+            {"face.index", "Face Index", 0.0, 0.0, 1000000.0, 1.0}
+        },
+        [](CAlfaDoc& document, const std::vector<ToolParameter>& parameters) {
+            document.CreateShellFromSurface(
+                static_cast<unsigned long>(std::max(
+                    0.0, param(parameters, "surface.id", 0.0))),
+                static_cast<int>(param(parameters, "face.index", 0.0)),
+                param(parameters, "distance", 18.0));
+        },
+        [](CAlfaDoc& document, size_t index,
+           const std::vector<ToolParameter>& parameters) {
+            document.RebuildShellFromSurface(
+                index,
+                static_cast<unsigned long>(std::max(
+                    0.0, param(parameters, "surface.id", 0.0))),
+                static_cast<int>(param(parameters, "face.index", 0.0)),
+                param(parameters, "distance", 18.0));
+        }
+    });
+
+    tools_.push_back({
         "DrawSpline",
         "Draw Spline",
         {},
@@ -5138,18 +6164,33 @@ ToolRegistry::ToolRegistry() {
     });
 
     tools_.push_back({
-        "stair",
-        "Stair",
+        "room",
+        "Room",
         {
-            {"width", "Width", 1.2, 0.4, 4.0, 0.1},
-            {"height", "Height", 1.4, 0.2, 4.0, 0.1},
-            {"depth", "Depth", 2.6, 0.6, 6.0, 0.1}
+            {"length", "Length", 6000.0, 500.0, 100000.0, 100.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"width", "Width", 4000.0, 500.0, 100000.0, 100.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"height", "Height", 2900.0, 300.0, 20000.0, 100.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"wall_thickness", "Wall Thickness", 200.0, 20.0, 2000.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"floor_thickness", "Floor Thickness", 120.0, 10.0, 500.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"ceiling", "Ceiling", 0.0, 0.0, 1.0, 1.0,
+                ToolParameterType::Checkbox}
         },
         [](CAlfaDoc& document, const std::vector<ToolParameter>& parameters) {
-            document.AddMesh(make_box("Parametric Stair", static_cast<float>(param(parameters, "width", 1.2)), static_cast<float>(param(parameters, "height", 1.4)), static_cast<float>(param(parameters, "depth", 2.6)), -0.6f, 0.0f, -1.3f, {0.70f, 0.47f, 0.28f}));
+            create_component_assembly(
+                document, room_parts(document, parameters), parameters, "room", "Room");
         },
-        [](CAlfaDoc& document, size_t index, const std::vector<ToolParameter>& parameters) {
-            rebuild_box(document, index, parameters, "Parametric Stair", {0.70f, 0.47f, 0.28f}, 2.6f);
+        [](CAlfaDoc& document, size_t index,
+           const std::vector<ToolParameter>& parameters) {
+            const auto& objects = document.GetObjects();
+            const auto* room = index < objects.size()
+                ? dynamic_cast<const CAssembled*>(objects[index].get()) : nullptr;
+            rebuild_component_assembly(
+                document, index, room_parts(document, parameters, room), parameters, "room");
         }
     });
 
@@ -5157,15 +6198,43 @@ ToolRegistry::ToolRegistry() {
         "window",
         "Window",
         {
-            {"width", "Width", 1.4, 0.4, 4.0, 0.1},
-            {"height", "Height", 1.1, 0.3, 3.0, 0.1},
-            {"depth", "Frame Depth", 0.16, 0.05, 0.5, 0.01}
+            {"distance_along_wall", "Distance Along Wall", 1800.0, 0.0, 100000.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"distance_from_floor", "Distance From Floor", 900.0, 0.0, 20000.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"factor", "Factor", 0.5, 0.1, 0.9, 0.05},
+            {"wood_construction", "Wood Construction", 0.0, 0.0, 1.0, 1.0,
+                ToolParameterType::Checkbox},
+            {"shape", "Shape", 0.0, 0.0, 2.0, 1.0,
+                ToolParameterType::Combo,
+                {"Rectangular 1", "Rectangular 2", "Arched"}},
+            {"width", "Width", 1000.0, 300.0, 10000.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"height", "Height", 1300.0, 300.0, 10000.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"frame_width", "Frame Profile Width", 60.0, 15.0, 500.0, 5.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"frame_thickness", "Frame Profile Thickness", 60.0, 15.0, 500.0, 5.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"vertical_bars", "Vertical Muntin Bars", 0.0, 0.0, 12.0, 1.0},
+            {"horizontal_bars", "Horizontal Muntin Bars", 0.0, 0.0, 12.0, 1.0},
+            {"sill_projection", "Sill Projection", 50.0, 0.0, 500.0, 5.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"sill_thickness", "Sill Thickness", 30.0, 5.0, 100.0, 5.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"sill_side_extension", "Sill Side Extension", 50.0, 0.0, 500.0, 5.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"reverse", "Reverse", 0.0, 0.0, 1.0, 1.0,
+                ToolParameterType::Checkbox},
+            {"host.wall.id", "Host Wall", 0.0, 0.0, 4294967295.0, 1.0}
         },
         [](CAlfaDoc& document, const std::vector<ToolParameter>& parameters) {
-            document.AddMesh(make_box("Parametric Window", static_cast<float>(param(parameters, "width", 1.4)), static_cast<float>(param(parameters, "height", 1.1)), static_cast<float>(param(parameters, "depth", 0.16)), -0.7f, 0.8f, -0.08f, {0.40f, 0.68f, 0.88f}));
+            create_component_assembly(
+                document, window_parts(document, parameters), parameters, "window", "Window");
         },
         [](CAlfaDoc& document, size_t index, const std::vector<ToolParameter>& parameters) {
-            rebuild_box(document, index, parameters, "Parametric Window", {0.40f, 0.68f, 0.88f}, 0.16f);
+            rebuild_component_assembly(
+                document, index, window_parts(document, parameters), parameters, "window");
         }
     });
 
@@ -5173,15 +6242,39 @@ ToolRegistry::ToolRegistry() {
         "door",
         "Door",
         {
-            {"width", "Width", 0.9, 0.5, 2.0, 0.05},
-            {"height", "Height", 2.1, 1.2, 3.0, 0.1},
-            {"depth", "Thickness", 0.12, 0.04, 0.35, 0.01}
+            {"type", "Type", 0.0, 0.0, 2.0, 1.0,
+                ToolParameterType::Combo,
+                {"Glass Door", "Panel Door", "Opening"}},
+            {"distance_along_wall", "Distance Along Wall", 1270.0, 0.0, 100000.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"width", "Width", 900.0, 500.0, 10000.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"height", "Height", 2000.0, 1000.0, 10000.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"reverse", "Reverse", 0.0, 0.0, 1.0, 1.0,
+                ToolParameterType::Checkbox},
+            {"distance_to_floor", "Distance To Floor", 100.0, 0.0, 5000.0, 10.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"handle_side", "Handle Position", 1.0, 0.0, 1.0, 1.0,
+                ToolParameterType::Combo, {"Left", "Right"}},
+            {"handle_type", "Handle Type", 0.0, 0.0, 2.0, 1.0,
+                ToolParameterType::Combo, {"Round", "Lever", "None"}},
+            {"double_door", "Double Door", 0.0, 0.0, 1.0, 1.0,
+                ToolParameterType::Checkbox},
+            {"door_frame", "Door Frame", 1.0, 0.0, 1.0, 1.0,
+                ToolParameterType::Checkbox},
+            {"material", "Material", 0.0, 0.0, 4.0, 1.0,
+                ToolParameterType::Combo,
+                {"Beech", "Oak", "Pine", "White", "Aluminum"}},
+            {"host.wall.id", "Host Wall", 0.0, 0.0, 4294967295.0, 1.0}
         },
         [](CAlfaDoc& document, const std::vector<ToolParameter>& parameters) {
-            document.AddMesh(make_box("Parametric Door", static_cast<float>(param(parameters, "width", 0.9)), static_cast<float>(param(parameters, "height", 2.1)), static_cast<float>(param(parameters, "depth", 0.12)), -0.45f, 0.0f, -0.06f, {0.62f, 0.42f, 0.24f}));
+            create_component_assembly(
+                document, door_parts(document, parameters), parameters, "door", "Door");
         },
         [](CAlfaDoc& document, size_t index, const std::vector<ToolParameter>& parameters) {
-            rebuild_box(document, index, parameters, "Parametric Door", {0.62f, 0.42f, 0.24f}, 0.12f);
+            rebuild_component_assembly(
+                document, index, door_parts(document, parameters), parameters, "door");
         }
     });
 
@@ -5404,9 +6497,9 @@ ToolRegistry::ToolRegistry() {
         {
             {"showcase_facade_type", "Facade", 0.0, 0.0, 1.0, 1.0,
                 ToolParameterType::Combo, {"Single Door", "Double Door"}},
-            {"facade_style", "Facade Style", 0.0, 0.0, 2.0, 1.0,
-                ToolParameterType::Combo, {"Screen", "Frame", "Plain"},
-                ToolParameterUnit::None, {2.0, 1.0, 0.0}},
+            {"facade_style", "Facade Style", 0.0, 0.0, 4.0, 1.0,
+                ToolParameterType::Combo,
+                {"Plain", "Frame", "Screen", "Milled", "Milano"}},
             {"facade_showcase", "Facade Showcase", 0.0, 0.0, 1.0, 1.0,
                 ToolParameterType::Checkbox},
             {"showcase_fill", "Showcase Fill", 0.0, 0.0, 3.0, 1.0,
@@ -5688,11 +6781,9 @@ ToolRegistry::ToolRegistry() {
                 ToolParameterType::Number, {}, ToolParameterUnit::Length},
             {"depth", "Depth", 500.0, 250.0, 1000.0, 10.0,
                 ToolParameterType::Number, {}, ToolParameterUnit::Length},
-            {"facade_type", "Facade Type", 0.0, 0.0, 9.0, 1.0,
+            {"facade_type", "Facade Type", 0.0, 0.0, 4.0, 1.0,
                 ToolParameterType::Combo,
-                {"Chipboard Panel", "MDF Profile", "Panel into Profile",
-                 "MDF Profile AGT-1032", "MDF Profile Milano", "Frame",
-                 "Screen", "Frame + Screen", "Frame-2", "Milling"}},
+                {"Plain", "Frame", "Screen", "Milled", "Milano"}},
             {"handle_type", "Handle Type", 0.0, 0.0, 3.0, 1.0,
                 ToolParameterType::Combo, {"Modern", "Classic", "Knob", "None"}},
             {"panel_thickness", "Panel Thickness", 18.0, 5.0, 50.0, 1.0,
@@ -5766,9 +6857,9 @@ ToolRegistry::ToolRegistry() {
                 ToolParameterType::Number, {}, ToolParameterUnit::Length},
             {"leg_height", "Leg Height", 100.0, 20.0, 300.0, 10.0,
                 ToolParameterType::Number, {}, ToolParameterUnit::Length},
-            {"facade_style", "Facade Style", 2.0, 0.0, 2.0, 1.0,
+            {"facade_style", "Facade Style", 4.0, 0.0, 4.0, 1.0,
                 ToolParameterType::Combo,
-                {"Chipboard Panel", "MDF Profile", "MDF Profile Milano"}},
+                {"Plain", "Frame", "Screen", "Milled", "Milano"}},
             {"handle_type", "Handle Type", 0.0, 0.0, 3.0, 1.0,
                 ToolParameterType::Combo,
                 {"Modern", "Classic", "Knob", "None"}},
@@ -5902,8 +6993,13 @@ ActiveParametricObject ToolRegistry::Activate(const std::string& id, CAlfaDoc& d
         return {};
     }
 
-    const std::vector<ToolParameter> parameters =
+    std::vector<ToolParameter> parameters =
         prepare_material_parameters(document, tool->defaults);
+    if (id == "window" || id == "door") {
+        set_tool_parameter_value(
+            parameters, "host.wall.id",
+            static_cast<double>(selected_room_wall_id(document)));
+    }
     const size_t object_count_before = document.GetObjects().size();
     tool->create(document, parameters);
     if (id == "SolidTwoSketches") {
@@ -5929,7 +7025,64 @@ ActiveParametricObject ToolRegistry::Activate(const std::string& id, CAlfaDoc& d
     }
     const size_t object_index = document.GetSelectedObjectIndex();
     store_parametric_definition(document, object_index, tool->id, tool->label, 0, parameters);
+    if (id == "window" || id == "door") {
+        RebuildArchitectureRooms(document);
+    }
     return {tool->id, object_index, 0, parameters};
+}
+
+bool ToolRegistry::HasVisibleArchitectureWalls(CAlfaDoc& document) const {
+    return !visible_room_wall_ids(document).empty();
+}
+
+ActiveParametricObject ToolRegistry::ActivateArchitectureOpening(
+    const std::string& id,
+    CAlfaDoc& document,
+    unsigned long wall_id,
+    CPoint3d approximate_point) const {
+    if (id != "window" && id != "door") return {};
+    const std::vector<unsigned long> visible_walls =
+        visible_room_wall_ids(document);
+    if (std::find(visible_walls.begin(), visible_walls.end(), wall_id)
+        == visible_walls.end()) {
+        return {};
+    }
+
+    const ToolDefinition* tool = Find(id);
+    const auto* wall = dynamic_cast<const CSolid*>(
+        document.FindObjectById(wall_id));
+    Vec3 minimum{};
+    Vec3 maximum{};
+    if (!tool || !wall || !wall->GetBounds(minimum, maximum)) return {};
+
+    std::vector<ToolParameter> parameters = tool->defaults;
+    set_tool_parameter_value(
+        parameters, "host.wall.id", static_cast<double>(wall_id));
+    const bool along_x = maximum.x - minimum.x
+        >= maximum.y - minimum.y;
+    const double wall_length = along_x
+        ? maximum.x - minimum.x
+        : maximum.y - minimum.y;
+    const double clicked_distance = along_x
+        ? approximate_point.x - minimum.x
+        : approximate_point.y - minimum.y;
+    const double opening_width = std::max(
+        id == "window" ? 300.0 : 500.0,
+        param(parameters, "width", id == "window" ? 1000.0 : 900.0));
+    const double half_width = std::min(opening_width * 0.5,
+                                       wall_length * 0.5);
+    const double distance = std::clamp(
+        clicked_distance,
+        half_width,
+        std::max(half_width, wall_length - half_width));
+    for (ToolParameter& parameter : parameters) {
+        if (parameter.id != "distance_along_wall") continue;
+        parameter.minimum = 0.0;
+        parameter.maximum = std::max(parameter.step, wall_length);
+        parameter.value = distance;
+        break;
+    }
+    return CreateParametricObject(id, document, parameters);
 }
 
 ActiveParametricObject ToolRegistry::CreateParametricObject(const std::string& id,
@@ -5965,6 +7118,9 @@ ActiveParametricObject ToolRegistry::CreateParametricObject(const std::string& i
     const size_t object_index = document.GetSelectedObjectIndex();
     store_parametric_definition(
         document, object_index, tool->id, tool->label, 0, prepared.parameters);
+    if (id == "window" || id == "door") {
+        RebuildArchitectureRooms(document);
+    }
     prepared.object_index = object_index;
     return prepared;
 }
@@ -6376,7 +7532,167 @@ void ToolRegistry::Rebuild(const ActiveParametricObject& active_object, CAlfaDoc
                                     tool->label,
                                     active_object.operation_index,
                                     active_object.parameters);
+        if (active_object.tool_id == "window"
+            || active_object.tool_id == "door") {
+            RebuildArchitectureRooms(document);
+        } else if (active_object.tool_id == "room"
+                   && active_object.object_index
+                       < document.GetObjects().size()) {
+            const auto* room = dynamic_cast<const CAssembled*>(
+                document.GetObjects()[active_object.object_index].get());
+            std::set<unsigned long> wall_ids;
+            if (room) {
+                wall_ids.insert(
+                    room->GetElementIds().begin(), room->GetElementIds().end());
+            }
+            std::vector<unsigned long> opening_ids;
+            for (const auto& object : document.GetObjects()) {
+                if (!object || (object->GetParametricToolId() != "window"
+                                && object->GetParametricToolId() != "door")) {
+                    continue;
+                }
+                const unsigned long host_id = static_cast<unsigned long>(
+                    std::max(0.0, saved_param(
+                        object->GetParametricParameters(),
+                        "host.wall.id", 0.0)));
+                if (wall_ids.find(host_id) != wall_ids.end()) {
+                    opening_ids.push_back(object->m_id);
+                }
+            }
+            for (unsigned long opening_id : opening_ids) {
+                const size_t opening_index =
+                    document.FindObjectIndexById(opening_id);
+                auto& objects = document.GetObjects();
+                if (opening_index >= objects.size() || !objects[opening_index]) {
+                    continue;
+                }
+                ActiveParametricObject opening = ActiveObjectFromDocument(
+                    opening_index, *objects[opening_index], 0, &document);
+                const ToolDefinition* opening_tool = Find(opening.tool_id);
+                if (opening_tool && opening_tool->rebuild) {
+                    opening_tool->rebuild(
+                        document, opening_index, opening.parameters);
+                }
+            }
+        }
         document.UpdateAttachedSketches();
+    }
+}
+
+bool ToolRegistry::ApplyFurnitureMaterialParameter(
+    const ActiveParametricObject& active_object,
+    CAlfaDoc& document,
+    const std::string& parameter_id) const {
+    if (parameter_id != "body_material_id"
+        && parameter_id != "facade_material_id"
+        && parameter_id != "hardware_material_id"
+        && parameter_id != "top_material_id"
+        && parameter_id != "base_material_id") {
+        return false;
+    }
+    if (active_object.object_index >= document.GetObjects().size()) {
+        return false;
+    }
+
+    auto* assembly = dynamic_cast<CAssembled*>(
+        document.GetObjects()[active_object.object_index].get());
+    if (!assembly) {
+        return false;
+    }
+    const Material* material = material_parameter(
+        document, active_object.parameters, parameter_id.c_str());
+    if (!material) {
+        return false;
+    }
+
+    const bool is_kitchen = active_object.tool_id == "kitchen_nika_260"
+        || active_object.tool_id == "kitchen_corner";
+    bool changed = false;
+    for (unsigned long element_id : assembly->GetElementIds()) {
+        CAlfaObject* part = document.FindObjectById(element_id);
+        if (!part) {
+            continue;
+        }
+        const std::string& name = part->GetName();
+        const bool protected_decor =
+            name.find("Showcase Glass") != std::string::npos
+            || name.find("Stained Glass Wire") != std::string::npos;
+        const bool round_handle_face =
+            name.find("Facade Handle Face") != std::string::npos;
+        const bool facade = !protected_decor
+            && name.find("Facade") != std::string::npos;
+        const bool hardware = !round_handle_face
+            && (name.find("Handle") != std::string::npos
+                || name.find("Guide") != std::string::npos
+                || (is_kitchen && name.find("Leg") != std::string::npos));
+        const bool top = (active_object.tool_id == "table"
+                          && name == "Table Top")
+            || (is_kitchen && name.find("Worktop") != std::string::npos);
+        const bool body = !protected_decor && !facade && !hardware && !top;
+
+        const bool matches =
+            (parameter_id == "facade_material_id" && facade)
+            || (parameter_id == "hardware_material_id" && hardware)
+            || (parameter_id == "top_material_id" && top)
+            || (parameter_id == "base_material_id" && !top)
+            || (parameter_id == "body_material_id" && body);
+        if (!matches) {
+            continue;
+        }
+        part->SetMaterial(*material);
+        part->SetMaterialId(material->id);
+        changed = true;
+    }
+
+    if (!changed) {
+        return false;
+    }
+    std::vector<ParametricParameterValue> saved =
+        assembly->GetParametricParameters();
+    const double value = param(active_object.parameters, parameter_id.c_str(), 0.0);
+    const auto existing = std::find_if(
+        saved.begin(), saved.end(), [&parameter_id](const auto& parameter) {
+            return parameter.id == parameter_id;
+        });
+    if (existing == saved.end()) {
+        saved.push_back({parameter_id, value});
+    } else {
+        existing->value = value;
+    }
+    assembly->SetParametricDefinition(
+        assembly->GetParametricToolId(), std::move(saved));
+    return true;
+}
+
+void ToolRegistry::RebuildArchitectureRooms(CAlfaDoc& document) const {
+    std::vector<unsigned long> room_ids;
+    for (const auto& object : document.GetObjects()) {
+        const auto* room = dynamic_cast<const CAssembled*>(object.get());
+        if (room && room->GetParametricToolId() == "room") {
+            room_ids.push_back(room->m_id);
+        }
+    }
+
+    for (unsigned long room_id : room_ids) {
+        const size_t room_index = document.FindObjectIndexById(room_id);
+        auto& objects = document.GetObjects();
+        auto* room = room_index < objects.size()
+            ? dynamic_cast<CAssembled*>(objects[room_index].get()) : nullptr;
+        if (!room) continue;
+
+        std::vector<ToolParameter> parameters;
+        parameters.reserve(room->GetParametricParameters().size());
+        for (const ParametricParameterValue& saved
+             : room->GetParametricParameters()) {
+            parameters.push_back({
+                saved.id, saved.id, saved.value,
+                -1000000.0, 1000000.0, 1.0});
+        }
+        if (parameters.empty()) continue;
+        rebuild_component_assembly(
+            document, room_index,
+            room_parts(document, parameters, room),
+            parameters, "room");
     }
 }
 

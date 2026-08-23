@@ -14,6 +14,7 @@
 #endif
 
 #include "CFurnitureDrawer.h"
+#include "CFacadeFurniture.h"
 #include "CKitchenCabinet.h"
 #include "solid/Solid.h"
 
@@ -885,9 +886,8 @@ std::vector<std::unique_ptr<CAlfaObject>> CDrawerBoxFurniture::BuildParts(
         definition.facade_width = facade_width;
         definition.facade_height = facade_height;
         definition.facade_thickness = t;
-        definition.facade_style = box.facade_type == 0
-            ? FurnitureDrawerFacadeStyle::Slab
-            : FurnitureDrawerFacadeStyle::Frame;
+        definition.facade_style = static_cast<FurnitureDrawerFacadeStyle>(
+            std::clamp(box.facade_type, 0, 4));
         definition.make_handle = box.handle_type != 3;
         definition.round_handle = box.handle_type == 2;
         definition.body_color = drawer_color;
@@ -926,7 +926,6 @@ std::vector<std::unique_ptr<CAlfaObject>> CNikaKitchenFurniture::BuildParts(
     const NikaKitchenDefinition& kitchen) {
     const Color body_color{0.48f, 0.24f, 0.10f};
     const Color facade_color{0.61f, 0.31f, 0.12f};
-    const Color panel_color{0.52f, 0.25f, 0.10f};
     const Color glass_color{0.66f, 0.82f, 0.88f};
     const Color hardware_color{0.36f, 0.32f, 0.18f};
     const Color worktop_color{0.46f, 0.22f, 0.09f};
@@ -1017,9 +1016,14 @@ std::vector<std::unique_ptr<CAlfaObject>> CNikaKitchenFurniture::BuildParts(
             add_moving(name, std::move(shape), color, pullout,
                        hinge_x, front, signed_angle);
         };
-        if (kitchen.facade_style == 0 && !glass) {
-            add_part(prefix + " Facade",
-                furniture_box(x, front - t, z, width, t, height), facade_color);
+        if (!glass) {
+            const auto style = static_cast<KitchenCabinetFacadeStyle>(
+                std::clamp(kitchen.facade_style, 0, 4));
+            add_part(prefix + " Facade Panel",
+                CFacadeFurniture::BuildPlanarShape(
+                    style, x, front - t, z, width, t, height,
+                    true, KitchenCabinetShowcaseFill::None),
+                facade_color);
         } else {
             const double frame = std::clamp(
                 std::min(width, height) * 0.12, 45.0, 75.0);
@@ -1034,12 +1038,12 @@ std::vector<std::unique_ptr<CAlfaObject>> CNikaKitchenFurniture::BuildParts(
             add_part(prefix + " Facade Top Frame",
                 furniture_box(x + frame, front - t, z + height - frame,
                               width - 2.0 * frame, t, frame), facade_color);
-            const double inset = kitchen.facade_style == 2 ? 5.0 : 2.0;
-            add_part(glass ? prefix + " Showcase Glass" : prefix + " Facade Panel",
+            const double inset = 2.0;
+            add_part(prefix + " Showcase Glass",
                 furniture_box(x + frame, front - t + inset, z + frame,
                               width - 2.0 * frame, std::max(2.0, t - inset),
                               height - 2.0 * frame),
-                glass ? glass_color : panel_color);
+                glass_color);
         }
         add_handle(prefix, x, front - t, z + height * 0.72,
                    width, vertical_handle, handle_on_left, pullout,

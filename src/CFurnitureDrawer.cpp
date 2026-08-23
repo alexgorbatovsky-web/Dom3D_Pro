@@ -1,5 +1,20 @@
 #include "CFurnitureDrawer.h"
 
+#include "CFacadeFurniture.h"
+
+#ifdef Coord
+#undef Coord
+#endif
+#ifdef String
+#undef String
+#endif
+#ifdef LPCTSTR
+#undef LPCTSTR
+#endif
+#ifdef Pixel
+#undef Pixel
+#endif
+
 #include "solid/Solid.h"
 
 #include <BRepPrimAPI_MakeBox.hxx>
@@ -57,45 +72,26 @@ std::vector<std::unique_ptr<CAlfaObject>> CFurnitureDrawer::BuildParts(
             inner_width, drawer.depth - 2.0 * side,
             drawer.bottom_thickness), drawer.body_color);
 
-    if (drawer.make_facade
-        && drawer.facade_style == FurnitureDrawerFacadeStyle::Slab) {
+    if (drawer.make_facade) {
+        const auto style = drawer.facade_style
+                == FurnitureDrawerFacadeStyle::Plain
+            ? KitchenCabinetFacadeStyle::Plain
+            : drawer.facade_style == FurnitureDrawerFacadeStyle::Frame
+                ? KitchenCabinetFacadeStyle::Frame
+                : drawer.facade_style
+                        == FurnitureDrawerFacadeStyle::Screen
+                    ? KitchenCabinetFacadeStyle::Screen
+                    : drawer.facade_style
+                            == FurnitureDrawerFacadeStyle::Milled
+                        ? KitchenCabinetFacadeStyle::Milled
+                        : KitchenCabinetFacadeStyle::Milano;
         add(drawer.facade_name,
-            drawer_box(drawer.facade_left, drawer.facade_front,
+            CFacadeFurniture::BuildPlanarShape(
+                style,
+                drawer.facade_left, drawer.facade_front,
                 drawer.facade_bottom, drawer.facade_width,
-                drawer.facade_thickness, drawer.facade_height),
-            drawer.facade_color);
-    } else if (drawer.make_facade) {
-        const double frame_width = std::clamp(
-            std::min(drawer.facade_height, drawer.facade_width) * 0.12,
-            18.0, 55.0);
-        const std::string prefix = drawer.facade_name + " ";
-        add(prefix + "Left Frame",
-            drawer_box(drawer.facade_left, drawer.facade_front,
-                drawer.facade_bottom, frame_width,
-                drawer.facade_thickness, drawer.facade_height),
-            drawer.facade_color);
-        add(prefix + "Right Frame",
-            drawer_box(drawer.facade_left + drawer.facade_width - frame_width,
-                drawer.facade_front, drawer.facade_bottom, frame_width,
-                drawer.facade_thickness, drawer.facade_height),
-            drawer.facade_color);
-        add(prefix + "Bottom Frame",
-            drawer_box(drawer.facade_left + frame_width, drawer.facade_front,
-                drawer.facade_bottom,
-                drawer.facade_width - 2.0 * frame_width,
-                drawer.facade_thickness, frame_width), drawer.facade_color);
-        add(prefix + "Top Frame",
-            drawer_box(drawer.facade_left + frame_width, drawer.facade_front,
-                drawer.facade_bottom + drawer.facade_height - frame_width,
-                drawer.facade_width - 2.0 * frame_width,
-                drawer.facade_thickness, frame_width), drawer.facade_color);
-        add(prefix + "Inset",
-            drawer_box(drawer.facade_left + frame_width,
-                drawer.facade_front + drawer.facade_thickness * 0.35,
-                drawer.facade_bottom + frame_width,
-                drawer.facade_width - 2.0 * frame_width,
-                drawer.facade_thickness * 0.45,
-                drawer.facade_height - 2.0 * frame_width),
+                drawer.facade_thickness, drawer.facade_height,
+                true, KitchenCabinetShowcaseFill::None),
             drawer.facade_color);
     }
 

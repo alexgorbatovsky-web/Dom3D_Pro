@@ -7,8 +7,11 @@
 #include <vector>
 
 enum class FurnitureDrawerFacadeStyle {
-    Slab,
-    Frame
+    Plain = 0,
+    Frame = 1,
+    Screen = 2,
+    Milled = 3,
+    Milano = 4
 };
 
 struct FurnitureDrawerDefinition {
@@ -32,7 +35,7 @@ struct FurnitureDrawerDefinition {
     double facade_width = 400.0;
     double facade_height = 160.0;
     double facade_thickness = 18.0;
-    FurnitureDrawerFacadeStyle facade_style = FurnitureDrawerFacadeStyle::Slab;
+    FurnitureDrawerFacadeStyle facade_style = FurnitureDrawerFacadeStyle::Plain;
 
     bool make_facade = true;
     bool make_handle = true;

@@ -78,6 +78,9 @@ std::unique_ptr<CAlfaObject> CSurfaceSet::Clone() const {
             copy->SetSurfaceCoating(i, source->MaterialOverride.coating_material);
         }
     }
-    copy->ReBuldMesh();
+    // Preserve the triangulation already carried by the shared OCCT shape.
+    // ReBuldMesh() routes a SurfaceSet through the legacy UV-grid mesher and
+    // made the initial Undo snapshot of imported IGES models extremely slow.
+    copy->EnsureRenderMesh();
     return copy;
 }

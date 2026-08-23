@@ -7297,6 +7297,26 @@
     <Text>Ruled Surface: выберите необходимую геометрию и продолжайте</Text>
   </TextItem>
   <TextItem>
+    <ID>Auto_SHELL_TOOL</ID>
+    <Text>Оболочка</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Auto_SHELL_PARAMETERS</ID>
+    <Text>Параметры оболочки</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Auto_SHELL_ADJUST</ID>
+    <Text>Оболочка: настройте расстояние и продолжайте</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Auto_SHELL_FAILED</ID>
+    <Text>Оболочка: операция не выполнена; проверьте поверхность и расстояние</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Auto_SHELL_SELECT</ID>
+    <Text>Оболочка: выберите одну грань поверхности и продолжайте</Text>
+  </TextItem>
+  <TextItem>
     <ID>Auto_879666EEAA0F16</ID>
     <Text>Запустите тест обрезки</Text>
   </TextItem>

@@ -167,6 +167,9 @@ private:
     void ShowDrawSplineDialog();
     void ShowSketchPanel();
     void ActivateParametricTool(const std::string& tool_id);
+    void CompleteArchitectureOpeningPlacement(
+        unsigned long wall_id, CPoint3d point);
+    void CancelArchitectureOpeningPlacement();
     void ApplySheetBend();
     bool TryApplyPendingTrim();
     void CancelPendingTrim(const QString& status_text = {});
@@ -206,6 +209,7 @@ private:
     void ShowPreferences();
     void ShowLightingDialog();
     void ShowBlenderCyclesDialog();
+    void ShowNativeRaytraceDialog();
     void ViewLastRenderResult();
     void ImportFile();
     void ShowCatalogDialog();
@@ -306,6 +310,7 @@ private:
     QSlider* mesh_opacity_slider_ = nullptr;
     QLabel* mesh_opacity_value_label_ = nullptr;
     QLabel* projection_status_label_ = nullptr;
+    QDoubleSpinBox* camera_fov_spin_ = nullptr;
     Material selected_library_material_;
     bool has_selected_library_material_ = false;
     QString pending_material_parameter_id_;
@@ -399,6 +404,7 @@ private:
     std::vector<unsigned long> furniture_animation_selection_ids_;
     std::string furniture_animation_parameter_id_;
     std::string pending_trim_tool_id_;
+    std::string pending_architecture_opening_tool_id_;
     PendingGroupCommand pending_group_command_ = PendingGroupCommand::None;
     PendingPreciseTransform pending_precise_transform_ = PendingPreciseTransform::None;
     PendingTransformPointPick pending_transform_point_pick_ = PendingTransformPointPick::None;

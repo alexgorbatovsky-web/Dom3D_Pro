@@ -49,7 +49,7 @@ struct NikaKitchenDefinition {
     double worktop_front_radius = 20.0;
     double panel_thickness = 18.0;
     double leg_height = 100.0;
-    int facade_style = 2;
+    int facade_style = 4;
     int handle_type = 0;
     std::array<double, 8> door_open_angles{};
     int open_drawer = 0;

@@ -76,7 +76,8 @@ bool Renderer::ScreenToFloor(int screen_x, int screen_y, int width, int height, 
     const float ndc_x = (2.0f * static_cast<float>(screen_x - kPanelWidth) / scene_width) - 1.0f;
     const float ndc_y = 1.0f - (2.0f * static_cast<float>(screen_y - kToolbarHeight) / scene_height);
     const float aspect = static_cast<float>(scene_width) / scene_height;
-    const float tan_half = std::tan(deg_to_rad(48.0f) * 0.5f);
+    const float tan_half = std::tan(
+        deg_to_rad(camera.vertical_fov_degrees) * 0.5f);
 
     Vec3 eye{};
     Vec3 forward{};
@@ -117,7 +118,8 @@ bool Renderer::WorldToScreen(Vec3 point, const Camera& camera, int width, int he
         return false;
     }
 
-    const float tan_half = std::tan(deg_to_rad(48.0f) * 0.5f);
+    const float tan_half = std::tan(
+        deg_to_rad(camera.vertical_fov_degrees) * 0.5f);
     const float aspect = static_cast<float>(scene_width) / scene_height;
     const float ndc_x = camera_x / (camera_z * tan_half * aspect);
     const float ndc_y = camera_y / (camera_z * tan_half);
@@ -150,7 +152,9 @@ void Renderer::DrawScene(const CAlfaDoc& document, const Camera& camera, ToolMod
 
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
-    Perspective(48.0f, static_cast<float>(scene_width) / scene_height, 0.1f, 100.0f);
+    Perspective(camera.vertical_fov_degrees,
+                static_cast<float>(scene_width) / scene_height,
+                0.1f, 100.0f);
 
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();

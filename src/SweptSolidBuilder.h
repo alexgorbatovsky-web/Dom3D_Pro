@@ -52,7 +52,8 @@ TopoDS_Shape BuildMillingSweepShape(const TopoDS_Wire& section_wire,
                                     const TopoDS_Wire& guide_wire,
                                     const Vec3& guide_normal,
                                     int transition_mode = 2,
-                                    bool require_evolved = false);
+                                    bool require_evolved = false,
+                                    bool preserve_section_orientation = false);
 
 TopoDS_Shape BuildSweptSolidShape(const CSmartLine& section,
                                   const CAlfaObject& guide,
@@ -62,7 +63,8 @@ TopoDS_Shape BuildSweptSolidShape(const CSmartLine& section,
                                   double angle_degrees = 0.0,
                                   const std::vector<double>& width_scales = {},
                                   const std::vector<double>& height_scales = {},
-                                  bool require_evolved = false);
+                                  bool require_evolved = false,
+                                  bool force_authored_section = false);
 
 // Creates the exact section copy used at the start of BuildSweptSolidShape.
 // Intended for visual diagnostics and profile-orientation verification.

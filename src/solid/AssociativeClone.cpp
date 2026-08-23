@@ -48,7 +48,7 @@ std::unique_ptr<CAlfaObject> CAssociativeClone::Clone() const {
     copy->SetMaterialId(GetMaterialId());
     copy->m_LayerID = m_LayerID;
     copy->InitSurfaces();
-    copy->ReBuldMesh();
+    copy->EnsureRenderMesh();
     return copy;
 }
 

@@ -27,8 +27,10 @@ public:
 
 private:
     void ApplyPreset(int index);
+    void ApplyLightingPreset(int index);
     void BrowseBlender();
     void BrowseOutput();
+    void EditLights();
     void StartRender();
     void ViewResult();
     void UpdatePreview();
@@ -42,11 +44,18 @@ protected:
     BlenderCyclesRenderer* renderer_ = nullptr;
     QLineEdit* blender_path_ = nullptr;
     QComboBox* preset_ = nullptr;
+    QComboBox* lighting_preset_ = nullptr;
+    QComboBox* light_mode_ = nullptr;
+    QPushButton* customize_lights_ = nullptr;
+    std::vector<RenderLight> custom_lights_;
     QSpinBox* width_ = nullptr;
     QSpinBox* height_ = nullptr;
     QSpinBox* samples_ = nullptr;
     QDoubleSpinBox* noise_threshold_ = nullptr;
     QComboBox* device_ = nullptr;
+    QDoubleSpinBox* exposure_ = nullptr;
+    QDoubleSpinBox* environment_strength_ = nullptr;
+    QDoubleSpinBox* interior_light_strength_ = nullptr;
     QCheckBox* denoise_ = nullptr;
     QLineEdit* output_path_ = nullptr;
     QPushButton* render_button_ = nullptr;
