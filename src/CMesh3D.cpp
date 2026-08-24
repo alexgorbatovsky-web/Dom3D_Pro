@@ -2742,7 +2742,7 @@ bool CMesh3D::CreateFromBoundary(CPolyline* bond, float Density)
         return false;
     }
 
-    const float grid_step = std::max(Density, 0.0001f);
+    float grid_step = std::max(Density, 0.0001f);
     const std::vector<CPoint3d>& source_points = bond->GetPoints();
     std::vector<Vec3> contour;
     contour.reserve(source_points.size());
@@ -2811,6 +2811,12 @@ bool CMesh3D::CreateFromBoundary(CPolyline* bond, float Density)
         Clear();
         return false;
     }
+
+    // Safety net for all callers: never create more than 256 intervals along
+    // the longest axis from an accidentally tiny absolute step.
+    constexpr double max_grid_intervals = 256.0;
+    grid_step = static_cast<float>(std::max<double>(
+        grid_step, std::max(max_x - min_x, max_y - min_y) / max_grid_intervals));
 
     const double eps = std::max<double>(grid_step * 0.00001, 0.000001);
     const auto add_sorted_unique = [](std::vector<double>& values, double value, double merge_eps) {
@@ -2982,8 +2988,32 @@ bool CMesh3D::CreateFromBoundary(CPolyline* bond, float Density)
         }
     }
 
+    // Interior grid cells are already quads. Clipping a boundary cell may
+    // produce an N-gon, so reduce only those cells to triangles and run the
+    // same triangle-pairing step used by ContourQuadrangulator. The resulting
+    // contour mesh therefore contains quads and unavoidable boundary
+    // triangles, never arbitrary polygons.
+    std::vector<Face> triangle_and_quad_faces;
+    triangle_and_quad_faces.reserve(faces.size());
+    for (const Face& face : faces) {
+        if (face.corners.size() <= 4) {
+            triangle_and_quad_faces.push_back(face);
+            continue;
+        }
+        for (size_t corner = 1; corner + 1 < face.corners.size(); ++corner) {
+            Face triangle;
+            triangle.corners = {
+                face.corners.front(), face.corners[corner], face.corners[corner + 1]};
+            triangle_and_quad_faces.push_back(std::move(triangle));
+        }
+    }
+    faces = std::move(triangle_and_quad_faces);
+
     if (!vertices.empty() && !faces.empty() && SetGeometry(std::move(vertices), std::move(faces), {}, std::move(normals))) {
-        return true;
+        ContourQuadrangulator quadrangulator;
+        quadrangulator.CreateFromMesh(this);
+        quadrangulator.Quadrangulate(this);
+        return !faces_.empty();
     }
 
     CMesh3D triangle_mesh;

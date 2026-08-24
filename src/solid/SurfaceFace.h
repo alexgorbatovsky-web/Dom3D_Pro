@@ -104,7 +104,7 @@ public:
 	bool GetEdgeEndpoints(int edge_index, Vec3& start, Vec3& end) const;
 	bool GetEdgePolylinePoints(int edge_index, std::vector<Vec3>& points) const;
 	int GetEdgeCount() const { return static_cast<int>(m_Edges.size()); }
-	void PrepareEdges(float Deflection);
+	void PrepareEdges(float Deflection, bool normalized_quadro_density = false);
 	int GetPreparedPolylineCount() const;
 	int GetPreparedPolylinePointCount(int edge_index) const;
 	bool GetPreparedPolylineEndpoints(int edge_index, Vec3& start, Vec3& end) const;
@@ -117,6 +117,9 @@ public:
 	void DumpPreparedPolylinesToScene() const;
 	bool BuildTrimmingMesh(CSolid* psol, float Deflection);
 	void MakeFilledContour(const std::vector<Vec3>& contour, Vec3 normal, CMesh3D* quad_mesh);
+	bool MakeQuadMeshFromBoundary(float density,
+	                              CMesh3D* quad_mesh,
+	                              std::vector<Vec3>* triangulation_boundary = nullptr);
 	void GetEdges(std::vector<CPolyline*>& plines);
 	bool IsBoundLine(CPolyline* line);
 

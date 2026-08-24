@@ -26,6 +26,76 @@ if(NOT Qt6_FOUND)
 endif()
 find_package(OpenGL REQUIRED)
 
+# Legacy 3DCoat communication/utility engine. The copied comms sources depend
+# on the sibling comms-Math module, so keep the original 3DCoat checkout as a
+# configurable dependency instead of baking its files into Dom3D Pro.
+set(DOM3D_3DCOAT_SOURCE_DIR
+    "C:/3DCoat/3dcoat/3D-CoatV4"
+    CACHE PATH "3DCoat source directory containing comms-Math")
+set(DOM3D_COMMS_MATH_DIR
+    "${DOM3D_3DCOAT_SOURCE_DIR}/comms-Math"
+    CACHE PATH "3DCoat comms-Math source directory")
+
+if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/comms/comms.h")
+    message(FATAL_ERROR "Dom3D comms sources were not found in src/comms")
+endif()
+if(NOT EXISTS "${DOM3D_COMMS_MATH_DIR}/comms-Math.h")
+    message(FATAL_ERROR
+        "comms-Math was not found at:\n"
+        "  ${DOM3D_COMMS_MATH_DIR}\n"
+        "Configure DOM3D_3DCOAT_SOURCE_DIR or DOM3D_COMMS_MATH_DIR.")
+endif()
+
+file(GLOB DOM3D_COMMS_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/comms/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/comms/*.h")
+file(GLOB DOM3D_COMMS_MATH_SOURCES CONFIGURE_DEPENDS
+    "${DOM3D_COMMS_MATH_DIR}/*.cpp"
+    "${DOM3D_COMMS_MATH_DIR}/*.h")
+
+set(DOM3D_COMMS_BUILD_SOURCES ${DOM3D_COMMS_SOURCES})
+# cCodecPng.cpp includes the third-party png.h outside its COMMS_PNG guard.
+# Keep it visible in Visual Studio but do not compile it in the base module.
+set(DOM3D_COMMS_NON_BUILD_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/comms/cCodecPng.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/comms/cWinMain.cpp")
+list(REMOVE_ITEM DOM3D_COMMS_BUILD_SOURCES ${DOM3D_COMMS_NON_BUILD_SOURCES})
+set_source_files_properties(${DOM3D_COMMS_NON_BUILD_SOURCES}
+    PROPERTIES HEADER_FILE_ONLY TRUE)
+
+add_library(dom3d_comms STATIC
+    ${DOM3D_COMMS_BUILD_SOURCES}
+    ${DOM3D_COMMS_NON_BUILD_SOURCES}
+    ${DOM3D_COMMS_MATH_SOURCES})
+target_compile_features(dom3d_comms PUBLIC cxx_std_17)
+target_include_directories(dom3d_comms PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/comms"
+    "${DOM3D_COMMS_MATH_DIR}")
+target_compile_definitions(dom3d_comms PUBLIC DOM3D_COMMS_STANDALONE)
+target_compile_definitions(dom3d_comms PRIVATE
+    $<$<PLATFORM_ID:Windows>:_CRT_SECURE_NO_WARNINGS>
+    $<$<PLATFORM_ID:Windows>:_WINSOCK_DEPRECATED_NO_WARNINGS>)
+target_link_libraries(dom3d_comms PUBLIC OpenGL::GL)
+if(WIN32)
+    target_link_libraries(dom3d_comms PUBLIC
+        ws2_32 wininet comdlg32 shell32 ole32 uuid)
+endif()
+source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/src/comms"
+             PREFIX "comms" FILES ${DOM3D_COMMS_SOURCES})
+source_group(TREE "${DOM3D_COMMS_MATH_DIR}"
+             PREFIX "comms-Math" FILES ${DOM3D_COMMS_MATH_SOURCES})
+
+add_library(dom3d_mesh_adapter STATIC
+    src/excomms/cMeshContainerAdapter.cpp
+    src/excomms/cMeshContainerAdapter.h)
+target_compile_features(dom3d_mesh_adapter PUBLIC cxx_std_17)
+target_include_directories(dom3d_mesh_adapter PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(dom3d_mesh_adapter PUBLIC dom3d_comms)
+source_group("excomms" FILES
+    src/excomms/cMeshContainerAdapter.cpp
+    src/excomms/cMeshContainerAdapter.h)
+
 set(DOM3D_RAYTRACE_SOURCE_DIR
     "${CMAKE_CURRENT_SOURCE_DIR}/../raytrace-0.1"
     CACHE PATH "Original Dom3D raytrace source directory")
@@ -110,6 +180,7 @@ set(DOM3D_SOURCES
     src/CMesh3D.cpp
     src/ReferenceImage.cpp
     src/FillContour.cpp
+    src/ContourQuadrangulator3DCoat.cpp
     src/Line2D.cpp
     src/Net.cpp
     src/SurfaceUVMapping.cpp
@@ -210,6 +281,7 @@ set(DOM3D_HEADERS
     src/Common.h
     src/CMesh3D.h
     src/FillContour.h
+    src/ContourQuadrangulator3DCoat.h
     src/Line2D.h
     src/Net.h
     src/CBSpline.h
@@ -373,7 +445,15 @@ if(MSVC)
 endif()
 target_include_directories(Dom3D_Pro PRIVATE "${DOM3D_OPENCASCADE_INCLUDE_DIR}")
 target_link_directories(Dom3D_Pro PRIVATE "${DOM3D_OPENCASCADE_LIBRARY_DIR}")
-target_link_libraries(Dom3D_Pro PRIVATE Qt6::Widgets Qt6::OpenGLWidgets Qt6::Xml OpenGL::GL raytrace ${DOM3D_OPENCASCADE_LIBS})
+target_link_libraries(Dom3D_Pro PRIVATE
+    Qt6::Widgets
+    Qt6::OpenGLWidgets
+    Qt6::Xml
+    OpenGL::GL
+    raytrace
+    dom3d_comms
+    dom3d_mesh_adapter
+    ${DOM3D_OPENCASCADE_LIBS})
 if(MSVC)
     # Keep an address map next to the executable so Windows crash dumps from
     # optimized builds can be resolved even when no debugger was attached.
@@ -454,6 +534,16 @@ if(MSVC)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(CommsSmokeTests tests/CommsSmokeTests.cpp)
+    target_compile_features(CommsSmokeTests PRIVATE cxx_std_17)
+    target_link_libraries(CommsSmokeTests PRIVATE dom3d_comms)
+    add_test(NAME CommsSmokeTests COMMAND CommsSmokeTests)
+
+    add_executable(MeshContainerAdapterTests tests/MeshContainerAdapterTests.cpp)
+    target_compile_features(MeshContainerAdapterTests PRIVATE cxx_std_17)
+    target_link_libraries(MeshContainerAdapterTests PRIVATE dom3d_mesh_adapter)
+    add_test(NAME MeshContainerAdapterTests COMMAND MeshContainerAdapterTests)
+
     add_executable(PropertyPanelTests
         tests/PropertyPanelTests.cpp
         src/ui/PropertyPanel.cpp

@@ -6765,6 +6765,11 @@ bool OpenGLViewport::SnapCreationPoint(const QPoint& point,
             for (std::size_t index = 0; index < sketch->GetNodeCount(); ++index) {
                 consider(object, sketch->GetNodeWorld(index), false);
             }
+        } else if (const auto* mesh = dynamic_cast<const CMesh3D*>(object)) {
+            for (const Vec3& vertex : mesh->GetVertices()) {
+                consider(object,
+                    CPoint3d(vertex.x, vertex.y, vertex.z), false);
+            }
         } else if (const auto* solid = dynamic_cast<const CSolid*>(object)) {
             const std::string& name = object->GetName();
             const bool furniture_part = name.rfind("Nika ", 0) == 0

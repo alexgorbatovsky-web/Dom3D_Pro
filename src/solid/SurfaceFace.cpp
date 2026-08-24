@@ -20,6 +20,7 @@
 #include "Poly_Triangulation.hxx"
 #include <Standard_OutOfMemory.hxx>
 #include <BRepTools.hxx>
+#include <BRepTools_WireExplorer.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <AIS_ListOfInteractive.hxx>
 #include <Geom_BSplineSurface.hxx>
@@ -52,6 +53,8 @@
 #include <TColgp_HArray1OfPnt.hxx>
 #include <BRepBuilderAPI_GTransform.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepAdaptor_Curve.hxx>
+#include <GCPnts_AbscissaPoint.hxx>
 #include <BRepClass_FaceClassifier.hxx>
 #include <BRep_Tool.hxx>
 #include <ElSLib.hxx>
@@ -407,6 +410,27 @@ int mesh_point_quantity_for_length(double length, float deflection, GeomAbs_Surf
 	if (IsEven(quantity))
 		++quantity;
 	return quantity;
+}
+
+int normalized_quadro_point_quantity(double length,
+	                                  double maximum_edge_length,
+	                                  float deflection)
+{
+	if (!std::isfinite(length) || length <= 0.0
+		|| !std::isfinite(maximum_edge_length) || maximum_edge_length <= 0.0
+		|| !std::isfinite(deflection) || deflection <= 0.0f) {
+		return CSurfaceFace::m_QtyMin;
+	}
+
+	// Original 3DCoat-compatible Low Poly rule. Deflection is 1 / Density,
+	// so the longest edge receives approximately 20 * Density intervals.
+	int maximum_quantity = static_cast<int>(20.0 / deflection);
+	maximum_quantity = std::max(maximum_quantity, 4);
+	int quantity = static_cast<int>(
+		static_cast<double>(maximum_quantity) * length / maximum_edge_length);
+	if (IsEven(quantity))
+		++quantity;
+	return std::max(quantity, CSurfaceFace::m_QtyMin);
 }
 
 void adjust_mesh_quantities_from_prepared_edges(CSurfaceFace* surface,
@@ -1837,7 +1861,7 @@ bool CSurfaceFace::BuldMesh(float Deflection, bool MeshQuadro)
 		if (!IsInitEdges)
 			InitEdges();
 		if (!Polylines.empty() || InitEdges()) {
-			PrepareEdges(Deflection);
+			PrepareEdges(Deflection, true);
 			if (BuildTrimmingMesh(nullptr, Deflection))
 				return true;
 		}
@@ -2562,7 +2586,7 @@ bool CSurfaceFace::GetEdgePolylinePoints(int edge_index, std::vector<Vec3>& poin
 	return points.size() >= 2;
 }
 
-void CSurfaceFace::PrepareEdges(float Deflection)
+void CSurfaceFace::PrepareEdges(float Deflection, bool normalized_quadro_density)
 {
 	if (!IsInitEdges)
 		InitEdges();
@@ -2607,7 +2631,9 @@ void CSurfaceFace::PrepareEdges(float Deflection)
 		spl.Create(pLine);
 		CPolyline* pline = new CPolyline;
 		float len = spl.GetLength();
-		int Qty = mesh_point_quantity_for_length(len, Deflection, surface_type);
+		int Qty = normalized_quadro_density
+			? normalized_quadro_point_quantity(len, lenEdgeMax, Deflection)
+			: mesh_point_quantity_for_length(len, Deflection, surface_type);
 		spl.MakePolylineByQtyKnots(pline, Qty);
 		pline->TmpLen = spl.GetLength();
 		pline->Dir1.l = spl.P(0)->l;
@@ -2961,8 +2987,15 @@ bool CSurfaceFace::BuildTrimmingMesh(CSolid* psol, float Deflection){
 	// not be passed through the contour trimming code.
 	UpdateMeshTypeFromBoundary();
 
-	const bool use_adaptive_net = m_TypeMesh == REGULAR_MESH
-		|| is_regular_uv_mesh_surface(F1);
+	// The adaptive CNet::Build() is used only by the fast display renderer.
+	// It refines by geometric deviation, so a planar face legitimately remains
+	// a single quad. Low Poly has different semantics: Density determines a
+	// regular QtyS x QtyT grid, including on planar and trimmed faces, and must
+	// therefore continue to CNet::BuildNetByTwoQty() below.
+	const bool low_poly_quadro = psol && psol->MeshQuadro;
+	const bool use_adaptive_net = !low_poly_quadro
+		&& (m_TypeMesh == REGULAR_MESH
+			|| is_regular_uv_mesh_surface(F1));
 	if (use_adaptive_net && build_regular_uv_mesh(this, Deflection)) {
 		if (m_TypeMesh == REGULAR_MESH)
 			return true;
@@ -3005,10 +3038,14 @@ bool CSurfaceFace::BuildTrimmingMesh(CSolid* psol, float Deflection){
 	int QtyT = 2;
 	const GeomAbs_SurfaceType surface_type = surface_type_of(F1);
 	float len = BoundSpl[0]->GetLength();
-	int Qty1 = mesh_point_quantity_for_length(len, Deflection, surface_type);
+	int Qty1 = low_poly_quadro
+		? normalized_quadro_point_quantity(len, lenEdgeMax, Deflection)
+		: mesh_point_quantity_for_length(len, Deflection, surface_type);
 	QtyS = Qty1;
 	len = BoundSpl[2]->GetLength();
-	int Qty2 = mesh_point_quantity_for_length(len, Deflection, surface_type);
+	int Qty2 = low_poly_quadro
+		? normalized_quadro_point_quantity(len, lenEdgeMax, Deflection)
+		: mesh_point_quantity_for_length(len, Deflection, surface_type);
 	QtyT = Qty2;
 	double trim_u_min = Umin;
 	double trim_u_max = Umax;
@@ -3101,6 +3138,163 @@ void CSurfaceFace::MakeFilledContour(const std::vector<Vec3>& contour, Vec3 norm
 	ContourQuadrangulator quadrangulator;
 	quadrangulator.CreateFromMesh(&triangle_mesh);
 	quadrangulator.Quadrangulate(quad_mesh);
+}
+
+bool CSurfaceFace::MakeQuadMeshFromBoundary(
+	float density,
+	CMesh3D* quad_mesh,
+	std::vector<Vec3>* triangulation_boundary)
+{
+	if (!quad_mesh || m_Face.IsNull())
+		return false;
+
+	quad_mesh->Clear();
+	if (triangulation_boundary)
+		triangulation_boundary->clear();
+	density = std::max(density, 0.0001f);
+
+	try {
+		const TopoDS_Face face = TopoDS::Face(m_Face);
+		const TopoDS_Wire outer_wire = BRepTools::OuterWire(face);
+		if (outer_wire.IsNull())
+			return false;
+
+		// Same normalized convention as Low Poly: the longest edge receives
+		// approximately 20 * Density intervals. Density is not a distance in
+		// millimetres; treating it that way can create millions of cells.
+		double maximum_edge_length = 0.0;
+		for (BRepTools_WireExplorer explorer(outer_wire, face); explorer.More(); explorer.Next()) {
+			const TopoDS_Edge edge = explorer.Current();
+			if (edge.IsNull() || BRep_Tool::Degenerated(edge))
+				continue;
+			try {
+				BRepAdaptor_Curve curve(edge);
+				maximum_edge_length = std::max(maximum_edge_length,
+					GCPnts_AbscissaPoint::Length(
+						curve, curve.FirstParameter(), curve.LastParameter()));
+			} catch (const Standard_Failure&) {
+			}
+		}
+		if (!std::isfinite(maximum_edge_length) || maximum_edge_length <= 1.0e-12)
+			return false;
+		const int maximum_intervals = std::clamp(
+			static_cast<int>(std::ceil(20.0 * density)), 4, 256);
+		const double target_step = maximum_edge_length / maximum_intervals;
+
+		std::vector<Vec3> boundary;
+		const auto append_unique = [&boundary](const gp_Pnt& point) {
+			const Vec3 value{
+				static_cast<float>(point.X()),
+				static_cast<float>(point.Y()),
+				static_cast<float>(point.Z())};
+			if (boundary.empty() || dot(value - boundary.back(), value - boundary.back()) > 1.0e-12f)
+				boundary.push_back(value);
+		};
+
+		for (BRepTools_WireExplorer explorer(outer_wire, face); explorer.More(); explorer.Next()) {
+			const TopoDS_Edge edge = explorer.Current();
+			if (edge.IsNull() || BRep_Tool::Degenerated(edge))
+				continue;
+
+			BRepAdaptor_Curve curve(edge);
+			const double first = curve.FirstParameter();
+			const double last = curve.LastParameter();
+			double length = 0.0;
+			try {
+				length = GCPnts_AbscissaPoint::Length(curve, first, last);
+			} catch (const Standard_Failure&) {
+				length = 0.0;
+			}
+			const int segments = std::clamp(
+				static_cast<int>(std::round(length / target_step)),
+				1, maximum_intervals);
+			const bool reversed = edge.Orientation() == TopAbs_REVERSED;
+			GCPnts_UniformAbscissa uniform(curve, segments + 1, first, last);
+			for (int sample = 0; sample <= segments; ++sample) {
+				double parameter = 0.0;
+				if (uniform.IsDone() && uniform.NbPoints() == segments + 1) {
+					const int point_index = reversed
+						? segments + 1 - sample : sample + 1;
+					parameter = uniform.Parameter(point_index);
+				} else {
+					const double alpha = static_cast<double>(sample) / segments;
+					parameter = reversed
+						? last + (first - last) * alpha
+						: first + (last - first) * alpha;
+				}
+				append_unique(curve.Value(parameter));
+			}
+		}
+
+		if (boundary.size() > 2
+			&& dot(boundary.front() - boundary.back(), boundary.front() - boundary.back()) <= 1.0e-10f) {
+			boundary.pop_back();
+		}
+		if (boundary.size() < 3)
+			return false;
+		if (triangulation_boundary)
+			*triangulation_boundary = boundary;
+
+		// Keep the exact sampled 3D contour used as the source for UV mapping.
+		// printToFile() writes files without an explicit directory to C:\temp.
+		CPolyline world_contour("Fill Contour boundary 3D");
+		for (const Vec3& point : boundary)
+			world_contour.AddPoint(CPoint3d(point.x, point.y, point.z));
+		world_contour.SetClosed(true);
+		world_contour.printToFile("FillContourBoundary3D.txt");
+
+		SurfaceUVMapping mapping(this);
+		if (!mapping.IsValid())
+			return false;
+
+		std::vector<SurfaceUVPoint> uv_boundary;
+		uv_boundary.reserve(boundary.size());
+		for (const Vec3& point : boundary) {
+			SurfaceUVPoint uv;
+			if (!mapping.Project(point, uv))
+				return false;
+			if (!uv_boundary.empty())
+				uv = mapping.UnwrapNear(uv, uv_boundary.back());
+			uv_boundary.push_back(uv);
+		}
+
+		double world_perimeter = 0.0;
+		double uv_perimeter = 0.0;
+		for (size_t i = 0; i < boundary.size(); ++i) {
+			const size_t next = (i + 1) % boundary.size();
+			world_perimeter += std::sqrt(static_cast<double>(
+				dot(boundary[next] - boundary[i], boundary[next] - boundary[i])));
+			const double du = uv_boundary[next].u - uv_boundary[i].u;
+			const double dv = uv_boundary[next].v - uv_boundary[i].v;
+			uv_perimeter += std::sqrt(du * du + dv * dv);
+		}
+		if (world_perimeter <= 1.0e-12 || uv_perimeter <= 1.0e-12)
+			return false;
+
+		const double world_units_per_uv = world_perimeter / uv_perimeter;
+		const float uv_density = static_cast<float>(std::max(
+			target_step / world_units_per_uv, 1.0e-6));
+
+		CPolyline uv_contour("Surface boundary UV");
+		for (const SurfaceUVPoint& uv : uv_boundary)
+			uv_contour.AddPoint(CPoint3d(uv.u, uv.v, 0.0));
+		uv_contour.SetClosed(true);
+		// This is the contour passed verbatim to CreateFromBoundary().  Dump it
+		// separately because a bad seam unwrap on a fillet is visible here even
+		// when the sampled 3D boundary itself looks correct.
+		uv_contour.printToFile("FillContourBoundaryUV.txt");
+
+		if (!quad_mesh->CreateFromBoundary(&uv_contour, uv_density))
+			return false;
+		if (!quad_mesh->RestoreTo3DFromUVSurface(this)) {
+			quad_mesh->Clear();
+			return false;
+		}
+		return !quad_mesh->GetFaces().empty();
+	} catch (const Standard_Failure&) {
+		quad_mesh->Clear();
+		return false;
+	}
 }
 
 void GetPointFromCurve(TopoDS_Edge& ed, int gtystep, CPolyline* pl)

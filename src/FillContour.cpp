@@ -1,4 +1,5 @@
 #include "FillContour.h"
+#include "ContourQuadrangulator3DCoat.h"
 
 #include <algorithm>
 #include <array>
@@ -156,127 +157,6 @@ std::vector<CMesh3D::Face> triangulate_polygon(const std::vector<Vec3>& vertices
     return faces;
 }
 
-using EdgeKey = std::pair<size_t, size_t>;
-
-EdgeKey edge_key(size_t a, size_t b)
-{
-    return {std::min(a, b), std::max(a, b)};
-}
-
-bool face_has_vertex(const CMesh3D::Face& face, size_t vertex)
-{
-    return std::any_of(face.corners.begin(), face.corners.end(), [vertex](const MeshCorner& corner) {
-        return corner.v == vertex;
-    });
-}
-
-bool convex_quad(const std::vector<Vec2>& projected, const std::array<size_t, 4>& quad)
-{
-    float sign = 0.0f;
-    for (size_t i = 0; i < quad.size(); ++i) {
-        const float c = cross2(projected[quad[i]], projected[quad[(i + 1) % quad.size()]], projected[quad[(i + 2) % quad.size()]]);
-        if (std::fabs(c) <= 0.000001f)
-            continue;
-        if (sign == 0.0f) {
-            sign = c;
-        } else if ((sign > 0.0f) != (c > 0.0f)) {
-            return false;
-        }
-    }
-    return sign > 0.0f;
-}
-
-bool merged_quad(const CMesh3D::Face& first,
-                 const CMesh3D::Face& second,
-                 const std::vector<Vec2>& projected,
-                 CMesh3D::Face& quad)
-{
-    if (first.corners.size() != 3 || second.corners.size() != 3)
-        return false;
-
-    std::vector<size_t> shared;
-    std::vector<size_t> unique;
-    for (const MeshCorner& corner : first.corners) {
-        if (face_has_vertex(second, corner.v))
-            shared.push_back(corner.v);
-        else
-            unique.push_back(corner.v);
-    }
-    for (const MeshCorner& corner : second.corners) {
-        if (!face_has_vertex(first, corner.v))
-            unique.push_back(corner.v);
-    }
-    if (shared.size() != 2 || unique.size() != 2)
-        return false;
-
-    std::array<size_t, 4> candidate{unique[0], shared[0], unique[1], shared[1]};
-    Vec2 center{};
-    for (size_t index : candidate) {
-        center.x += projected[index].x;
-        center.y += projected[index].y;
-    }
-    center.x *= 0.25f;
-    center.y *= 0.25f;
-    std::sort(candidate.begin(), candidate.end(), [&](size_t a, size_t b) {
-        return std::atan2(projected[a].y - center.y, projected[a].x - center.x)
-            < std::atan2(projected[b].y - center.y, projected[b].x - center.x);
-    });
-
-    if (!convex_quad(projected, candidate))
-        return false;
-
-    quad = make_face({candidate[0], candidate[1], candidate[2], candidate[3]});
-    return true;
-}
-
-std::vector<CMesh3D::Face> merge_triangles_to_quads(const std::vector<Vec3>& vertices,
-                                                     const std::vector<CMesh3D::Face>& faces)
-{
-    if (faces.empty())
-        return {};
-
-    Vec3 normal{};
-    for (const CMesh3D::Face& face : faces) {
-        if (face.corners.size() < 3)
-            continue;
-        normal = normal + cross(vertices[face.corners[1].v] - vertices[face.corners[0].v],
-                                vertices[face.corners[2].v] - vertices[face.corners[0].v]);
-    }
-    normal = normalize(normal);
-    if (length_sq(normal) <= 0.000001f)
-        normal = {0.0f, 1.0f, 0.0f};
-    const std::vector<Vec2> projected = project_points(vertices, normal);
-
-    std::map<EdgeKey, std::vector<size_t>> edge_faces;
-    for (size_t face_index = 0; face_index < faces.size(); ++face_index) {
-        const CMesh3D::Face& face = faces[face_index];
-        if (face.corners.size() != 3)
-            continue;
-        for (size_t i = 0; i < 3; ++i) {
-            edge_faces[edge_key(face.corners[i].v, face.corners[(i + 1) % 3].v)].push_back(face_index);
-        }
-    }
-
-    std::vector<CMesh3D::Face> result;
-    std::vector<bool> used(faces.size(), false);
-    for (const auto& entry : edge_faces) {
-        const std::vector<size_t>& adjacent = entry.second;
-        if (adjacent.size() != 2 || used[adjacent[0]] || used[adjacent[1]])
-            continue;
-        CMesh3D::Face quad;
-        if (merged_quad(faces[adjacent[0]], faces[adjacent[1]], projected, quad)) {
-            result.push_back(std::move(quad));
-            used[adjacent[0]] = true;
-            used[adjacent[1]] = true;
-        }
-    }
-
-    for (size_t i = 0; i < faces.size(); ++i) {
-        if (!used[i])
-            result.push_back(faces[i]);
-    }
-    return result;
-}
 }
 
 bool ContourToFill::PlacePoint(Vec3& pt, Vec3& n)
@@ -297,26 +177,233 @@ void ContourToFill::FillByQuads(CMesh3D& mesh)
 void ContourToFill::FillByTriangles(CMesh3D& mesh, int nSubd)
 {
     (void)nSubd;
+    // The original 3DCoat ContourToFill::Prepare() accepts a closed contour
+    // whose final point repeats the first one and removes that duplicate
+    // internally. BoundaryLine is passed here verbatim, so preserve the same
+    // input contract instead of modifying the line before this call.
+    if (points_.size() > 1
+        && length_sq(points_.front().Pos - points_.back().Pos) <= 0.00000001f) {
+        points_.pop_back();
+    }
     if (points_.size() < 3) {
         mesh.Clear();
         return;
     }
 
-    std::vector<Vec3> vertices;
-    vertices.reserve(points_.size());
-    std::vector<Vec3> normals;
-    normals.reserve(points_.size());
-    for (ContourPoint point : points_) {
-        PlacePoint(point.Pos, point.Normal);
-        vertices.push_back(point.Pos);
-        normals.push_back(length_sq(point.Normal) > 0.000001f ? normalize(point.Normal) : contour_normal(points_));
-    }
-    if (InvertOrder) {
-        std::reverse(vertices.begin(), vertices.end());
-        std::reverse(normals.begin(), normals.end());
+    // Port of the moving-front core from 3DCoat's
+    // ContourToFill::FillByTriangles().  Unlike planar ear clipping, obtuse
+    // front corners generate a new interior point and two triangles; the
+    // active contour then advances inward until it can be closed.
+    std::vector<ContourPoint> prepared = points_;
+    Vec3 fallback_normal = contour_normal(prepared);
+    for (ContourPoint& point : prepared) {
+        if (length_sq(point.Normal) <= 0.000001f)
+            point.Normal = fallback_normal;
+        else
+            point.Normal = normalize(point.Normal);
     }
 
-    std::vector<CMesh3D::Face> faces = triangulate_polygon(vertices, contour_normal(points_));
+    constexpr float pi = 3.14159265358979323846f;
+    const auto front_angle = [](Vec3 center, Vec3 previous, Vec3 next, Vec3 normal) {
+        const Vec3 a = previous - center;
+        const Vec3 b = next - center;
+        const Vec3 turn = cross(b, a);
+        const float sine = std::sqrt(std::max(0.0f, length_sq(turn)));
+        const float cosine = dot(a, b);
+        float angle = std::atan2(sine, cosine);
+        if (dot(turn, normal) < 0.0f)
+            angle = 2.0f * pi - angle;
+        return angle;
+    };
+
+    float average_angle = 0.0f;
+    for (size_t i = 0; i < prepared.size(); ++i) {
+        const size_t previous = (i + prepared.size() - 1) % prepared.size();
+        const size_t next = (i + 1) % prepared.size();
+        average_angle += front_angle(
+            prepared[i].Pos, prepared[previous].Pos, prepared[next].Pos,
+            prepared[i].Normal);
+    }
+    average_angle /= static_cast<float>(prepared.size());
+    if ((average_angle > pi) != InvertOrder)
+        std::reverse(prepared.begin(), prepared.end());
+
+    struct FrontPoint {
+        size_t vertex = 0;
+        int previous = -1;
+        int next = -1;
+        float angle = 0.0f;
+        bool active = true;
+    };
+
+    std::vector<Vec3> vertices;
+    std::vector<Vec3> normals;
+    std::vector<FrontPoint> front(prepared.size());
+    std::vector<int> live;
+    vertices.reserve(prepared.size() * 3);
+    normals.reserve(prepared.size() * 3);
+    live.reserve(prepared.size());
+    float average_edge_length = 0.0f;
+    for (size_t i = 0; i < prepared.size(); ++i) {
+        vertices.push_back(prepared[i].Pos);
+        normals.push_back(prepared[i].Normal);
+        front[i].vertex = i;
+        front[i].previous = static_cast<int>((i + prepared.size() - 1) % prepared.size());
+        front[i].next = static_cast<int>((i + 1) % prepared.size());
+        live.push_back(static_cast<int>(i));
+        average_edge_length += std::sqrt(length_sq(
+            prepared[i].Pos - prepared[(i + prepared.size() - 1) % prepared.size()].Pos));
+    }
+    average_edge_length /= static_cast<float>(prepared.size());
+    if (!std::isfinite(average_edge_length) || average_edge_length <= 0.000001f) {
+        mesh.Clear();
+        return;
+    }
+
+    std::vector<CMesh3D::Face> faces;
+    faces.reserve(prepared.size() * 3);
+    const auto add_triangle = [&faces](size_t first, size_t second, size_t third) {
+        if (first != second && second != third && third != first)
+            faces.emplace_back(std::initializer_list<size_t>{first, second, third});
+    };
+    const auto safe_normal = [fallback_normal](Vec3 value) {
+        return length_sq(value) > 0.000001f ? normalize(value) : fallback_normal;
+    };
+
+    const size_t maximum_iterations = prepared.size() * prepared.size() * 4;
+    size_t iteration = 0;
+    while (live.size() > 2 && iteration++ < maximum_iterations) {
+        size_t best_live_position = live.size();
+        float minimum_angle = std::numeric_limits<float>::max();
+        for (size_t position = 0; position < live.size(); ++position) {
+            FrontPoint& current = front[static_cast<size_t>(live[position])];
+            const FrontPoint& previous = front[static_cast<size_t>(current.previous)];
+            const FrontPoint& next = front[static_cast<size_t>(current.next)];
+            const Vec3 normal = safe_normal(
+                normals[previous.vertex] + normals[current.vertex] + normals[next.vertex]);
+            if (std::fabs(current.angle) <= 0.0001f) {
+                current.angle = front_angle(
+                    vertices[current.vertex], vertices[previous.vertex],
+                    vertices[next.vertex], normal);
+            }
+            float selection_angle = current.angle;
+            if (selection_angle > pi * 1.999f)
+                selection_angle -= 2.0f * pi;
+            if (selection_angle <= minimum_angle) {
+                minimum_angle = selection_angle;
+                best_live_position = position;
+            }
+        }
+        if (best_live_position == live.size())
+            break;
+
+        const int current_index = live[best_live_position];
+        FrontPoint& current = front[static_cast<size_t>(current_index)];
+        FrontPoint& previous = front[static_cast<size_t>(current.previous)];
+        FrontPoint& next = front[static_cast<size_t>(current.next)];
+        const size_t vertex1 = previous.vertex;
+        const size_t vertex2 = current.vertex;
+        const size_t vertex3 = next.vertex;
+        const float angle = current.angle;
+        const bool finish_fast = iteration > prepared.size() * prepared.size() * 2;
+
+        if (angle <= pi * 0.5f || angle >= pi || live.size() == 3 || finish_fast) {
+            add_triangle(vertex1, vertex2, vertex3);
+            current.active = false;
+            previous.next = current.next;
+            next.previous = current.previous;
+            previous.angle = 0.0f;
+            next.angle = 0.0f;
+            live.erase(live.begin() + static_cast<std::ptrdiff_t>(best_live_position));
+            continue;
+        }
+
+        const Vec3 vertex_position1 = vertices[vertex1];
+        const Vec3 vertex_position2 = vertices[vertex2];
+        const Vec3 vertex_position3 = vertices[vertex3];
+        Vec3 direction = safe_normal(
+            safe_normal(vertex_position1 - vertex_position2)
+            + safe_normal(vertex_position3 - vertex_position2));
+        Vec3 new_position = vertex_position2 + direction * average_edge_length;
+        Vec3 new_normal = safe_normal(
+            normals[vertex1] + normals[vertex2] + normals[vertex3]);
+        PlacePoint(new_position, new_normal);
+        const size_t generated = vertices.size();
+        vertices.push_back(new_position);
+        normals.push_back(new_normal);
+
+        // Standalone equivalent of FillContour::SnapSomewhere(): when the
+        // advancing point reaches another non-adjacent part of the live
+        // front, reuse that vertex and split the linked contour there.
+        int snap_index = -1;
+        float snap_distance_squared = std::numeric_limits<float>::max();
+        const Vec3 advance = new_position - vertex_position2;
+        const float advance_length_squared = length_sq(advance);
+        if (advance_length_squared > 0.000001f) {
+            for (int candidate_index : live) {
+                if (candidate_index == current_index
+                    || candidate_index == current.previous
+                    || candidate_index == current.next) {
+                    continue;
+                }
+                const FrontPoint& candidate = front[static_cast<size_t>(candidate_index)];
+                const Vec3 candidate_position = vertices[candidate.vertex];
+                const float projection = std::clamp(
+                    dot(candidate_position - vertex_position2, advance)
+                        / advance_length_squared,
+                    0.0f, 1.0f);
+                const Vec3 projected = vertex_position2 + advance * projection;
+                const float distance_squared = length_sq(candidate_position - projected);
+                const float allowed = average_edge_length
+                    * 0.95f * std::max(projection, 0.1f);
+                if (distance_squared < allowed * allowed
+                    && distance_squared < snap_distance_squared) {
+                    snap_distance_squared = distance_squared;
+                    snap_index = candidate_index;
+                }
+            }
+        }
+
+        size_t front_vertex = generated;
+        Vec3 front_position = new_position;
+        if (snap_index >= 0) {
+            FrontPoint& snap = front[static_cast<size_t>(snap_index)];
+            const int old_previous = current.previous;
+            const int old_snap_previous = snap.previous;
+            current.vertex = snap.vertex;
+            current.previous = old_snap_previous;
+            snap.previous = old_previous;
+            front[static_cast<size_t>(current.previous)].next = current_index;
+            front[static_cast<size_t>(current.next)].previous = current_index;
+            front[static_cast<size_t>(snap.previous)].next = snap_index;
+            front[static_cast<size_t>(snap.next)].previous = snap_index;
+            front_vertex = snap.vertex;
+            front_position = vertices[front_vertex];
+            front[static_cast<size_t>(current.previous)].angle = 0.0f;
+            front[static_cast<size_t>(snap.previous)].angle = 0.0f;
+            snap.angle = 0.0f;
+        }
+
+        const Vec3 triangle_normal1 = safe_normal(cross(
+            vertex_position1 - front_position,
+            vertex_position2 - front_position));
+        const Vec3 triangle_normal2 = safe_normal(cross(
+            vertex_position2 - front_position,
+            vertex_position3 - front_position));
+        if (dot(triangle_normal1, triangle_normal2) > 0.0f) {
+            add_triangle(vertex1, vertex2, front_vertex);
+            add_triangle(front_vertex, vertex2, vertex3);
+        } else {
+            add_triangle(vertex1, vertex2, vertex3);
+            add_triangle(front_vertex, vertex1, vertex3);
+        }
+        if (snap_index < 0)
+            current.vertex = generated;
+        current.angle = 0.0f;
+        previous.angle = 0.0f;
+        next.angle = 0.0f;
+    }
+
     if (faces.empty()) {
         mesh.Clear();
         return;
@@ -361,12 +448,9 @@ void ContourQuadrangulator::Quadrangulate(CMesh3D* res)
         return;
     }
 
-    std::vector<CMesh3D::Face> quad_faces = merge_triangles_to_quads(vertices_, faces_);
-    if (quad_faces.empty()) {
+    if (!Build3DCoatQuadrangulation(vertices_, faces_, res)) {
         res->Clear();
-        return;
     }
-    res->SetGeometry(vertices_, std::move(quad_faces));
 }
 
 bool FillContorByTriangles(CMesh3D* mesh, const std::vector<Vec3>& contour, Vec3 normal)

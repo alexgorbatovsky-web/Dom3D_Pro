@@ -267,6 +267,8 @@ static	int NumReadFile;
 //	SERIALIZE_LATER();
 
 private:
+	bool BuildHybridRenderMesh(float Deflection);
+	bool BuildQuadroMesh(float Deflection);
 	bool RestoreRenderMeshFromStoredTriangulation();
 	bool CanUseRenderBatch() const;
 	bool EnsureRenderBatch() const;

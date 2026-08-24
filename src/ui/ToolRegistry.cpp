@@ -6195,6 +6195,16 @@ ToolRegistry::ToolRegistry() {
     });
 
     tools_.push_back({
+        "MeshBoundaryLine",
+        "Boundary Line Patch",
+        {},
+        [](CAlfaDoc&, const std::vector<ToolParameter>&) {
+        },
+        [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {
+        }
+    });
+
+    tools_.push_back({
         "window",
         "Window",
         {

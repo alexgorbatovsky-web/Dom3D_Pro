@@ -178,6 +178,7 @@ private:
     void CancelPendingTrim(const QString& status_text = {});
     void ShowLowPolyTool();
     void ShowMeshFillContourTool();
+    void ShowMeshBoundaryLineTool();
     void ShowTrimMeshTestTool();
     void ShowClassifyFaceCutTool();
     void EditSelectedParametricObject();

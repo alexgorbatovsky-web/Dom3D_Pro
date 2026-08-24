@@ -2017,9 +2017,19 @@ bool CSolid::BuldMesh(float Deflection)
 {
 	if (!IsSurfaceInit)
 		return false;
-	if (!MeshQuadro) {
 
-		Deflection /= 10.0;
+	// Keep the fast display tessellation and the Low Poly quadrangulation as
+	// two independent algorithms.  The hybrid renderer is allowed to hand
+	// trimmed faces to OCCT; Low Poly must run the legacy quad/trimming pass on
+	// every face.
+	return MeshQuadro
+		? BuildQuadroMesh(Deflection)
+		: BuildHybridRenderMesh(Deflection);
+}
+
+bool CSolid::BuildHybridRenderMesh(float Deflection)
+{
+	Deflection /= 10.0;
 		if (m_Shape.IsNull())
 			return false;
 
@@ -2140,7 +2150,12 @@ bool CSolid::BuldMesh(float Deflection)
 			snap_surface_mesh_seams(m_Surfaces);
 		}
 		return ok;
-	}
+}
+
+bool CSolid::BuildQuadroMesh(float Deflection)
+{
+	if (!std::isfinite(Deflection) || Deflection <= 0.0f)
+		return false;
 
 	for (int i = 0; i < m_Surfaces.size(); i++)
 		m_Surfaces[i]->TypeGeom = m_TypeGeom;
@@ -2165,7 +2180,7 @@ bool CSolid::BuldMesh(float Deflection)
 
 	// Prepare edges of Surfaces
 	for (int i = 0; i < m_Surfaces.size(); i++)
-		m_Surfaces[i]->PrepareEdges(Deflection);
+		m_Surfaces[i]->PrepareEdges(Deflection, true);
 	sync_surface_edge_polyline_counts(m_Surfaces);
 	for (CSurfaceFace* surface : m_Surfaces) {
 		if (surface)
@@ -2178,9 +2193,12 @@ bool CSolid::BuldMesh(float Deflection)
 				surface->DumpPreparedPolylinesToScene();
 		}
 	}
+	bool ok = true;
 	for (CSurfaceFace* surface : m_Surfaces) {
-		if (surface && surface->m_TypeMesh == REGULAR_MESH)
-			surface->BuildTrimmingMesh(this, Deflection);
+		if (surface && surface->m_TypeMesh == REGULAR_MESH
+			&& !surface->BuildTrimmingMesh(this, Deflection)) {
+			ok = false;
+		}
 	}
 
 	// Different analytic surface types can choose different base UV steps even
@@ -2188,8 +2206,10 @@ bool CSolid::BuldMesh(float Deflection)
 	// propagate the densest one, and rebuild regular meshes with a common step.
 	sync_regular_surface_mesh_steps(m_Surfaces);
 	for (CSurfaceFace* surface : m_Surfaces) {
-		if (surface && surface->m_TypeMesh == REGULAR_MESH)
-			surface->BuildTrimmingMesh(this, Deflection);
+		if (surface && surface->m_TypeMesh == REGULAR_MESH
+			&& !surface->BuildTrimmingMesh(this, Deflection)) {
+			ok = false;
+		}
 	}
 
 	// A trimmed face must use the exact boundary row of an already built
@@ -2197,8 +2217,10 @@ bool CSolid::BuldMesh(float Deflection)
 	sync_trim_lines_from_regular_mesh(m_Surfaces);
 
 	for (CSurfaceFace* surface : m_Surfaces) {
-		if (surface && surface->m_TypeMesh != REGULAR_MESH)
-			surface->BuildTrimmingMesh(this, Deflection);
+		if (surface && surface->m_TypeMesh != REGULAR_MESH
+			&& !surface->BuildTrimmingMesh(this, Deflection)) {
+			ok = false;
+		}
 	}
 
 	// Trimming creates its own boundary vertices. Insert/snap the master
@@ -2207,7 +2229,7 @@ bool CSolid::BuldMesh(float Deflection)
 
 	snap_surface_mesh_seams(m_Surfaces);
 	
-	return true;
+	return ok;
 }
 
 

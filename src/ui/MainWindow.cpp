@@ -4,6 +4,7 @@
 #include "../CBSpline.h"
 #include "../BezierSpline.h"
 #include "../CMesh3D.h"
+#include "../FillContour.h"
 #include "../ReferenceImage.h"
 #include "../CGroup.h"
 #include "../CPart.h"
@@ -123,6 +124,7 @@
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <limits>
@@ -384,8 +386,10 @@ public:
         density_->setRange(0.1, 100.0);
         density_->setSingleStep(0.05);
         density_->setDecimals(2);
-        density_->setValue(1.0);
-        form->addRow("Density", density_);
+        QSettings fill_contour_settings;
+        density_->setValue(fill_contour_settings.value(
+            "meshFillContour/density", 0.3).toDouble());
+        form->addRow("Density (normalized)", density_);
 
         mesh_quadro_ = new QCheckBox("Mesh Quadro", this);
         form->addRow(mesh_quadro_);
@@ -471,7 +475,11 @@ private:
             return;
         }
         density_->setValue(solids.front()->ptchDensity);
-        mesh_quadro_->setChecked(solids.front()->MeshQuadro);
+        // Low Poly is a quadrangulation tool.  Solids normally use the fast
+        // hybrid display mesh, so inheriting MeshQuadro=false here made a new
+        // dialog create an OCCT triangle mesh unless the user toggled the box
+        // before pressing Create.
+        mesh_quadro_->setChecked(true);
     }
 
     void RebuildSolids()
@@ -501,6 +509,10 @@ private:
 
     void CreateLowPoly()
     {
+        // Apply the values currently shown by the dialog even when the user
+        // presses Create immediately after opening it (before any valueChanged
+        // signal has rebuilt the selected solids).
+        RebuildSolids();
         int created = 0;
         for (CSolid* solid : Solids()) {
             std::unique_ptr<CMesh3D> mesh = CreateLowPolyMeshFromSolid(*solid);
@@ -539,17 +551,16 @@ public:
           document_(document),
           refresh_scene_(std::move(refresh_scene)),
           set_status_(std::move(set_status)) {
-        setWindowTitle("Mesh 3D - Fiill Contour");
+        setWindowTitle("Mesh 3D - Fill Contour");
         setAttribute(Qt::WA_DeleteOnClose, true);
 
         auto* root = new QVBoxLayout(this);
-        auto* contour_label = new QLabel("Contour CPolyline", this);
-        contours_list_ = new QListWidget(this);
-        contours_list_->setMinimumSize(280, 120);
-        root->addWidget(contour_label);
-        root->addWidget(contours_list_);
+        root->addWidget(new QLabel("Surface boundary", this));
+        selected_surface_ = new QLabel("No surface selected", this);
+        selected_surface_->setMinimumWidth(280);
+        root->addWidget(selected_surface_);
 
-        auto* use_selected = new QPushButton("Use Selected Contour", this);
+        auto* use_selected = new QPushButton("Use Selected Surface", this);
         root->addWidget(use_selected);
 
         auto* form = new QFormLayout();
@@ -569,11 +580,15 @@ public:
         buttons->addWidget(close);
         root->addLayout(buttons);
 
-        RebuildContoursList();
-        SelectDocumentPolyline();
+        UpdateSelectedSurface();
 
         connect(use_selected, &QPushButton::clicked, this, [this]() {
-            SelectDocumentPolyline();
+            UpdateSelectedSurface();
+        });
+        connect(density_, qOverload<double>(&QDoubleSpinBox::valueChanged),
+                this, [](double value) {
+            QSettings settings;
+            settings.setValue("meshFillContour/density", value);
         });
         connect(create, &QPushButton::clicked, this, [this]() {
             CreateMesh();
@@ -581,87 +596,724 @@ public:
         connect(close, &QPushButton::clicked, this, &QDialog::close);
     }
 
-    bool HasContours() const
-    {
-        return contours_list_ && contours_list_->count() > 0;
-    }
-
 private:
-    void RebuildContoursList()
+    CSurfaceFace* CurrentSurface(CSolid** owner = nullptr, int* face_index = nullptr)
     {
-        contours_list_->clear();
-        for (const CAlfaDoc::ObjectPtr& object : document_.GetObjects()) {
-            const auto* polyline = dynamic_cast<const CPolyline*>(object.get());
-            if (!polyline || polyline->GetPointCount() < 3) {
-                continue;
-            }
-            auto* item = new QListWidgetItem(QString::fromStdString(polyline->GetName()), contours_list_);
-            item->setData(Qt::UserRole, static_cast<qulonglong>(polyline->m_id));
-            item->setToolTip(polyline->IsClosed() ? "Closed CPolyline" : "Open CPolyline will be closed for fill");
-        }
-        if (contours_list_->count() > 0 && !contours_list_->currentItem()) {
-            contours_list_->setCurrentRow(0);
-        }
-    }
-
-    void SelectDocumentPolyline()
-    {
-        const CPolyline* selected = document_.GetSelectedPolyline();
-        if (!selected) {
-            if (set_status_) {
-                set_status_("Fiill Contour:select the required geometry and continue");
-            }
-            return;
-        }
-        for (int i = 0; i < contours_list_->count(); ++i) {
-            QListWidgetItem* item = contours_list_->item(i);
-            if (item && item->data(Qt::UserRole).toULongLong() == selected->m_id) {
-                contours_list_->setCurrentItem(item);
-                if (set_status_) {
-                    set_status_(QString("Fiill Contour: contour %1 selected").arg(QString::fromStdString(selected->GetName())));
-                }
-                return;
-            }
-        }
-    }
-
-    CPolyline* CurrentPolyline()
-    {
-        QListWidgetItem* item = contours_list_->currentItem();
-        if (!item) {
+        CSolid* solid = document_.GetSelectedFaceSolid();
+        if (!solid || !solid->HasSelectedFace())
             return nullptr;
+        const int index = solid->GetSelectedFaceIndex();
+        CSurfaceFace* surface = solid->GetSurfaceFace(index);
+        if (owner)
+            *owner = solid;
+        if (face_index)
+            *face_index = index;
+        return surface;
+    }
+
+    void UpdateSelectedSurface()
+    {
+        CSolid* solid = nullptr;
+        int face_index = -1;
+        if (CurrentSurface(&solid, &face_index)) {
+            selected_surface_->setText(QString("%1 — surface %2")
+                .arg(QString::fromStdString(solid->GetName()))
+                .arg(face_index + 1));
+            if (set_status_)
+                set_status_("Fill Contour: surface boundary selected");
+        } else {
+            selected_surface_->setText("No surface selected");
+            if (set_status_)
+                set_status_("Fill Contour: select a surface and continue");
         }
-        const unsigned long id = static_cast<unsigned long>(item->data(Qt::UserRole).toULongLong());
-        return dynamic_cast<CPolyline*>(document_.FindObjectById(id));
     }
 
     void CreateMesh()
     {
-        CPolyline* contour = CurrentPolyline();
-        if (!contour) {
-            QMessageBox::warning(this, "Fiill Contour", "Select a CPolyline contour.");
+        CSolid* solid = nullptr;
+        int face_index = -1;
+        CSurfaceFace* surface = CurrentSurface(&solid, &face_index);
+        if (!surface || !solid) {
+            QMessageBox::warning(this, "Fill Contour", "Select a surface face.");
             return;
         }
-        auto mesh = std::make_unique<CMesh3D>(contour->GetName() + " Fill Mesh");
-        if (!mesh->CreateFromBoundary(contour, static_cast<float>(density_->value()))) {
-            QMessageBox::warning(this, "Fiill Contour", "Mesh was not created. Check contour points.");
+        auto mesh = std::make_unique<CMesh3D>(
+            solid->GetName() + " Surface " + std::to_string(face_index + 1) + " Fill Mesh");
+        std::vector<Vec3> triangulation_boundary;
+        if (!surface->MakeQuadMeshFromBoundary(
+                static_cast<float>(density_->value()), mesh.get(),
+                &triangulation_boundary)) {
+            QMessageBox::warning(this, "Fill Contour",
+                                 "Mesh was not created. Check the surface boundary and density.");
             return;
         }
+        const size_t vertex_count = mesh->GetVertices().size();
+        const size_t face_count = mesh->GetFaces().size();
         mesh->SetColor({0.16f, 0.52f, 0.82f});
         document_.AddMesh(std::move(mesh));
+        auto boundary = std::make_unique<CPolyline>(
+            solid->GetName() + " Surface " + std::to_string(face_index + 1)
+            + " Triangulation Boundary");
+        for (const Vec3& point : triangulation_boundary)
+            boundary->AddPoint(CPoint3d(point.x, point.y, point.z));
+        boundary->SetClosed(true);
+        boundary->SetColor({1.0f, 0.28f, 0.05f});
+        boundary->SetLineWidth(2.0);
+        document_.AddObject(std::move(boundary));
+        // The generated mesh occupies the same surface as its source face.
+        // Keeping two differently shaded coplanar surfaces visible causes
+        // dense diagonal z-fighting stripes that look like an over-detailed
+        // mesh. Show the generated result and leave the source available in
+        // the scene tree so the user can turn it back on when needed.
+        solid->SetVisible(false);
         if (refresh_scene_) {
             refresh_scene_();
         }
         if (set_status_) {
-            set_status_(QString("Fiill Contour: mesh created, Density %1").arg(density_->value(), 0, 'f', 3));
+            set_status_(QString("Fill Contour: Density %1, %2 boundary points, %3 vertices, %4 faces; source hidden")
+                .arg(density_->value(), 0, 'f', 3)
+                .arg(triangulation_boundary.size())
+                .arg(vertex_count).arg(face_count));
         }
     }
 
     CAlfaDoc& document_;
     std::function<void()> refresh_scene_;
     std::function<void(const QString&)> set_status_;
-    QListWidget* contours_list_ = nullptr;
+    QLabel* selected_surface_ = nullptr;
     QDoubleSpinBox* density_ = nullptr;
+};
+
+std::vector<Vec3> BoundaryPatchSamples(const CPolyline& boundary,
+                                       int spans,
+                                       bool equal_step)
+{
+    std::vector<Vec3> source;
+    source.reserve(boundary.GetPointCount());
+    for (const CPoint3d& point : boundary.GetPoints()) {
+        const Vec3 value{static_cast<float>(point.x),
+                         static_cast<float>(point.y),
+                         static_cast<float>(point.z)};
+        if (source.empty() || dot(value - source.back(), value - source.back()) > 1.0e-12f)
+            source.push_back(value);
+    }
+    if (source.size() > 2
+        && dot(source.front() - source.back(), source.front() - source.back()) <= 1.0e-12f) {
+        source.pop_back();
+    }
+    if (source.size() < 4)
+        return {};
+
+    std::vector<double> cumulative(source.size() + 1, 0.0);
+    for (size_t i = 0; i < source.size(); ++i) {
+        const Vec3 delta = source[(i + 1) % source.size()] - source[i];
+        cumulative[i + 1] = cumulative[i]
+            + std::sqrt(static_cast<double>(dot(delta, delta)));
+    }
+    const double perimeter = cumulative.back();
+    if (!std::isfinite(perimeter) || perimeter <= 1.0e-12)
+        return {};
+
+    // A patch needs four boundary sides. Prefer the four sharpest turns: this
+    // preserves the vertical/fillet junctions instead of cutting the loop at
+    // arbitrary perimeter quarters. Smooth loops fall back to four equal
+    // arc-length sections.
+    std::vector<std::pair<double, size_t>> turns;
+    turns.reserve(source.size());
+    for (size_t i = 0; i < source.size(); ++i) {
+        const Vec3 incoming = source[i] - source[(i + source.size() - 1) % source.size()];
+        const Vec3 outgoing = source[(i + 1) % source.size()] - source[i];
+        const double incoming_length = std::sqrt(static_cast<double>(dot(incoming, incoming)));
+        const double outgoing_length = std::sqrt(static_cast<double>(dot(outgoing, outgoing)));
+        double score = 0.0;
+        if (incoming_length > 1.0e-12 && outgoing_length > 1.0e-12) {
+            score = 1.0 - std::clamp(
+                static_cast<double>(dot(incoming, outgoing))
+                    / (incoming_length * outgoing_length), -1.0, 1.0);
+        }
+        turns.emplace_back(score, i);
+    }
+    std::sort(turns.begin(), turns.end(), [](const auto& a, const auto& b) {
+        return a.first > b.first;
+    });
+
+    std::vector<size_t> corners;
+    if (!turns.empty() && turns.front().first > 0.05) {
+        for (const auto& turn : turns) {
+            bool separated = true;
+            for (size_t corner : corners) {
+                const size_t direct = corner > turn.second
+                    ? corner - turn.second : turn.second - corner;
+                const size_t cyclic = std::min(direct, source.size() - direct);
+                if (cyclic < 2) {
+                    separated = false;
+                    break;
+                }
+            }
+            if (separated)
+                corners.push_back(turn.second);
+            if (corners.size() == 4)
+                break;
+        }
+    }
+    if (corners.size() != 4) {
+        corners.clear();
+        for (int quarter = 0; quarter < 4; ++quarter) {
+            const double target = perimeter * quarter / 4.0;
+            const auto found = std::lower_bound(cumulative.begin(), cumulative.end(), target);
+            corners.push_back(std::min<size_t>(
+                std::distance(cumulative.begin(), found), source.size() - 1));
+        }
+    }
+    std::sort(corners.begin(), corners.end());
+
+    std::vector<Vec3> result;
+    result.reserve(static_cast<size_t>(spans * 4));
+    for (int side = 0; side < 4; ++side) {
+        const size_t begin = corners[side];
+        const size_t end = corners[(side + 1) % 4];
+        std::vector<size_t> side_indices;
+        for (size_t index = begin;; index = (index + 1) % source.size()) {
+            side_indices.push_back(index);
+            if (index == end)
+                break;
+        }
+        std::vector<double> side_length(side_indices.size(), 0.0);
+        for (size_t i = 1; i < side_indices.size(); ++i) {
+            const Vec3 delta = source[side_indices[i]] - source[side_indices[i - 1]];
+            side_length[i] = side_length[i - 1]
+                + std::sqrt(static_cast<double>(dot(delta, delta)));
+        }
+        for (int sample = 0; sample < spans; ++sample) {
+            const double fraction = static_cast<double>(sample) / spans;
+            if (!equal_step) {
+                const double position = fraction * (side_indices.size() - 1);
+                const size_t local = std::min<size_t>(
+                    static_cast<size_t>(std::floor(position)), side_indices.size() - 2);
+                const float alpha = static_cast<float>(position - std::floor(position));
+                result.push_back(source[side_indices[local]] * (1.0f - alpha)
+                    + source[side_indices[local + 1]] * alpha);
+                continue;
+            }
+            const double target = fraction * side_length.back();
+            const auto found = std::lower_bound(side_length.begin(), side_length.end(), target);
+            const size_t local_end = std::clamp<size_t>(
+                std::distance(side_length.begin(), found), 1, side_length.size() - 1);
+            const size_t local_begin = local_end - 1;
+            const double segment_length = side_length[local_end] - side_length[local_begin];
+            const float alpha = segment_length > 1.0e-12
+                ? static_cast<float>((target - side_length[local_begin]) / segment_length) : 0.0f;
+            result.push_back(source[side_indices[local_begin]] * (1.0f - alpha)
+                + source[side_indices[local_end]] * alpha);
+        }
+    }
+    return result;
+}
+
+std::unique_ptr<CPolyline> BoundaryCurvePolyline(const CAlfaObject* curve,
+                                                 int spans,
+                                                 bool equal_step)
+{
+    if (!curve)
+        return nullptr;
+    auto result = std::make_unique<CPolyline>(curve->GetName() + " Boundary Line");
+    if (const auto* polyline = dynamic_cast<const CPolyline*>(curve)) {
+        for (const CPoint3d& point : polyline->GetPoints())
+            result->AddPoint(point);
+        if (result->GetPointCount() < 4)
+            return nullptr;
+        result->SetClosed(true);
+        return result;
+    }
+
+    const auto* spline = dynamic_cast<const CBSpline*>(curve);
+    if (!spline || spline->GetPointCount() < 2)
+        return nullptr;
+
+    // Reproduce CreateBoundaryLineSingle(): split the spline into its Bezier /
+    // non-zero knot spans, find LenMax, then use Step = LenMax / QtyU for all
+    // spans. Sampling the whole joined spline as one curve was the reason the
+    // visible boundary intervals were not equal.
+    std::vector<std::pair<double, double>> parameter_spans;
+    const std::vector<double>& knots = spline->GetKnots();
+    const int degree = spline->GetDegree();
+    if (knots.size() == spline->GetPointCount() + static_cast<size_t>(degree) + 1) {
+        const double domain_first = knots[static_cast<size_t>(degree)];
+        const double domain_last = knots[spline->GetPointCount()];
+        const double domain = domain_last - domain_first;
+        if (domain > 1.0e-12) {
+            for (size_t i = static_cast<size_t>(degree);
+                 i < spline->GetPointCount(); ++i) {
+                if (knots[i + 1] - knots[i] > 1.0e-12) {
+                    parameter_spans.emplace_back(
+                        (knots[i] - domain_first) / domain,
+                        (knots[i + 1] - domain_first) / domain);
+                }
+            }
+        }
+    }
+    if (parameter_spans.empty()) {
+        int segment_count = 1;
+        if (spline->IsBezierChain())
+            segment_count = static_cast<int>((spline->GetPointCount() - 1) / 3);
+        else
+            segment_count = std::max(
+                1, static_cast<int>(spline->GetPointCount()) - degree);
+        for (int segment = 0; segment < segment_count; ++segment) {
+            parameter_spans.emplace_back(
+                static_cast<double>(segment) / segment_count,
+                static_cast<double>(segment + 1) / segment_count);
+        }
+    }
+
+    struct ArcSpan {
+        std::vector<CPoint3d> points;
+        std::vector<double> lengths;
+        double length = 0.0;
+    };
+    std::vector<ArcSpan> arc_spans;
+    arc_spans.reserve(parameter_spans.size());
+    double maximum_length = 0.0;
+    const int dense_per_span = std::max(96, spans * 16);
+    for (const auto& range : parameter_spans) {
+        ArcSpan arc;
+        arc.points.reserve(static_cast<size_t>(dense_per_span + 1));
+        arc.lengths.assign(static_cast<size_t>(dense_per_span + 1), 0.0);
+        for (int sample = 0; sample <= dense_per_span; ++sample) {
+            const double alpha = static_cast<double>(sample) / dense_per_span;
+            const double parameter = range.first
+                + (range.second - range.first) * alpha;
+            arc.points.push_back(spline->Evaluate(static_cast<float>(parameter)));
+            if (sample > 0) {
+                const CPoint3d delta = arc.points[static_cast<size_t>(sample)]
+                    - arc.points[static_cast<size_t>(sample - 1)];
+                arc.lengths[static_cast<size_t>(sample)] =
+                    arc.lengths[static_cast<size_t>(sample - 1)]
+                    + std::sqrt(delta.x * delta.x + delta.y * delta.y
+                                + delta.z * delta.z);
+            }
+        }
+        arc.length = arc.lengths.back();
+        maximum_length = std::max(maximum_length, arc.length);
+        arc_spans.push_back(std::move(arc));
+    }
+    if (!std::isfinite(maximum_length) || maximum_length <= 1.0e-12)
+        return nullptr;
+    const double step = maximum_length / std::max(1, spans);
+
+    for (size_t span_index = 0; span_index < arc_spans.size(); ++span_index) {
+        const ArcSpan& arc = arc_spans[span_index];
+        int quantity = equal_step
+            ? static_cast<int>(arc.length / step) : spans;
+        quantity = std::max(quantity, 3);
+        for (int sample = span_index == 0 ? 0 : 1;
+             sample <= quantity; ++sample) {
+            const double target = arc.length * sample / quantity;
+            const auto found = std::lower_bound(
+                arc.lengths.begin(), arc.lengths.end(), target);
+            const size_t end = std::clamp<size_t>(
+                std::distance(arc.lengths.begin(), found),
+                1, arc.lengths.size() - 1);
+            const size_t begin = end - 1;
+            const double local_length = arc.lengths[end] - arc.lengths[begin];
+            const double alpha = local_length > 1.0e-12
+                ? (target - arc.lengths[begin]) / local_length : 0.0;
+            result->AddPoint(
+                arc.points[begin] * (1.0 - alpha) + arc.points[end] * alpha);
+        }
+    }
+    result->SetClosed(true);
+    return result;
+}
+
+std::unique_ptr<CPolyline> BoundarySplinesPolyline(
+    const std::vector<const CAlfaObject*>& curves,
+    int quantity_u,
+    bool equal_step)
+{
+    if (curves.empty())
+        return nullptr;
+    if (curves.size() == 1)
+        return BoundaryCurvePolyline(curves.front(), quantity_u, equal_step);
+
+    struct SampleSource {
+        std::vector<CPoint3d> dense;
+        std::vector<double> cumulative;
+        double length = 0.0;
+    };
+    std::vector<SampleSource> sources;
+    sources.reserve(curves.size());
+    double maximum_length = 0.0;
+    for (const CAlfaObject* curve : curves) {
+        SampleSource source;
+        if (const auto* spline = dynamic_cast<const CBSpline*>(curve)) {
+            const int dense_count = std::max(
+                512, static_cast<int>(spline->GetPointCount()) * 64);
+            source.dense.reserve(static_cast<size_t>(dense_count + 1));
+            for (int sample = 0; sample <= dense_count; ++sample) {
+                source.dense.push_back(spline->Evaluate(
+                    static_cast<float>(sample) / dense_count));
+            }
+        } else if (const auto* polyline = dynamic_cast<const CPolyline*>(curve)) {
+            source.dense = polyline->GetRoundedPathPoints();
+            if (source.dense.size() < 2)
+                source.dense = polyline->GetPoints();
+        }
+        if (source.dense.size() < 2)
+            return nullptr;
+        source.cumulative.assign(source.dense.size(), 0.0);
+        for (size_t i = 1; i < source.dense.size(); ++i) {
+            const CPoint3d delta = source.dense[i] - source.dense[i - 1];
+            source.cumulative[i] = source.cumulative[i - 1]
+                + std::sqrt(delta.x * delta.x + delta.y * delta.y
+                            + delta.z * delta.z);
+        }
+        source.length = source.cumulative.back();
+        if (!std::isfinite(source.length) || source.length <= 1.0e-12)
+            return nullptr;
+        maximum_length = std::max(maximum_length, source.length);
+        sources.push_back(std::move(source));
+    }
+
+    quantity_u = std::max(1, quantity_u);
+    const double maximum_step = maximum_length / quantity_u;
+    std::vector<std::vector<CPoint3d>> polylines;
+    polylines.reserve(sources.size());
+    double d_step = maximum_step;
+    for (const SampleSource& source : sources) {
+        const int quantity = equal_step
+            ? std::max(1, static_cast<int>(std::ceil(source.length / maximum_step)))
+            : quantity_u;
+        d_step = source.length / quantity;
+        std::vector<CPoint3d> points;
+        points.reserve(static_cast<size_t>(quantity + 1));
+        for (int sample = 0; sample <= quantity; ++sample) {
+            const double target = source.length * sample / quantity;
+            const auto found = std::lower_bound(
+                source.cumulative.begin(), source.cumulative.end(), target);
+            const size_t end = std::clamp<size_t>(
+                std::distance(source.cumulative.begin(), found),
+                1, source.cumulative.size() - 1);
+            const size_t begin = end - 1;
+            const double segment = source.cumulative[end]
+                - source.cumulative[begin];
+            const double alpha = segment > 1.0e-12
+                ? (target - source.cumulative[begin]) / segment : 0.0;
+            points.push_back(source.dense[begin] * (1.0 - alpha)
+                + source.dense[end] * alpha);
+        }
+        polylines.push_back(std::move(points));
+    }
+
+    auto result = std::make_unique<CPolyline>("BoundaryLine");
+    for (const CPoint3d& point : polylines.front())
+        result->AddPoint(point);
+    polylines.erase(polylines.begin());
+    constexpr double join_tolerance_squared = 0.01; // DistTo < 0.1
+    const auto distance_squared = [](const CPoint3d& first,
+                                     const CPoint3d& second) {
+        const CPoint3d delta = first - second;
+        return delta.x * delta.x + delta.y * delta.y + delta.z * delta.z;
+    };
+    while (!polylines.empty()) {
+        const CPoint3d& end = result->GetPoints().back();
+        size_t best = 0;
+        bool reverse = false;
+        double best_distance = std::numeric_limits<double>::max();
+        for (size_t i = 0; i < polylines.size(); ++i) {
+            const double to_start = distance_squared(end, polylines[i].front());
+            const double to_end = distance_squared(end, polylines[i].back());
+            if (to_start < best_distance) {
+                best_distance = to_start;
+                best = i;
+                reverse = false;
+            }
+            if (to_end < best_distance) {
+                best_distance = to_end;
+                best = i;
+                reverse = true;
+            }
+        }
+        std::vector<CPoint3d> next = std::move(polylines[best]);
+        polylines.erase(polylines.begin() + static_cast<std::ptrdiff_t>(best));
+        if (reverse)
+            std::reverse(next.begin(), next.end());
+        const size_t start = distance_squared(
+            result->GetPoints().back(), next.front()) < join_tolerance_squared ? 1 : 0;
+        for (size_t i = start; i < next.size(); ++i)
+            result->AddPoint(next[i]);
+    }
+
+    // SurfacePatchGenerator::ImproveBoundaryLine(dStep): complete a missing
+    // closing side using the same interval size that was used for the source
+    // splines.  The last generated point is the first boundary point.
+    const CPoint3d first = result->GetPoints().front();
+    const CPoint3d last = result->GetPoints().back();
+    const double closing_length = std::sqrt(distance_squared(first, last));
+    if (closing_length > 1.0e-12 && d_step > 1.0e-12) {
+        const int closing_quantity = std::max(
+            1, static_cast<int>(std::ceil(closing_length / d_step)));
+        for (int sample = 1; sample <= closing_quantity; ++sample) {
+            const double alpha = static_cast<double>(sample) / closing_quantity;
+            result->AddPoint(last * (1.0 - alpha) + first * alpha);
+        }
+    }
+
+    // CPolyline::ControlPoints(dStep / 5): remove adjacent points that are
+    // effectively duplicates before this exact line is printed and displayed.
+    const double control_tolerance_squared = (d_step / 5.0) * (d_step / 5.0);
+    for (size_t i = 0; i + 1 < result->GetPointCount();) {
+        if (distance_squared(result->GetPoints()[i], result->GetPoints()[i + 1])
+            < control_tolerance_squared) {
+            result->RemovePoint(i);
+        } else {
+            ++i;
+        }
+    }
+    result->SetClosed(true);
+    return result;
+}
+
+class MeshBoundaryLineDialog : public QDialog {
+public:
+    MeshBoundaryLineDialog(CAlfaDoc& document,
+                           std::function<void()> refresh_scene,
+                           std::function<void(const QString&)> set_status,
+                           QWidget* parent)
+        : QDialog(parent), document_(document),
+          refresh_scene_(std::move(refresh_scene)),
+          set_status_(std::move(set_status)) {
+        setWindowTitle("Mesh 3D - Boundary Line Patch");
+        setAttribute(Qt::WA_DeleteOnClose, true);
+
+        auto* root = new QVBoxLayout(this);
+        root->addWidget(new QLabel("Selected boundary curves (N Splines or CPolyline)", this));
+        selected_boundary_ = new QLabel("No boundary curves selected", this);
+        selected_boundary_->setMinimumWidth(280);
+        root->addWidget(selected_boundary_);
+        auto* use_selected = new QPushButton("Use Selected Curves", this);
+        root->addWidget(use_selected);
+
+        auto* form = new QFormLayout;
+        spans_ = new QSpinBox(this);
+        spans_->setRange(2, 64);
+        spans_->setValue(8);
+        form->addRow("U Spans", spans_);
+        equal_step_ = new QCheckBox("Equal Step", this);
+        equal_step_->setChecked(true);
+        form->addRow(equal_step_);
+        reverse_normal_ = new QCheckBox("Reverse Normal", this);
+        form->addRow(reverse_normal_);
+        root->addLayout(form);
+
+        auto* buttons = new QHBoxLayout;
+        auto* create_boundary = new QPushButton("Create BoundaryLine", this);
+        auto* triangulate = new QPushButton("Triangulate BoundaryLine", this);
+        auto* quadrangulate = new QPushButton("Quadrangulate Mesh", this);
+        auto* close = new QPushButton("Close", this);
+        buttons->addWidget(create_boundary);
+        buttons->addWidget(triangulate);
+        buttons->addWidget(quadrangulate);
+        buttons->addWidget(close);
+        root->addLayout(buttons);
+
+        UpdateSelectedBoundary();
+        connect(use_selected, &QPushButton::clicked, this,
+                [this]() { UpdateSelectedBoundary(); });
+        connect(create_boundary, &QPushButton::clicked, this,
+                [this]() { CreateBoundaryLine(); });
+        connect(triangulate, &QPushButton::clicked, this,
+                [this]() { TriangulateBoundaryLine(); });
+        connect(quadrangulate, &QPushButton::clicked, this,
+                [this]() { QuadrangulateTriangleMesh(); });
+        connect(close, &QPushButton::clicked, this, &QDialog::close);
+    }
+
+private:
+    void UpdateSelectedBoundary() {
+        boundary_curve_ids_.clear();
+        const CAlfaDoc::ObjectList& objects = document_.GetObjects();
+        QStringList names;
+        for (size_t index : document_.GetSelectedObjectIndices()) {
+            if (index >= objects.size() || !objects[index])
+                continue;
+            const CAlfaObject* object = objects[index].get();
+            if (!dynamic_cast<const CPolyline*>(object)
+                && !dynamic_cast<const CBSpline*>(object)) {
+                continue;
+            }
+            boundary_curve_ids_.push_back(object->m_id);
+            names.push_back(QString::fromStdString(object->GetName()));
+        }
+        if (!boundary_curve_ids_.empty()) {
+            selected_boundary_->setText(
+                QString("%1 curve(s): %2")
+                    .arg(boundary_curve_ids_.size())
+                    .arg(names.join(", ")));
+            if (set_status_)
+                set_status_(QString("Boundary Line Patch: %1 boundary curve(s) selected")
+                    .arg(boundary_curve_ids_.size()));
+        } else {
+            selected_boundary_->setText("No boundary curves selected");
+            if (set_status_)
+                set_status_("Boundary Line Patch: select N Splines or CPolyline objects");
+        }
+    }
+
+    std::vector<const CAlfaObject*> SelectedBoundaryCurves() const {
+        std::vector<const CAlfaObject*> curves;
+        curves.reserve(boundary_curve_ids_.size());
+        for (unsigned long id : boundary_curve_ids_) {
+            const CAlfaObject* object = document_.FindObjectById(id);
+            if (dynamic_cast<const CPolyline*>(object)
+                || dynamic_cast<const CBSpline*>(object)) {
+                curves.push_back(object);
+            }
+        }
+        return curves;
+    }
+
+    void CreateBoundaryLine() {
+        UpdateSelectedBoundary();
+        const std::vector<const CAlfaObject*> curves = SelectedBoundaryCurves();
+        std::unique_ptr<CPolyline> boundary_line = BoundarySplinesPolyline(
+            curves, spans_->value(), equal_step_->isChecked());
+        if (!boundary_line) {
+            QMessageBox::warning(this, "Boundary Line Patch",
+                                 "Select N connected Splines or CPolyline objects with enough points.");
+            return;
+        }
+        boundary_line->SetName("BoundaryLine from "
+            + std::to_string(curves.size()) + " curves");
+        boundary_line->SetColor({1.0f, 0.0f, 1.0f});
+        boundary_line->SetLineWidth(2.0);
+        const std::filesystem::path dump_path(
+            "C:\\temp\\Dom3D_BoundaryLine.txt");
+        std::error_code dump_error;
+        std::filesystem::remove(dump_path, dump_error);
+        boundary_line->printToFile(dump_path.string());
+        const size_t point_count = boundary_line->GetPointCount();
+        document_.EnsureObjectId(*boundary_line);
+        generated_boundary_id_ = boundary_line->m_id;
+        document_.AddObject(std::move(boundary_line));
+        if (refresh_scene_)
+            refresh_scene_();
+        if (set_status_) {
+            set_status_(QString("Boundary Line: %1 source curve(s), U=%2, %3 points; C:\\temp\\Dom3D_BoundaryLine.txt")
+                .arg(curves.size()).arg(spans_->value()).arg(point_count));
+        }
+    }
+
+    void TriangulateBoundaryLine() {
+        const auto* boundary_line = dynamic_cast<const CPolyline*>(
+            document_.FindObjectById(generated_boundary_id_));
+        if (!boundary_line || boundary_line->GetPointCount() < 3) {
+            QMessageBox::warning(
+                this, "Boundary Line Patch",
+                "Create BoundaryLine first. The saved BoundaryLine object was not found.");
+            return;
+        }
+
+        const std::vector<CPoint3d>& points = boundary_line->GetPoints();
+        Vec3 normal{};
+        for (size_t i = 0; i < points.size(); ++i) {
+            const CPoint3d& current = points[i];
+            const CPoint3d& next = points[(i + 1) % points.size()];
+            normal.x += static_cast<float>((current.y - next.y) * (current.z + next.z));
+            normal.y += static_cast<float>((current.z - next.z) * (current.x + next.x));
+            normal.z += static_cast<float>((current.x - next.x) * (current.y + next.y));
+        }
+        normal = normalize(normal);
+        if (dot(normal, normal) <= 1.0e-12f)
+            normal = {0.0f, 0.0f, 1.0f};
+        if (reverse_normal_->isChecked())
+            normal = normal * -1.0f;
+
+        ContourToFill contour_to_fill;
+        contour_to_fill.ForceSnaping = false;
+        contour_to_fill.InvertOrder = reverse_normal_->isChecked();
+        for (const CPoint3d& point : points) {
+            contour_to_fill.AddPoint(
+                {static_cast<float>(point.x),
+                 static_cast<float>(point.y),
+                 static_cast<float>(point.z)},
+                normal);
+        }
+
+        auto mesh = std::make_unique<CMesh3D>(
+            boundary_line->GetName() + " ContourToFill Triangles");
+        contour_to_fill.FillByTriangles(*mesh, 0);
+        if (mesh->GetFaces().empty()) {
+            QMessageBox::warning(
+                this, "Boundary Line Patch",
+                "ContourToFill did not create any triangles from this BoundaryLine.");
+            return;
+        }
+        mesh->SetColor({0.12f, 0.72f, 0.78f});
+        const size_t vertex_count = mesh->GetVertices().size();
+        const size_t face_count = mesh->GetFaces().size();
+        document_.EnsureObjectId(*mesh);
+        generated_triangle_mesh_id_ = mesh->m_id;
+        document_.AddObject(std::move(mesh));
+        if (refresh_scene_)
+            refresh_scene_();
+        if (set_status_) {
+            set_status_(QString("ContourToFill: exact BoundaryLine, %1 vertices, %2 triangles")
+                .arg(vertex_count).arg(face_count));
+        }
+    }
+
+    void QuadrangulateTriangleMesh() {
+        const auto* mesh_fill = dynamic_cast<const CMesh3D*>(
+            document_.FindObjectById(generated_triangle_mesh_id_));
+        if (!mesh_fill || mesh_fill->GetFaces().empty()) {
+            QMessageBox::warning(
+                this, "Boundary Line Patch",
+                "Triangulate BoundaryLine first. The saved triangle mesh was not found.");
+            return;
+        }
+
+        ContourQuadrangulator coq;
+        coq.CreateFromMesh(mesh_fill);
+        auto quad_mesh = std::make_unique<CMesh3D>(
+            mesh_fill->GetName() + " Quadrangulated");
+        quad_mesh->Clear();
+        coq.Quadrangulate(quad_mesh.get());
+        if (quad_mesh->GetFaces().empty()) {
+            QMessageBox::warning(
+                this, "Boundary Line Patch",
+                "ContourQuadrangulator did not create a mesh.");
+            return;
+        }
+
+        size_t quad_count = 0;
+        size_t triangle_count = 0;
+        for (const CMesh3D::Face& face : quad_mesh->GetFaces()) {
+            if (face.corners.size() == 4)
+                ++quad_count;
+            else if (face.corners.size() == 3)
+                ++triangle_count;
+        }
+        quad_mesh->SetColor({0.32f, 0.82f, 0.36f});
+        document_.AddObject(std::move(quad_mesh));
+        if (refresh_scene_)
+            refresh_scene_();
+        if (set_status_) {
+            set_status_(QString("ContourQuadrangulator: %1 quads, %2 remaining triangles")
+                .arg(quad_count).arg(triangle_count));
+        }
+    }
+
+    CAlfaDoc& document_;
+    std::function<void()> refresh_scene_;
+    std::function<void(const QString&)> set_status_;
+    std::vector<unsigned long> boundary_curve_ids_;
+    unsigned long generated_boundary_id_ = 0;
+    unsigned long generated_triangle_mesh_id_ = 0;
+    QLabel* selected_boundary_ = nullptr;
+    QSpinBox* spans_ = nullptr;
+    QCheckBox* equal_step_ = nullptr;
+    QCheckBox* reverse_normal_ = nullptr;
 };
 constexpr int kMaterialLibraryEntryRole = Qt::UserRole + 20;
 constexpr int kMaterialDocumentIndexRole = Qt::UserRole + 21;
@@ -5841,6 +6493,7 @@ void MainWindow::CreateVerticalToolBar() {
         "SolidLowPoly",
         {
             {"MeshFillContour", "Fiill Contour"},
+            {"MeshBoundaryLine", "Boundary Line Patch"},
             {"SolidLowPoly", "Low Poly"}
         });
 
@@ -6331,6 +6984,9 @@ void MainWindow::AddToolButton(QGridLayout* layout, QWidget* parent, const std::
     } else if (key == "MeshFillContour") {
         button->setIcon(QIcon());
         button->setText("Fill");
+    } else if (key == "MeshBoundaryLine") {
+        button->setIcon(QIcon());
+        button->setText("Bound");
     } else if (key == "DrawSpline") {
         button->setIcon(ToolIcon(key));
         button->setText("Draw");
@@ -8475,6 +9131,7 @@ bool MainWindow::JoinSelectedCurves() {
     std::vector<CPoint3d> joined = *CurveControlPoints(objects[indices[0]].get());
     std::vector<double> joined_weights = first_spline
         ? first_spline->GetWeights() : std::vector<double>{};
+    std::vector<size_t> joined_seams;
     std::set<size_t> remaining(indices.begin() + 1, indices.end());
     constexpr double tolerance_squared = 1.0;
     while (!remaining.empty()) {
@@ -8511,11 +9168,25 @@ bool MainWindow::JoinSelectedCurves() {
             std::reverse(next_weights.begin(), next_weights.end());
         }
         if (best_mode <= 1) {
+            // Snap in 3D by translating the complete candidate. Dropping a
+            // merely nearby endpoint used to displace only the first Bezier
+            // handle and introduced a visible kink at the join.
+            const CPoint3d offset = joined.back() - next.front();
+            for (CPoint3d& point : next)
+                point += offset;
+            const size_t seam = joined.size() - 1;
             joined.insert(joined.end(), next.begin() + 1, next.end());
             if (!joined_weights.empty()) joined_weights.insert(
                 joined_weights.end(), next_weights.begin() + 1, next_weights.end());
+            joined_seams.push_back(seam);
         } else {
+            const CPoint3d offset = joined.front() - next.back();
+            for (CPoint3d& point : next)
+                point += offset;
             next.pop_back();
+            const size_t prefix_size = next.size();
+            for (size_t& seam : joined_seams)
+                seam += prefix_size;
             next.insert(next.end(), joined.begin(), joined.end());
             joined.swap(next);
             if (!joined_weights.empty()) {
@@ -8523,8 +9194,44 @@ bool MainWindow::JoinSelectedCurves() {
                 next_weights.insert(next_weights.end(), joined_weights.begin(), joined_weights.end());
                 joined_weights.swap(next_weights);
             }
+            joined_seams.push_back(prefix_size);
         }
         remaining.erase(best_index);
+    }
+
+    if (first_spline
+        && first_spline->GetCurveType() == SplineCurveType::Bezier
+        && joined.size() >= 4 && (joined.size() - 1) % 3 == 0) {
+        for (size_t seam : joined_seams) {
+            if (seam == 0 || seam + 1 >= joined.size())
+                continue;
+            const CPoint3d& anchor = joined[seam];
+            const CPoint3d incoming = anchor - joined[seam - 1];
+            const CPoint3d outgoing = joined[seam + 1] - anchor;
+            const double incoming_length = std::sqrt(
+                incoming.x * incoming.x + incoming.y * incoming.y
+                + incoming.z * incoming.z);
+            const double outgoing_length = std::sqrt(
+                outgoing.x * outgoing.x + outgoing.y * outgoing.y
+                + outgoing.z * outgoing.z);
+            if (incoming_length <= 1.0e-12 || outgoing_length <= 1.0e-12)
+                continue;
+
+            CPoint3d tangent(
+                incoming.x / incoming_length + outgoing.x / outgoing_length,
+                incoming.y / incoming_length + outgoing.y / outgoing_length,
+                incoming.z / incoming_length + outgoing.z / outgoing_length);
+            double tangent_length = std::sqrt(
+                tangent.x * tangent.x + tangent.y * tangent.y
+                + tangent.z * tangent.z);
+            if (tangent_length <= 1.0e-12) {
+                tangent = incoming;
+                tangent_length = incoming_length;
+            }
+            tangent = tangent * (1.0 / tangent_length);
+            joined[seam - 1] = anchor - tangent * incoming_length;
+            joined[seam + 1] = anchor + tangent * outgoing_length;
+        }
     }
 
     undo_redo_.BeginChange();
@@ -12247,6 +12954,10 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         ShowMeshFillContourTool();
         return;
     }
+    if (tool_id == "MeshBoundaryLine") {
+        ShowMeshBoundaryLineTool();
+        return;
+    }
     if (tool_id == "TrimMeshTest") {
         ShowTrimMeshTestTool();
         return;
@@ -13261,7 +13972,7 @@ void MainWindow::ShowLowPolyTool() {
 void MainWindow::ShowMeshFillContourTool() {
     ClearActiveProperties();
     viewport_->SetTool(ToolMode::Select);
-    viewport_->SetSelectionMode(SelectionMode::Object);
+    viewport_->SetSelectionMode(SelectionMode::Face);
     UpdateActiveToolUi("MeshFillContour");
 
     auto* dialog = new MeshFillContourDialog(
@@ -13275,22 +13986,46 @@ void MainWindow::ShowMeshFillContourTool() {
         },
         this);
 
-    if (!dialog->HasContours()) {
-        dialog->deleteLater();
-        statusBar()->showMessage("Fiill Contour:operation status", 2000);
-        return;
-    }
-
     connect(dialog, &QDialog::finished, this, [this]() {
         UpdateActiveToolUi("select");
         viewport_->SetTool(ToolMode::Select);
+        viewport_->SetSelectionMode(SelectionMode::Object);
         viewport_->update();
         statusBar()->showMessage("Select objects", 900);
     });
     dialog->show();
     dialog->raise();
     dialog->activateWindow();
-    statusBar()->showMessage("Fiill Contour:select the required geometry and continue", 1800);
+    statusBar()->showMessage("Fill Contour: select a surface and continue", 1800);
+}
+
+void MainWindow::ShowMeshBoundaryLineTool() {
+    ClearActiveProperties();
+    viewport_->SetTool(ToolMode::Select);
+    viewport_->SetSelectionMode(SelectionMode::Object);
+    UpdateActiveToolUi("MeshBoundaryLine");
+
+    auto* dialog = new MeshBoundaryLineDialog(
+        document_,
+        [this]() {
+            RefreshSceneTree();
+            viewport_->update();
+        },
+        [this](const QString& text) {
+            statusBar()->showMessage(text, 2500);
+        },
+        this);
+    connect(dialog, &QDialog::finished, this, [this]() {
+        UpdateActiveToolUi("select");
+        viewport_->SetTool(ToolMode::Select);
+        viewport_->SetSelectionMode(SelectionMode::Object);
+        viewport_->update();
+        statusBar()->showMessage("Select objects", 900);
+    });
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
+    statusBar()->showMessage("Boundary Line Patch: select a Spline or CPolyline", 1800);
 }
 
 void MainWindow::ShowTrimMeshTestTool() {
@@ -16254,7 +16989,8 @@ void MainWindow::PopulateToolsPanelForTab(int tab_index) {
                     "single_facade", "kitchen_nika_260",
                     "kitchen_corner"};
     } else if (tab == "Mesh 3D") {
-        tool_ids = {"MeshFillContour", "SolidLowPoly", "TrimMeshTest", "ClassifyFaceCut"};
+        tool_ids = {"MeshFillContour", "MeshBoundaryLine", "SolidLowPoly",
+                    "TrimMeshTest", "ClassifyFaceCut"};
     } else if (tab == "Surfaces") {
         tool_ids = {"PlaneTool", "SurfaceRuled", "SurfaceLoft", "SurfaceSweepTwoRails", "SurfaceFourSplines", "SurfaceJoin", "SurfaceReverseNormals", "SurfaceOfRevolution"};
     } else if (tab == "Solid") {

@@ -1,0 +1,945 @@
+************************************************************************************************************
+How to convert mp3-files into caff-files (CoreAudio File Format) in macOS Terminal using "afconvert" utility
+************************************************************************************************************
+List of supported file/data formats:
+% afconvert -hf
+All mp3-files into caf/IMA4:1/44kHz/Mono:
+% for i in *.mp3; do afconvert -f caff -d ima4@44100 -c 1 $i; done
+All mp3-files into wav/little-endian signed 16-bit integer linear PCM/44kHz/Mono:
+% for i in *.mp3; do afconvert -f WAVE -d LEI16@44100 -c 1 $i; done
+
+//*****************************************************************************
+// macOS
+//*****************************************************************************
+Install Prerequisites
+    1. https://www.autodesk.com/developer-network/platform-technologies/fbx-sdk-2020-2 > Mac > FBX SDK 2020.2 Clang (Universal Binary)
+
+	3DxWare 10 for macOS (https://3dconnexion.com/uk/drivers/ > 3DXWARE 10.7.0 BETA (BIG SUR))
+	MKL 2019 https://software.seek.intel.com/performance-libraries
+	(Intel Math Kernel Library for macOS > 2019 Update 4 > Customizable Package > uncheck all except [V] Intel MKL core libraries for C/C++)
+
+
+//--------------------------------------------------------
+// Add icon (macOS 10.15 Catalina, Xcode 11.3)
+//--------------------------------------------------------
+Project navigator > XXX > TARGETS XXX > General > App Icons > Source > Don’t use asset catalogs
+From the Finder drag & drop icon "Icon.icns" onto Project navigator > XXX > Add to targets [V] XXX > Finish
+(check Project navigator / XXX / TARGETS XXX / Build Phases / Copy Bundle Resources / Icon.icns)
+Project navigator > XXX > Info.plist > Icon file = Icon
+(make sure that Build Settings > Info.plist File = Info.plist)
+Create icon: res/3D-Coat.ico > macOS Preview > File > Export... > PNG > "Icon.iconset\icon_128x128.png" > $ iconutil -c icns Icon.iconset
+
+//----------------------------------------------------------
+// Add "relaunch" target (macOS 10.15 Catalina, Xcode 11.4)
+//----------------------------------------------------------
+File > New > Target... > macOS > Application > Command Line Tool > Next > relaunch / None / Pilgway / com.Pilgway / Objective-C > Finish
+Project navigator > XXX >
+	--> folder "relaunch" > [RMB] Delete > Move to Trash (in the Finder remove folder "relaunch")
+	--> comms > select "relaunch.m" [OPT+CMD+0] (or [RMB] Show File Inspector) > Target Membership > [ ] XXX [V] relaunch
+	--> TARGETS relaunch > Build Settings >
+		--> macOS Deployment Target = macOS 10.9 (because "range of supported deployment target versions is 10.9 to 11.0.99.")
+	[XXX > My Mac] > TARGETS XXX > Build Phases >
+		--> Dependencies > + > relaunch > Add
+		--> Copy Bundle Resources > + > XXX/Products/relaunch > Add
+		(check [RMB] relaunch ...in build/Debug > Show in Finder -> build/Release/relaunch when XXX > Edit Scheme... [SHIFT+CMD+,] > Build Configuration = Release)
+
+//----------------------------------------------------------------------------------
+// Sign "Developer ID Application" and notarize (macOS 10.15.4 Catalina, Xcode 11.4)
+//----------------------------------------------------------------------------------
+1. Xcode > Preferences... > Accounts > + > AppleID > ... > Manage Certificates... > + > Developer ID Application
+   (or manually using site developer.apple.com > Account > Certificates, IDs & Profiles > macOS > Mac Development, Developer ID Application > Download)
+2. Project navigator > PROJECT-NAME > TARGETS TARGET-NAME >
+	Signing & Capabilities >
+		[ ] Automatically manage signing
+		Team = Andrii Shpahin
+		Provisioning Profile = None
+		Signing Certificate = Developer ID Application
+	Build Settings >
+		[Release] Code Signing Inject Base Entitlements = No (to solve notarization error "The executable requests the com.apple.security.get-task-allow entitlement.")
+		[Release] Other Code Signing Flags = --timestamp (to solve notarization error "The signature does not include a secure timestamp.")
+		[Release] Enable Hardened Runtime = Yes
+		Note that "Hardened Runtime":
+			A. Activates only on system with enabled SIP.
+			B. Causes error in Xcode Console "Library not loaded: @rpath/xxx.dylib" when project is not signed.
+			C. Causes "Message from debugger: Error 1" when "Code Signing Inject Base Entitlements = No"
+			D. Prevents app from accessing third-party "3DconnexionClient.framework". To access do in Xcode:
+			   File > New > File... > macOS > Resource/Property List > name "Entitlements.plist" >
+			   --> [RMB] in editor area > Property List Type = [V] Entitlements File > (+) Disable Library Validation = YES
+			   --> Project navigator > [PROJECT_NAME] > Build Settings > Code Signing Entitlements = Entitlements.plist
+			   --> to check in Terminal: % codesign -d --entitlements :- /Applications/3DCoat-x.x.xx/3DCoat.app
+3. Application specific password for "altool":
+	https://appleid.apple.com/account/home > Security > APP-SPECIFIC PASSWORDS > Generate Password...
+	(to view Security > Edit > APP-SPECIFIC PASSWORDS > View History)
+4. Test APP:
+	$ spctl -a -v XXX.app
+	(the output should be: "XXX.app: accepted source=Developer ID")
+5. Test DMG:
+	$ spctl -a -t open --context context:primary-signature -v XXX.dmg
+	(the output should be: "XXX.dmg: accepted source=Developer ID)
+Error 1. The signature does not include a secure timestamp.
+	% codesign -dvv ./3DCoat.app
+	(if there is "Signed Time" then the binary has no secure timestamp, only when there is "Timestamp")
+Error 2. The signature of the binary is invalid. It means that you make a modification after signing.
+	To copy app-bundle use "rsync -a" (do not use "cp -r"). To check: % codesign -vvv --deep --strict ./3DCoat.app
+Error 3. The executable requests the com.apple.security.get-task-allow entitlement. By default Xcode sets
+	"Build Settings > Code Signing Inject Base Entitlements = Yes" to allow debugging (on systems with enabled SIP).
+Error 4. The binary is not signed with a valid Developer ID certificate.
+	Do step 2 for every target in the project.
+Error 5. The executable does not have the hardened runtime enabled.
+	Set "Build Settings > Enable Hardened Runtime = Yes" for every target in the project.
+
+//--------------------------------------------------------
+// FBX SDK 2020.2 (Xcode 14.2, macOS 12.6.3 Monterey)
+//--------------------------------------------------------
+1. Project navigator > PROJECT-NAME > TARGETS TARGET-NAME > Build Settings >
+	Header Search Paths > + > /Applications/Autodesk/FBX\ SDK/2020.2/include
+	Library Search Paths > + > /Applications/Autodesk/FBX\ SDK/2020.2/lib/clang/release
+    (to solve error "Library not found for -lfbxsdk")
+2. To solve errors "Undefined symbol: fbxsdk::..." drag "/Applications/Autodesk/FBX SDK/2020.2/lib/clang/release/libfbxsdk.dylib" and
+   drop on "Project navigator / PROJECT-NAME / Frameworks". [RMB] libfbxsdk.dylib > Show File Inspector > Location = Absolute Path
+3. To resolve SIGABRT on startup "Library not loaded: '@executable_path/libfbxsdk.dylib'":
+   Project navigator > PROJECT-NAME > TARGETS TARGET-NAME > Build Phases >
+	--> [+] New Copy Files Phase > Copy Files (0 items) > Destination = Executables > [+] PROJECT-NAME/Frameworks/libfbxsdk.dylib > Add
+	(the default [V] Code Sign On Copy resolves error Code Sign Error: code object is not signed at all)
+
+//--------------------------------------------------------
+// PVR Texture Library (Xcode 9.3)
+//--------------------------------------------------------
+0. http://www.imgtec.com/tools/powervr-tools/
+1. Project navigator > PROJECT-NAME > TARGETS TARGET-NAME > Build Settings > Search Paths >
+	Header Search Paths > + > Libs/PVRTexLib/3.3\ R2/Include (note '\' before space in the path)
+2. In the Finder drag "Libs/PVRTexLib/3.3 R2/OSX/libPVRTexLib.a" and drop on "Project navigator > PROJECT-NAME > Frameworks"
+3. Project navigator > PROJECT-NAME > TARGETS TARGET-NAME > Build Settings > Search Paths > Library Search Paths >
+	Library Search Paths > + > Libs/PVRTexLib/3.3\ R2/OSX (note '\' before space in the path, remove automatically added path because it is incorrectly split)
+
+//--------------------------------------------------------
+// 3Dconnexion SDK (macOS 10.15.6, Xcode 11.5)
+//--------------------------------------------------------
+0. Download macOS SDK: https://www.3dconnexion.eu/nc/service/software-developer/licence-agreement/sdk-download.html
+   and read document "3DxMacWare SDK.pdf" (section "4. Using the 3DxWareMac SDK")
+1. Project navigator > PROJECT-NAME >
+	--> TARGETS TARGET-NAME >
+		--> General > Frameworks, Libraries, and Embedded Content > + > Add Other... > Add Files... > [SHIFT+COMMAND+C] "Macintosh HD/Library/Frameworks/3DconnexionClient.framework" > Open > set "Do Not Embed"
+	--> Frameworks > [RMB] 3DconnexionClient.framework > Show File Inspector >
+		--> Location = Absolute Path (click the folder icon and select "3DconnexionClient.framework" again to fix the path)
+		--> Target Membership [V] TARGET-NAME [Optional]
+		(the same as Build Phases > Link Binary With Libraries > 3DconnexionClient.framework = Optional)
+		(to verify % otool -l APP_BUNDLE.app/Contents/MacOS/EXEC_FILE)
+		--> Info > (+) > Bundle creator OS Type code = "Coat" (the same as inside "cMacMain.mm" when calling "RegisterConnexionClient")
+		(not necessary --> Build Settings > Other Linker Flags = -weak_framework 3DConnexionClient)
+
+//--------------------------------------------------------------------------------
+// How to include dynamic libraries into application bundle (MKL & TBB 2019) 
+//--------------------------------------------------------------------------------
+In the Finder drag "LIB_NAME.dylib" and drop on "Project navigator / PROJECT_NAME / Frameworks" (this automatically updates "Build Settings > Library Search Paths")
+   [RMB] "LIB_NAME.dylib" > Show File Inspector > Location = Absolute Path. Click the folder icon and select this lib to fix the path.
+Project navigator > PROJECT_NAME > TARGETS TARGET-NAME > Build Phases >
+	--> [+] New Copy Files Phase > Copy Files (0 items) > Destination = Frameworks > [+] PROJECT_NAME/Frameworks/LIB_NAME.dylib > Add
+	--> To verify
+		% cd APP_BUNDLE.app/Contents
+		% ls Frameworks/LIB_NAME.dylib
+		% otool -l MacOS/EXEC_FILE
+		..
+		LC_LOAD_DYLIB
+		@rpath/LIB_NAME.dylib
+		..
+		LC_RPATH
+		@executable_path/../Frameworks
+Note: lines below in "Run Script Phase" generate build error about duplicate path which the executable file already has:
+	EXECFILE=${BUILT_PRODUCTS_DIR}/${EXECUTABLE_PATH}
+	install_name_tool -add_rpath @executable_path/. ${EXECFILE}
+
+//--------------------------------------------------------
+// MKL 2019
+// https://software.seek.intel.com/performance-libraries
+// Intel Math Kernel Library for macOS > 2019 Update 4 > Customizable Package > uncheck all except [V] Intel MKL core libraries for C/C++
+//--------------------------------------------------------
+1. Project navigator > PROJECT-NAME > TARGETS TARGET-NAME > Build Settings > Search Paths >
+	Header Search Paths > + > /opt/intel
+2. Finder > Go > Go to Folder... > /opt/intel/mkl/lib >
+2.1. "How to include... libmkl_intel_lp64.dylib"
+     (build error "Undefined symbol: _PARDISO")
+2.2. "How to include... libmkl_intel_thread.dylib"
+     (startup error "dyld: Symbol not found: _mkl_blas_caxpy",
+     was found with "$ nm -a libmkl_intel_thread.dylib | grep _mkl_blas_caxpy")
+2.3. "How to include... /opt/intel/lib > libiomp5.dylib"
+     (startup error "dyld: Library not loaded: @rpath/libiomp5.dylib")
+2.4. "How to include... libmkl_core.dylib"
+     (startup error "dyld: Symbol not found: _mkl_serv_inspector_loaded",
+     was found with "$ nm -a libmkl_core.dylib | grep _mkl_serv_inspector_loaded")
+// Libs below are loaded in runtime (when calling functions Sculpt > AUTOPO and
+//  Retopo > UV > Mark Seams > Selected > To ABF/GU/LSCM/Planar)
+2.5. "How to include... libmkl_mc.dylib"
+     (under macOS 10.15 Terminal error "Intel MKL FATAL ERROR: Cannot load libmkl_avx2.dylib or libmkl_mc.dylib")
+2.6. "How to include... libmkl_avx2.dylib"
+     (under macOS 10.15 there is runtime error "Intel MKL FATAL ERROR: Error on loading function mkl_blas_avx2_xdswap."
+     was found with "% nm -a libmkl_avx2.dylib | grep mkl_blas_avx2_xdswap")
+2.7. "How to include... libmkl_vml_mc.dylib"
+     (runtime error "dlopen(libmkl_vml_mc.dylib): image not found.")
+2.8. "How to include... libmkl_vml_avx2.dylib"
+     (runtime error "dlopen(libmkl_vml_avx2.dylib): image not found.")
+2.9. "How to include... libmkl_sequential.dylib"
+     (runtime error "Intel MKL FATAL ERROR: Cannot load <mkl-thread-layer>."
+     was found in document https://software.intel.com/content/www/us/en/develop/documentation/mkl-macos-developer-guide/top/appendix-c-directory-structure-in-detail/dynamic-libraries-in-the-lib-directory.html)
+2.10. "How to include... libmkl_mc3.dylib"
+     (runtime error on iMac/macOS 10.13 "Intel MKL FATAL ERROR: Error on loading function mkl_blas_mc3_xdswap."
+     was found with "$ nm -a libmkl_mc3.dylib | grep mkl_blas_mc3_xdswap")
+2.11. "How to include... libmkl_avx.dylib"
+     (runtime error on macOS 10.14 "Intel MKL FATAL ERROR: Error on loading function mkl_blas_avx_xdswap."
+     was found with "$ nm -a libmkl_avx.dylib | grep mkl_blas_avx_xdswap")
+2.12. "How to include... libmkl_avx512.dylib"
+     (runtime error on user's macOS 10.14 "Intel MKL FATAL ERROR: Error on loading function mkl_blas_avx512_xdswap."
+     was found with "$ nm -a libmkl_avx512.dylib | grep mkl_blas_avx512_xdswap")
+
+//---------------------------------------------------------------
+// Xcode / Sourcetree
+//---------------------------------------------------------------
+Add to Sourcetree PROJECT_NAME.xcodeproj/project.pbxproj + xcshareddata/xcschemes/TARGET_NAME.xcscheme
+(w/o .xcscheme Xcode builds but creates default scheme "relaunch" instead of "3DCoat")
+Ignore subfolders PROJECT_NAME.xcodeproj/project.xcworkspace + xcuserdata
+
+//------------------------------------------------------------------------------------
+// How to create project "FServer/StrokeTest/3DCoat" under macOS Catalina / Xcode 11.3
+//------------------------------------------------------------------------------------
+Daemon in OSX Example: https://gist.github.com/nacho4d/2338521
+
+	1. File > New > Project... > macOS > App > Next > XXX / None / Pilgway / com.Pilgway / Objective-C / all other unchecked > Next > Create
+	2. In the Finder move file "Info.plist" to the root folder of the project
+	3. Project navigator > PROJECT_NAME > item PROJECT_NAME [RMB] > Delete > Move to Trash
+	4. Drag & drop "Info.plist" onto Project navigator > PROJECT_NAME, uncheck "Add to targets [ ] PROJECT_NAME"
+	(check "Project navigator / PROJECT_NAME / TARGETS PROJECT_NAME / Build Phases / Copy Bundle Resources" and delete "Info.plist" if needed)
+	5. In the Finder move to trash subfolder "PROJECT_NAME"
+	6. Project navigator > PROJECT_NAME > TARGETS PROJECT_NAME >
+		Signing & Capabilities > Signing (Debug + Release) > Sign to Run Locally
+		Build Settings >
+			Architectures = x86_64 (because of error "The linked and embedded library 'xxx.dylib' is missing one or more architectures required by this target: arm64.")
+			Code Signing Entitlement = {empty}
+			Info.plist File = Info.plist
+		General >
+			Deployment Target: macOS 10.9 (because "range of supported deployment target versions is 10.9 to 11.0.99.")
+			Frameworks, Libraries, and Embedded Content > + > macOS 10.15
+		    		Carbon.framework
+				Cocoa.framework
+				IOKit.framework
+				[StrokeTest/3DCoat] OpenGL.framework
+                [xxx] OpenAL.framework
+				[3DCoat] OpenCL.framework
+                [macOS 11.0 Big Sur]
+                    libz.tbd [3DCoat, StrokeTest]
+                    libxml2.tbd [3DCoat]
+                [macOS 10.15 Catalina]
+                    Add Other... > Add Files... > SHIFT+COMMAND+G > Go to the folder: /usr/lib/ > Go >
+                        libz.dylib [3DCoat, StrokeTest]
+                        libxml2.dylib [3DCoat]
+                            > Open > [RMB] "Frameworks/libz.1.dylib" and "libxml2.2.dylib" > Show File Inspector > Location = Absolute Path
+                            (click the folder icon and select "libz.dylib" and "libxml2.dylib" again to fix the path)
+	7. Project navigator > [RMB] PROJECT_NAME > Add Files to "PROJECT_NAME"... > [LMB] comms + [CMD+LMB] comms-Math + Main.cpp + XXX > Add
+		[FServer]	FServer.cpp
+		[StrokeTest]	Plugins + Tests.cpp + Utils.cpp
+		[3DCoat]	3D-Coat + ClassEngine + excomms + Libs/AngelScript/2.36.1 + Libs/ColladaCodec/Sources
+	8. Project navigator > PROJECT_NAME > select "Main.cpp" [OPT+CMD+0] (or [RMB] > Show File Inspector) >
+		Type: Objective-C++ Source (to mix C++/Cocoa in the same cpp-file)
+	9. Project navigator > PROJECT_NAME > TARGETS PROJECT_NAME > Build Settings >
+		Objective-C Automatic Reference Counting = No
+		C++ Language Dialect = GNU++17 (instead GNU++14 because error "No type named 'invoke' in namespace 'std'")
+		Precompile Prefix Header = Yes
+		Prefix Header =
+			[FServer, StrokeTest] comms/comms.h
+			[3DCoat] 3D-Coat/stdafx.h
+	10. Do "Add icon" (Icon.icns)
+	11. Do "Add "relaunch" target"
+	12. Project navigator > PROJECT_NAME > TARGETS PROJECT_NAME > Build Settings >
+		Product Name > Debug = $(TARGET_NAME)-Debug
+		[FServer] Go to 18
+		[3DCoat] Inhibit All Warnings = Yes
+		Header Search Paths >
+			[3DCoat] 3D-Coat (to solve error "'stdafx.h' file not found")
+			Libs/TBB/2019\ Update\ 8
+			Libs/Png/1.6.37/macOS/
+			Libs/Jpeg/9c/macOS/
+			Libs/Tiff/4.0.10/macOS/
+            Libs/AngelScript/2.36.1/include ('angelscript.h' file not found with <angled> include; use "quotes" instead)
+		Preprocessor Macros >
+			COMMS_OPENGL
+            [xxx] COMMS_OPENAL
+			COMMS_PNG
+			COMMS_ZIP
+			COMMS_JPEG
+			[StrokeTest] COMMS_TIFF
+			COMMS_FBX
+			COMMS_3DCONNEXION
+			[Debug]
+			COMMS_ASSERT
+	13. Drag & drop on "Project navigator > PROJECT_NAME > Frameworks"
+			Libs/Png/1.6.37/macOS/libpng16.a
+			Libs/Jpeg/9c/macOS/libjpeg.a
+			Libs/Tiff/4.0.10/macOS/libtiff.a
+	14. Do "3Dconnexion SDK"
+	15. Do "FBX SDK 2019.2"
+	16. Do "How to include dynamic libraries into application bundle" for "Libs/TBB/2019 Update 8/macOS"
+		(original Finder > Go > Computer (SHIFT+CMD+C) > Macintosh HD > show hidden folders (SHIFT+CMD+.) > /opt/intel/tbb/lib)
+	17. Do "MKL 2019"
+	18. [3DCoat/relaunch] Do "Sign "Developer ID Application" and notarize"
+    19. "AngelScript" error "Undefined symbol: CallSystemFunctionNative(...)":
+        because macro "AS_X64_GCC" is defined when building under macOS then include "as_callfunc_x64_gcc.cpp" in "Project navigator".
+        "AngelScript" error "1 duplicate symbol for architecture x86_64":
+        remove function "int main()" inside "generateheader.cpp"
+        
+//----------------------------------------------------------------------
+// USD under macOS
+//----------------------------------------------------------------------
+Official USD site:
+https://github.com/PixarAnimationStudios/USD
+Get USD sources into Documents:
+cd ~/Documents
+git clone https://github.com/PixarAnimationStudios/USD
+CMake is required for building USD:
+https://cmake.org
+Download dmg-image (Download > Latest Release). Copy CMake.app into Applications.
+To make cmake available in Terminal create symlink:
+sudo "/Applications/CMake.app/Contents/bin/cmake-gui" --install
+Building USD using Python script into output folder "BUILD_USD" inside Documents (1 file dylib):
+python3 USD/build_scripts/build_usd.py BUILD_USD --no-usdview --build-monolithic --no-python
+Option "no python" was used because Apple notarization server reported error:
+"The executable does not have the hardened runtime enabled" specifying paths
+inside "3DCoat.app/Contents/Frameworks/Python3.framework/Versions/3.8".
+USD on M1: https://developer.apple.com/forums/thread/701321
+
+//----------------------------------------------------------------------
+// USD under Windows
+//----------------------------------------------------------------------
+1. https://github.com/PixarAnimationStudios/USD > Code > Download ZIP > Save as > Documents
+2. [RMB] Start > Windows Terminal > enter "python", this will open Microsoft Store to install it
+3. ERROR: CMake not found -- please install it and adjust your PATH
+https://cmake.org > Download > Windows x64 Installer > (*) Add CMake to the system PATH
+4. ERROR: C++ compiler not found -- please install a compiler
+https://learn.microsoft.com/en-us/visualstudio/releases/2019/release-notes
+VS2019 (16) > Tools > Command Line > Developer PowerShell
+NOTE. Do not use VS2022 (17) because inside script "USD-release\build_scripts\build_usd.py" there is
+"Visual Studio 16 2019". When you replace it with "Visual Studio 17 2022" there is another error:
+ERROR: Failed to run 'bootstrap.bat'. In "BUILD_USD\src\boost_1_70_0\bootstrap.log" there is "Unknown toolset: vcunk".
+Open "BUILD_USD\src\boost_1_70_0\bootstrap.bat". There maximum toolset is "vc141".
+(5). Building USD using Python script from "USD-release" into output folder "BUILD_USD" (1 dll-file):
+python USD-release/build_scripts/build_usd.py BUILD_USD --no-usdview --build-monolithic --no-python
+
+// USD examples
+USDZ examples from Apple:
+https://developer.apple.com/augmented-reality/object-capture/
+https://developer.apple.com/augmented-reality/quick-look/
+USD examples from Pixar:
+https://graphics.pixar.com/usd/release/dl_downloads.html#assets
+
+//*****************************************************************************
+// Linux Ubuntu
+//*****************************************************************************
+A. Install Prerequisites
+	MKL 2020 https://software.seek.intel.com/performance-libraries
+	(Intel Math Kernel Library for Linux > 2020 Update 3 (31 Aug 2020) > Customizable Package > ./install_GUI.sh > Customize... > uncheck [ ] IA-32, uncheck all except only one item [V] Intel MKL core libraries for C/C++)
+	(No registration: https://registrationcenter.intel.com/regcenter/RegisterSNInfo.aspx?dnld=t&SN=N2R2-DS8WW9PH&EmailID=sergyi@ua.fm&Sequence=2832415)
+	FBX SDK 2020.0.1
+		https://www.autodesk.com/developer-network/platform-technologies/fbx-sdk-2020-0
+		https://www.autodesk.com/content/dam/autodesk/www/adn/fbx/2020-0-1/fbx202001_fbxsdk_linux.tar.gz
+		$ ./fbx202001_fbxsdk_linux ~/fbx (WARNING: DO NOT install "sudo xxx /usr" because it corrupts the system)
+	VS Code (from "Ubuntu Software") >
+		Extensions > C/C++ (Microsoft), C/C++ Makefile Project (Adriano Markovic)
+		File > Preferences > Settings [Ctrl+Comma] >
+			search "scrollback" > Terminal Integrated: Scrollback = 10000
+			search "enablePreview" > uncheck "[  ] Workbench Editor: Enable Preview"
+	$ sudo apt update
+	$ sudo apt upgrade
+	$ sudo apt install build-essential gdb
+	$ sudo apt install libgtk2.0-dev
+	$ sudo apt install clang (you can install latest LLVM with script from "https://apt.llvm.org/")
+	$ sudo apt install libc++-dev (fatal error: 'iostream' file not found)
+	$ sudo apt install libgl1-mesa-dev (fatal error: 'glx.h' file not found)
+	$ sudo apt install libopenal-dev (fatal error: 'AL/al.h' file not found)
+
+// Linux errors
+1. Gtk-Message: xx:xx:xx.xxx: Failed to load module "canberra-gtk-module"
+	$ sudo apt install --reinstall libcanberra-gtk-module
+2. Gtk-WARNING **: xx:xx:xx.xxx: Error loading theme icon 'folder' for stock: Fatal error reading PNG image file: Invalid IHDR data
+	$ for i in /usr/share/icons/*; do sudo gtk-update-icon-cache $i; done
+
+//-----------------------------------------------------------------------------
+// g++/clang++ (CXXFLAGS)
+//-----------------------------------------------------------------------------
+-g Puts debugging information for gdb
+-o <name> Name of the file produced by g++ (object.o or executable)
+-I<includePath> Additional include path
+-D<macro> Define macro
+-Wall Turns on most warnings
+-O(the same as -O1) or -O2 Turn on optimizations
+-c Output an object.o file
+-w Inhibit all warning messages
+
+//-----------------------------------------------------------------------------
+// ld (LDFLAGS)
+//-----------------------------------------------------------------------------
+-L<library-dir> Additional lib path
+-l<library> Link with library lib<library>.so
+Path/To/Library.a Link with specific static library
+-Wl,-rpath="Folder/With/Libs.so" Relative path to local dynamic libraries
+
+//-----------------------------------------------------------------------------
+// make
+//-----------------------------------------------------------------------------
+-j<jobs_count> Multi-threaded make. Cpu count "$ grep -c "^processor" /proc/cpuinfo"
+
+//------------------------------------------------------------------------------------
+// How to create project "StrokeTest/3DCoat" under Linux Ubuntu / VS Code
+//------------------------------------------------------------------------------------
+0. How to build C++ in VS Code: https://code.visualstudio.com/docs/cpp/config-linux
+   Makefile extension: https://youtu.be/whQQF4kVjPY
+   Debugging in VS Code: https://youtu.be/9VpiGwp8Vos
+   Makefile syntax: https://www.gnu.org/software/make/manual/make.html
+1. File > Open Folder... > stroke-test/StrokeTest, 3dcoat/3D-CoatV4 > OK
+2. Select any cpp-file (e.g. Main.cpp) and only then Terminal > Configure Default Build Task... > select any
+   In created ".vscode/tasks.json" replace:
+   	"label": "Build Debug"
+   	"command": "/usr/bin/time"
+   	"args": ["-f", "Build \"Debug\" time %E Minutes:Seconds.milliseconds", "/usr/bin/make", "-j8", "Debug"]
+   To run it Terminal > Run Build Task... Ctrl+Shift+B
+   Duplicate task "Build Debug".
+   Replace "Debug" with "Release".
+   Remove "group".
+   To run it Terminal > Run Task... > Build Release
+3. Duplicate task "Build" inside ".vscode/tasks.json" then replace:
+	"label" : "Clean"
+	"args": ["clean"]
+	"problemMatcher": []
+	Remove "group".
+	To run it Terminal > Run Task... > Clean
+4. Duplicate task "Clean" inside ".vscode/tasks.json" then replace:
+	"label" : "Touch"
+	"args": ["touch"]
+	To run it Terminal > Run Task... > Touch
+5. Duplicate task "Touch" inside ".vscode/tasks.json" then replace:
+	"label" : "Remove ._"
+	"command": "find"
+	"args": [".", "-name", "\"._*\"", "-delete"]
+	To run it Terminal > Run Task... > Remove ._
+6. Add tasks "Rebuild Debug/Release" (see ".vscode/tasks.json").
+7. Command Palette (Ctrl+Shift+P) > C/C++ Make: INIT Project > C++ Project
+	[3DCoat] -I3D-Coat (fatal error: stdafx.h: No such file or directory)
+	[StrokeTest, 3DCoat]
+		-I/usr/include/gtk-2.0 (fatal error: gtk/gtk.h: No such file or directory)
+		-I/usr/include/glib-2.0 (fatal error: gio/gio.h: No such file or directory)
+		-I/usr/lib/x86_64-linux-gnu/glib-2.0/include (fatal error: glibconfig.h: No such file or directory, $ sudo find / -name "glibconfig.h")
+		-I/usr/include/cairo (fatal error: cairo.h: No such file or directory)
+		-I/usr/include/pango-1.0 (fatal error: pango/pango.h: No such file or directory)
+		-I/usr/include/harfbuzz (fatal error: hb.h: No such file or directory)
+		-I/usr/lib/x86_64-linux-gnu/gtk-2.0/include (fatal error: gdkconfig.h: No such file or directory, $ sudo find / -name "gdkconfig.h")
+		-I/usr/include/gdk-pixbuf-2.0 (fatal error: gdk-pixbuf/gdk-pixbuf.h: No such file or directory)
+		-I/usr/include/atk-1.0 (fatal error: atk/atk.h: No such file or directory)
+	[TBB] -ILibs/TBB/2019\ Update\ 8
+	[MKL] INCLUDES := -I$(HOME)/intel (tilde '~' doesn't work)
+		  LDFLAGS :=
+		  	-lmkl_intel_lp64 -L$(HOME)/intel/mkl/lib/intel64 (undefined reference to `PARDISO')
+			(was found with "$ nm -a libmkl_intel_lp64.so | grep PARDISO")
+			-lmkl_core (undefined reference to `mkl_lapack_zla_gbrcond_x')
+			(was found with "$ nm -a libmkl_core.so | grep mkl_lapack_zla_gbrcond_x")
+			-lmkl_intel_thread (undefined reference to `mkl_lapack_dgbtrs')
+			(was found with "$ nm -a libmkl_intel_thread.so | grep mkl_lapack_dgbtrs")
+			$(HOME)/intel/lib/intel64/libiomp5.a (undefined reference to `omp_get_nested')
+			OR "-L$(HOME)/intel/lib/intel64 -liomp5" and ship file "LinuxLibs/libiomp5.so"
+			(was found with "$ nm libiomp5.a(so) | grep omp_get_nested")
+			(Note that linker flag "-liomp5" could link against dynamic library "/usr/lib/x86_64-linux-gnu/libiomp5.so" which on clean Linux installation
+			(will cause runtime "error while loading shared libraries: libomp.so.5: cannot open shared object file: No such file or directory")
+			(check executable with Terminal command: $ ldd EXECUTABLE | grep omp)
+	[FBX] DEFINES := -DCOMMS_FBX INCLUDES := -I$(HOME)/fbx/include LDFLAGS := -lfbxsdk -L$(HOME)/fbx/lib/gcc/x64/release (undefined reference to `fbxsdk::xxx')
+	[XML] LDFLAGS := Libs/xml/2.9.7/Linux/libxml2.a (libfbxsdk.so: undefined reference to `xml...')
+	[TIFF] DEFINES := -DCOMMS_TIFF (define only in "stroke-test") INCLUDES := -ILibs/TIFF/4.1.0/Linux LDFLAGS := Libs/TIFF/4.1.0/Linux/libtiff.a (undefined reference to `TIFFSetWarningHandler')
+	[JPEG] DEFINES := -DCOMMS_JPEG INCLUDES := -ILibs/Jpeg/9d/Linux LDFLAGS := Libs/Jpeg/9d/Linux/libjpeg.a
+	[PNG] DEFINES := -DCOMMS_PNG INCLUDES := -ILibs/Png/1.6.37/Linux LDFLAGS := Libs/Png/1.6.37/Linux/libpng16.a (undefined reference to symbol 'png...')
+	[ZIP] -DCOMMS_ZIP
+	[GL] -DCOMMS_OPENGL
+	[CURL] DEFINES := -DCOMMS_CURL INCLUDES := -ILibs/curl/7.72.0/Linux LDFLAGS := Libs/curl/7.72.0/Linux/libcurl.a (undefined reference to `curl_easy_init')
+	[3Dconnexion] DEFINES := -DCOMMS_3DCONNEXION LDFLAGS := /usr/lib/libspnav.a (undefined reference to `spnav_open')
+	DRFLAGS :=
+		[Debug] -g -DCOMMS_ASSERT
+		[Release] -O2
+	CXXFLAGS := -std=c++17 $(DRFLAGS) -w $(DEFINES) $(INCLUDES)
+		(do not use flag "-stdlib=libc++" because it causes dependencies from "libc++.so" and "libc++abi.so" which are absent on clear Linux Ubuntu)
+		(check executable dependencies with Terminal command: $ ldd EXECUTABLE | grep libc++)
+	LDFLAGS :=
+		-lpthread (undefined reference to symbol 'pthread_xxx')
+		-ltbb -LLibs/TBB/2019\ Update\ 8/Linux (undefined reference to `tbb::xxx')
+	[3DCoat] -dl (undefined reference to symbol 'dlclose...')
+		-lGL (undefined reference to `gl...')
+		-lX11 (undefined reference to symbol 'XkbFreeKeyboard')
+		-lglib-2.0 (undefined reference to `g_file_test')
+		-lgtk-x11-2.0 (undefined reference to `gtk_clipboard_get')
+		-lgdk-x11-2.0 (undefined reference to symbol 'gdk_keymap_get_entries_for_keyval')
+		-lgdk_pixbuf-2.0 (undefined reference to symbol 'gdk_pixbuf_get_rowstride')
+		-lpango-1.0 (undefined reference to symbol 'pango_layout_set_font_description')
+		-lgobject-2.0 (undefined reference to symbol 'g_type_check_instance_cast')
+		-lz (undefined reference to symbol 'inflateEnd')
+		-Wl,-rpath="LinuxLibs" (place dynamic libraries in folder "LinuxLibs")
+8. Run > Start Debugging > C++ (GDB/LLDB) > in created ".vscode/launch.json" replace:
+	"name": "Debug after building"
+	"program":
+		[StrokeTest] "${workspaceFolder}/stroke-test-Debug"
+		[3DCoat] "${workspaceFolder}/../../3d-coat-data-2020/3dcoat-Debug"
+	[3DCoat] "cwd": "${workspaceFolder}/../../3d-coat-data-2020"
+	"MIMode": "gdb" ("lldb" doesn't work)
+	Remove "setupCommands".
+
+//*****************************************************************************
+// How to build XML library (http://www.xmlsoft.org/downloads.html)
+//*****************************************************************************
+Linux Ubuntu 20.04 64-bit
+	Extract "libxml2-git-snapshot.tar.gz" in "Downloads" (ftp://xmlsoft.org/libxml2/libxml2-git-snapshot.tar.gz)
+	[RMB] libxml2-2.9.7 > Open in Terminal > $ ./configure > $ make
+	$ cp .libs/libxml2.a /media/sergii/WORK/WORK/stroke-test/StrokeTest/Libs/xml/2.9.7/Linux
+
+//*****************************************************************************
+// 3Dconnexion under Linux using Spacenav (http://spacenav.sourceforge.net/)
+//*****************************************************************************
+	Linux Ubuntu 20.04
+	Spacenav driver:
+		$ sudo apt install spacenavd
+		To check $ service spacenavd status
+	Libspnav SDK:
+		$ sudo apt install libspnav-dev
+		(/usr/include/spnav.h, /usr/lib/libspnav.a)
+	Libspnav examples:
+		$ git clone https://github.com/FreeSpacenav/libspnav.git
+
+//*****************************************************************************
+// Windows
+//*****************************************************************************
+PREREQUISITES
+1. Visual Studio Community 2019 > Desktop development with C++ [V]
+	https://visualstudio.microsoft.com/downloads/
+	Development Settings: Visual C++
+2. FBX SDK 2019.2 VS2017 (works under VS2019, currently not available for VS2019 directly)
+	https://www.autodesk.com/content/dam/autodesk/www/adn/fbx/20192/fbx20192_fbxsdk_vs2017_win.exe
+	https://www.autodesk.com/developer-network/platform-technologies/fbx-sdk-2019-2
+3. 	CUDA Toolkit 10.1 [Windows] [10] https://developer.nvidia.com/cuda-downloads
+
+//-----------------------------------------------------------------------------
+// Add FBX SDK 2019.2 (VS2017)
+//-----------------------------------------------------------------------------
+PROJECT-NAME > Properties
+	C/C++ > General > [All Configurations, All platforms] > Additional Include Directories > Edit... > New Line > ... >
+		"C:\Program Files\Autodesk\FBX\FBX SDK\2019.2\include"
+	Preprocessor > Preprocessor Definitions > Edit... >
+		[All Configurations, All Platforms] COMMS_FBX
+	Linker > General > Additional Library Directories > Edit... > New Line > ... >
+		[2 x Debug, Win32]  "C:\Program Files\Autodesk\FBX\FBX SDK\2019.2\lib\vs2017\x86\debug"
+		[2 x Release, Win32] "C:\Program Files\Autodesk\FBX\FBX SDK\2019.2\lib\vs2017\x86\release"
+		[2 x Debug, x64] "C:\Program Files\Autodesk\FBX\FBX SDK\2019.2\lib\vs2017\x64\debug"
+		[2 x Release, x64] "C:\Program Files\Autodesk\FBX\FBX SDK\2019.2\lib\vs2017\x64\release"
+
+//-----------------------------------------------------------------------------
+// Add tablet and 3Dconnexion
+//-----------------------------------------------------------------------------
+PROJECT-NAME > Properties > C/C++ > Preprocessor > Preprocessor Definitions > Edit... >
+	[All Configurations, All Platforms]
+	COMMS_TABLET
+	COMMS_3DCONNEXION
+
+//-----------------------------------------------------------------------------
+// Add ZIP and PNG libraries
+//-----------------------------------------------------------------------------
+PROJECT-NAME > Properties
+	C/C++ >
+		--> General > [All Configurations, All platforms] > Additional Include Directories > Edit... > New Line > ... >
+			"Libs\Png\1.6.36\Windows" (keep the path relative)
+		--> Preprocessor > Preprocessor Definitions > Edit... >
+			[All Configurations, All Platforms] COMMS_ZIP COMMS_PNG
+	Linker >
+		--> General > Additional Library Directories > Edit... > New Line > ... >
+			[All Configurations, Win32] "Libs\Png\1.6.36\Windows\32" (keep the path relative)
+			[All Configurations, x64] "Libs\Png\1.6.36\Windows\64" (keep the path relative)
+		--> Input > [2 x Debug, All Platforms] > Ignore Specific Default Libraries = libcmt.lib
+			(in "Debug" mode our application links against "libcmtd.lib" while "Release" third-party libraries have been linked against "libcmt.lib")
+
+//-----------------------------------------------------------------------------
+// Add JPEG library
+//-----------------------------------------------------------------------------
+PROJECT-NAME > Properties
+	C/C++ >
+		--> General > [All Configurations, All platforms] > Additional Include Directories > Edit... > New Line > ... >
+			"Libs\Jpeg\9c\Windows" (keep the path relative)
+		--> Preprocessor > Preprocessor Definitions > Edit... >
+			[All Configurations, All Platforms] COMMS_JPEG
+	Linker > General > Additional Library Directories > Edit... > New Line > ... >
+		[All Configurations, Win32] "Libs\Jpeg\9c\Windows\32" (keep the path relative)
+		[All Configurations, x64] "Libs\Jpeg\9c\Windows\64" (keep the path relative)
+
+//-----------------------------------------------------------------------------
+// Add TIFF library
+//-----------------------------------------------------------------------------
+PROJECT-NAME > Properties
+	C/C++ >
+		--> General > [All Configurations, All platforms] > Additional Include Directories > Edit... > New Line > ... >
+			"Libs\Tiff\4.0.10\Windows" (keep the path relative)
+		--> Preprocessor > Preprocessor Definitions > Edit... >
+			[All Configurations, All Platforms] COMMS_TIFF
+	Linker > General > Additional Library Directories > Edit... > New Line > ... >
+		[All Configurations, Win32] "Libs\Tiff\4.0.10\Windows\32" (keep the path relative)
+		[All Configurations, x64] "Libs\Tiff\4.0.10\Windows\64" (keep the path relative)
+
+//-----------------------------------------------------------------------------
+// How to create Windows project "3DCoat"
+//-----------------------------------------------------------------------------
+Windows 10 + Visual Studio Community 2019
+	1. File > New > Project... > Visual C++ > Windows Desktop > Windows Desktop Application > Name: 3DCoat, uncheck "[  ] Create directory for solution" > OK > remove all files except four files 3DCoat.sln/.vcxproj
+	2. Solution Explorer > select "3DCoat" > click button "Show All Files" >
+		[LMB] "3D-Coat" + [Ctrl + LMB] "ClassEngine" + [Ctrl + LMB] "comms" + [Ctrl + LMB] "comms-Math" + [Ctrl + LMB] "excomms" + [Ctrl + LMB] "Main.cpp" > [RMB] Include In Project
+	3. Solution Explorer > select "3DCoat" > button "Properties" >
+		--> General >
+				[All Configurations, All Platforms] > Character Set = Use Multi-Byte Character Set
+				[All Configurations, Win32] > Output Directory = "D:\3d-coat-data\.binary32\"
+				[All Configurations, x64] > > Output Directory = "D:\3d-coat-data\.binary64\"
+		--> C/C++ >
+			[All Configurations, All Platforms] Multi-processor Compilation = Yes (/MP)
+			--> General > [All Configurations, All Platforms] > Warning Level = Turn Off All Warnings (/W0)
+			--> Preprocessor > [All Configurations, All Platforms] > Preprocessor Definitions > Edit... >
+				_CRT_SECURE_NO_WARNINGS
+				_WINSOCK_DEPRECATED_NO_WARNINGS
+			--> Language > [All Configurations, All Platforms] > Conformance mode = No
+			--> General > [All Configurations, All Platforms] > Additional Include Directories > "3D-Coat" (keep the path relative)
+			--> Code Generation
+				[Debug, All Platforms] > Runtime Library = Multi-threaded Debug (/MTd)
+				[Release, All Platforms] > Runtime Library = Multi-threaded (/MT)
+			--> Precompiled Headers > [All Configurations, All Platforms] > Precompiled Header = Not Using Precompiled Headers
+			--> Command Line > Additional Options > [Debug, x64] > /bigobj (to solve "fatal error C1128: number of sections exceeded object file format limit")
+		--> Linker > Command Line > [All Configurations, All Platforms] > /ignore:4217 /ignore:4049 
+		--> Linker > Advanced > [Release, x86] > Image Has Safe Exception Handlers = No (/SAFESEH:NO)
+		(to solve "error LNK2026: module unsafe for SAFESEH image.")
+	4. Build > Configuration Manager... > Active solution configuration: <Edit...> / Rename:
+		"Debug" -> "Debug (GL)"
+		"Release" -> "Release (GL)"
+		(do the same in the column "Configuration / <Edit...>" because this is displayed in Solution Explorer > Properties)
+	Build > Configuration Manager... > Active solution configuration: <New...> / Copy settings from:
+		"Debug (GL)" -> "Debug (DX)"
+		"Release (GL)" -> "Release (DX)"
+		(make sure that Solution Explorer > 3DCoat > Properties > Linker > Advanced > [All Configurations, x64] > Target Machine = MachineX64)
+	5. Solution Explorer > 3DCoat > Properties >
+		--> General > Target Name >
+			[2 x GL, All Platforms] add "GL"
+			[2 x DX, All Platforms] add "DX"
+			[2 x Debug, All Platforms] add "-Debug"
+			[All Congirations, x64] add "64"
+		--> C/C++ > Preprocessor > Preprocessor Definitions > Edit... >
+			[2 x GL, All Platforms] COMMS_OPENGL
+			[2 x DX, All Platforms] COMMS_DIRECTX
+	6. Add FBX SDK 2019.2 (VS2017)
+	7. Solution Explorer > 3DCoat > Libs > [RMB] Include In Project
+		AngelScript\2.31.0
+	   To solve error "unresolved external symbol CallX64/GetReturnedFloat/GetReturnedDouble":
+		Solution Explorer >
+		[RMB] 3DCoat > Build Dependencies > Build Customizations... > [V] masm(.targets, .props) > OK
+		as_callfunc_x64_msvc_asm.asm > Properties > Item Type = Microsoft Macro Assembler > OK
+	8. Add TIFF library (do not define "COMMS_TIFF", see "tiff32.cpp")
+	9. Add ZIP and PNG libraries (in "Debug" ignore "libcmt.lib")
+	10. Add JPEG library
+	11. CUDA Toolkit 10.1 [Windows] [10] https://developer.nvidia.com/cuda-downloads
+		Solution Explorer >
+			--> 3DCoat > Properties >
+				--> C/C++ > Preprocessor > [All Configurations, x64] > Preprocessor Definitions > Edit... >
+					USE_CUDA
+				--> Linker > General > Additional Library Directories > Edit... > New Line > ... >
+					[All Configurations, Win32] "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v10.1\lib\Win32"
+					[All Configurations, x64] "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v10.1\lib\x64"
+			--> 3DCoat > MC > CUDA > cuda_core.cu > [RMB] Include In Project
+				[RMB] cuda_core.cu > [All Configurations, All Platforms] > Item Type = Custom Build Tool
+				Custom Build Tool > [All Configurations, x64] >
+					Outputs = $(Platform)\$(Configuration)\cuda_core.obj
+					Command Line = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v10.1\bin\nvcc.exe" -ccbin "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.20.27508\bin\HostX86\x64" -Xcompiler "/MTd" --compile -o "$(Platform)\$(Configuration)\cuda_core.obj" "3D-Coat\MC\CUDA\cuda_core.cu"
+					[2 x Release, x64] "/MT" instead of "/MTd"
+					[All Configurations, Win32] cuda_core.cu > Excluded From Build = Yes
+			
+			Error "nvcc fatal : A single input file is required for a non-link phase when an outputfile is specified" is because /Fd"x64\Debug (DX)\vc142.pdb"
+			Error "nvcc fatal : Cannot find compiler 'cl.exe' in PATH" is because --use-local-env
+			To resolve those errors do not include CUDA in documented way:
+			--> 3DCoat > [RMB] Build Dependencies > Build Customizations... > Find Existing...
+				"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v10.1\extras\visual_studio_integration\MSBuildExtensions"
+				[v] CUDA 10.1 > OK
+
+//-----------------------------------------------------------------------------
+// How to create Windows project "STROKE TEST"
+//-----------------------------------------------------------------------------
+Windows 10 + Visual Studio Community 2019
+	1. Create a new project > Windows Desktop Application > [V] Place solution and project in the same directory >
+		--> remove all files except four files .sln/.vcxproj/.filters/.user
+		--> remove all files in Solution Explorer
+	2. Solution Explorer > click button "Show All Files" > [LMB] "comms" + [Ctrl + LMB] "comms-Math" + [Ctrl + LMB] "Plugins" + [Ctrl + LMB] "Main.cpp" + [Ctrl + LMB] "Tests.cpp" + [Ctrl + LMB] "Utils.cpp" > [RMB] Include In Project
+	3. Solution Explorer > button "Properties" >
+		--> General > [All Configurations, All Platforms] >
+			Character Set = Use Multi-Byte Character Set
+		--> C/C++ >
+			[All Configurations, All Platforms] Multi-processor Compilation = Yes (/MP)
+			--> Code Generation
+				[Debug, All Platforms] > Runtime Library = Multi-threaded Debug (/MTd)
+				[Release, All Platforms] > Runtime Library = Multi-threaded (/MT)
+			--> Precompiled Headers > [All Configurations, All Platforms] > Precompiled Header = Use (/Yu), Precompiled Header File = comms.h
+			--> Advanced > [All Configurations, All Platforms] > Forced Include File = comms.h
+				(to solve "fatal error C1010: unexpected end of file while looking for precompiled header")
+			To solve the first error "cAngles.cpp : fatal error C1083: Cannot open precompiled header file: '.pch'"
+			select "cAngles.cpp" (the first compiled file) > Properties > Precompiled Headers > Precompiled Header = Create (/Yc)
+			--> General > Additional Include Directories += comms (to solve "fatal error C1083: Cannot open include file: 'comms.h')
+			--> Command Line > Additional Options > [2 x Debug, x64] > /bigobj (to solve "fatal error C1128: number of sections exceeded object file format limit")
+	4. Build > Configuration Manager... > Active solution configuration: <Edit...> / Rename:
+		"Debug" -> "Debug (GL)"
+		"Release" -> "Release (GL)"
+		(do the same in the column "Configuration / <Edit...>" because this is displayed in Solution Explorer > Properties)
+	Build > Configuration Manager... > Active solution configuration: <New...> / Copy settings from:
+		"Debug (GL)" -> "Debug (DX)"
+		"Release (GL)" -> "Release (DX)"
+		(make sure that Solution Explorer > Properties > [All Configurations, x64] > Linker > Advanced > Target Machine = MachineX64)
+	5. Solution Explorer > Properties >
+		--> General > Target Name >
+			[2 x GL, All Platforms] add " (GL)"
+			[2 x DX, All Platforms] add " (DX)"
+			[All Congirations, x64] insert "(..64)"
+			[2 x Debug, All Platforms] add "-Debug"
+		--> C/C++ > Preprocessor > Preprocessor Definitions > Edit... >
+			[2 x GL, All Platforms] COMMS_OPENGL
+			[2 x DX, All Platforms] COMMS_DIRECTX
+	6. Add ZIP and PNG Libraries (in "Debug" ignore "libcmt.lib")
+	7. Add JPEG library
+	8. Add TIFF library
+	9. Add FBX SDK 2019.2 (VS2017)
+	10. Add tablet and 3Dconnexion
+
+//-----------------------------------------------------------------------------
+// How to create Windows project "FServer"
+//-----------------------------------------------------------------------------
+Windows 10 + Visual Studio Community 2019
+	1. Create a new project > Windows Desktop Application > [V] Place solution and project in the same directory >
+		--> remove all files except four files .sln/.vcxproj/.filters/.user
+		--> delete all files in Solution Explorer
+	2. Solution Explorer > click button "Show All Files" > [LMB] "comms" + [Ctrl + LMB] "comms-Math" + [Ctrl + LMB] "FServer.cpp" + [Ctrl + LMB] "FServer.rc" + [Ctrl + LMB] "Main.cpp" > [RMB] Include In Project
+	3. Solution Explorer > button "Properties" > [All Configurations, All Platforms] >
+		--> General >
+			Output Directory = "C:\3DCoat-FServer-1-16\"
+			[Debug, All Platforms] Target Name = add "-Debug"
+			[Debug/Release, x64] Target Name = add "64"
+		--> Advanced > [All Configurations, All Platforms] >
+			Character Set = Use Multi-Byte Character Set
+		--> C/C++ >
+			--> General >
+				Multi-processor Compilation = Yes (/MP)
+			--> Code Generation >
+				[Release, All Platforms] > Runtime Library = Multi-threaded (/MT)
+			--> Precompiled Headers > [All Configurations, All Platforms] >
+				Precompiled Header = Use (/Yu), Precompiled Header File = comms.h
+			--> Advanced > [All Configurations, All Platforms] > Forced Include File = comms.h
+				(to solve "fatal error C1010: unexpected end of file while looking for precompiled header")
+				To solve the first error "cAngles.cpp : fatal error C1083: Cannot open precompiled header file: '.pch'"
+				select "cAngles.cpp" (the first compiled file) > Properties > Precompiled Headers > Precompiled Header = Create (/Yc)
+			--> General > Additional Include Directories += comms (to solve "fatal error C1083: Cannot open include file: 'comms.h')
+			--> Preprocessor > [All Configurations, All Platforms] > Preprocessor Definitions +=
+				_CRT_SECURE_NO_WARNINGS
+				_WINSOCK_DEPRECATED_NO_WARNINGS
+		--> Linker > Debugging > [Release, All Platforms] > Generate Debug Info = No (to suppress pdb-file)
+	4. Build > Configuration Manager... > Active solution configuration: <New...> / Name: "Service (Release)", select "Copy settings from: Release", check "Create new project configurations"
+	5. Solution Explorer > FServer > Properties > [Service (Release)] >
+		--> General > Target Name = "$(ProjectName)_Service" or "_Service64"
+		--> C/C++ > Preprocessor > Preprocessor Definitions > Edit... > replace "_WINDOWS" with "_CONSOLE" ("Win32" and "x64")
+		--> Linker > System > SubSystem = Console (/SUBSYSTEM:CONSOLE) ("Win32" and "x64")
+
+//*******************************************************************************
+// How to build AngelScript
+//*******************************************************************************
+Windows 8.1 + Visual Studio Express 2013 for Windows Desktop
+	0. We are building "Debug" and "Release" versions of AngelScript because otherwise we would get two errors:
+		A. error LNK2038: mismatch detected for '_ITERATOR_DEBUG_LEVEL': value '0' doesn't match value '2'
+		B. error LNK2038: mismatch detected for 'RuntimeLibrary': value 'MT_StaticRelease' doesn't match value 'MTd_StaticDebug'
+	1. Open "trunk\sdk\angelscript\projects\msvc2013\angelscript.sln"
+	2. [Debug, Win32] > BUILD > Build Solution
+	   [Release, Win32] > BUILD > Build Solution
+	   [Debug, x64] > BUILD > Build Solution
+	   [Release, x64] > BUILD > Build Solution
+	3. Copy "trunk\sdk\angelscript\lib\angelscript(64)(d).lib" into "3D-CoatV4\Libs\AngelScript\2.31.0\Windows"
+	4. To include "AngelScript" sources into your project (instead of libraries):
+	   Solution Explorer > select "YOUR_PROJECT" > click button "Show All Files" >
+		--> "Libs/AngelScript/2.31.0/source" [RMB] Include In Project
+		--> "as_callfunc_x64_msvc_asm.asm" [RMB] > Properties > [All Configurations, x64] > Item Type = Custom Build Tool > Apply > Custom Build Tool >
+			--> Command Line = ml64.exe /c /nologo /Fo "x64\$(Configuration)\as_callfunc_x64_msvc_asm.obj" /W3 /Zi /Ta %(RootDir)%(Directory)\%(Filename)%(Extension)
+			--> Outputs = x64\$(Configuration)\as_callfunc_x64_msvc_asm.obj
+
+Linux CentOS 6.7 (64-bit)
+	1. $ svn checkout http://svn.code.sf.net/p/angelscript/code/trunk (http://www.angelcode.com/angelscript/wip.php)
+	2. $ cd trunk/sdk
+	3. $ mkdir /media/SYSTEM/WORK/3d-coat/3D-CoatV4/Libs/AngelScript/
+	4. $ mkdir /media/SYSTEM/WORK/3d-coat/3D-CoatV4/Libs/AngelScript/2.31.0/
+	5. $ cp -r add_on /media/SYSTEM/WORK/3d-coat/3D-CoatV4/Libs/AngelScript/2.31.0/
+	6. $ cd angelscript
+	7. $ cp -r include /media/SYSTEM/WORK/3d-coat/3D-CoatV4/Libs/AngelScript/2.31.0/
+	8. $ cp -r source /media/SYSTEM/WORK/3d-coat/3D-CoatV4/Libs/AngelScript/2.31.0/
+
+//*******************************************************************************
+// How to build Collada Codec
+//*******************************************************************************
+Windows 10 + Visual Studio 2019
+	0. We are building "Debug" and "Release" versions of Collada Codec because otherwise we would get two errors:
+		A. error LNK2038: mismatch detected for '_ITERATOR_DEBUG_LEVEL': value '0' doesn't match value '2'
+		B. error LNK2038: mismatch detected for 'RuntimeLibrary': value 'MT_StaticRelease' doesn't match value 'MTd_StaticDebug'
+		These are the same errors as we get during linking 3DCoat/Frame applications in "Debug" mode against FBX library from "release" folder.
+	1. File > New > Project... > Windows Desktop Wizard > Project name: ColladaCodec > [V] Place solution and project in the same directory > Create > Application Type Static Library (.lib) > [V] Empty project > OK
+	2. Move created sln/vcxproj/filters them into "3dcoat\3D-CoatV4\Libs\ColladaCodec"
+	3. Solution Explorer > ColladaCodec > Show All Files > [RMB] "Sources" > Include In Project
+	4. Solution Explorer > ColladaCodec > Properties > [All Configurations, All Platforms] >
+		--> Advanced >
+			--> Character Set = Use Multi-Byte Character Set
+		--> C/C++ > General >
+			--> Additional Include Directories = "..\TBB\2019 Update 8"
+			--> Debug Information Format = None, Warning Level = Turn Off All Warnings (/W0)
+			--> Optimization > [Release, All Platforms] > Whole Program Optimization = No
+			--> Code Generation >
+				[Debug, All Platforms] > Runtime Library = Multi-threaded Debug (/MTd)
+				[Release, All Platforms] > Runtime Library = Multi-threaded (/MT)
+			--> Language >
+				C++ Language Standard = C++17
+			--> Precompiled Headers > [All Configurations, All Platforms] > Precompiled Header = Not Using Precompiled Headers
+			--> Preprocessor > Preprocessor Definitions > [All Configurations, All Platforms] > Edit... >
+				_CRT_SECURE_NO_WARNINGS
+	5. [Debug/Release x64] > Build > Build Solution
+
+//*******************************************************************************
+// How to build ZIP (http://zlib.net/) and PNG (http://www.libpng.org/) libraries
+//*******************************************************************************
+Windows 10 + Visual Studio 2017
+	1. Extract "zlib1211.zip" and "lpng1636.zip" in the same folder (rename folder "zlib-1.2.11" into "zlib").
+	2. Open "lpng1636\projects\vstudio\vstudio.sln". Uncheck and then "Solution Explorer > Unload Project" all except "zlib", "pnglibconf", and "libpng".
+	3. Select configuration [Release Library, Win32].
+	4. [LMB] "libpng" + [Ctrl + LMB] "zlib" > Properties > C/C++ > [Release Library] >
+		Make sure that: Code Generation > Runtime Library = Multi-threaded (/MT)
+		General > Debug Information Format = None (to solve "warning LNK4204: 'vc120.pdb' is missing debugging information for referencing module; linking object as if no debug info")
+		Optimization > Whole Program Optimization = No (to solve problem "libpng16.lib(png.obj) : MSIL .netmodule or module compiled with /GL found; restarting link with /LTCG; add /LTCG to the link command line to improve linker performance")
+		General > Treat Warnings As Errors = No (to solve "error C2220: warning treated as error - no 'object' file generated")
+	5. zlib > Properties > C/C++ > Preprocessor > [Release Library] > Preprocessor Definitions > Remove "Z_SOLO" (otherwise functions "inflateInit2" and "deflateInit2" will return "Z_STREAM_ERROR")
+	6. [RMB] zlib > Add > Existing Item... > gzclose.c + gzread.c + gzwrite.c + gzlib.c (these functions are used in "3DCoat" inside file "svg.c")
+	7. [Release Library, Win32] > Build > Build Solution
+	8. Build > Configuration Manager... > Active solution platform: <New...> / x64 / Select "Copy settings from: Win32" / Check "Create new project platforms".
+	9. [Release Library, x64] > Build > Build Solution
+	10. Copy "lpng1636\projects\vstudio\(x64\)Release Library\libpng16.lib + zlib.lib" into "Libs/Png/1.6.36/Windows/32(64)".
+	11. Copy zlib\zlib.h + zconf.h, lpng1636\png.h + pnglibconf.h + pngconf.h into "Libs/Png/1.6.36/Windows".
+
+Linux Ubuntu 20.04 64-bit
+	Extract "libpng-1.6.37.tar.xz" in "Downloads" (https://download.sourceforge.net/libpng/libpng-1.6.37.tar.xz)
+	libpng-1.6.37 > [RMB] Open in Terminal
+	$ ./configure
+	$ make
+	To workaround LLVM error: conflicting types for '__sigsetjmp':
+		$ gedit pnglibconf.h
+		Remove #define PNG_SETJMP_SUPPORTED
+	$ cp .libs/libpng16.a png.h pnglibconf.h pngconf.h /media/sergii/WORK/WORK/stroke-test/StrokeTest/Libs/Png/1.6.37/Linux
+
+macOS 10.14.4
+	Extract "libpng-1.6.37.tar.gz" (zip archive will not work)
+	Finder > libpng-1.6.37 > Services > New Terminal at Folder
+	$ ./configure
+	$ make
+	$ cp .libs/libpng16.a /Volumes/WORK/frame/Frame/Libs/Png/1.6.37/macOS/
+	$ cp png.h pnglibconf.h pngconf.h /Volumes/WORK/frame/Frame/Libs/Png/1.6.37/macOS/
+
+//*******************************************************************************
+// How to build JPEG (http://ijg.org/) library
+//*******************************************************************************
+Windows 10 + Visual Studio 2017
+	1. Extract "jpegsr9c.zip"
+	2. Run START > Developer Developer Command Prompt for VS 2017
+		> cd jpeg-9c
+		> nmake -f makefile.vc setup-v15 (Copy "C:\Program Files (x86)\Microsoft SDKs\Windows\v7.1A\Include\Win32.Mak")
+	3. Open "jpeg.sln".
+	4. jpeg > Properties > C/C++ > [Release, Win32] >
+	   Code Generation > Runtime Library = Multi-threaded (/MT)
+	   General > Debug Information Format = None
+	   Optimization > Whole Program Optimization = No
+	5. Solution Explorer > [RMB] jpeg > Retarget Projects > 10.0.17763.0 > OK
+	   (to solve "error MSB8036: The Windows SDK version 10.0.16299.0 was not found.")
+	6. [Release, Win32] Build > Build Solution
+	7. Build > Configuration Manager... > Active solution platform: <New...> / x64 / select "Copy settings from: Win32" / check "Create new project platforms"
+	8. [Release, x64] Build > Build Solution
+	9. Copy "jpeg-9c\(x64\)Release\jpeg.lib" into "Libs/Jpeg/9c/Windows/32(64)"
+	10. Copy "jpeg-9c\jconfig.h + jmorecfg.h + jpeglib.h + jerror.h (only for 3DCoat)" into "Libs/Jpeg/9c/Windows"
+
+Linux Ubuntu 20.04 64-bit
+	Extract "jpegsrc.v9d.tar.gz" in "Downloads" (http://ijg.org/files/jpegsrc.v9d.tar.gz)
+	File Browser > [RMB] jpeg-9d > Open in Terminal
+	$ ./configure
+	$ make
+	$ cp .libs/libjpeg.a jpeglib.h jconfig.h jmorecfg.h /media/sergii/WORK/WORK/stroke-test/StrokeTest/Libs/Jpeg/9d/Linux
+
+macOS 10.14.4
+	Extract "jpegsrc.v9c.tar.gz"
+	Finder > jpeg-9c > Services > New Terminal at Folder
+	$ ./configure
+	$ make
+	$ cp .libs/libjpeg.a /Volumes/WORK/frame/Frame/Libs/Jpeg/9c/macOS/
+	$ cp jpeglib.h jconfig.h jmorecfg.h jerror.h /Volumes/WORK/frame/Frame/Libs/Jpeg/9c/macOS/
+				("jerror.h" only for "3DCoat") 
+
+//*******************************************************************************
+// How to build TIFF (https://download.osgeo.org/libtiff/) library
+//*******************************************************************************
+Windows 10 + Visual Studio 2017
+	1. Extract "tiff-4.0.10.zip" (https://download.osgeo.org/libtiff/tiff-4.0.10.zip)
+	2. File > New > Project... > Visual C++ > Windows Desktop > Static Library > Name: libtiff, uncheck "Create directory for solution" > OK
+	3. Copy all h/c files except "tif_unix.c" from "tiff-4.0.10\libtiff". Rename "tif_config.vc.h" into "tif_config.h" and "tiffconf.vc.h" into "tiffconf.h"
+	4. Solution Explorer > libtiff > click button "Show All Files" > select all h/c files > [RMB] Include In Project
+	5. Solution Explorer > libtiff > Properties > [Release, All Platforms] >
+		--> General > Character Set = Use Multi-Byte Character Set
+		--> C/C++ >
+			--> General > Debug Information Format = None
+			--> Optimization > Whole Program Optimization = No
+			--> Code Generation > Runtime Library = Multi-threaded (/MT)
+			--> Precompiled Headers > Precompiled Header = Not Using Precompiled Headers
+	6. [Release, x86] Build > Build Solution
+	7. [Release, x64] Build > Build Solution (make sure that "Librarian > General > Target Machine = MachineX64")
+	8. Copy "libtiff\(x64\)Release\libtiff.lib" into "Libs\Tiff\4.0.10\Windows\32(64)"
+	9. Copy "libtiff\tiff.h, tiffconf.h, tiffio.h, tiffvers.h" into "Libs\Tiff\4.0.10\Windows"
+
+Linux Ubuntu 20.04 64-bit
+	Extract "tiff-4.1.0.tar.gz" in "Downloads" (https://download.osgeo.org/libtiff/tiff-4.1.0.tar.gz)
+	File Browser > [RMB] tiff-4.1.0 > Open in Terminal
+	$ ./configure
+	$ make
+	$ cp libtiff/.libs/libtiff.a libtiff/tiff.h libtiff/tiffconf.h libtiff/tiffio.h libtiff/tiffvers.h /media/sergii/WORK/WORK/stroke-test/StrokeTest/Libs/Tiff/4.1.0/Linux
+
+macOS 10.14.4
+	Extract "tiff-4.0.10.tar.gz" (https://download.osgeo.org/libtiff/tiff-4.0.10.tar.gz)
+	Finder > [RMB] tiff-4.0.10 > Services > New Terminal at Folder
+	$ ./configure
+	$ make
+	$ cd libtiff
+	$ cp .libs/libtiff.a /Volumes/WORK/frame/Frame/Libs/Tiff/4.0.10/macOS
+	$ cp tiff.h tiffconf.h tiffio.h tiffvers.h /Volumes/WORK/frame/Frame/Libs/Tiff/4.0.10/macOS
+
+TIFF Examples:
+	https://download.osgeo.org/libtiff/pics-3.8.0.tar.gz
+
+//***************************************************************************************
+// How to build CURL (https://curl.haxx.se/download.html)
+//***************************************************************************************
+Linux Ubuntu 20.04 64-bit
+	Extract "curl-7.72.0.tar.gz" in "Downloads" (https://curl.haxx.se/download/curl-7.72.0.tar.gz)
+	[RMB] curl-7.72.0 > Open in Terminal
+	$ ./configure --disable-ldap --without-ssl --without-libidn
+	$ make
+	$ cp lib/.libs/libcurl.a include/curl/curl.h include/curl/curlver.h include/curl/easy.h include/curl/multi.h include/curl/system.h include/curl/urlapi.h /media/sergii/WORK/WORK/stroke-test/StrokeTest/Libs/curl/7.72.0/Linux
+
+//*****************************************************************************
+// How to remotely debug on a tablet with Windows 8.1
+//*****************************************************************************
+1. On the tablet:
+	1.1. Install "Tools for Visual Studio 2013 > Remote Tools for Visual Studio 2013":
+	     https://www.visualstudio.com/downloads/download-visual-studio-vs
+	1.2. Start > Remote Debugger
+	1.3. Create folder "C:\WORK". Share it "Properties > Sharing > Share... > Share".
+	1.4. Note pair {TABLET_NAME}\{USER_NAME} in the Control Panel > User Accounts > Configure advanced user profile properties (for example "RISYA\Marina")
+2. On the host:
+	2.1. File Explorer > Network > {TABLET_NAME} > Enter network credentials > Username = {TABLET_NAME}\{USER_NAME} (for example "RISYA\Marina"), Password = {YOUR_PASSWORD}
+	2.2. Copy data into "\\Risya\WORK\"
+	2.3. Visual Studio Express 2013 for Windows Desktop > Solution Explorer > YOUR_PROJECT > Properties > Configuration Properties >
+		--> Debugging > Debugger to launch: Remote Windows Debugger >
+			--> Remote Command = \\Risya\WORK\$(TargetFileName)
+			--> Working Directory = \\Risya\WORK\
+			--> Remote Server Name = RISYA:4018
+		--> Build Events > Post-Build Event > Command Line = copy "$(TargetPath)" "\\Risya\WORK\" (copying is faster than deploying)
+	2.4. Start project with button "[>] Remote Windows Debugger"
