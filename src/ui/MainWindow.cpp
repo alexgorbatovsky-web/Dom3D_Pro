@@ -2249,7 +2249,10 @@ std::array<double, 4> PlaneFactorsFromParameters(
     return {1.0, 0.0, 0.0, -offset};
 }
 
-int ShowCurveTrimPlaneMethodDialog(
+// Shared plane-definition dialog. Reference Plane creation and curve trimming
+// must use the same UI and the same result codes so the two workflows cannot
+// drift into separate dialog implementations again.
+int ShowPlaneDefinitionDialog(
     QWidget* parent, std::array<double, 4>& factors) {
     QDialog dialog(parent);
     dialog.setWindowTitle("Plane box");
@@ -2263,21 +2266,20 @@ int ShowCurveTrimPlaneMethodDialog(
     factors_layout->setContentsMargins(4, 5, 4, 5);
     factors_layout->setSpacing(4);
     auto* factors_editor = new QLineEdit(factors_group);
+    const QLocale number_locale = NumberInputLocale();
     factors_editor->setText(QString("%1 %2 %3 %4")
-        .arg(factors[0], 0, 'f', 6)
-        .arg(factors[1], 0, 'f', 6)
-        .arg(factors[2], 0, 'f', 6)
-        .arg(factors[3], 0, 'f', 6));
+        .arg(number_locale.toString(factors[0], 'f', 6))
+        .arg(number_locale.toString(factors[1], 'f', 6))
+        .arg(number_locale.toString(factors[2], 'f', 6))
+        .arg(number_locale.toString(factors[3], 'f', 6)));
     factors_editor->setToolTip("A B C D");
     factors_layout->addWidget(factors_editor);
     auto* factors_ok = new QPushButton("OK", factors_group);
     factors_layout->addWidget(factors_ok, 0, Qt::AlignHCenter);
     layout->addWidget(factors_group);
     QObject::connect(factors_ok, &QPushButton::clicked, &dialog,
-                     [&dialog, &factors, factors_editor]() {
-        QString text = factors_editor->text();
-        text.replace(',', '.');
-        const QStringList values = text.split(
+                     [&dialog, &factors, factors_editor, number_locale]() {
+        const QStringList values = factors_editor->text().split(
             QRegularExpression("\\s+"), Qt::SkipEmptyParts);
         if (values.size() != 4) {
             factors_editor->setStyleSheet("QLineEdit { background: #ffd6d6; }");
@@ -2289,7 +2291,8 @@ int ShowCurveTrimPlaneMethodDialog(
         std::array<double, 4> parsed{};
         for (int index = 0; index < 4; ++index) {
             bool ok = false;
-            parsed[static_cast<size_t>(index)] = values[index].toDouble(&ok);
+            parsed[static_cast<size_t>(index)] =
+                number_locale.toDouble(values[index], &ok);
             if (!ok) {
                 factors_editor->setStyleSheet("QLineEdit { background: #ffd6d6; }");
                 factors_editor->setToolTip("Enter four numbers: A B C D");
@@ -2318,57 +2321,6 @@ int ShowCurveTrimPlaneMethodDialog(
     auto* cancel = new QPushButton("Cancel", &dialog);
     layout->addSpacing(7);
     layout->addWidget(cancel, 0, Qt::AlignHCenter);
-    QObject::connect(cancel, &QPushButton::clicked, &dialog, &QDialog::reject);
-    CenterDialogOnCursor(dialog);
-    return dialog.exec();
-}
-
-int ShowBodySectionPlaneMethodDialog(
-    QWidget* parent, std::array<double, 4>& factors) {
-    QDialog dialog(parent);
-    dialog.setWindowTitle("Body Section by Plane");
-    dialog.setModal(true);
-    dialog.setFixedWidth(270);
-    auto* layout = new QVBoxLayout(&dialog);
-    layout->setContentsMargins(10, 10, 10, 10);
-    layout->addWidget(new QLabel("Define the section plane:", &dialog));
-    const auto add_method = [&dialog, layout](const QString& text, int result) {
-        auto* button = new QPushButton(text, &dialog);
-        layout->addWidget(button);
-        QObject::connect(button, &QPushButton::clicked, &dialog,
-                         [&dialog, result]() { dialog.done(result); });
-    };
-    add_method("Pick planar face", 7);
-    add_method("Pick Plane / planar Sketch / Polyline", 8);
-    add_method("Plane XY", 2);
-    add_method("Plane XZ", 3);
-    add_method("Plane YZ", 4);
-    auto* factors_editor = new QLineEdit(&dialog);
-    factors_editor->setText(QString("%1 %2 %3 %4")
-        .arg(factors[0], 0, 'f', 6).arg(factors[1], 0, 'f', 6)
-        .arg(factors[2], 0, 'f', 6).arg(factors[3], 0, 'f', 6));
-    factors_editor->setToolTip("Plane factors A B C D");
-    layout->addWidget(factors_editor);
-    auto* factors_button = new QPushButton("Use factors A, B, C, D", &dialog);
-    layout->addWidget(factors_button);
-    QObject::connect(factors_button, &QPushButton::clicked, &dialog,
-                     [&dialog, &factors, factors_editor]() {
-        QString value = factors_editor->text();
-        value.replace(',', '.');
-        const QStringList values = value.split(
-            QRegularExpression("\\s+"), Qt::SkipEmptyParts);
-        if (values.size() != 4) return;
-        std::array<double, 4> parsed{};
-        for (int index = 0; index < 4; ++index) {
-            bool ok = false;
-            parsed[static_cast<size_t>(index)] = values[index].toDouble(&ok);
-            if (!ok) return;
-        }
-        factors = parsed;
-        dialog.done(5);
-    });
-    auto* cancel = new QPushButton("Cancel", &dialog);
-    layout->addWidget(cancel);
     QObject::connect(cancel, &QPushButton::clicked, &dialog, &QDialog::reject);
     CenterDialogOnCursor(dialog);
     return dialog.exec();
@@ -2807,6 +2759,10 @@ MainWindow::MainWindow(QWidget* parent)
         }
     });
     connect(viewport_, &OpenGLViewport::Point3DPicked, this, [this](CPoint3d point) {
+        if (pending_body_section_three_point_pick_) {
+            AppendBodySectionThreePointPick(point);
+            return;
+        }
         if (plane_three_point_pick_active_) {
             AppendPlaneThreePointPick(point);
             return;
@@ -2876,6 +2832,11 @@ MainWindow::MainWindow(QWidget* parent)
         statusBar()->showMessage("Rotate canceled", 1400);
     });
     connect(viewport_, &OpenGLViewport::Point3DPickCanceled, this, [this]() {
+        if (pending_body_section_three_point_pick_) {
+            CancelBodySectionThreePointPick(
+                "Body Section by Plane: operation canceled");
+            return;
+        }
         if (plane_three_point_pick_active_) {
             CancelPlaneThreePointPick("Plane:operation canceled");
             return;
@@ -2940,6 +2901,9 @@ MainWindow::MainWindow(QWidget* parent)
             pending_body_section_target_id_ = 0;
             pending_body_section_plane_face_pick_ = false;
             pending_body_section_plane_object_pick_ = false;
+            pending_body_section_three_point_pick_ = false;
+            pending_body_section_plane_points_.clear();
+            viewport_->ClearPointPickMarkers();
             CancelPendingGroupCommand("Body Section by Plane: operation canceled");
         } else if (pending_group_command_ == PendingGroupCommand::SurfaceIntersection) {
             CancelPendingGroupCommand("Surface Intersection:operation canceled");
@@ -4719,7 +4683,9 @@ void MainWindow::AdvanceFurnitureAnimation() {
         for (unsigned long id : furniture_animation_preview_ids_) {
             if (auto* solid = dynamic_cast<CSolid*>(
                     document_.FindObjectById(id))) {
-                solid->CommitPreviewTranslate(total_delta);
+                // Drawer animation is part of the furniture parameters, not
+                // a user-authored transform of each generated solid.
+                solid->CommitPreviewTranslate(total_delta, false);
             }
         }
         store_animation_parameters();
@@ -4999,7 +4965,6 @@ void MainWindow::CreateActions() {
                 MillimetersToDisplay(1000000.0, unit));
             grid_step->setSingleStep(
                 MillimetersToDisplay(unit == DisplayLengthUnit::Inches ? 1.27 : 10.0, unit));
-            grid_step->setSuffix(" " + DisplayLengthUnitSuffix(unit));
             grid_step->setValue(MillimetersToDisplay(
                 settings.value("view/customGridStep", 100.0).toDouble(), unit));
 
@@ -7172,7 +7137,6 @@ bool MainWindow::EditDrawingText(CDrawingText& text, bool creating) {
     auto* height = new QDoubleSpinBox(&dialog);
     height->setRange(0.01, 1000000.0);
     height->setDecimals(3);
-    height->setSuffix(" mm");
     height->setValue(text.GetHeight());
     form->addRow("Height:", height);
 
@@ -8255,7 +8219,7 @@ bool MainWindow::PrepareCurveEditCommandSelection() {
         pending_curve_trim_plane_points_.clear();
         if (plane_count == 0) {
             std::array<double, 4> remembered_factors = LoadRememberedPlaneFactors();
-            const int method = ShowCurveTrimPlaneMethodDialog(this, remembered_factors);
+            const int method = ShowPlaneDefinitionDialog(this, remembered_factors);
             if (method == QDialog::Rejected) {
                 CancelCurveEditCommand("Trim by Plane:operation canceled");
                 return true;
@@ -9470,6 +9434,8 @@ void MainWindow::CreatePlaneIntersection() {
     pending_body_section_target_id_ = solid ? solid->m_id : 0;
     pending_body_section_plane_face_pick_ = false;
     pending_body_section_plane_object_pick_ = false;
+    pending_body_section_three_point_pick_ = false;
+    pending_body_section_plane_points_.clear();
     viewport_->SetTool(ToolMode::Select);
     viewport_->SetSelectionMode(SelectionMode::Object);
     viewport_->SetSelectionConfirmationMode(false);
@@ -9486,7 +9452,7 @@ void MainWindow::CreatePlaneIntersection() {
 void MainWindow::BeginBodySectionPlaneInput() {
     if (pending_body_section_target_id_ == 0) return;
     std::array<double, 4> factors = LoadRememberedPlaneFactors();
-    const int method = ShowBodySectionPlaneMethodDialog(this, factors);
+    const int method = ShowPlaneDefinitionDialog(this, factors);
     if (method == QDialog::Rejected) {
         pending_body_section_target_id_ = 0;
         CancelPendingGroupCommand("Body Section by Plane: operation canceled");
@@ -9505,12 +9471,33 @@ void MainWindow::BeginBodySectionPlaneInput() {
             "Body Section by Plane: click a reference Plane, planar Sketch, or planar Polyline");
         return;
     }
+    if (method == 1) {
+        BeginBodySectionThreePointPick();
+        return;
+    }
     Vec3 origin{};
     Vec3 normal{};
     if (method == 2) normal = {0.0f, 0.0f, 1.0f};
     else if (method == 3) normal = {0.0f, 1.0f, 0.0f};
     else if (method == 4) normal = {1.0f, 0.0f, 0.0f};
-    else {
+    else if (method == 6) {
+        std::vector<double> values{0.0, 0.0, 0.0, 0.0, 0.0, 1.0};
+        if (!ShowPlaneValuesDialog(
+                this, "Point + Normal",
+                {"Point X", "Point Y", "Point Z",
+                 "Normal X", "Normal Y", "Normal Z"}, values)) {
+            pending_body_section_target_id_ = 0;
+            CancelPendingGroupCommand(
+                "Body Section by Plane: operation canceled");
+            return;
+        }
+        origin = {static_cast<float>(values[0]),
+                  static_cast<float>(values[1]),
+                  static_cast<float>(values[2])};
+        normal = {static_cast<float>(values[3]),
+                  static_cast<float>(values[4]),
+                  static_cast<float>(values[5])};
+    } else {
         normal = {static_cast<float>(factors[0]),
                   static_cast<float>(factors[1]),
                   static_cast<float>(factors[2])};
@@ -9522,9 +9509,81 @@ void MainWindow::BeginBodySectionPlaneInput() {
         }
         origin = normal * static_cast<float>(-factors[3] / length_squared);
     }
+    if (dot(normal, normal) <= 1.0e-18f) {
+        statusBar()->showMessage(
+            "Body Section by Plane: invalid plane normal", 2600);
+        BeginBodySectionPlaneInput();
+        return;
+    }
     SaveRememberedPlaneFactors({normal.x, normal.y, normal.z,
         -(normal.x * origin.x + normal.y * origin.y + normal.z * origin.z)});
     CompleteBodySectionByPlane(origin, normal);
+}
+
+void MainWindow::BeginBodySectionThreePointPick() {
+    pending_body_section_plane_points_.clear();
+    pending_body_section_three_point_pick_ = true;
+    viewport_->ClearPointPickMarkers();
+    viewport_->BeginPick3DPoint(
+        "Body Section by Plane — Point 1 of 3: select a point");
+}
+
+void MainWindow::AppendBodySectionThreePointPick(CPoint3d point) {
+    if (!pending_body_section_three_point_pick_
+        || pending_body_section_target_id_ == 0) {
+        return;
+    }
+    pending_body_section_plane_points_.push_back(point);
+    viewport_->SetPointPickMarkers(pending_body_section_plane_points_);
+    if (pending_body_section_plane_points_.size() < 3) {
+        viewport_->BeginPick3DPoint(
+            QString("Body Section by Plane — Point %1 of 3: select a point")
+                .arg(pending_body_section_plane_points_.size() + 1));
+        return;
+    }
+
+    const CPoint3d& first = pending_body_section_plane_points_[0];
+    const CPoint3d& second = pending_body_section_plane_points_[1];
+    const CPoint3d& third = pending_body_section_plane_points_[2];
+    const Vec3 first_edge{
+        static_cast<float>(second.x - first.x),
+        static_cast<float>(second.y - first.y),
+        static_cast<float>(second.z - first.z)};
+    const Vec3 second_edge{
+        static_cast<float>(third.x - first.x),
+        static_cast<float>(third.y - first.y),
+        static_cast<float>(third.z - first.z)};
+    const Vec3 normal = normalize(cross(first_edge, second_edge));
+    if (dot(normal, normal) <= 1.0e-12f) {
+        pending_body_section_plane_points_.pop_back();
+        viewport_->SetPointPickMarkers(pending_body_section_plane_points_);
+        statusBar()->showMessage(
+            "Body Section by Plane: the three points must not be collinear",
+            2600);
+        viewport_->BeginPick3DPoint(
+            "Body Section by Plane — Point 3 of 3: select a point");
+        return;
+    }
+
+    const Vec3 origin{static_cast<float>(first.x),
+                      static_cast<float>(first.y),
+                      static_cast<float>(first.z)};
+    SaveRememberedPlaneFactors({
+        normal.x, normal.y, normal.z,
+        -(normal.x * origin.x + normal.y * origin.y + normal.z * origin.z)});
+    pending_body_section_three_point_pick_ = false;
+    pending_body_section_plane_points_.clear();
+    viewport_->ClearPointPickMarkers();
+    CompleteBodySectionByPlane(origin, normal);
+}
+
+void MainWindow::CancelBodySectionThreePointPick(const QString& message) {
+    pending_body_section_three_point_pick_ = false;
+    pending_body_section_plane_points_.clear();
+    pending_body_section_target_id_ = 0;
+    if (viewport_)
+        viewport_->ClearPointPickMarkers();
+    CancelPendingGroupCommand(message);
 }
 
 bool MainWindow::CompleteBodySectionPlaneObjectPick() {
@@ -9558,6 +9617,9 @@ void MainWindow::CompleteBodySectionByPlane(Vec3 origin, Vec3 normal) {
     pending_body_section_target_id_ = 0;
     pending_body_section_plane_face_pick_ = false;
     pending_body_section_plane_object_pick_ = false;
+    pending_body_section_three_point_pick_ = false;
+    pending_body_section_plane_points_.clear();
+    viewport_->ClearPointPickMarkers();
     pending_group_command_ = PendingGroupCommand::None;
     viewport_->SetSelectionConfirmationMode(false);
     viewport_->SetTool(ToolMode::Select);
@@ -10669,7 +10731,6 @@ void MainWindow::ShowPreciseMoveDialog() {
         lengths[i]->setRange(0.0, 1000000.0);
         lengths[i]->setDecimals(3);
         lengths[i]->setSingleStep(1.0);
-        lengths[i]->setSuffix(" mm");
         lengths[i]->setValue(100.0);
         lengths[i]->setKeyboardTracking(false);
         lengths[i]->setFixedWidth(116);
@@ -10760,7 +10821,6 @@ void MainWindow::ShowPreciseMoveDialog() {
         spin->setRange(-1000000.0, 1000000.0);
         spin->setDecimals(3);
         spin->setSingleStep(1.0);
-        spin->setSuffix(" mm");
         spin->setValue(value);
         spin->setKeyboardTracking(false);
         return spin;
@@ -10903,13 +10963,15 @@ void MainWindow::BeginMoveTwoPointEntry() {
         }
         auto* coordinate_entry = new QLineEdit(dialog);
         coordinate_entry->setAlignment(Qt::AlignCenter);
+        const QLocale number_locale = NumberInputLocale();
+        const QString zero = number_locale.toString(0.0, 'f', 4);
         coordinate_entry->setText(
-            plane_xy ? "0.0000   0.0000"
-                     : "0.0000   0.0000   0.0000");
+            plane_xy ? QString("%1   %1").arg(zero)
+                     : QString("%1   %1   %1").arg(zero));
         coordinate_entry->setToolTip(
             plane_xy
-                ? "Enter X and Y separated by spaces, commas, or semicolons"
-                : "Enter X, Y, and Z separated by spaces, commas, or semicolons");
+                ? "Enter X and Y separated by spaces or semicolons"
+                : "Enter X, Y, and Z separated by spaces or semicolons");
         coordinate_entry->setStyleSheet(
             "QLineEdit { font-family: Consolas, 'Courier New', monospace;"
             " padding: 3px 5px; }");
@@ -10996,9 +11058,9 @@ void MainWindow::BeginMoveTwoPointEntry() {
             viewport_->BeginMovePointToPoint(true);
         });
         const auto submit_coordinates = [coordinate_entry, error_label,
-                                         plane_xy, complete_point]() {
+                                         plane_xy, complete_point,
+                                         number_locale]() {
             QString normalized = coordinate_entry->text().trimmed();
-            normalized.replace(',', ' ');
             normalized.replace(';', ' ');
             const QStringList parts = normalized.split(' ', Qt::SkipEmptyParts);
             const int expected_count = plane_xy ? 2 : 3;
@@ -11014,7 +11076,7 @@ void MainWindow::BeginMoveTwoPointEntry() {
             double parsed[3]{};
             for (int i = 0; i < expected_count; ++i) {
                 bool valid = false;
-                parsed[i] = parts[i].toDouble(&valid);
+                parsed[i] = number_locale.toDouble(parts[i], &valid);
                 if (!valid || !std::isfinite(parsed[i])) {
                     error_label->setText("Coordinates must be valid numbers");
                     error_label->show();
@@ -11499,7 +11561,6 @@ void MainWindow::BeginSketchFillet() {
         sketch_fillet_radius_spin_->setDecimals(3);
         sketch_fillet_radius_spin_->setValue(10.0);
         sketch_fillet_radius_spin_->setKeyboardTracking(true);
-        sketch_fillet_radius_spin_->setSuffix(" mm");
         layout->addWidget(radius_label, 0, 0);
         layout->addWidget(sketch_fillet_radius_spin_, 0, 1);
 
@@ -11896,7 +11957,6 @@ void MainWindow::ApplySheetBend() {
     radius->setDecimals(3);
     radius->setSingleStep(0.5);
     radius->setValue(2.0);
-    radius->setSuffix(" mm");
     auto* angle = new QDoubleSpinBox(&dialog);
     angle->setRange(0.01, 178.99);
     angle->setDecimals(2);
@@ -12081,7 +12141,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
     if (tool_id == "PlaneTool") {
         ClearActiveProperties();
         std::array<double, 4> factors = LoadRememberedPlaneFactors();
-        const int method = ShowCurveTrimPlaneMethodDialog(this, factors);
+        const int method = ShowPlaneDefinitionDialog(this, factors);
         if (method == QDialog::Rejected) {
             UpdateActiveToolUi("select");
             statusBar()->showMessage("Plane:operation canceled", 1200);
@@ -15583,11 +15643,36 @@ void MainWindow::dropEvent(QDropEvent* event) {
 
 void MainWindow::ExportFile() {
     const QString filter = "Wavefront OBJ (*.obj);;STEP (*.step *.stp);;IGES (*.iges *.igs);;AutoCAD DXF (*.dxf);;Encapsulated PostScript (*.eps);;HPGL Plotter (*.hpgl);;STL Mesh (*.stl);;All files (*.*)";
-    QString selected_filter;
-    QString path = QFileDialog::getSaveFileName(this, "Export", LastDialogDir(), filter, &selected_filter);
-    if (path.isEmpty()) {
+    QFileDialog file_dialog(this, "Export", LastDialogDir(), filter);
+    file_dialog.setAcceptMode(QFileDialog::AcceptSave);
+    file_dialog.setFileMode(QFileDialog::AnyFile);
+    file_dialog.setOption(QFileDialog::DontUseNativeDialog, true);
+
+    auto* unit_row = new QWidget(&file_dialog);
+    auto* unit_layout = new QFormLayout(unit_row);
+    unit_layout->setContentsMargins(0, 4, 0, 0);
+    auto* export_unit = new QComboBox(unit_row);
+    export_unit->addItem("Meters (m)", static_cast<int>(ObjLengthUnit::Meters));
+    export_unit->addItem("Decimeters (dm)", static_cast<int>(ObjLengthUnit::Decimeters));
+    export_unit->addItem("Centimeters (cm)", static_cast<int>(ObjLengthUnit::Centimeters));
+    export_unit->addItem("Millimeters (mm)", static_cast<int>(ObjLengthUnit::Millimeters));
+    export_unit->addItem("Feet (ft)", static_cast<int>(ObjLengthUnit::Feet));
+    export_unit->addItem("Inches (in)", static_cast<int>(ObjLengthUnit::Inches));
+    QSettings export_settings("Dom3D", "Dom3D_Pro");
+    const int saved_unit = export_settings.value(
+        "export/objLengthUnit",
+        static_cast<int>(ObjLengthUnit::Millimeters)).toInt();
+    const int saved_unit_index = export_unit->findData(saved_unit);
+    export_unit->setCurrentIndex(saved_unit_index >= 0 ? saved_unit_index : 3);
+    unit_layout->addRow("File export units (OBJ)", export_unit);
+    file_dialog.layout()->addWidget(unit_row);
+
+    if (file_dialog.exec() != QDialog::Accepted
+        || file_dialog.selectedFiles().isEmpty()) {
         return;
     }
+    QString path = file_dialog.selectedFiles().constFirst();
+    const QString selected_filter = file_dialog.selectedNameFilter();
 
     std::string error;
     const QString lower_path = path.toLower();
@@ -15622,7 +15707,14 @@ void MainWindow::ExportFile() {
     } else if (export_stl) {
         exported = stl_io_.Export(path.toStdString(), document_, error);
     } else {
-        exported = obj_io_.Export(path.toStdString(), document_, error);
+        const ObjLengthUnit unit = static_cast<ObjLengthUnit>(
+            export_unit->currentData().toInt());
+        exported = obj_io_.Export(
+            path.toStdString(), document_, error, unit);
+        if (exported) {
+            export_settings.setValue(
+                "export/objLengthUnit", static_cast<int>(unit));
+        }
     }
 
     if (!exported) {

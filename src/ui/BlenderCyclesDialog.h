@@ -35,12 +35,16 @@ private:
     void ViewResult();
     void UpdatePreview();
     void SetRendering(bool rendering);
+    void RestoreDefaults();
+    void LoadSettings();
+    void SaveSettings();
     RenderSettings CurrentSettings() const;
 
 protected:
     void resizeEvent(QResizeEvent* event) override;
 
     RenderScene scene_;
+    QSize initial_image_size_;
     BlenderCyclesRenderer* renderer_ = nullptr;
     QLineEdit* blender_path_ = nullptr;
     QComboBox* preset_ = nullptr;
@@ -59,6 +63,7 @@ protected:
     QCheckBox* denoise_ = nullptr;
     QLineEdit* output_path_ = nullptr;
     QPushButton* render_button_ = nullptr;
+    QPushButton* restore_defaults_button_ = nullptr;
     QPushButton* view_button_ = nullptr;
     QPushButton* cancel_button_ = nullptr;
     QLabel* status_ = nullptr;

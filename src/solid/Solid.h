@@ -126,7 +126,7 @@ public:
 	void PreviewTranslate(Vec3 delta);
 	void PreviewRotate(Vec3 center, Vec3 axis, float angle);
 	void PreviewScale(Vec3 center, Vec3 axis, float factor);
-	bool CommitPreviewTranslate(Vec3 delta);
+	bool CommitPreviewTranslate(Vec3 delta, bool record_operation = true);
 	bool CommitPreviewRotate(Vec3 center, Vec3 axis, float angle);
 	bool ReverseNormals();
 	bool GetBounds(Vec3& min_point, Vec3& max_point) const override;

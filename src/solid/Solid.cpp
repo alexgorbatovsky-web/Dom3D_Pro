@@ -3075,7 +3075,7 @@ void CSolid::PreviewRotate(Vec3 center, Vec3 axis, float angle)
 	}
 }
 
-bool CSolid::CommitPreviewTranslate(Vec3 delta)
+bool CSolid::CommitPreviewTranslate(Vec3 delta, bool record_operation)
 {
 	m_RenderBatchDirty = true;
 	gp_Trsf transform;
@@ -3087,6 +3087,35 @@ bool CSolid::CommitPreviewTranslate(Vec3 delta)
 			return false;
 	}
 	ClearSelectedEdge();
+	if (record_operation && !m_OperatonTree.empty()) {
+		// Undo applies the exact opposite translation through this same fast
+		// commit path.  Cancel the matching last Move instead of adding a
+		// second, inverse operation to the parametric history.
+		const auto saved_value = [](const ParametricFunction& operation,
+		                            const char* id) {
+			for (const ParametricParameterValue& parameter : operation.Parameters) {
+				if (parameter.id == id)
+					return parameter.value;
+			}
+			return 0.0;
+		};
+		const ParametricFunction* last_operation = m_OperatonTree.back();
+		const bool cancels_last_move = last_operation
+			&& last_operation->ToolId == "SolidTransform"
+			&& last_operation->Name == "Move"
+			&& std::fabs(saved_value(*last_operation, "dx") + delta.x) <= 0.000001
+			&& std::fabs(saved_value(*last_operation, "dy") + delta.y) <= 0.000001
+			&& std::fabs(saved_value(*last_operation, "dz") + delta.z) <= 0.000001;
+		if (cancels_last_move) {
+			RemoveParametricOperation(m_OperatonTree.size() - 1);
+		} else {
+			SetParametricOperation(m_OperatonTree.size(),
+			                      "SolidTransform",
+			                      "Move",
+			                      transform_parameters(
+				                      0, delta, {}, {}, 0.0, 1.0));
+		}
+	}
 	return true;
 }
 

@@ -152,7 +152,12 @@ QOpenGLShaderProgram* mesh_shader_program() {
         void main() {
             vec3 n = normalize(eyeNormal);
             vec3 viewDirection = normalize(-eyePosition);
-            if (dot(n, viewDirection) < 0.0) n = -n;
+            // Use the geometric front/back side of the triangle for
+            // two-sided lighting.  Flipping an interpolated smooth normal
+            // when its dot product with the eye crosses zero makes lighting
+            // jump at an arbitrary viewing angle and creates moving patches
+            // on curved surfaces.
+            if (!gl_FrontFacing) n = -n;
             vec3 coatNormal = n;
             if (diagnosticColor) {
                 float direction = selectedObject ? -1.0 : 1.0;
@@ -665,14 +670,10 @@ Color shaded_color(Color base,
     }
     up = normalize(cross(right, view_dir));
 
-    // Surfaces are intentionally rendered without back-face culling.  Light
-    // the side that is visible to the camera; otherwise a correctly smooth
-    // open surface becomes almost black solely because its BRep orientation
-    // happens to point away from the viewer.
+    // The caller orients normals from the geometric triangle side.  Do not
+    // flip a smooth normal using its eye dot product here: that creates an
+    // abrupt lighting discontinuity when the interpolated normal crosses 90°.
     Vec3 n = normalize(normal);
-    if (dot(n, view_dir) < 0.0f) {
-        n = n * -1.0f;
-    }
 
     // The editor uses the same light-vector convention as CAD2Quads: values
     // describe the direction in which the rays travel.  Negating that vector
@@ -3529,22 +3530,27 @@ void CMesh3D::RenderFaces(bool selected,
             for (size_t i = 1; i + 1 < face.corners.size(); ++i) {
                 const MeshCorner corners[]{
                     face.corners[0], face.corners[i], face.corners[i + 1]};
+                const Vec3 triangle_normal = normalize(cross(
+                    vertices_[corners[1].v] - vertices_[corners[0].v],
+                    vertices_[corners[2].v] - vertices_[corners[0].v]));
                 for (const MeshCorner& corner : corners) {
                     const size_t vertex_index = corner.v;
                     const Vec3& normal = normals_.empty()
                             || corner.n >= normals_.size()
                         ? vertex_normals[vertex_index] : normals_[corner.n];
+                    const Vec3 direction_to_eye = s_ZebraOrthographic
+                        ? s_ZebraForward * -1.0f
+                        : normalize(s_ZebraEye - vertices_[vertex_index]);
+                    const Vec3 lighting_normal =
+                        dot(triangle_normal, direction_to_eye) < 0.0f
+                            ? normal * -1.0f : normal;
                     const Color shade = zebra
                         ? Color{1.0f, 1.0f, 1.0f}
                         : flat_color ? color
                         : ((diagnostic_rgb && !has_texture)
                             ? normal_rgb_color(normal, selected)
                             : shaded_color(
-                                color, normal,
-                                s_ZebraOrthographic
-                                    ? s_ZebraForward * -1.0f
-                                    : normalize(s_ZebraEye
-                                                - vertices_[vertex_index]),
+                                color, lighting_normal, direction_to_eye,
                                 s_ZebraUp, specular_strength, shininess,
                                 selected, s_LightingSettings));
                     const Vec3& vertex = vertices_[vertex_index];
@@ -3552,9 +3558,6 @@ void CMesh3D::RenderFaces(bool selected,
                     glColor4f(shade.r, shade.g, shade.b, alpha);
                     if (zebra && !zebra_shader_active) {
                         const Vec3 unit_normal = normalize(normal);
-                        const Vec3 direction_to_eye = s_ZebraOrthographic
-                            ? s_ZebraForward * -1.0f
-                            : normalize(s_ZebraEye - vertex);
                         const Vec3 reflection = normalize(
                             unit_normal
                                 * (2.0f * dot(unit_normal, direction_to_eye))

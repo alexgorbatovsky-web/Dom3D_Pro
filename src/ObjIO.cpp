@@ -19,9 +19,42 @@
 #include <vector>
 
 namespace {
-constexpr double kMillimetersToMeters = 0.001;
-constexpr double kMetersToMillimeters = 1000.0;
-constexpr char kDom3DObjMeterUnits[] = "# Dom3D Pro units: meters";
+constexpr char kDom3DObjUnitsPrefix[] = "# Dom3D Pro units: ";
+
+const char* obj_unit_key(ObjLengthUnit unit) {
+    switch (unit) {
+    case ObjLengthUnit::Meters: return "meters";
+    case ObjLengthUnit::Decimeters: return "decimeters";
+    case ObjLengthUnit::Centimeters: return "centimeters";
+    case ObjLengthUnit::Millimeters: return "millimeters";
+    case ObjLengthUnit::Feet: return "feet";
+    case ObjLengthUnit::Inches: return "inches";
+    }
+    return "millimeters";
+}
+
+double millimeters_to_obj_scale(ObjLengthUnit unit) {
+    switch (unit) {
+    case ObjLengthUnit::Meters: return 1.0 / 1000.0;
+    case ObjLengthUnit::Decimeters: return 1.0 / 100.0;
+    case ObjLengthUnit::Centimeters: return 1.0 / 10.0;
+    case ObjLengthUnit::Millimeters: return 1.0;
+    case ObjLengthUnit::Feet: return 1.0 / 304.8;
+    case ObjLengthUnit::Inches: return 1.0 / 25.4;
+    }
+    return 1.0;
+}
+
+bool obj_unit_from_key(const std::string& key, ObjLengthUnit& unit) {
+    if (key == "meters") unit = ObjLengthUnit::Meters;
+    else if (key == "decimeters") unit = ObjLengthUnit::Decimeters;
+    else if (key == "centimeters") unit = ObjLengthUnit::Centimeters;
+    else if (key == "millimeters") unit = ObjLengthUnit::Millimeters;
+    else if (key == "feet") unit = ObjLengthUnit::Feet;
+    else if (key == "inches") unit = ObjLengthUnit::Inches;
+    else return false;
+    return true;
+}
 
 struct ObjFaceVertex {
     size_t vertex = 0;
@@ -443,9 +476,14 @@ bool ObjIO::Import(const std::string& path, std::vector<std::unique_ptr<CMesh3D>
     };
     std::string line;
     while (std::getline(file, line)) {
-        if (line == kDom3DObjMeterUnits) {
-            vertex_scale = kMetersToMillimeters;
-            continue;
+        if (line.rfind(kDom3DObjUnitsPrefix, 0) == 0) {
+            ObjLengthUnit unit = ObjLengthUnit::Millimeters;
+            if (obj_unit_from_key(
+                    line.substr(std::char_traits<char>::length(
+                        kDom3DObjUnitsPrefix)), unit)) {
+                vertex_scale = 1.0 / millimeters_to_obj_scale(unit);
+                continue;
+            }
         }
         std::istringstream line_stream(line);
         std::string keyword;
@@ -565,7 +603,10 @@ bool ObjIO::Import(const std::string& path, std::vector<std::unique_ptr<CMesh3D>
     return true;
 }
 
-bool ObjIO::Export(const std::string& path, const CAlfaDoc& document, std::string& error) const {
+bool ObjIO::Export(const std::string& path,
+                   const CAlfaDoc& document,
+                   std::string& error,
+                   ObjLengthUnit unit) const {
     const std::filesystem::path obj_path(path);
     const std::filesystem::path mtl_path = obj_path.parent_path() / (obj_path.stem().string() + ".mtl");
     // Fusion resolves OBJ textures most reliably when OBJ, MTL and image files
@@ -585,7 +626,7 @@ bool ObjIO::Export(const std::string& path, const CAlfaDoc& document, std::strin
 
     file << std::setprecision(std::numeric_limits<double>::max_digits10);
     file << "# Dom3D Pro OBJ export\n";
-    file << kDom3DObjMeterUnits << "\n";
+    file << kDom3DObjUnitsPrefix << obj_unit_key(unit) << "\n";
     file << "mtllib " << mtl_path.filename().generic_string() << "\n\n";
     material_file << "# Dom3D Pro material library\n\n";
     size_t vertex_offset = 0;
@@ -593,6 +634,7 @@ bool ObjIO::Export(const std::string& path, const CAlfaDoc& document, std::strin
     size_t normal_offset = 0;
     size_t next_smoothing_group = 1;
     size_t mesh_count = 0;
+    const double vertex_scale = millimeters_to_obj_scale(unit);
     std::set<std::string> used_material_names;
     std::map<std::string, std::string> exported_materials;
     const auto export_material = [&](const Material& material, const std::string& fallback_name) {
@@ -622,7 +664,8 @@ bool ObjIO::Export(const std::string& path, const CAlfaDoc& document, std::strin
                             uv_offset,
                             normal_offset,
                             next_smoothing_group,
-                            mesh->GetName())) {
+                            mesh->GetName(),
+                            vertex_scale)) {
                 error = "Could not write mesh data.";
                 return false;
             }
@@ -662,6 +705,7 @@ bool ObjIO::Export(const std::string& path, const CAlfaDoc& document, std::strin
                             normal_offset,
                             next_smoothing_group,
                             surface_name,
+                            vertex_scale,
                             surface,
                             false)) {
                 error = "Could not write surface mesh data.";
@@ -692,6 +736,7 @@ bool ObjIO::ExportMesh(std::ostream& stream,
                        size_t& normal_offset,
                        size_t& next_smoothing_group,
                        const std::string& object_name,
+                       double vertex_scale,
                        const CSurfaceFace* surface,
                        bool write_object_header) const {
     stream << (write_object_header ? "o " : "g ")
@@ -700,9 +745,9 @@ bool ObjIO::ExportMesh(std::ostream& stream,
 
     for (const Vec3& vertex : mesh.GetVertices()) {
         stream << "v "
-               << static_cast<double>(vertex.x) * kMillimetersToMeters << " "
-               << static_cast<double>(vertex.y) * kMillimetersToMeters << " "
-               << static_cast<double>(vertex.z) * kMillimetersToMeters << "\n";
+               << static_cast<double>(vertex.x) * vertex_scale << " "
+               << static_cast<double>(vertex.y) * vertex_scale << " "
+               << static_cast<double>(vertex.z) * vertex_scale << "\n";
     }
 
     const bool has_uvs = mesh.GetUVs().size() == mesh.GetVertices().size();

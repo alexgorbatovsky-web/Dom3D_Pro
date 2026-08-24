@@ -1,5 +1,6 @@
 #include "ui/MainWindow.h"
 #include "ui/LanguageManager.h"
+#include "ui/MeasurementUnits.h"
 
 #include <QApplication>
 #include <QElapsedTimer>
@@ -129,6 +130,7 @@ int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
     QApplication::setOrganizationName("Dom3D");
     QApplication::setApplicationName("Dom3D Pro");
+    ApplyNumberInputLocale();
     app.setWindowIcon(QIcon(":/icons/app_icon.ico"));
 
     QString startup_project_path;

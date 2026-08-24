@@ -671,17 +671,17 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
                     ++axis_index;
                 }
                 auto* editor = new QLineEdit(this);
+                const QLocale number_locale = NumberInputLocale();
                 editor->setText(QString("%1 %2 %3")
-                    .arg(displayed_values[0], 0, 'f', 3)
-                    .arg(displayed_values[1], 0, 'f', 3)
-                    .arg(displayed_values[2], 0, 'f', 3));
+                    .arg(number_locale.toString(displayed_values[0], 'f', 3))
+                    .arg(number_locale.toString(displayed_values[1], 'f', 3))
+                    .arg(number_locale.toString(displayed_values[2], 'f', 3)));
                 editor->setToolTip(QString("Point %1: X Y Z (%2)")
                     .arg(point).arg(DisplayLengthUnitSuffix(display_unit)));
                 connect(editor, &QLineEdit::editingFinished, this,
-                        [this, editor, parameter_indices, display_factor]() {
-                    QString text = editor->text();
-                    text.replace(',', '.');
-                    const QStringList values = text.split(
+                        [this, editor, parameter_indices, display_factor,
+                         number_locale]() {
+                    const QStringList values = editor->text().split(
                         QRegularExpression("\\s+"), Qt::SkipEmptyParts);
                     if (values.size() != 3) {
                         editor->setStyleSheet("QLineEdit { background: #ffd6d6; }");
@@ -690,7 +690,8 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
                     std::array<double, 3> parsed{};
                     for (int axis = 0; axis < 3; ++axis) {
                         bool ok = false;
-                        parsed[static_cast<size_t>(axis)] = values[axis].toDouble(&ok);
+                        parsed[static_cast<size_t>(axis)] =
+                            number_locale.toDouble(values[axis], &ok);
                         if (!ok) {
                             editor->setStyleSheet("QLineEdit { background: #ffd6d6; }");
                             return;
@@ -905,7 +906,8 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
         editor->setRange(parameter.minimum * display_factor, parameter.maximum * display_factor);
         editor->setSingleStep(parameter.step * display_factor);
         editor->setDecimals(integer_parameter ? 0 : ((solid_transform_angle || degree_parameter) ? 1 : (length_parameter ? 3 : (parameter.step < 0.1 ? 2 : 1))));
-        editor->setSuffix((solid_transform_angle || degree_parameter) ? QString::fromUtf8("°") : (length_parameter ? DisplayLengthUnitSuffix(display_unit) : QString()));
+        editor->setSuffix((solid_transform_angle || degree_parameter)
+            ? QString::fromUtf8("°") : QString());
         editor->setValue(parameter.value * display_factor);
         const bool use_drag_label = IsSliderParameter(active_object_, parameter);
         connect(editor, &QDoubleSpinBox::valueChanged, this, [this, i, display_factor](double value) {

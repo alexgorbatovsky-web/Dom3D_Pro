@@ -1957,3 +1957,4 @@ TopoDS_Shape CFacadeFurniture::BuildPlanarMilledFromProfiles(
     }
     return cut_milled_panel(panel, cutter_sweeps);
 }
+

@@ -328,6 +328,43 @@ bool is_regular_uv_mesh_surface(const TopoDS_Face& face)
 	}
 }
 
+bool is_complete_spherical_face(const TopoDS_Face& face)
+{
+	if (face.IsNull())
+		return false;
+	try {
+		BRepAdaptor_Surface surface(face);
+		if (surface.GetType() != GeomAbs_Sphere)
+			return false;
+
+		Standard_Real u_min = 0.0;
+		Standard_Real u_max = 0.0;
+		Standard_Real v_min = 0.0;
+		Standard_Real v_max = 0.0;
+		BRepTools::UVBounds(face, u_min, u_max, v_min, v_max);
+		constexpr double pi = 3.14159265358979323846;
+		const double tolerance = 1.0e-6;
+		if (std::fabs((u_max - u_min) - 2.0 * pi) > tolerance
+			|| std::fabs((v_max - v_min) - pi) > tolerance) {
+			return false;
+		}
+
+		// A complete sphere has only its duplicated parameterisation seam and
+		// two degenerated pole edges. Extra real edges mean a spherical patch or
+		// a cutout, which still requires contour trimming.
+		int non_degenerated_edges = 0;
+		for (TopExp_Explorer edges(face, TopAbs_EDGE);
+			 edges.More(); edges.Next()) {
+			const TopoDS_Edge edge = TopoDS::Edge(edges.Current());
+			if (!edge.IsNull() && !BRep_Tool::Degenerated(edge))
+				++non_degenerated_edges;
+		}
+		return non_degenerated_edges <= 2;
+	} catch (const Standard_Failure&) {
+		return false;
+	}
+}
+
 GeomAbs_SurfaceType surface_type_of(const TopoDS_Face& face)
 {
 	try {
@@ -1712,16 +1749,21 @@ bool CSurfaceFace::BuldMeshTriangle(float Deflection, float AngDeflection)
 			const gp_Pnt2d uv = aTriangulation->UVNode(nodeIndex);
 			uvs.push_back({static_cast<float>(uv.X()), static_cast<float>(uv.Y())});
 			try {
-				gp_Pnt surface_point;
-				gp_Vec derivative_u;
-				gp_Vec derivative_v;
-				analytic_surface.D1(
-					uv.X(), uv.Y(), surface_point,
-					derivative_u, derivative_v);
-				gp_Vec normal = derivative_u.Crossed(derivative_v);
-				if (normal.SquareMagnitude() <= 1.0e-24
-					&& spherical_surface) {
+				gp_Vec normal;
+				if (spherical_surface) {
+					// A parametric sphere has a singular derivative at each pole.
+					// Even a tiny numerical residue can normalize into an arbitrary
+					// sideways vector and appear as a black dot in Cycles.  The exact
+					// analytic normal is radial everywhere, including poles and seam.
 					normal = gp_Vec(spherical_center, point);
+				} else {
+					gp_Pnt surface_point;
+					gp_Vec derivative_u;
+					gp_Vec derivative_v;
+					analytic_surface.D1(
+						uv.X(), uv.Y(), surface_point,
+						derivative_u, derivative_v);
+					normal = derivative_u.Crossed(derivative_v);
 				}
 				if (normal.SquareMagnitude() <= 1.0e-24) {
 					analytic_normals_valid = false;
@@ -1996,10 +2038,16 @@ bool CSurfaceFace::InitEdges3DCoat()
 		delete BoundSpl[i];
 	BoundSpl.clear();
 	TopoDS_Face F1 = TopoDS::Face(m_Face);
-	Handle(Geom_Surface) surf = BRep_Tool::Surface(F1);
 	char buf[1120];
 	if (F1.IsNull())
 		return false;
+	// BRep_Tool::Surface(face) returns the underlying geometry without the
+	// face's TopLoc_Location.  After a history Move that left the boundary
+	// splines at the original position while GetPoint() evaluated the regular
+	// grid in world space, so trimming removed a diagonal part of the sphere.
+	// BRepAdaptor_Surface evaluates both points and derivatives with the face
+	// location applied.
+	BRepAdaptor_Surface surf(F1);
 	Standard_Real U1;
 	Standard_Real U2;
 	Standard_Real V1;
@@ -2014,7 +2062,7 @@ bool CSurfaceFace::InitEdges3DCoat()
 	const Standard_Real V = (V1 + V2) / 2.0;
 	gp_Vec D1U;
 	gp_Vec D1V;
-	surf->D1(U, V, P, D1U, D1V);
+	surf.D1(U, V, P, D1U, D1V);
 	CVector vx(D1U.X(), D1U.Y(), D1U.Z());
 	CVector vy(D1V.X(), D1V.Y(), D1V.Z());
 	CVector vz(&vx, &vy);
@@ -2036,7 +2084,7 @@ bool CSurfaceFace::InitEdges3DCoat()
 		Standard_Real Ui = U1 + stepU * i;
 		Standard_Real Vi = V1;
 		gp_Pnt Pi;
-		surf->D0(Ui, Vi, Pi);
+		surf.D0(Ui, Vi, Pi);
 		spl->Pnt(i)->x = Pi.X();
 		spl->Pnt(i)->y = Pi.Y();
 		spl->Pnt(i)->z = Pi.Z();
@@ -2049,7 +2097,7 @@ bool CSurfaceFace::InitEdges3DCoat()
 		Standard_Real Ui = U1 + stepU * i;
 		Standard_Real Vi = V2;
 		gp_Pnt Pi;
-		surf->D0(Ui, Vi, Pi);
+		surf.D0(Ui, Vi, Pi);
 		spl->Pnt(i)->x = Pi.X();
 		spl->Pnt(i)->y = Pi.Y();
 		spl->Pnt(i)->z = Pi.Z();
@@ -2063,7 +2111,7 @@ bool CSurfaceFace::InitEdges3DCoat()
 		Standard_Real Ui = U1;
 		Standard_Real Vi = V1 + stepV * i;
 		gp_Pnt Pi;
-		surf->D0(Ui, Vi, Pi);
+		surf.D0(Ui, Vi, Pi);
 		spl->Pnt(i)->x = Pi.X();
 		spl->Pnt(i)->y = Pi.Y();
 		spl->Pnt(i)->z = Pi.Z();
@@ -2076,7 +2124,7 @@ bool CSurfaceFace::InitEdges3DCoat()
 		Standard_Real Ui = U2;
 		Standard_Real Vi = V1 + stepV * i;
 		gp_Pnt Pi;
-		surf->D0(Ui, Vi, Pi);
+		surf.D0(Ui, Vi, Pi);
 		spl->Pnt(i)->x = Pi.X();
 		spl->Pnt(i)->y = Pi.Y();
 		spl->Pnt(i)->z = Pi.Z();
@@ -2763,6 +2811,10 @@ void CSurfaceFace::UpdateMeshTypeFromBoundary()
 	m_TypeMesh = TRIMMED_MESH;
 	if (Polylines.empty())
 		return;
+	if (is_complete_spherical_face(TopoDS::Face(m_Face))) {
+		m_TypeMesh = REGULAR_MESH;
+		return;
+	}
 	if (is_untrimmed_planar_quad(TopoDS::Face(m_Face))) {
 		m_TypeMesh = REGULAR_MESH;
 		return;
@@ -3066,6 +3118,11 @@ void GetPointFromCurve(TopoDS_Edge& ed, int gtystep, CPolyline* pl)
 	for (int i = 0; i <= NECHANT; i++) {
 		prm = f + step * i;
 		gp_Pnt pnt = C->Value(prm);
+		// The curve returned by BRep_Tool is expressed in its local
+		// coordinates.  A replayed Move is stored in the edge location; without
+		// applying it, the trim boundary remains around the original sphere and
+		// incorrectly cuts the translated regular mesh.
+		pnt.Transform(Loc.Transformation());
 		CPoint3d p3d(pnt.X(), pnt.Y(), pnt.Z());
 		pl->AddPoint(&p3d);
 	}

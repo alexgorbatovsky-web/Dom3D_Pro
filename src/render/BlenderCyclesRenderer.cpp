@@ -271,6 +271,13 @@ def set_socket(node, names, value):
         return True
     return False
 
+def srgb_channel_to_linear(value):
+    value = min(1.0, max(0.0, value))
+    return value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
+
+def srgb_to_linear(color):
+    return [srgb_channel_to_linear(value) for value in color]
+
 def load_image(path, non_color=False):
     if not path or not os.path.isfile(path):
         if path: print("DOM3D_WARNING: missing texture", path, flush=True)
@@ -298,7 +305,10 @@ def create_material(data, index):
     output = nodes.new('ShaderNodeOutputMaterial')
     bsdf = nodes.new('ShaderNodeBsdfPrincipled')
     links.new(bsdf.outputs['BSDF'], output.inputs['Surface'])
-    color = data.get('base_color', [0.8, 0.8, 0.8])
+    # Dom3D material colours are authored as display/sRGB values. Blender
+    # node sockets expect scene-linear RGB; passing the values through
+    # unchanged makes mid-tones too bright and visibly washes out colours.
+    color = srgb_to_linear(data.get('base_color', [0.8, 0.8, 0.8]))
     alpha = min(1.0, max(0.0, data.get('alpha', 1.0)))
     legacy_reflection = min(1.0, max(0.0, data.get('reflectivity', 0.0)))
     legacy_specular = min(1.0, max(0.0, data.get('specular', 0.2)))
@@ -306,17 +316,10 @@ def create_material(data, index):
     pbr_metallic = min(1.0, max(0.0, data.get('metallic', 0.0)))
     pbr_roughness = min(1.0, max(0.0, data.get('roughness', 0.5)))
 
-    # Old Dom materials express mirror strength and gloss independently from
-    # diffuse colour. Principled BSDF does not, so translate strong legacy
-    # reflection into a neutral metal component and derive GGX roughness from
-    # the old Blinn/Phong exponent. Low reflection remains a clear coat, which
-    # keeps lacquered wood dielectric instead of turning it into copper.
-    legacy_metallic = min(1.0, max(0.0, (legacy_reflection - 0.25) / 0.75))
-    metallic_value = max(pbr_metallic, legacy_metallic)
-    if legacy_metallic > pbr_metallic:
-        neutral = 0.72 + 0.22 * legacy_reflection
-        blend = legacy_metallic - pbr_metallic
-        color = [value * (1.0 - blend) + neutral * blend for value in color]
+    # Legacy reflection describes a glossy dielectric surface, not metal.
+    # Preserve its authored colour and map reflection to specular/coat below;
+    # only the explicit PBR metallic property is allowed to create a metal.
+    metallic_value = pbr_metallic
     legacy_roughness = min(0.65, max(0.025,
         math.sqrt(2.0 / (legacy_shininess + 2.0))))
     roughness_value = pbr_roughness
@@ -334,7 +337,7 @@ def create_material(data, index):
     set_socket(bsdf, ['IOR'], 1.45)
     set_socket(bsdf, ['Specular IOR Level', 'Specular'],
                max(0.5, legacy_specular, legacy_reflection))
-    emission = data.get('emission', [0.0, 0.0, 0.0])
+    emission = srgb_to_linear(data.get('emission', [0.0, 0.0, 0.0]))
     set_socket(bsdf, ['Emission Color', 'Emission'], (*emission, 1.0))
     set_socket(bsdf, ['Emission Strength'], 1.0 if max(emission) > 0.0 else 0.0)
     set_socket(bsdf, ['Coat Weight', 'Clearcoat'], max(
@@ -416,7 +419,8 @@ def build_world(scene, data, settings):
     source_strength = data.get('strength', 1.0)
     background.inputs['Strength'].default_value = source_strength * environment_strength
     reflection_background.inputs['Strength'].default_value = source_strength * max(1.0, environment_strength)
-    background_color = (*data.get('background_color', [0.055,0.065,0.08]), 1.0)
+    background_color = (*srgb_to_linear(
+        data.get('background_color', [0.055,0.065,0.08])), 1.0)
     background.inputs['Color'].default_value = background_color
     reflection_background.inputs['Color'].default_value = background_color
     light_path = nodes.new('ShaderNodeLightPath')
@@ -473,7 +477,9 @@ def add_custom_lights(scene, lights, scale):
         diffuse = item.get('diffuse', [1.0, 1.0, 1.0])
         specular = item.get('specular', [1.0, 1.0, 1.0])
         strength = max(max(diffuse), 0.0)
-        light_data.color = tuple(value / strength for value in diffuse) if strength > 0.0 else (1.0, 1.0, 1.0)
+        normalized_color = (tuple(value / strength for value in diffuse)
+                            if strength > 0.0 else (1.0, 1.0, 1.0))
+        light_data.color = srgb_to_linear(normalized_color)
         # Legacy Dom3D colors also carry light intensity. Default custom
         # colors are normalized to the Auto rig, so 1000 W preserves the
         # same total output while still allowing direct RGB intensity edits.

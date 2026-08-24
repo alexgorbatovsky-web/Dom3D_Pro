@@ -140,6 +140,14 @@ QWidget* PreferencesDialog::CreateProjectPage() {
     length_unit_->addItem(DisplayLengthUnitLabel(DisplayLengthUnit::Inches),
                           DisplayLengthUnitKey(DisplayLengthUnit::Inches));
     form->addRow("Units", length_unit_);
+    number_separator_ = new QComboBox(page);
+    number_separator_->addItem(
+        NumberDecimalSeparatorLabel(NumberDecimalSeparator::Dot),
+        NumberDecimalSeparatorKey(NumberDecimalSeparator::Dot));
+    number_separator_->addItem(
+        NumberDecimalSeparatorLabel(NumberDecimalSeparator::Comma),
+        NumberDecimalSeparatorKey(NumberDecimalSeparator::Comma));
+    form->addRow("Number separator", number_separator_);
     layout->addLayout(form);
     layout->addStretch();
     return page;
@@ -160,6 +168,11 @@ void PreferencesDialog::LoadSettings() {
     const QString unit_key = DisplayLengthUnitKey(LoadDisplayLengthUnit());
     const int unit_index = length_unit_->findData(unit_key);
     length_unit_->setCurrentIndex(unit_index >= 0 ? unit_index : 0);
+
+    const QString separator_key = NumberDecimalSeparatorKey(
+        LoadNumberDecimalSeparator());
+    const int separator_index = number_separator_->findData(separator_key);
+    number_separator_->setCurrentIndex(separator_index >= 0 ? separator_index : 0);
 
     tolerance_modeling_->setValue(settings.value("preferences/modeling/tolerance", 0.02).toDouble());
     delete_loop_->setChecked(settings.value("preferences/modeling/deleteLoop", true).toBool());
@@ -185,6 +198,9 @@ void PreferencesDialog::ApplySettings() {
     QSettings settings("Dom3D", "Dom3D_Pro");
 
     SaveDisplayLengthUnit(DisplayLengthUnitFromKey(length_unit_->currentData().toString()));
+    SaveNumberDecimalSeparator(NumberDecimalSeparatorFromKey(
+        number_separator_->currentData().toString()));
+    ApplyNumberInputLocale();
 
     settings.setValue("preferences/modeling/tolerance", tolerance_modeling_->value());
     settings.setValue("preferences/modeling/deleteLoop", delete_loop_->isChecked());

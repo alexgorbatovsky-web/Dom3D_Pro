@@ -25,6 +25,7 @@ private:
     void ApplySettings();
 
     QComboBox* length_unit_ = nullptr;
+    QComboBox* number_separator_ = nullptr;
     QDoubleSpinBox* tolerance_modeling_ = nullptr;
     QCheckBox* delete_loop_ = nullptr;
     QRadioButton* offset_corner_ = nullptr;

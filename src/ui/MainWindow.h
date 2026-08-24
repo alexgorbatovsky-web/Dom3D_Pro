@@ -100,6 +100,9 @@ private:
     void JoinSelectedSurfaces();
     void CreatePlaneIntersection();
     void BeginBodySectionPlaneInput();
+    void BeginBodySectionThreePointPick();
+    void AppendBodySectionThreePointPick(CPoint3d point);
+    void CancelBodySectionThreePointPick(const QString& message = {});
     void CompleteBodySectionByPlane(Vec3 origin, Vec3 normal);
     bool CompleteBodySectionPlaneObjectPick();
     void CreateSurfaceIntersection();
@@ -377,6 +380,8 @@ private:
     unsigned long pending_body_section_target_id_ = 0;
     bool pending_body_section_plane_face_pick_ = false;
     bool pending_body_section_plane_object_pick_ = false;
+    bool pending_body_section_three_point_pick_ = false;
+    std::vector<CPoint3d> pending_body_section_plane_points_;
     bool pending_trim_plane_face_pick_ = false;
     unsigned long pending_trim_plane_curve_id_ = 0;
     bool object_color_pick_pending_ = false;
