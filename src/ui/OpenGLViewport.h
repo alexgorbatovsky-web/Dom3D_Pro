@@ -318,6 +318,7 @@ private:
     void MoveWalkCamera(int key, Qt::KeyboardModifiers modifiers);
     bool ApplyMaterialDrop(const QPoint& point, const Material& material);
     CAlfaObject* FindObjectForMaterialAt(const QPoint& point);
+    CAlfaObject* FindInteractiveFurnitureHandleAt(const QPoint& point);
     void CaptureCurvePointChangeBefore();
     void FinalizeCurvePointChange();
 
@@ -414,6 +415,8 @@ private:
     bool highlighted_draft_face_gizmo_ = false;
     bool highlighted_polyline_handle_ = false;
     bool hovering_furniture_handle_ = false;
+    unsigned long hovered_furniture_handle_id_ = 0;
+    QPoint furniture_handle_capture_anchor_{};
     size_t hovered_edge_object_index_ = static_cast<size_t>(-1);
     int hovered_edge_surface_index_ = -1;
     int hovered_edge_index_ = -1;

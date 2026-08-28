@@ -34,6 +34,8 @@ private:
     void RestoreDefaults();
     void LoadSettings();
     void SaveSettings();
+    int ResolutionScalePercent() const;
+    void UpdateResolutionSummary();
 
 signals:
     void RenderProgress(int percent, QImage preview, QString stage);
@@ -44,6 +46,8 @@ private:
     QSize initial_image_size_;
     QSpinBox* width_ = nullptr;
     QSpinBox* height_ = nullptr;
+    QComboBox* resolution_scale_ = nullptr;
+    QLabel* output_size_ = nullptr;
     QSpinBox* depth_ = nullptr;
     QSpinBox* anti_alias_ = nullptr;
     QSpinBox* passes_ = nullptr;

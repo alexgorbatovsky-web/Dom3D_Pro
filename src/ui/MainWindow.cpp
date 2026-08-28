@@ -5889,6 +5889,30 @@ void MainWindow::CreateActions() {
         ViewLastRenderResult();
     });
 
+    fullscreen_scene_action_ = view_menu->addAction(
+        "Full Screen Scene", this, &MainWindow::ToggleSceneFullScreen);
+    fullscreen_scene_action_->setObjectName("FullScreenSceneAction");
+    fullscreen_scene_action_->setCheckable(true);
+    fullscreen_scene_action_->setShortcut(QKeySequence(Qt::Key_F11));
+    fullscreen_scene_action_->setShortcutContext(Qt::ApplicationShortcut);
+    fullscreen_scene_action_->setToolTip(
+        "Show only the scene. Press F11 or Esc to restore the interface");
+
+    const auto create_fullscreen_exit_shortcut = [this](int key) {
+        auto* shortcut = new QShortcut(QKeySequence(key), this);
+        shortcut->setContext(Qt::ApplicationShortcut);
+        shortcut->setEnabled(false);
+        connect(shortcut, &QShortcut::activated, this, [this]() {
+            if (fullscreen_scene_active_) ToggleSceneFullScreen();
+        });
+        return shortcut;
+    };
+    exit_fullscreen_f11_shortcut_ =
+        create_fullscreen_exit_shortcut(Qt::Key_F11);
+    exit_fullscreen_escape_shortcut_ =
+        create_fullscreen_exit_shortcut(Qt::Key_Escape);
+
+    view_menu->addSeparator();
     view_menu->addAction("Update Scene", this, [this]() {
         viewport_->RefreshSurfaceMeshQuality();
     });
@@ -6596,6 +6620,76 @@ void MainWindow::ShowModelingPanels() {
         material_library_dock_->raise();
     }
     statusBar()->showMessage("Object Tree and Materials Library are visible", 1800);
+}
+
+void MainWindow::ToggleSceneFullScreen() {
+    if (!fullscreen_scene_active_) {
+        // saveState() remembers the exact dock/toolbar layout, including which
+        // panels the user intentionally kept hidden before presentation mode.
+        fullscreen_saved_geometry_ = saveGeometry();
+        fullscreen_saved_ui_state_ = saveState(1);
+        fullscreen_was_maximized_ = isMaximized();
+        fullscreen_menu_bar_visible_ = menuBar()->isVisible();
+        fullscreen_status_bar_visible_ = statusBar()->isVisible();
+        fullscreen_scene_active_ = true;
+
+        for (QToolBar* toolbar :
+             findChildren<QToolBar*>(QString(), Qt::FindDirectChildrenOnly)) {
+            toolbar->hide();
+        }
+        for (QDockWidget* dock :
+             findChildren<QDockWidget*>(QString(), Qt::FindDirectChildrenOnly)) {
+            dock->hide();
+        }
+        menuBar()->hide();
+        statusBar()->hide();
+        showFullScreen();
+
+        if (fullscreen_scene_action_) {
+            fullscreen_scene_action_->setChecked(true);
+            // An action owned by the now-hidden View menu cannot reliably
+            // receive F11 on every platform. The dedicated exit action owns
+            // F11 while presentation mode is active.
+            fullscreen_scene_action_->setEnabled(false);
+        }
+        if (exit_fullscreen_f11_shortcut_) {
+            exit_fullscreen_f11_shortcut_->setEnabled(true);
+        }
+        if (exit_fullscreen_escape_shortcut_) {
+            exit_fullscreen_escape_shortcut_->setEnabled(true);
+        }
+        if (workspace_stack_ && workspace_stack_->currentWidget()) {
+            workspace_stack_->currentWidget()->setFocus(Qt::ShortcutFocusReason);
+        }
+        return;
+    }
+
+    fullscreen_scene_active_ = false;
+    if (exit_fullscreen_f11_shortcut_) {
+        exit_fullscreen_f11_shortcut_->setEnabled(false);
+    }
+    if (exit_fullscreen_escape_shortcut_) {
+        exit_fullscreen_escape_shortcut_->setEnabled(false);
+    }
+    if (fullscreen_scene_action_) fullscreen_scene_action_->setEnabled(true);
+
+    if (fullscreen_was_maximized_) {
+        showMaximized();
+    } else {
+        showNormal();
+        if (!fullscreen_saved_geometry_.isEmpty()) {
+            restoreGeometry(fullscreen_saved_geometry_);
+        }
+    }
+    if (!fullscreen_saved_ui_state_.isEmpty()) {
+        restoreState(fullscreen_saved_ui_state_, 1);
+    }
+    menuBar()->setVisible(fullscreen_menu_bar_visible_);
+    statusBar()->setVisible(fullscreen_status_bar_visible_);
+    if (fullscreen_scene_action_) fullscreen_scene_action_->setChecked(false);
+    if (workspace_stack_ && workspace_stack_->currentWidget()) {
+        workspace_stack_->currentWidget()->setFocus(Qt::ShortcutFocusReason);
+    }
 }
 
 void MainWindow::CreateVerticalToolBar() {
@@ -18249,8 +18343,16 @@ void MainWindow::RestoreUserInterfaceSettings() {
 
 void MainWindow::SaveUserInterfaceSettings() {
     QSettings settings;
-    settings.setValue("ui/mainWindowGeometry", saveGeometry());
-    settings.setValue("ui/mainWindowState", saveState(1));
+    // Closing from scene full screen must not make the stripped presentation
+    // layout the normal layout on the next launch.
+    settings.setValue(
+        "ui/mainWindowGeometry",
+        fullscreen_scene_active_ && !fullscreen_saved_geometry_.isEmpty()
+            ? fullscreen_saved_geometry_ : saveGeometry());
+    settings.setValue(
+        "ui/mainWindowState",
+        fullscreen_scene_active_ && !fullscreen_saved_ui_state_.isEmpty()
+            ? fullscreen_saved_ui_state_ : saveState(1));
     if (tool_tabs_ && tool_tabs_->currentIndex() >= 0) {
         settings.setValue(
             "ui/activeRoom",

@@ -90,11 +90,8 @@ BlenderCyclesDialog::BlenderCyclesDialog(RenderScene scene,
     connect(light_mode_, qOverload<int>(&QComboBox::currentIndexChanged),
             this, [this](int index) { customize_lights_->setEnabled(index == 1); });
 
-    auto* size_row = new QWidget(this);
-    auto* size_layout = new QHBoxLayout(size_row);
-    size_layout->setContentsMargins(0, 0, 0, 0);
-    width_ = new QSpinBox(size_row);
-    height_ = new QSpinBox(size_row);
+    width_ = new QSpinBox(this);
+    height_ = new QSpinBox(this);
     for (QSpinBox* spin : {width_, height_}) {
         spin->setRange(64, 16384);
         spin->setSingleStep(64);
@@ -103,10 +100,25 @@ BlenderCyclesDialog::BlenderCyclesDialog(RenderScene scene,
         ? std::clamp(initial_image_size.width(), 64, 16384) : 1280);
     height_->setValue(initial_image_size.isValid()
         ? std::clamp(initial_image_size.height(), 64, 16384) : 720);
-    size_layout->addWidget(width_);
-    size_layout->addWidget(new QLabel("×", size_row));
-    size_layout->addWidget(height_);
-    form->addRow("Image size", size_row);
+    resolution_scale_ = new QComboBox(this);
+    for (const int percent : {200, 170, 130, 100, 50, 30}) {
+        resolution_scale_->addItem(QString::number(percent) + "%", percent);
+    }
+    resolution_scale_->setCurrentIndex(resolution_scale_->findData(100));
+    resolution_scale_->setToolTip(
+        "Scale the output resolution without changing the base width and height");
+    output_size_ = new QLabel(this);
+    form->addRow("Width", width_);
+    form->addRow("Height", height_);
+    form->addRow("Resolution scale", resolution_scale_);
+    form->addRow("Output size", output_size_);
+    connect(width_, qOverload<int>(&QSpinBox::valueChanged),
+            this, [this]() { UpdateResolutionSummary(); });
+    connect(height_, qOverload<int>(&QSpinBox::valueChanged),
+            this, [this]() { UpdateResolutionSummary(); });
+    connect(resolution_scale_, qOverload<int>(&QComboBox::currentIndexChanged),
+            this, [this]() { UpdateResolutionSummary(); });
+    UpdateResolutionSummary();
 
     samples_ = new QSpinBox(this);
     samples_->setRange(1, 16384);
@@ -143,9 +155,8 @@ BlenderCyclesDialog::BlenderCyclesDialog(RenderScene scene,
         QStandardPaths::writableLocation(QStandardPaths::PicturesLocation))
         .filePath("Dom3D_Cycles.png"));
     last_render_path_ = QSettings("Dom3D", "Dom3D_Pro")
-        .value("render/lastOutputPath").toString();
+        .value("render/cycles/lastOutputPath").toString();
     if (QFileInfo::exists(last_render_path_)) {
-        output_path_->setText(last_render_path_);
         result_pixmap_.load(last_render_path_);
     }
     layout->addLayout(form);
@@ -192,7 +203,10 @@ BlenderCyclesDialog::BlenderCyclesDialog(RenderScene scene,
         if (renderer_) renderer_->Cancel();
     });
     connect(close, &QPushButton::clicked, this, &QDialog::close);
-    layout->addWidget(buttons);
+    // Keep the primary render controls directly below the settings. Large
+    // previews and the Blender log may extend beyond a short display, but the
+    // user must always be able to start or cancel a render.
+    layout->insertWidget(2, buttons);
     ApplyPreset(0);
     LoadSettings();
     connect(lighting_preset_, qOverload<int>(&QComboBox::currentIndexChanged),
@@ -232,7 +246,10 @@ void BlenderCyclesDialog::ApplyLightingPreset(int index) {
     } else if (index == 1) {
         exposure_->setValue(0.0);
         environment_strength_->setValue(1.0);
-        interior_light_strength_->setValue(0.0);
+        // A closed architectural room cannot rely on the world environment
+        // alone. Keep a neutral daylight fill so Exterior remains usable for
+        // interiors with windows instead of rendering almost completely black.
+        interior_light_strength_->setValue(0.30);
     } else {
         exposure_->setValue(-0.2);
         environment_strength_->setValue(0.15);
@@ -255,10 +272,24 @@ void BlenderCyclesDialog::BrowseOutput() {
     output_path_->setText(path);
 }
 
+int BlenderCyclesDialog::ResolutionScalePercent() const {
+    return resolution_scale_ ? resolution_scale_->currentData().toInt() : 100;
+}
+
+void BlenderCyclesDialog::UpdateResolutionSummary() {
+    if (!width_ || !height_ || !output_size_) return;
+    const int scale = ResolutionScalePercent();
+    const int output_width = std::max(16, width_->value() * scale / 100);
+    const int output_height = std::max(16, height_->value() * scale / 100);
+    output_size_->setText(QString("%1 × %2 pixels")
+        .arg(output_width).arg(output_height));
+}
+
 RenderSettings BlenderCyclesDialog::CurrentSettings() const {
     RenderSettings settings;
-    settings.width = width_->value();
-    settings.height = height_->value();
+    const int resolution_scale = ResolutionScalePercent();
+    settings.width = std::max(16, width_->value() * resolution_scale / 100);
+    settings.height = std::max(16, height_->value() * resolution_scale / 100);
     settings.samples = samples_->value();
     settings.noise_threshold = noise_threshold_->value();
     settings.denoise = denoise_->isChecked();
@@ -296,6 +327,7 @@ void BlenderCyclesDialog::RestoreDefaults() {
         ? std::clamp(initial_image_size_.width(), 64, 16384) : 1280);
     height_->setValue(initial_image_size_.isValid()
         ? std::clamp(initial_image_size_.height(), 64, 16384) : 720);
+    resolution_scale_->setCurrentIndex(resolution_scale_->findData(100));
     device_->setCurrentIndex(0);
     output_path_->setText(QDir(
         QStandardPaths::writableLocation(QStandardPaths::PicturesLocation))
@@ -320,6 +352,10 @@ void BlenderCyclesDialog::LoadSettings() {
         settings.value("qualityPreset", preset_->currentIndex()).toInt(), 0, 2));
     width_->setValue(settings.value("width", width_->value()).toInt());
     height_->setValue(settings.value("height", height_->value()).toInt());
+    const int scale_index = resolution_scale_->findData(
+        settings.value("resolutionScale", 100).toInt());
+    resolution_scale_->setCurrentIndex(scale_index >= 0 ? scale_index
+                                                        : resolution_scale_->findData(100));
     samples_->setValue(settings.value("samples", samples_->value()).toInt());
     noise_threshold_->setValue(
         settings.value("noiseThreshold", noise_threshold_->value()).toDouble());
@@ -337,7 +373,18 @@ void BlenderCyclesDialog::LoadSettings() {
         settings.value("interiorLightStrength", legacy_interior_light_strength).toDouble());
     light_mode_->setCurrentIndex(std::clamp(
         settings.value("lightMode", legacy_light_mode).toInt(), 0, 1));
-    output_path_->setText(settings.value("outputPath", output_path_->text()).toString());
+    QString output_path = settings.value(
+        "outputPath", output_path_->text()).toString();
+    if (QFileInfo(output_path).fileName().compare(
+            "Dom3D_NativeRaytrace.png", Qt::CaseInsensitive) == 0) {
+        output_path = QDir(
+            QStandardPaths::writableLocation(QStandardPaths::PicturesLocation))
+            .filePath("Dom3D_Cycles.png");
+    }
+    output_path_->setText(output_path);
+    if (lighting_index == 1 && interior_light_strength_->value() <= 0.0) {
+        interior_light_strength_->setValue(0.30);
+    }
     settings.endGroup();
 
     custom_lights_ = RenderLightEditorDialog::Load(
@@ -352,6 +399,7 @@ void BlenderCyclesDialog::SaveSettings() {
     settings.setValue("qualityPreset", preset_->currentIndex());
     settings.setValue("width", width_->value());
     settings.setValue("height", height_->value());
+    settings.setValue("resolutionScale", ResolutionScalePercent());
     settings.setValue("samples", samples_->value());
     settings.setValue("noiseThreshold", noise_threshold_->value());
     settings.setValue("denoise", denoise_->isChecked());
@@ -394,7 +442,7 @@ void BlenderCyclesDialog::StartRender() {
         progress_->setValue(100);
         last_render_path_ = path;
         QSettings("Dom3D", "Dom3D_Pro")
-            .setValue("render/lastOutputPath", path);
+            .setValue("render/cycles/lastOutputPath", path);
         result_pixmap_.load(path);
         UpdatePreview();
         view_button_->setEnabled(!result_pixmap_.isNull());

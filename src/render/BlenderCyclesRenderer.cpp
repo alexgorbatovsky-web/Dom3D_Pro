@@ -596,7 +596,7 @@ def add_render_lights(scene, camera_object, environment, settings,
                      reflection_card=True)
     if standalone_reflections:
         return
-    if preset != 'INTERIOR' or light_strength <= 0.0:
+    if preset not in ('INTERIOR', 'EXTERIOR') or light_strength <= 0.0:
         return
 
     # Three adaptive area sources reproduce the classic Dom3D Light-1/2/3

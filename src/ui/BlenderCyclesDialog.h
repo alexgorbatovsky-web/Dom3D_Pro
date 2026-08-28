@@ -38,6 +38,8 @@ private:
     void RestoreDefaults();
     void LoadSettings();
     void SaveSettings();
+    int ResolutionScalePercent() const;
+    void UpdateResolutionSummary();
     RenderSettings CurrentSettings() const;
 
 protected:
@@ -54,6 +56,8 @@ protected:
     std::vector<RenderLight> custom_lights_;
     QSpinBox* width_ = nullptr;
     QSpinBox* height_ = nullptr;
+    QComboBox* resolution_scale_ = nullptr;
+    QLabel* output_size_ = nullptr;
     QSpinBox* samples_ = nullptr;
     QDoubleSpinBox* noise_threshold_ = nullptr;
     QComboBox* device_ = nullptr;

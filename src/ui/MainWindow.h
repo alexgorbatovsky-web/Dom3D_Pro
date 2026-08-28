@@ -18,6 +18,7 @@
 #include <QIcon>
 #include <QMainWindow>
 #include <QStringList>
+#include <QByteArray>
 
 #include <functional>
 #include <array>
@@ -40,6 +41,7 @@ class LightingDialog;
 class QMenu;
 class QPushButton;
 class QSlider;
+class QShortcut;
 class QTabBar;
 class QTimer;
 class QLabel;
@@ -66,6 +68,7 @@ private:
     void CreateMaterialLibraryDock();
     void CreateToolsPanel(QDockWidget* dock);
     void ShowModelingPanels();
+    void ToggleSceneFullScreen();
     void PopulateToolsPanelForTab(int tab_index);
     void AddToolButton(QGridLayout* layout, QWidget* parent, const std::string& key, int row, int column);
     void AddPlaceholderButton(QGridLayout* layout, QWidget* parent, const QString& icon_key, const QString& title, int row, int column);
@@ -329,6 +332,9 @@ private:
     QAction* orthographic_projection_action_ = nullptr;
     QAction* undo_action_ = nullptr;
     QAction* redo_action_ = nullptr;
+    QAction* fullscreen_scene_action_ = nullptr;
+    QShortcut* exit_fullscreen_f11_shortcut_ = nullptr;
+    QShortcut* exit_fullscreen_escape_shortcut_ = nullptr;
     QAction* cad_orbit_action_ = nullptr;
     QAction* architectural_orbit_action_ = nullptr;
     QAction* surfaces_edges_action_ = nullptr;
@@ -344,6 +350,12 @@ private:
     QSlider* mesh_opacity_slider_ = nullptr;
     QLabel* mesh_opacity_value_label_ = nullptr;
     QLabel* projection_status_label_ = nullptr;
+    QByteArray fullscreen_saved_geometry_;
+    QByteArray fullscreen_saved_ui_state_;
+    bool fullscreen_scene_active_ = false;
+    bool fullscreen_was_maximized_ = false;
+    bool fullscreen_menu_bar_visible_ = true;
+    bool fullscreen_status_bar_visible_ = true;
     QDoubleSpinBox* camera_fov_spin_ = nullptr;
     Material selected_library_material_;
     bool has_selected_library_material_ = false;

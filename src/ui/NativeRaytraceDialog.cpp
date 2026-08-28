@@ -49,11 +49,8 @@ NativeRaytraceDialog::NativeRaytraceDialog(
         .arg(scene_.materials.size()), this));
 
     auto* form = new QFormLayout;
-    auto* size_row = new QWidget(this);
-    auto* size_layout = new QHBoxLayout(size_row);
-    size_layout->setContentsMargins(0, 0, 0, 0);
-    width_ = new QSpinBox(size_row);
-    height_ = new QSpinBox(size_row);
+    width_ = new QSpinBox(this);
+    height_ = new QSpinBox(this);
     for (QSpinBox* value : {width_, height_}) {
         value->setRange(64, 16384);
         value->setSingleStep(64);
@@ -62,10 +59,25 @@ NativeRaytraceDialog::NativeRaytraceDialog(
         ? std::clamp(initial_image_size.width(), 64, 16384) : 1280);
     height_->setValue(initial_image_size.isValid()
         ? std::clamp(initial_image_size.height(), 64, 16384) : 720);
-    size_layout->addWidget(width_);
-    size_layout->addWidget(new QLabel("×", size_row));
-    size_layout->addWidget(height_);
-    form->addRow("Image size", size_row);
+    resolution_scale_ = new QComboBox(this);
+    for (const int percent : {200, 170, 130, 100, 50, 30}) {
+        resolution_scale_->addItem(QString::number(percent) + "%", percent);
+    }
+    resolution_scale_->setCurrentIndex(resolution_scale_->findData(100));
+    resolution_scale_->setToolTip(
+        "Scale the output resolution without changing the base width and height");
+    output_size_ = new QLabel(this);
+    form->addRow("Width", width_);
+    form->addRow("Height", height_);
+    form->addRow("Resolution scale", resolution_scale_);
+    form->addRow("Output size", output_size_);
+    connect(width_, qOverload<int>(&QSpinBox::valueChanged),
+            this, [this]() { UpdateResolutionSummary(); });
+    connect(height_, qOverload<int>(&QSpinBox::valueChanged),
+            this, [this]() { UpdateResolutionSummary(); });
+    connect(resolution_scale_, qOverload<int>(&QComboBox::currentIndexChanged),
+            this, [this]() { UpdateResolutionSummary(); });
+    UpdateResolutionSummary();
 
     auto* light_mode_row = new QWidget(this);
     auto* light_mode_layout = new QHBoxLayout(light_mode_row);
@@ -189,7 +201,9 @@ NativeRaytraceDialog::NativeRaytraceDialog(
         status_->setText("Canceling...");
     });
     connect(close, &QPushButton::clicked, this, &QDialog::close);
-    layout->addWidget(buttons);
+    // Keep the primary render controls directly below the settings so the
+    // preview cannot push them outside the visible part of the dialog.
+    layout->insertWidget(2, buttons);
     LoadSettings();
     connect(this, &NativeRaytraceDialog::RenderProgress, this,
             [this](int percent, const QImage& preview, const QString& stage) {
@@ -220,6 +234,7 @@ void NativeRaytraceDialog::RestoreDefaults() {
         ? std::clamp(initial_image_size_.width(), 64, 16384) : 1280);
     height_->setValue(initial_image_size_.isValid()
         ? std::clamp(initial_image_size_.height(), 64, 16384) : 720);
+    resolution_scale_->setCurrentIndex(resolution_scale_->findData(100));
     depth_->setValue(4);
     anti_alias_->setValue(2);
     passes_->setValue(5);
@@ -246,6 +261,10 @@ void NativeRaytraceDialog::LoadSettings() {
     settings.beginGroup("render/native");
     width_->setValue(settings.value("width", width_->value()).toInt());
     height_->setValue(settings.value("height", height_->value()).toInt());
+    const int scale_index = resolution_scale_->findData(
+        settings.value("resolutionScale", 100).toInt());
+    resolution_scale_->setCurrentIndex(scale_index >= 0 ? scale_index
+                                                        : resolution_scale_->findData(100));
     depth_->setValue(settings.value("reflectionDepth", depth_->value()).toInt());
     anti_alias_->setValue(settings.value("antialiasing", anti_alias_->value()).toInt());
     passes_->setValue(settings.value("progressivePasses", passes_->value()).toInt());
@@ -269,7 +288,8 @@ void NativeRaytraceDialog::LoadSettings() {
         settings, RenderLightEditorDialog::Defaults(scene_));
     customize_lights_->setEnabled(light_mode_->currentIndex() == 1);
 
-    last_render_path_ = settings.value("render/lastOutputPath").toString();
+    last_render_path_ = settings.value(
+        "render/native/lastOutputPath").toString();
     if (QFileInfo::exists(last_render_path_)) {
         result_pixmap_.load(last_render_path_);
         view_button_->setEnabled(!result_pixmap_.isNull());
@@ -282,6 +302,7 @@ void NativeRaytraceDialog::SaveSettings() {
     settings.beginGroup("render/native");
     settings.setValue("width", width_->value());
     settings.setValue("height", height_->value());
+    settings.setValue("resolutionScale", ResolutionScalePercent());
     settings.setValue("reflectionDepth", depth_->value());
     settings.setValue("antialiasing", anti_alias_->value());
     settings.setValue("progressivePasses", passes_->value());
@@ -299,11 +320,25 @@ void NativeRaytraceDialog::SaveSettings() {
     RenderLightEditorDialog::Save(settings, custom_lights_);
 }
 
+int NativeRaytraceDialog::ResolutionScalePercent() const {
+    return resolution_scale_ ? resolution_scale_->currentData().toInt() : 100;
+}
+
+void NativeRaytraceDialog::UpdateResolutionSummary() {
+    if (!width_ || !height_ || !output_size_) return;
+    const int scale = ResolutionScalePercent();
+    const int output_width = std::max(16, width_->value() * scale / 100);
+    const int output_height = std::max(16, height_->value() * scale / 100);
+    output_size_->setText(QString("%1 × %2 pixels")
+        .arg(output_width).arg(output_height));
+}
+
 void NativeRaytraceDialog::StartRender() {
     if (render_thread_) return;
     NativeRaytraceSettings settings;
-    settings.width = width_->value();
-    settings.height = height_->value();
+    const int resolution_scale = ResolutionScalePercent();
+    settings.width = std::max(16, width_->value() * resolution_scale / 100);
+    settings.height = std::max(16, height_->value() * resolution_scale / 100);
     settings.reflection_depth = depth_->value();
     settings.anti_alias_level = anti_alias_->value();
     settings.progressive_passes = passes_->value();
@@ -351,7 +386,7 @@ void NativeRaytraceDialog::StartRender() {
         result_pixmap_ = QPixmap::fromImage(result->image);
         progress_->setValue(100);
         QSettings("Dom3D", "Dom3D_Pro").setValue(
-            "render/lastOutputPath", last_render_path_);
+            "render/native/lastOutputPath", last_render_path_);
         status_->setText(QString("Finished — %1 threads")
             .arg(threads_->value() == 0
                 ? QThread::idealThreadCount() : threads_->value()));

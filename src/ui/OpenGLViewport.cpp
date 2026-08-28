@@ -647,6 +647,23 @@ void set_view_by_camera_ray(Camera& camera) {
         camera.orientation = orientation_from_forward_right(best_axis, horizontal_axis);
     }
 }
+
+bool is_interactive_furniture_handle_name(const std::string& name) {
+    const bool furniture_handle =
+        name.find("Desk Drawer Handle") != std::string::npos
+        || (name.rfind("Drawer ", 0) == 0
+            && name.find(" Handle") != std::string::npos);
+    const bool cabinet_handle = name.find("Cabinet") != std::string::npos
+        && name.find("Facade") != std::string::npos
+        && name.find("Handle") != std::string::npos;
+    const bool nika_handle = name.rfind("Nika ", 0) == 0
+        && name.find("Handle") != std::string::npos;
+    const bool corner_kitchen_handle = name.rfind("Corner ", 0) == 0
+        && name.find("Handle") != std::string::npos;
+    const bool single_facade_handle = name == "Single Facade Handle";
+    return furniture_handle || cabinet_handle || nika_handle
+        || corner_kitchen_handle || single_facade_handle;
+}
 }
 
 OpenGLViewport::OpenGLViewport(QWidget* parent)
@@ -713,6 +730,8 @@ void OpenGLViewport::SetTool(ToolMode tool) {
     dragging_sketch_handle_ = false;
     sketch_drag_changed_ = false;
     hovering_furniture_handle_ = false;
+    hovered_furniture_handle_id_ = 0;
+    furniture_handle_capture_anchor_ = {};
     selecting_with_rect_ = false;
     zoom_rect_active_ = false;
     active_sketch_handle_kind_ = SketchHandleKind::None;
@@ -835,6 +854,12 @@ OpenGLViewport::NavigationDrag OpenGLViewport::NavigationDragFor(
     }
 
     if (navigation_preset_ == "dom3d") {
+        // Alt temporarily invokes orbit without changing the active modeling
+        // tool. In particular, Select keeps Ctrl/Shift for selection changes,
+        // while Alt + LMB remains available for scene navigation.
+        if (button == Qt::LeftButton && exact(Qt::AltModifier)) {
+            return NavigationDrag::Orbit;
+        }
         if (button == Qt::LeftButton && tool_ == ToolMode::Orbit) {
             return modifiers.testFlag(Qt::ControlModifier)
                 ? NavigationDrag::Pan : NavigationDrag::Orbit;
@@ -910,7 +935,8 @@ OpenGLViewport::NavigationDrag OpenGLViewport::NavigationDragFor(
 }
 
 bool OpenGLViewport::UsesAltNavigationModifier() const {
-    return navigation_preset_ == "3dcoat"
+    return navigation_preset_ == "dom3d"
+        || navigation_preset_ == "3dcoat"
         || navigation_preset_ == "3dsmax"
         || navigation_preset_ == "maya"
         || navigation_preset_ == "houdini";
@@ -2646,6 +2672,26 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
         return;
     }
 
+    // Orbit normally owns LMB from the moment it is pressed. Give a plain
+    // click on an interactive furniture handle priority, so presentation and
+    // room-viewing mode can operate doors and drawers without switching to
+    // Select. Modified drags (notably Alt + LMB) remain pure navigation.
+    const Qt::KeyboardModifiers navigation_modifiers = event->modifiers()
+        & (Qt::ShiftModifier | Qt::ControlModifier
+           | Qt::AltModifier | Qt::MetaModifier);
+    if (tool_ == ToolMode::Orbit
+        && event->button() == Qt::LeftButton
+        && navigation_modifiers == Qt::NoModifier
+        && selection_mode_ == SelectionMode::Object
+        && material_interaction_mode_ == MaterialInteractionMode::None) {
+        if (CAlfaObject* handle =
+                FindInteractiveFurnitureHandleAt(event->pos())) {
+            emit FurnitureInteractionRequested(handle->m_id);
+            event->accept();
+            return;
+        }
+    }
+
     if (event->button() == Qt::RightButton
         && document_
         && tool_ == ToolMode::Transform
@@ -2986,29 +3032,14 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
     if (event->button() == Qt::LeftButton
         && !event->modifiers().testFlag(Qt::ShiftModifier)
         && !event->modifiers().testFlag(Qt::ControlModifier)
+        && !event->modifiers().testFlag(Qt::AltModifier)
         && (tool_ == ToolMode::Select || tool_ == ToolMode::Orbit)
         && selection_mode_ == SelectionMode::Object) {
-        if (CAlfaObject* object = FindObjectForMaterialAt(event->pos())) {
-            const std::string& name = object->GetName();
-            const bool furniture_handle =
-                name.find("Desk Drawer Handle") != std::string::npos
-                || (name.rfind("Drawer ", 0) == 0
-                    && name.find(" Handle") != std::string::npos);
-            const bool cabinet_handle = name.find("Cabinet") != std::string::npos
-                && name.find("Facade") != std::string::npos
-                && name.find("Handle") != std::string::npos;
-            const bool nika_handle = name.rfind("Nika ", 0) == 0
-                && name.find("Handle") != std::string::npos;
-            const bool corner_kitchen_handle = name.rfind("Corner ", 0) == 0
-                && name.find("Handle") != std::string::npos;
-            const bool single_facade_handle =
-                name == "Single Facade Handle";
-            if (furniture_handle || cabinet_handle || nika_handle
-                || corner_kitchen_handle || single_facade_handle) {
-                emit FurnitureInteractionRequested(object->m_id);
-                event->accept();
-                return;
-            }
+        if (CAlfaObject* handle =
+                FindInteractiveFurnitureHandleAt(event->pos())) {
+            emit FurnitureInteractionRequested(handle->m_id);
+            event->accept();
+            return;
         }
     }
 
@@ -3563,7 +3594,13 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
             || alt_navigation_modifier_down_) {
             RestoreDefaultToolCursor();
             last_mouse_ = event->pos();
-            return;
+            // Orbit still needs the idle hover pass below so interactive
+            // furniture handles can replace the orbit cursor with a hand.
+            // Modifier-driven navigation keeps its cursor unconditionally.
+            if (pan_navigation_modifier_down_
+                || alt_navigation_modifier_down_) {
+                return;
+            }
         }
     }
 
@@ -3997,55 +4034,35 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
         && !editing_sketch_
         && !dragging_solid_dimension_grip_
         && highlighted_solid_dimension_grip_.isEmpty()) {
-        // The pointing cursor is needed only for interactive furniture
-        // handles.  FindObjectForMaterialAt() tests every triangle in every
-        // solid and was previously called for every idle mouse move.  A room
-        // containing an imported IGES kettle could therefore appear complete
-        // and then freeze for more than a minute.  Test the small set of
-        // handle bodies directly instead.
-        const DomPoint screen_point{event->pos().x(), event->pos().y()};
-        auto project_world = [this](Vec3 world, DomPoint& screen, float& depth) {
-            Vec3 forward{};
-            Vec3 right{};
-            Vec3 up{};
-            viewport_camera_basis(camera_, forward, right, up);
-            depth = dot(
-                world - camera_position(camera_, orthographic_projection_),
-                forward);
-            return depth > 0.0f && renderer_.WorldToScreen(
-                world, camera_, orthographic_projection_, width(), height(),
-                screen);
-        };
-        bool hovering_handle = false;
-        float best_depth = std::numeric_limits<float>::max();
-        for (const auto& object : document_->GetObjects()) {
-            const auto* solid = object
-                ? dynamic_cast<const CSolid*>(object.get()) : nullptr;
-            if (!solid || !document_->IsObjectSelectable(*solid)) continue;
-            const std::string& name = solid->GetName();
-            if (name.find("Handle") == std::string::npos
-                || (name.find("Cabinet") == std::string::npos
-                    && name.find("Drawer") == std::string::npos
-                    && name.rfind("Single Facade", 0) != 0
-                    && name.rfind("Nika ", 0) != 0
-                    && name.rfind("Corner ", 0) != 0)) {
-                continue;
-            }
-            float depth = 0.0f;
-            if (solid->HitTestMeshScreen(
-                    screen_point, project_world, depth)
-                && depth < best_depth) {
-                best_depth = depth;
-                hovering_handle = true;
-            }
+        constexpr int kFurnitureHandleCaptureDistance = 20;
+        const QPoint captured_delta =
+            event->pos() - furniture_handle_capture_anchor_;
+        const bool keep_captured_handle = hovering_furniture_handle_
+            && hovered_furniture_handle_id_ != 0
+            && captured_delta.x() * captured_delta.x()
+                    + captured_delta.y() * captured_delta.y()
+                <= kFurnitureHandleCaptureDistance
+                    * kFurnitureHandleCaptureDistance;
+
+        CAlfaObject* hovered_handle = keep_captured_handle
+            ? document_->FindObjectById(hovered_furniture_handle_id_)
+            : FindInteractiveFurnitureHandleAt(event->pos());
+        const bool hovering_handle = hovered_handle != nullptr;
+        if (hovering_handle && !keep_captured_handle) {
+            hovered_furniture_handle_id_ = hovered_handle->m_id;
+            furniture_handle_capture_anchor_ = event->pos();
+        } else if (!hovering_handle) {
+            hovered_furniture_handle_id_ = 0;
         }
-        if (hovering_handle != hovering_furniture_handle_) {
-            hovering_furniture_handle_ = hovering_handle;
-            if (hovering_handle) {
-                setCursor(Qt::PointingHandCursor);
-            } else {
-                RestoreDefaultToolCursor();
-            }
+        const bool was_hovering_handle = hovering_furniture_handle_;
+        hovering_furniture_handle_ = hovering_handle;
+        if (hovering_handle) {
+            // Orbit restores its own cursor near the start of every idle
+            // mouse move. Reassert the hand on every pass while the handle is
+            // captured, not only on the first false -> true transition.
+            setCursor(Qt::PointingHandCursor);
+        } else if (was_hovering_handle) {
+            RestoreDefaultToolCursor();
         }
     }
 
@@ -4938,6 +4955,94 @@ bool OpenGLViewport::ApplyMaterialDrop(const QPoint& point, const Material& mate
     material_drop_after_id_ = document_material.id;
     material_drop_change_pending_ = material_drop_object_id_ != 0;
     return true;
+}
+
+CAlfaObject* OpenGLViewport::FindInteractiveFurnitureHandleAt(
+    const QPoint& point) {
+    if (!document_) {
+        return nullptr;
+    }
+
+    constexpr int kFurnitureHandleCaptureDistance = 20;
+    const QPoint captured_delta = point - furniture_handle_capture_anchor_;
+    if (hovering_furniture_handle_ && hovered_furniture_handle_id_ != 0
+        && captured_delta.x() * captured_delta.x()
+                + captured_delta.y() * captured_delta.y()
+            <= kFurnitureHandleCaptureDistance
+                * kFurnitureHandleCaptureDistance) {
+        if (CAlfaObject* captured =
+                document_->FindObjectById(hovered_furniture_handle_id_)) {
+            return captured;
+        }
+    }
+
+    // First test only the small handle bodies. This prevents an ordinary
+    // Orbit press on a complex imported room from ray-testing every triangle.
+    auto project_world = [this](Vec3 world, DomPoint& screen, float& depth) {
+        Vec3 forward{};
+        Vec3 right{};
+        Vec3 up{};
+        viewport_camera_basis(camera_, forward, right, up);
+        depth = dot(
+            world - camera_position(camera_, orthographic_projection_),
+            forward);
+        return depth > 0.0f && renderer_.WorldToScreen(
+            world, camera_, orthographic_projection_, width(), height(),
+            screen);
+    };
+
+    // Thin handles are hard to hit after perspective projection. Probe a
+    // compact 12-pixel halo around the cursor, then latch the result in the
+    // hover code for a wider 20-pixel hysteresis zone.
+    const std::array<QPoint, 13> probe_offsets = {
+        QPoint{0, 0},
+        QPoint{6, 0}, QPoint{-6, 0},
+        QPoint{0, 6}, QPoint{0, -6},
+        QPoint{6, 6}, QPoint{6, -6},
+        QPoint{-6, 6}, QPoint{-6, -6},
+        QPoint{12, 0}, QPoint{-12, 0},
+        QPoint{0, 12}, QPoint{0, -12}};
+
+    CAlfaObject* best_handle = nullptr;
+    QPoint best_probe = point;
+    int best_probe_distance_squared = std::numeric_limits<int>::max();
+    float best_depth = std::numeric_limits<float>::max();
+    for (const auto& object : document_->GetObjects()) {
+        auto* solid = object ? dynamic_cast<CSolid*>(object.get()) : nullptr;
+        if (!solid || !document_->IsObjectSelectable(*solid)
+            || !is_interactive_furniture_handle_name(solid->GetName())) {
+            continue;
+        }
+        for (const QPoint& offset : probe_offsets) {
+            const QPoint probe = point + offset;
+            const DomPoint screen_point{probe.x(), probe.y()};
+            float depth = 0.0f;
+            if (!solid->HitTestMeshScreen(
+                    screen_point, project_world, depth)) {
+                continue;
+            }
+            const int distance_squared =
+                offset.x() * offset.x() + offset.y() * offset.y();
+            if (distance_squared < best_probe_distance_squared
+                || (distance_squared == best_probe_distance_squared
+                    && depth < best_depth)) {
+                best_handle = solid;
+                best_probe = probe;
+                best_probe_distance_squared = distance_squared;
+                best_depth = depth;
+            }
+        }
+    }
+    if (!best_handle) {
+        return nullptr;
+    }
+
+    // Confirm normal scene occlusion only after the cheap handle test. This
+    // keeps a handle behind another object from reacting to the click.
+    CAlfaObject* visible_object = FindObjectForMaterialAt(best_probe);
+    return visible_object
+            && is_interactive_furniture_handle_name(visible_object->GetName())
+        ? visible_object : nullptr;
 }
 
 CAlfaObject* OpenGLViewport::FindObjectForMaterialAt(const QPoint& point) {
