@@ -7,6 +7,7 @@
 #include <functional>
 #include <array>
 #include <initializer_list>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -129,6 +130,10 @@ public:
                      std::vector<Face> faces,
                      std::vector<UV> uvs,
                      std::vector<Vec3> normals);
+    static std::unique_ptr<CMesh3D> CreateWelded(
+        const std::vector<const CMesh3D*>& meshes,
+        size_t* welded_vertex_count = nullptr,
+        float* used_tolerance = nullptr);
     void GeneratePlanarUVs();
 
     void Render();
@@ -142,6 +147,7 @@ public:
                     bool draw_on_top = false,
                     const Color* color_override = nullptr,
                     bool hidden = false) const;
+    void RenderOpenEdges() const;
     void RenderHiddenLineDepth(const Color& background) const;
     void RenderHiddenLineEdges(bool hidden, const Color& background, bool selected = false) const;
     void Render2d(float center_x, float center_y, float scale) const override;
@@ -150,6 +156,8 @@ public:
     static void SetSurfaceOpacity(float opacity);
     static MeshDisplayMode GetDisplayMode();
     static void SetDisplayMode(MeshDisplayMode mode);
+    static bool IsOpenEdgeDisplayEnabled();
+    static void SetOpenEdgeDisplayEnabled(bool enabled);
     static bool IsZebraAnalysisEnabled();
     static bool IsZebraAnalysisTarget();
     static void SetZebraAnalysisEnabled(bool enabled);
@@ -187,7 +195,7 @@ public:
     bool PrepareAndMoveVertexToTrimLine(CPolyline* pLine, std::vector<DataToMoveVerts*>& Data);
     bool FindVertexToMove(CPolyline* pLine, DataToMoveVerts* data);
     bool SplitFaceByVar5(int face_index, int v1, int edgeIndex, cVec2& pm);
-    bool SplitFaceByVar6(int face_index, int v1, int edgeIndex, cVec2& pm);
+    bool SplitFaceByVar6(int face_index, int v1, int v2, int edgeIndex, cVec2& pm);
     bool SplitFaceByVar7(int face_index, int v1, int edgeIndex);
     bool SplitFaceByVar8(int face_index, int vertexToMove, cVec2 moveTarget);
     int FindFirstFace3d(Edge ed);
@@ -222,6 +230,7 @@ private:
     mutable bool gpu_cache_dirty_ = true;
     static float s_SurfaceOpacity;
     static MeshDisplayMode s_DisplayMode;
+    static bool s_OpenEdgeDisplayEnabled;
     static bool s_ZebraAnalysisEnabled;
     static bool s_ZebraAnalysisTarget;
     static bool s_ZebraOrthographic;

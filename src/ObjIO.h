@@ -27,11 +27,13 @@ public:
                 ObjLengthUnit unit = ObjLengthUnit::Meters) const;
 
 private:
+    struct ObjExportVertexPool;
+
     bool ExportMesh(std::ostream& stream,
                     const CMesh3D& mesh,
                     const Material& material,
                     const std::string& material_name,
-                    size_t& vertex_offset,
+                    ObjExportVertexPool& vertex_pool,
                     size_t& uv_offset,
                     size_t& normal_offset,
                     size_t& next_smoothing_group,

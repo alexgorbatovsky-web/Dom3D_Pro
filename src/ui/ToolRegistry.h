@@ -81,6 +81,9 @@ public:
     bool CancelTransientTrim(const ActiveParametricObject& active_object,
                              CAlfaDoc& document) const;
     ActiveParametricObject ApplySketchFeatureToSelection(CAlfaDoc& document) const;
+    ActiveParametricObject ApplyHole(CAlfaDoc& document,
+                                     unsigned long body_id,
+                                     const std::vector<ToolParameter>& parameters) const;
     ActiveParametricObject ApplyOffsetFaceToSelection(CAlfaDoc& document) const;
     bool ApplyOffsetFaceOnce(CAlfaDoc& document, double distance) const;
     void Rebuild(const ActiveParametricObject& active_object, CAlfaDoc& document) const;

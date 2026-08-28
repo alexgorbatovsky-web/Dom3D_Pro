@@ -46,6 +46,7 @@
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepFilletAPI_MakeChamfer.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
+#include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepGProp.hxx>
 #include <GC_MakeArcOfCircle.hxx>
@@ -604,10 +605,67 @@ bool apply_sketch_feature(CSolid& solid,
     }
 
     const SketchCoordinateSystem& system = sketch->GetCoordinateSystem();
-    const Vec3 outward_normal = normalize(Vec3{
+    const Vec3 sketch_origin{
+        static_cast<float>(system.origin.x),
+        static_cast<float>(system.origin.y),
+        static_cast<float>(system.origin.z)};
+    const Vec3 sketch_normal = normalize(Vec3{
         static_cast<float>(system.normal.x),
         static_cast<float>(system.normal.y),
         static_cast<float>(system.normal.z)});
+    Vec3 outward_normal = sketch_normal;
+    const int saved_face_index = static_cast<int>(
+        param(parameters, "face.index", -1.0));
+    Vec3 face_center{};
+    Vec3 face_normal{};
+    bool resolved_host_face = false;
+    if (saved_face_index >= 0
+        && solid.GetFaceCenterAndNormal(
+            saved_face_index, face_center, face_normal)) {
+        face_normal = normalize(face_normal);
+        // A sketch coordinate system describes its 2D parametrization; its
+        // normal is not guaranteed to be the outward normal of the host face.
+        // Boss/Pocket direction, however, is defined by that oriented face.
+        // Only trust the saved face when it is still coplanar with the sketch;
+        // a later boolean can legitimately change face numbering.
+        const double plane_distance = std::fabs(static_cast<double>(
+            dot(face_center - sketch_origin, face_normal)));
+        if (dot(face_normal, face_normal) > 1.0e-12f
+            && plane_distance <= 1.0e-3) {
+            outward_normal = face_normal;
+            resolved_host_face = true;
+        }
+    }
+    if (!resolved_host_face) {
+        double best_plane_distance = std::numeric_limits<double>::max();
+        for (int face_index = 0;
+             face_index < solid.GetNumSurfaces(); ++face_index) {
+            const TopoDS_Face face = solid.GetTopoFace(face_index);
+            if (face.IsNull())
+                continue;
+            try {
+                if (BRepAdaptor_Surface(face, true).GetType() != GeomAbs_Plane)
+                    continue;
+            } catch (const Standard_Failure&) {
+                continue;
+            }
+            Vec3 candidate_center{};
+            Vec3 candidate_normal{};
+            if (!solid.GetFaceCenterAndNormal(
+                    face_index, candidate_center, candidate_normal)) {
+                continue;
+            }
+            candidate_normal = normalize(candidate_normal);
+            if (std::fabs(dot(candidate_normal, sketch_normal)) < 0.999f)
+                continue;
+            const double plane_distance = std::fabs(static_cast<double>(
+                dot(candidate_center - sketch_origin, candidate_normal)));
+            if (plane_distance < best_plane_distance) {
+                best_plane_distance = plane_distance;
+                outward_normal = candidate_normal;
+            }
+        }
+    }
     const double depth = param(parameters, "depth", 10.0);
     const double taper = param(parameters, "taper", 0.0);
     const SketchFeatureOperation operation =
@@ -1095,6 +1153,120 @@ double saved_param(const std::vector<ParametricParameterValue>& parameters,
         }
     }
     return fallback;
+}
+
+Vec3 hole_center_from_references(const std::vector<ToolParameter>& parameters) {
+    const Vec3 saved_center{
+        static_cast<float>(param(parameters, "hole.center.x", 0.0)),
+        static_cast<float>(param(parameters, "hole.center.y", 0.0)),
+        static_cast<float>(param(parameters, "hole.center.z", 0.0))};
+    if (param(parameters, "hole.refs.valid", 0.0) < 0.5)
+        return saved_center;
+
+    Vec3 face_normal{
+        static_cast<float>(param(parameters, "hole.normal.x", 0.0)),
+        static_cast<float>(param(parameters, "hole.normal.y", 0.0)),
+        static_cast<float>(param(parameters, "hole.normal.z", 1.0))};
+    face_normal = normalize(face_normal);
+    std::array<Vec3, 2> starts{};
+    std::array<Vec3, 2> ends{};
+    std::array<double, 2> sides{};
+    std::array<double, 2> distances{};
+    for (int index = 0; index < 2; ++index) {
+        const std::string prefix = "hole.edge" + std::to_string(index + 1);
+        starts[static_cast<size_t>(index)] = {
+            static_cast<float>(param(parameters, (prefix + ".start.x").c_str(), 0.0)),
+            static_cast<float>(param(parameters, (prefix + ".start.y").c_str(), 0.0)),
+            static_cast<float>(param(parameters, (prefix + ".start.z").c_str(), 0.0))};
+        ends[static_cast<size_t>(index)] = {
+            static_cast<float>(param(parameters, (prefix + ".end.x").c_str(), 0.0)),
+            static_cast<float>(param(parameters, (prefix + ".end.y").c_str(), 0.0)),
+            static_cast<float>(param(parameters, (prefix + ".end.z").c_str(), 0.0))};
+        sides[static_cast<size_t>(index)] =
+            param(parameters, (prefix + ".side").c_str(), 1.0) < 0.0 ? -1.0 : 1.0;
+        distances[static_cast<size_t>(index)] = param(
+            parameters, index == 0 ? "hole.distance1" : "hole.distance2", 0.0);
+    }
+
+    const Vec3 direction1 = normalize(ends[0] - starts[0]);
+    const Vec3 direction2 = normalize(ends[1] - starts[1]);
+    const Vec3 normal1 = normalize(cross(face_normal, direction1));
+    const Vec3 normal2 = normalize(cross(face_normal, direction2));
+    const double determinant = dot(normal1, cross(normal2, face_normal));
+    if (std::fabs(determinant) <= 1.0e-8)
+        return saved_center;
+
+    const double rhs1 = dot(normal1, starts[0]) + sides[0] * distances[0];
+    const double rhs2 = dot(normal2, starts[1]) + sides[1] * distances[1];
+    const double rhs3 = dot(face_normal, saved_center);
+    const Vec3 result = (cross(normal2, face_normal) * static_cast<float>(rhs1)
+        + cross(face_normal, normal1) * static_cast<float>(rhs2)
+        + cross(normal1, normal2) * static_cast<float>(rhs3))
+        * static_cast<float>(1.0 / determinant);
+    return result;
+}
+
+bool apply_hole(CSolid& solid, const std::vector<ToolParameter>& parameters) {
+    if (solid.m_Shape.IsNull())
+        return false;
+    const double diameter = param(parameters, "diameter", 10.0);
+    const int hole_type = static_cast<int>(param(parameters, "hole_type", 0.0));
+    const double requested_depth = param(parameters, "depth", 10.0);
+    const Vec3 center = hole_center_from_references(parameters);
+    Vec3 outward{
+        static_cast<float>(param(parameters, "hole.normal.x", 0.0)),
+        static_cast<float>(param(parameters, "hole.normal.y", 0.0)),
+        static_cast<float>(param(parameters, "hole.normal.z", 1.0))};
+    outward = normalize(outward);
+    if (!std::isfinite(diameter) || diameter <= 0.000001
+        || dot(outward, outward) <= 0.000001f
+        || (hole_type != 0
+            && (!std::isfinite(requested_depth) || requested_depth <= 0.000001))) {
+        return false;
+    }
+
+    double shape_diagonal = std::max(diameter, 1.0);
+    Bnd_Box bounds;
+    BRepBndLib::Add(solid.m_Shape, bounds);
+    if (!bounds.IsVoid()) {
+        Standard_Real xmin = 0.0;
+        Standard_Real ymin = 0.0;
+        Standard_Real zmin = 0.0;
+        Standard_Real xmax = 0.0;
+        Standard_Real ymax = 0.0;
+        Standard_Real zmax = 0.0;
+        bounds.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+        shape_diagonal = std::max(
+            shape_diagonal,
+            std::sqrt((xmax - xmin) * (xmax - xmin)
+                + (ymax - ymin) * (ymax - ymin)
+                + (zmax - zmin) * (zmax - zmin)));
+    }
+    const double outside_extension = std::max(
+        {diameter, shape_diagonal * 0.05, 0.01});
+    const double cut_depth = hole_type == 0
+        ? shape_diagonal + outside_extension * 2.0
+        : requested_depth + outside_extension;
+    const Vec3 start = center + outward * static_cast<float>(outside_extension);
+    const Vec3 inward = outward * -1.0f;
+
+    try {
+        const TopoDS_Shape cylinder = BRepPrimAPI_MakeCylinder(
+            gp_Ax2(gp_Pnt(start.x, start.y, start.z),
+                   gp_Dir(inward.x, inward.y, inward.z)),
+            diameter * 0.5,
+            cut_depth).Shape();
+        BRepAlgoAPI_Cut cut(solid.m_Shape, cylinder);
+        cut.Build();
+        if (!cut.IsDone() || cut.Shape().IsNull())
+            return false;
+        solid.m_Shape = cut.Shape();
+    } catch (const Standard_Failure&) {
+        return false;
+    }
+    solid.ClearSelectedEdge();
+    solid.ClearSelectedFace();
+    return solid.ReBuldMesh();
 }
 
 bool apply_sheet_bend(CSolid& solid,
@@ -2023,6 +2195,25 @@ bool rebuild_solid_operation_tree(const ToolRegistry& registry,
                                           active_object.parameters);
     }
 
+    // A sketch is attached to one host face and defines one Boss/Pocket
+    // feature. Older builds appended a new operation every time the tool was
+    // reopened. Two cuts with the same profile then overlap, so changing the
+    // depth of the last one appears to do nothing. Keep the latest operation
+    // for each profile when replaying legacy project histories.
+    std::set<unsigned long> latest_sketch_features;
+    for (size_t index = operations.size(); index-- > 1;) {
+        StoredOperation& operation = operations[index];
+        if (operation.tool_id != "SolidSketchFeature")
+            continue;
+        const unsigned long profile_id = static_cast<unsigned long>(
+            std::max(0.0, saved_param(
+                operation.saved_parameters, "profile.id", 0.0)));
+        if (profile_id == 0)
+            continue;
+        if (!latest_sketch_features.insert(profile_id).second)
+            operations.erase(operations.begin() + index);
+    }
+
     const StoredOperation& base_operation = operations.front();
     const ToolDefinition* base_tool = registry.Find(base_operation.tool_id);
     if (!base_tool || !base_tool->rebuild) {
@@ -2095,8 +2286,8 @@ bool rebuild_solid_operation_tree(const ToolRegistry& registry,
             const double radius_type = std::clamp(
                 param(parameters, "radius_type", 0.0), 0.0, 1.0);
             const double start_radius = radius_type >= 0.5
-                ? param(parameters, "radius_start", param(parameters, "radius", 2.0))
-                : param(parameters, "radius", 2.0);
+                ? param(parameters, "radius_start", param(parameters, "radius", 1.0))
+                : param(parameters, "radius", 1.0);
             const double end_radius = radius_type >= 0.5
                 ? param(parameters, "radius_end", start_radius) : start_radius;
             const std::vector<double> radius_points =
@@ -2114,8 +2305,8 @@ bool rebuild_solid_operation_tree(const ToolRegistry& registry,
             const double radius_type = std::clamp(
                 param(parameters, "radius_type", 0.0), 0.0, 1.0);
             const double start_radius = radius_type >= 0.5
-                ? param(parameters, "radius_start", param(parameters, "radius", 2.0))
-                : param(parameters, "radius", 2.0);
+                ? param(parameters, "radius_start", param(parameters, "radius", 1.0))
+                : param(parameters, "radius", 1.0);
             const double end_radius = radius_type >= 0.5
                 ? param(parameters, "radius_end", start_radius) : start_radius;
             const std::vector<double> radius_points =
@@ -2133,7 +2324,7 @@ bool rebuild_solid_operation_tree(const ToolRegistry& registry,
             const std::vector<ToolParameter> parameters = parameters_for_operation(registry, operation);
             if (!apply_chamfer_edges(*solid,
                                      edge_refs_from_saved_parameters(operation.saved_parameters),
-                                     param(parameters, "distance", 2.0),
+                                     param(parameters, "distance", 1.0),
                                      &operation_created_faces[i],
                                      &operation_created_faces)) {
                 return false;
@@ -2154,6 +2345,12 @@ bool rebuild_solid_operation_tree(const ToolRegistry& registry,
             const std::vector<ToolParameter> parameters =
                 parameters_for_operation(registry, operation);
             if (!apply_sketch_feature(*solid, document, parameters)) {
+                return false;
+            }
+        } else if (operation.tool_id == "SolidHole") {
+            const std::vector<ToolParameter> parameters =
+                parameters_for_operation(registry, operation);
+            if (!apply_hole(*solid, parameters)) {
                 return false;
             }
         } else if (operation.tool_id == "SolidDraft") {
@@ -5714,9 +5911,9 @@ ToolRegistry::ToolRegistry() {
         {
             {"radius_type", "Radius Type", 0.0, 0.0, 1.0, 1.0,
              ToolParameterType::Combo, {"Constant", "Variable"}},
-            {"radius", "Radius", 2.0, 0.01, 100.0, 0.1},
-            {"radius_start", "Start Radius", 2.0, 0.01, 100.0, 0.1},
-            {"radius_end", "End Radius", 4.0, 0.01, 100.0, 0.1}
+            {"radius", "Radius", 1.0, 0.01, 100.0, 0.1},
+            {"radius_start", "Start Radius", 1.0, 0.01, 100.0, 0.1},
+            {"radius_end", "End Radius", 1.0, 0.01, 100.0, 0.1}
         },
         [](CAlfaDoc&, const std::vector<ToolParameter>&) {
         },
@@ -5730,9 +5927,9 @@ ToolRegistry::ToolRegistry() {
         {
             {"radius_type", "Radius Type", 0.0, 0.0, 1.0, 1.0,
              ToolParameterType::Combo, {"Constant", "Variable"}},
-            {"radius", "Radius", 2.0, 0.01, 100.0, 0.1},
-            {"radius_start", "Start Radius", 2.0, 0.01, 100.0, 0.1},
-            {"radius_end", "End Radius", 4.0, 0.01, 100.0, 0.1}
+            {"radius", "Radius", 1.0, 0.01, 100.0, 0.1},
+            {"radius_start", "Start Radius", 1.0, 0.01, 100.0, 0.1},
+            {"radius_end", "End Radius", 1.0, 0.01, 100.0, 0.1}
         },
         [](CAlfaDoc&, const std::vector<ToolParameter>&) {
         },
@@ -5744,7 +5941,7 @@ ToolRegistry::ToolRegistry() {
         "ChamferSolid",
         "Chamfer",
         {
-            {"distance", "Distance", 2.0, 0.01, 100.0, 0.1}
+            {"distance", "Distance", 1.0, 0.01, 100.0, 0.1}
         },
         [](CAlfaDoc&, const std::vector<ToolParameter>&) {
         },
@@ -5899,6 +6096,46 @@ ToolRegistry::ToolRegistry() {
         },
         [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {
         }
+    });
+
+    tools_.push_back({
+        "SolidHole",
+        "Hole",
+        {
+            {"diameter", "Diameter", 10.0, 0.001, 1000000.0, 0.1,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"hole_type", "Type", 0.0, 0.0, 1.0, 1.0,
+                ToolParameterType::Combo, {"Through", "Depth"}},
+            {"depth", "Depth", 10.0, 0.001, 1000000.0, 0.1,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"hole.distance1", "Distance to Edge 1", 10.0, 0.0, 1000000.0, 0.1,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"hole.distance2", "Distance to Edge 2", 10.0, 0.0, 1000000.0, 0.1,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"hole.center.x", "Center X", 0.0, -1000000.0, 1000000.0, 0.1},
+            {"hole.center.y", "Center Y", 0.0, -1000000.0, 1000000.0, 0.1},
+            {"hole.center.z", "Center Z", 0.0, -1000000.0, 1000000.0, 0.1},
+            {"hole.normal.x", "Normal X", 0.0, -1.0, 1.0, 0.01},
+            {"hole.normal.y", "Normal Y", 0.0, -1.0, 1.0, 0.01},
+            {"hole.normal.z", "Normal Z", 1.0, -1.0, 1.0, 0.01},
+            {"hole.refs.valid", "Reference Edges", 0.0, 0.0, 1.0, 1.0},
+            {"hole.edge1.start.x", "Edge 1 Start X", 0.0, -1000000.0, 1000000.0, 0.1},
+            {"hole.edge1.start.y", "Edge 1 Start Y", 0.0, -1000000.0, 1000000.0, 0.1},
+            {"hole.edge1.start.z", "Edge 1 Start Z", 0.0, -1000000.0, 1000000.0, 0.1},
+            {"hole.edge1.end.x", "Edge 1 End X", 0.0, -1000000.0, 1000000.0, 0.1},
+            {"hole.edge1.end.y", "Edge 1 End Y", 0.0, -1000000.0, 1000000.0, 0.1},
+            {"hole.edge1.end.z", "Edge 1 End Z", 0.0, -1000000.0, 1000000.0, 0.1},
+            {"hole.edge1.side", "Edge 1 Side", 1.0, -1.0, 1.0, 1.0},
+            {"hole.edge2.start.x", "Edge 2 Start X", 0.0, -1000000.0, 1000000.0, 0.1},
+            {"hole.edge2.start.y", "Edge 2 Start Y", 0.0, -1000000.0, 1000000.0, 0.1},
+            {"hole.edge2.start.z", "Edge 2 Start Z", 0.0, -1000000.0, 1000000.0, 0.1},
+            {"hole.edge2.end.x", "Edge 2 End X", 0.0, -1000000.0, 1000000.0, 0.1},
+            {"hole.edge2.end.y", "Edge 2 End Y", 0.0, -1000000.0, 1000000.0, 0.1},
+            {"hole.edge2.end.z", "Edge 2 End Z", 0.0, -1000000.0, 1000000.0, 0.1},
+            {"hole.edge2.side", "Edge 2 Side", 1.0, -1.0, 1.0, 1.0}
+        },
+        [](CAlfaDoc&, const std::vector<ToolParameter>&) {},
+        [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {}
     });
 
     tools_.push_back({
@@ -6191,6 +6428,26 @@ ToolRegistry::ToolRegistry() {
                 ? dynamic_cast<const CAssembled*>(objects[index].get()) : nullptr;
             rebuild_component_assembly(
                 document, index, room_parts(document, parameters, room), parameters, "room");
+        }
+    });
+
+    tools_.push_back({
+        "MeshIslandBoundaries",
+        "Surface Island Boundaries",
+        {},
+        [](CAlfaDoc&, const std::vector<ToolParameter>&) {
+        },
+        [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {
+        }
+    });
+
+    tools_.push_back({
+        "WeldingVertex",
+        "Welding Vertex",
+        {},
+        [](CAlfaDoc&, const std::vector<ToolParameter>&) {
+        },
+        [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {
         }
     });
 
@@ -7334,6 +7591,24 @@ ActiveParametricObject ToolRegistry::ApplySketchFeatureToSelection(
         }
     }
 
+    // Reopening Boss/Pocket for the same attached sketch edits its existing
+    // feature. Appending another operation with the identical profile makes
+    // overlapping cuts hide each other's Depth changes.
+    for (int operation_index = body->GetNumOperations() - 1;
+         operation_index >= 1; --operation_index) {
+        const ParametricFunction* operation = body->GetOperation(operation_index);
+        if (!operation || operation->ToolId != kToolId)
+            continue;
+        const unsigned long operation_profile_id = static_cast<unsigned long>(
+            std::max(0.0, saved_param(
+                operation->Parameters, "profile.id", 0.0)));
+        if (operation_profile_id == sketch->m_id) {
+            return ActiveObjectFromDocument(
+                body_index, *body, static_cast<size_t>(operation_index),
+                &document);
+        }
+    }
+
     const TopoDS_Shape previous_shape = body->m_Shape;
     if (!apply_sketch_feature(*body, document, parameters)) {
         return {};
@@ -7344,6 +7619,43 @@ ActiveParametricObject ToolRegistry::ApplySketchFeatureToSelection(
         operation_index,
         kToolId,
         tool->label,
+        parameter_values(parameters),
+        body->FindCreatedSurfaceIndices(previous_shape));
+    document.UpdateAttachedSketches();
+    return {kToolId, body_index, operation_index, std::move(parameters)};
+}
+
+ActiveParametricObject ToolRegistry::ApplyHole(
+    CAlfaDoc& document,
+    unsigned long body_id,
+    const std::vector<ToolParameter>& input_parameters) const {
+    constexpr const char* kToolId = "SolidHole";
+    const ToolDefinition* tool = Find(kToolId);
+    const size_t body_index = document.FindObjectIndexById(body_id);
+    auto& objects = document.GetObjects();
+    auto* body = body_index < objects.size()
+        ? dynamic_cast<CSolid*>(objects[body_index].get()) : nullptr;
+    if (!tool || !body || body->GetNumOperations() <= 0)
+        return {};
+
+    std::vector<ToolParameter> parameters = tool->defaults;
+    for (ToolParameter& parameter : parameters) {
+        const auto found = std::find_if(
+            input_parameters.begin(), input_parameters.end(),
+            [&parameter](const ToolParameter& input) {
+                return input.id == parameter.id;
+            });
+        if (found != input_parameters.end())
+            parameter.value = found->value;
+    }
+
+    const TopoDS_Shape previous_shape = body->m_Shape;
+    if (!apply_hole(*body, parameters))
+        return {};
+    const size_t operation_index =
+        static_cast<size_t>(body->GetNumOperations());
+    body->SetParametricOperation(
+        operation_index, kToolId, tool->label,
         parameter_values(parameters),
         body->FindCreatedSurfaceIndices(previous_shape));
     document.UpdateAttachedSketches();

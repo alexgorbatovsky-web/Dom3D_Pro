@@ -98,7 +98,8 @@ CMesh3D::Face make_face(std::initializer_list<size_t> indices)
     return CMesh3D::Face(indices);
 }
 
-std::vector<CMesh3D::Face> triangulate_polygon(const std::vector<Vec3>& vertices, Vec3 normal)
+std::vector<CMesh3D::Face> triangulate_polygon(
+    const std::vector<Vec3>& vertices, Vec3 normal, size_t ear_offset)
 {
     std::vector<CMesh3D::Face> faces;
     if (vertices.size() < 3)
@@ -118,7 +119,10 @@ std::vector<CMesh3D::Face> triangulate_polygon(const std::vector<Vec3>& vertices
     size_t guard = 0;
     while (polygon.size() > 3 && guard++ < vertices.size() * vertices.size()) {
         bool clipped = false;
-        for (size_t i = 0; i < polygon.size(); ++i) {
+        const size_t ear_start = (ear_offset
+            + guard * (ear_offset * 2U + 1U)) % polygon.size();
+        for (size_t step = 0; step < polygon.size(); ++step) {
+            const size_t i = (ear_start + step) % polygon.size();
             const size_t previous = polygon[(i + polygon.size() - 1) % polygon.size()];
             const size_t current = polygon[i];
             const size_t next = polygon[(i + 1) % polygon.size()];
@@ -448,7 +452,10 @@ void ContourQuadrangulator::Quadrangulate(CMesh3D* res)
         return;
     }
 
-    if (!Build3DCoatQuadrangulation(vertices_, faces_, res)) {
+    // Production must use the faithful 3DCoat candidate.  The alternative
+    // "safe" ordering is a Dom-specific heuristic and can choose a different
+    // advancing-front sequence for exactly the same ContourToFill mesh.
+    if (!Build3DCoatQuadrangulation(vertices_, faces_, res, true)) {
         res->Clear();
     }
 }
@@ -468,4 +475,423 @@ bool FillContorByTriangles(CMesh3D* mesh, const std::vector<Vec3>& contour, Vec3
 bool FillContourByTriangles(CMesh3D* mesh, const std::vector<Vec3>& contour, Vec3 normal)
 {
     return FillContorByTriangles(mesh, contour, normal);
+}
+
+bool FillContourByEarTriangles(CMesh3D* mesh,
+                               const std::vector<Vec3>& contour,
+                               Vec3 normal, size_t ear_offset)
+{
+    if (!mesh || contour.size() < 3)
+        return false;
+    std::vector<Vec3> vertices;
+    vertices.reserve(contour.size());
+    for (Vec3 point : contour) {
+        if (vertices.empty()
+            || length_sq(point - vertices.back()) > 0.00000001f) {
+            vertices.push_back(point);
+        }
+    }
+    if (vertices.size() > 1
+        && length_sq(vertices.front() - vertices.back()) <= 0.00000001f) {
+        vertices.pop_back();
+    }
+    if (vertices.size() < 3)
+        return false;
+
+    normal = normalize(normal);
+    if (length_sq(normal) <= 0.000001f)
+        normal = {0.0f, 0.0f, 1.0f};
+    std::vector<CMesh3D::Face> faces = triangulate_polygon(
+        vertices, normal, ear_offset);
+    if (faces.size() != vertices.size() - 2) {
+        mesh->Clear();
+        return false;
+    }
+    std::vector<Vec3> normals(vertices.size(), normal);
+    return mesh->SetGeometry(
+        std::move(vertices), std::move(faces), {}, std::move(normals));
+}
+
+bool FillContourByQuadEars(CMesh3D* mesh,
+                           const std::vector<Vec3>& contour,
+                           Vec3 normal, size_t ear_offset)
+{
+    if (!mesh || contour.size() < 4)
+        return false;
+    std::vector<Vec3> vertices;
+    vertices.reserve(contour.size());
+    for (Vec3 point : contour) {
+        if (vertices.empty()
+            || length_sq(point - vertices.back()) > 0.00000001f) {
+            vertices.push_back(point);
+        }
+    }
+    if (vertices.size() > 1
+        && length_sq(vertices.front() - vertices.back()) <= 0.00000001f) {
+        vertices.pop_back();
+    }
+    if (vertices.size() < 4 || (vertices.size() & 1U) != 0U)
+        return false;
+
+    normal = normalize(normal);
+    if (length_sq(normal) <= 0.000001f)
+        normal = {0.0f, 0.0f, 1.0f};
+    const std::vector<Vec2> projected = project_points(vertices, normal);
+    std::vector<size_t> polygon(vertices.size());
+    std::iota(polygon.begin(), polygon.end(), size_t{0});
+    if (signed_area(projected) < 0.0f)
+        std::reverse(polygon.begin(), polygon.end());
+
+    constexpr float epsilon = 0.000001f;
+    const auto on_segment = [&](Vec2 point, Vec2 a, Vec2 b) {
+        if (std::fabs(cross2(a, b, point)) > epsilon)
+            return false;
+        return point.x >= std::min(a.x, b.x) - epsilon
+            && point.x <= std::max(a.x, b.x) + epsilon
+            && point.y >= std::min(a.y, b.y) - epsilon
+            && point.y <= std::max(a.y, b.y) + epsilon;
+    };
+    const auto segments_intersect = [&](Vec2 a, Vec2 b, Vec2 c, Vec2 d) {
+        const float ab_c = cross2(a, b, c);
+        const float ab_d = cross2(a, b, d);
+        const float cd_a = cross2(c, d, a);
+        const float cd_b = cross2(c, d, b);
+        if ((ab_c > epsilon && ab_d < -epsilon
+                || ab_c < -epsilon && ab_d > epsilon)
+            && (cd_a > epsilon && cd_b < -epsilon
+                || cd_a < -epsilon && cd_b > epsilon)) {
+            return true;
+        }
+        return on_segment(c, a, b) || on_segment(d, a, b)
+            || on_segment(a, c, d) || on_segment(b, c, d);
+    };
+    const auto inside_polygon = [&](Vec2 point,
+                                    const std::vector<size_t>& indices) {
+        bool inside = false;
+        for (size_t i = 0, previous = indices.size() - 1;
+             i < indices.size(); previous = i++) {
+            const Vec2 a = projected[indices[previous]];
+            const Vec2 b = projected[indices[i]];
+            if (on_segment(point, a, b))
+                return true;
+            if ((a.y > point.y) != (b.y > point.y)) {
+                const float intersection_x = a.x
+                    + (point.y - a.y) * (b.x - a.x) / (b.y - a.y);
+                if (intersection_x > point.x)
+                    inside = !inside;
+            }
+        }
+        return inside;
+    };
+    const auto point_in_quad = [&](Vec2 point,
+                                   const std::array<size_t, 4>& quad) {
+        bool inside = false;
+        for (size_t i = 0, previous = 3; i < 4; previous = i++) {
+            const Vec2 a = projected[quad[previous]];
+            const Vec2 b = projected[quad[i]];
+            if (on_segment(point, a, b))
+                return true;
+            if ((a.y > point.y) != (b.y > point.y)) {
+                const float intersection_x = a.x
+                    + (point.y - a.y) * (b.x - a.x) / (b.y - a.y);
+                if (intersection_x > point.x)
+                    inside = !inside;
+            }
+        }
+        return inside;
+    };
+
+    std::vector<CMesh3D::Face> faces;
+    const auto append_face = [&faces](const auto& indices) {
+        CMesh3D::Face face;
+        for (size_t index : indices)
+            face.corners.push_back({index, index, index});
+        faces.push_back(std::move(face));
+    };
+    const auto clip_quad_ears = [&](const auto& self,
+                                    std::vector<size_t> current,
+                                    size_t depth) -> bool {
+        if (current.size() == 4) {
+            double area = 0.0;
+            for (size_t i = 0; i < 4; ++i) {
+                const Vec2 a = projected[current[i]];
+                const Vec2 b = projected[current[(i + 1) % 4]];
+                area += static_cast<double>(a.x) * b.y
+                    - static_cast<double>(b.x) * a.y;
+            }
+            if (area <= epsilon)
+                return false;
+            append_face(current);
+            return true;
+        }
+        const size_t count = current.size();
+        const size_t start = (ear_offset
+            + depth * (ear_offset * 2U + 1U)) % count;
+        for (size_t step = 0; step < count; ++step) {
+            const size_t first = (start + step) % count;
+            const size_t second = (first + 1) % count;
+            const size_t third = (first + 2) % count;
+            const size_t fourth = (first + 3) % count;
+            const std::array<size_t, 4> quad{
+                current[first], current[second],
+                current[third], current[fourth]};
+            const Vec2 diagonal_a = projected[quad[0]];
+            const Vec2 diagonal_b = projected[quad[3]];
+            bool valid = inside_polygon(
+                {(diagonal_a.x + diagonal_b.x) * 0.5f,
+                 (diagonal_a.y + diagonal_b.y) * 0.5f}, current);
+            for (size_t edge = 0; valid && edge < count; ++edge) {
+                const size_t edge_next = (edge + 1) % count;
+                if (edge == first || edge_next == first
+                    || edge == fourth || edge_next == fourth) {
+                    continue;
+                }
+                valid = !segments_intersect(
+                    diagonal_a, diagonal_b,
+                    projected[current[edge]], projected[current[edge_next]]);
+            }
+            for (size_t candidate : current) {
+                if (!valid)
+                    break;
+                if (std::find(quad.begin(), quad.end(), candidate) != quad.end())
+                    continue;
+                if (point_in_quad(projected[candidate], quad))
+                    valid = false;
+            }
+            if (!valid)
+                continue;
+
+            std::vector<size_t> remainder;
+            remainder.reserve(count - 2);
+            for (size_t i = 0; i < count; ++i) {
+                if (i != second && i != third)
+                    remainder.push_back(current[i]);
+            }
+            const size_t saved_face_count = faces.size();
+            append_face(quad);
+            if (self(self, std::move(remainder), depth + 1))
+                return true;
+            faces.resize(saved_face_count);
+        }
+        return false;
+    };
+    if (!clip_quad_ears(clip_quad_ears, polygon, 0)) {
+        mesh->Clear();
+        return false;
+    }
+    std::vector<Vec3> normals(vertices.size(), normal);
+    return mesh->SetGeometry(
+        std::move(vertices), std::move(faces), {}, std::move(normals));
+}
+
+bool PairTriangleMeshToQuads(const CMesh3D* triangles, CMesh3D* quads)
+{
+    if (!triangles || !quads)
+        return false;
+    const std::vector<Vec3>& vertices = triangles->GetVertices();
+    const std::vector<CMesh3D::Face>& source_faces = triangles->GetFaces();
+    if (vertices.empty() || source_faces.empty()
+        || (source_faces.size() & 1U) != 0U) {
+        return false;
+    }
+    for (const CMesh3D::Face& face : source_faces) {
+        if (face.deleted || face.corners.size() != 3)
+            return false;
+    }
+
+    using Edge = std::pair<size_t, size_t>;
+    const auto build_quad_cycle = [&](size_t first_face, size_t second_face,
+                                      std::vector<size_t>& cycle) {
+        std::map<size_t, std::vector<size_t>> boundary_adjacency;
+        std::map<Edge, int> edge_counts;
+        for (size_t face_index : {first_face, second_face}) {
+            const CMesh3D::Face& face = source_faces[face_index];
+            for (size_t corner = 0; corner < 3; ++corner) {
+                const size_t a = face.corners[corner].v;
+                const size_t b = face.corners[(corner + 1) % 3].v;
+                ++edge_counts[std::minmax(a, b)];
+            }
+        }
+        for (const auto& [edge, count] : edge_counts) {
+            if (count != 1)
+                continue;
+            boundary_adjacency[edge.first].push_back(edge.second);
+            boundary_adjacency[edge.second].push_back(edge.first);
+        }
+        if (boundary_adjacency.size() != 4)
+            return false;
+        cycle.clear();
+        cycle.reserve(4);
+        size_t previous = std::numeric_limits<size_t>::max();
+        size_t current = boundary_adjacency.begin()->first;
+        for (size_t i = 0; i < 4; ++i) {
+            cycle.push_back(current);
+            const auto& neighbours = boundary_adjacency[current];
+            if (neighbours.size() != 2)
+                return false;
+            const size_t next = neighbours[0] != previous
+                ? neighbours[0] : neighbours[1];
+            previous = current;
+            current = next;
+        }
+        if (current != cycle.front())
+            return false;
+
+        const CMesh3D::Face& reference = source_faces[first_face];
+        const Vec3 reference_normal = cross(
+            vertices[reference.corners[1].v] - vertices[reference.corners[0].v],
+            vertices[reference.corners[2].v] - vertices[reference.corners[0].v]);
+        Vec3 cycle_normal{};
+        for (size_t i = 0; i < cycle.size(); ++i)
+            cycle_normal = cycle_normal
+                + cross(vertices[cycle[i]], vertices[cycle[(i + 1) % cycle.size()]]);
+        if (dot(cycle_normal, reference_normal) < 0.0f)
+            std::reverse(cycle.begin(), cycle.end());
+
+        // Do not reject a pair locally by its arithmetic centre. Bridged
+        // contours can require such a concave pair for a complete matching.
+        // The finished quad mesh is validated against the complete patch in
+        // CSurfaceFace::MakeFilledContour(), where the correct domain is known.
+        return true;
+    };
+
+    std::map<Edge, size_t> edge_owner;
+    std::vector<std::vector<size_t>> adjacency(source_faces.size());
+    for (size_t face_index = 0; face_index < source_faces.size(); ++face_index) {
+        const CMesh3D::Face& face = source_faces[face_index];
+        for (size_t corner = 0; corner < 3; ++corner) {
+            const size_t a = face.corners[corner].v;
+            const size_t b = face.corners[(corner + 1) % 3].v;
+            if (a >= vertices.size() || b >= vertices.size() || a == b)
+                return false;
+            const Edge edge = std::minmax(a, b);
+            const auto [owner, inserted] = edge_owner.emplace(edge, face_index);
+            if (!inserted) {
+                const size_t other = owner->second;
+                std::vector<size_t> quad_cycle;
+                if (build_quad_cycle(face_index, other, quad_cycle)) {
+                    adjacency[face_index].push_back(other);
+                    adjacency[other].push_back(face_index);
+                }
+            }
+        }
+    }
+
+    std::vector<std::array<int, 2>> memo(
+        source_faces.size(), std::array<int, 2>{-1, -1});
+    const auto can_match = [&](const auto& self, size_t face, size_t parent,
+                               bool matched_to_parent) -> bool {
+        int& cached = memo[face][matched_to_parent ? 1 : 0];
+        if (cached >= 0)
+            return cached != 0;
+        std::vector<size_t> children;
+        for (size_t neighbour : adjacency[face]) {
+            if (neighbour != parent)
+                children.push_back(neighbour);
+        }
+        if (matched_to_parent) {
+            for (size_t child : children) {
+                if (!self(self, child, face, false))
+                    return cached = 0;
+            }
+            return cached = 1;
+        }
+        for (size_t paired_child : children) {
+            if (!self(self, paired_child, face, true))
+                continue;
+            bool valid = true;
+            for (size_t child : children) {
+                if (child != paired_child
+                    && !self(self, child, face, false)) {
+                    valid = false;
+                    break;
+                }
+            }
+            if (valid)
+                return cached = 1;
+        }
+        return cached = 0;
+    };
+    std::vector<size_t> component_roots;
+    std::vector<bool> component_seen(source_faces.size(), false);
+    const auto mark_component = [&](const auto& self, size_t face) -> void {
+        if (component_seen[face])
+            return;
+        component_seen[face] = true;
+        for (size_t neighbour : adjacency[face])
+            self(self, neighbour);
+    };
+    for (size_t face = 0; face < source_faces.size(); ++face) {
+        if (component_seen[face])
+            continue;
+        component_roots.push_back(face);
+        mark_component(mark_component, face);
+        if (!can_match(can_match, face, source_faces.size(), false))
+            return false;
+    }
+
+    std::vector<std::pair<size_t, size_t>> pairs;
+    const auto collect_pairs = [&](const auto& self, size_t face, size_t parent,
+                                   bool matched_to_parent) -> bool {
+        std::vector<size_t> children;
+        for (size_t neighbour : adjacency[face]) {
+            if (neighbour != parent)
+                children.push_back(neighbour);
+        }
+        if (matched_to_parent) {
+            for (size_t child : children) {
+                if (!self(self, child, face, false))
+                    return false;
+            }
+            return true;
+        }
+        for (size_t paired_child : children) {
+            if (!can_match(can_match, paired_child, face, true))
+                continue;
+            bool valid = true;
+            for (size_t child : children) {
+                if (child != paired_child
+                    && !can_match(can_match, child, face, false)) {
+                    valid = false;
+                    break;
+                }
+            }
+            if (!valid)
+                continue;
+            pairs.emplace_back(face, paired_child);
+            if (!self(self, paired_child, face, true))
+                return false;
+            for (size_t child : children) {
+                if (child != paired_child
+                    && !self(self, child, face, false)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        return false;
+    };
+    for (size_t root : component_roots) {
+        if (!collect_pairs(
+                collect_pairs, root, source_faces.size(), false)) {
+            return false;
+        }
+    }
+    if (pairs.size() * 2 != source_faces.size()) {
+        return false;
+    }
+
+    std::vector<CMesh3D::Face> quad_faces;
+    quad_faces.reserve(pairs.size());
+    for (const auto& pair : pairs) {
+        std::vector<size_t> cycle;
+        if (!build_quad_cycle(pair.first, pair.second, cycle))
+            return false;
+        CMesh3D::Face quad;
+        for (size_t vertex : cycle)
+            quad.corners.push_back({vertex, vertex, vertex});
+        quad_faces.push_back(std::move(quad));
+    }
+    return quads->SetGeometry(
+        vertices, std::move(quad_faces), {}, triangles->GetNormals());
 }

@@ -30,7 +30,7 @@ PreferencesDialog::PreferencesDialog(QWidget* parent)
     tabs->addTab(CreateProjectPage(), "Project");
     tabs->addTab(CreateModelingPage(), "Modeling");
     tabs->addTab(CreatePlaceholderPage("Draft options will be added here."), "Draft");
-    tabs->addTab(CreatePlaceholderPage("Picture and viewport options will be added here."), "Picture");
+    tabs->addTab(CreatePicturePage(), "Picture");
     tabs->setCurrentIndex(0);
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel | QDialogButtonBox::Apply, this);
@@ -113,11 +113,14 @@ QWidget* PreferencesDialog::CreateModelingPage() {
     layout->addWidget(parametrization_group);
 
     auto* flags_grid = new QGridLayout();
-    change_group_ = new QCheckBox("Change the group", page);
+    groups_enabled_ = new QCheckBox("Enable Groups", page);
+    groups_enabled_->setToolTip(
+        "When enabled, selecting or transforming one group member affects the whole group.\n"
+        "Turn this off temporarily to select and move individual members without ungrouping.");
     two_d_drag_auto_ = new QCheckBox("2D Dragin Auto", page);
     control_intersections_ = new QCheckBox("Control intersections", page);
     gizmo_3d_enable_ = new QCheckBox("Gizmo 3D Enable", page);
-    flags_grid->addWidget(change_group_, 0, 0);
+    flags_grid->addWidget(groups_enabled_, 0, 0);
     flags_grid->addWidget(two_d_drag_auto_, 0, 1);
     flags_grid->addWidget(control_intersections_, 1, 0);
     flags_grid->addWidget(gizmo_3d_enable_, 1, 1);
@@ -148,9 +151,115 @@ QWidget* PreferencesDialog::CreateProjectPage() {
         NumberDecimalSeparatorLabel(NumberDecimalSeparator::Comma),
         NumberDecimalSeparatorKey(NumberDecimalSeparator::Comma));
     form->addRow("Number separator", number_separator_);
+    auto_save_ = new QCheckBox("Auto Save", page);
+    form->addRow(auto_save_);
+    auto_save_time_ = new QSpinBox(page);
+    auto_save_time_->setRange(1, 120);
+    auto_save_time_->setSuffix(" min");
+    auto_save_time_->setToolTip(
+        "Automatically save the current project after this interval");
+    form->addRow("Time", auto_save_time_);
+    connect(auto_save_, &QCheckBox::toggled,
+            auto_save_time_, &QWidget::setEnabled);
     layout->addLayout(form);
     layout->addStretch();
     return page;
+}
+
+QWidget* PreferencesDialog::CreatePicturePage() {
+    auto* page = new QWidget(this);
+    auto* layout = new QVBoxLayout(page);
+    layout->setContentsMargins(12, 12, 12, 12);
+    layout->setSpacing(10);
+
+    auto* navigation_group = new QGroupBox("Viewport navigation", page);
+    auto* navigation_layout = new QFormLayout(navigation_group);
+    navigation_preset_ = new QComboBox(navigation_group);
+    navigation_preset_->addItem("3DCoat", "3dcoat");
+    navigation_preset_->addItem("3ds Max", "3dsmax");
+    navigation_preset_->addItem("Blender", "blender");
+    navigation_preset_->addItem("Dom-3D", "dom3d");
+    navigation_preset_->addItem("Fusion 360", "fusion360");
+    navigation_preset_->addItem("Houdini", "houdini");
+    navigation_preset_->addItem("Maya", "maya");
+    navigation_preset_->addItem("Plasticity", "plasticity");
+    navigation_preset_->addItem("Shapr3D", "shapr3d");
+    navigation_preset_->addItem("ZBrush", "zbrush");
+    navigation_preset_->setToolTip(
+        "Choose the mouse navigation controls used by an application you already know");
+    navigation_layout->addRow("Navigation preset", navigation_preset_);
+    layout->addWidget(navigation_group);
+
+    auto* controls_group = new QGroupBox("Mouse controls", page);
+    auto* controls_layout = new QFormLayout(controls_group);
+    navigation_orbit_ = new QLabel(controls_group);
+    navigation_pan_ = new QLabel(controls_group);
+    navigation_zoom_ = new QLabel(controls_group);
+    controls_layout->addRow("Orbit", navigation_orbit_);
+    controls_layout->addRow("Pan", navigation_pan_);
+    controls_layout->addRow("Zoom", navigation_zoom_);
+    layout->addWidget(controls_group);
+
+    auto* hint = new QLabel(
+        "The mouse wheel always zooms. The selected preset controls mouse-drag navigation.",
+        page);
+    hint->setWordWrap(true);
+    hint->setStyleSheet("color: palette(mid);");
+    layout->addWidget(hint);
+    layout->addStretch();
+
+    connect(navigation_preset_, &QComboBox::currentIndexChanged,
+            this, &PreferencesDialog::UpdateNavigationPreview);
+    UpdateNavigationPreview();
+    return page;
+}
+
+void PreferencesDialog::UpdateNavigationPreview() {
+    if (!navigation_preset_ || !navigation_orbit_
+        || !navigation_pan_ || !navigation_zoom_) {
+        return;
+    }
+    const QString preset = navigation_preset_->currentData().toString();
+    QString orbit;
+    QString pan;
+    QString zoom = "Mouse wheel";
+    if (preset == "dom3d") {
+        orbit = "LMB (Orbit tool)";
+        pan = "MMB or Ctrl + LMB (Orbit tool)";
+        zoom = "RMB drag or mouse wheel";
+    } else if (preset == "3dcoat") {
+        orbit = "LMB (Orbit tool) or Alt + LMB";
+        pan = "MMB or Alt + MMB";
+        zoom = "RMB drag, Alt + RMB, or mouse wheel";
+    } else if (preset == "3dsmax") {
+        orbit = "Alt + MMB";
+        pan = "MMB";
+        zoom = "Ctrl + Alt + MMB or mouse wheel";
+    } else if (preset == "maya") {
+        orbit = "Alt + LMB";
+        pan = "Alt + MMB";
+        zoom = "Alt + RMB or mouse wheel";
+    } else if (preset == "fusion360") {
+        orbit = "Shift + MMB";
+        pan = "MMB";
+    } else if (preset == "blender" || preset == "plasticity") {
+        orbit = "MMB";
+        pan = "Shift + MMB";
+    } else if (preset == "houdini") {
+        orbit = "Alt + LMB";
+        pan = "Alt + MMB";
+        zoom = "Alt + RMB or mouse wheel";
+    } else if (preset == "zbrush") {
+        orbit = "RMB";
+        pan = "Alt + RMB";
+        zoom = "Ctrl + RMB or mouse wheel";
+    } else if (preset == "shapr3d") {
+        orbit = "RMB";
+        pan = "MMB or Shift + RMB";
+    }
+    navigation_orbit_->setText(orbit);
+    navigation_pan_->setText(pan);
+    navigation_zoom_->setText(zoom);
 }
 
 QWidget* PreferencesDialog::CreatePlaceholderPage(const QString& text) {
@@ -174,6 +283,12 @@ void PreferencesDialog::LoadSettings() {
     const int separator_index = number_separator_->findData(separator_key);
     number_separator_->setCurrentIndex(separator_index >= 0 ? separator_index : 0);
 
+    auto_save_->setChecked(settings.value(
+        "preferences/project/autoSave", false).toBool());
+    auto_save_time_->setValue(settings.value(
+        "preferences/project/autoSaveMinutes", 10).toInt());
+    auto_save_time_->setEnabled(auto_save_->isChecked());
+
     tolerance_modeling_->setValue(settings.value("preferences/modeling/tolerance", 0.02).toDouble());
     delete_loop_->setChecked(settings.value("preferences/modeling/deleteLoop", true).toBool());
     offset_corner_->setChecked(settings.value("preferences/modeling/offsetCornerMode", "corner").toString() == "corner");
@@ -187,10 +302,19 @@ void PreferencesDialog::LoadSettings() {
     parametrization_ortho_->setChecked(parametrization == "ortho");
     parametrization_max_template_->setChecked(parametrization != "none" && parametrization != "ortho");
 
-    change_group_->setChecked(settings.value("preferences/modeling/changeGroup", true).toBool());
+    groups_enabled_->setChecked(
+        settings.value("preferences/modeling/changeGroup", true).toBool());
     two_d_drag_auto_->setChecked(settings.value("preferences/modeling/2dDragAuto", false).toBool());
     control_intersections_->setChecked(settings.value("preferences/modeling/controlIntersections", false).toBool());
     gizmo_3d_enable_->setChecked(settings.value("preferences/modeling/gizmo3dEnable", true).toBool());
+
+    const QString navigation_preset = settings.value(
+        "preferences/picture/navigationPreset", "dom3d").toString();
+    const int navigation_index = navigation_preset_->findData(navigation_preset);
+    const int dom3d_navigation_index = navigation_preset_->findData("dom3d");
+    navigation_preset_->setCurrentIndex(
+        navigation_index >= 0 ? navigation_index : dom3d_navigation_index);
+    UpdateNavigationPreview();
 
 }
 
@@ -201,6 +325,11 @@ void PreferencesDialog::ApplySettings() {
     SaveNumberDecimalSeparator(NumberDecimalSeparatorFromKey(
         number_separator_->currentData().toString()));
     ApplyNumberInputLocale();
+
+    settings.setValue(
+        "preferences/project/autoSave", auto_save_->isChecked());
+    settings.setValue(
+        "preferences/project/autoSaveMinutes", auto_save_time_->value());
 
     settings.setValue("preferences/modeling/tolerance", tolerance_modeling_->value());
     settings.setValue("preferences/modeling/deleteLoop", delete_loop_->isChecked());
@@ -216,9 +345,13 @@ void PreferencesDialog::ApplySettings() {
         parametrization = "ortho";
     }
     settings.setValue("preferences/modeling/parametrization", parametrization);
-    settings.setValue("preferences/modeling/changeGroup", change_group_->isChecked());
+    settings.setValue(
+        "preferences/modeling/changeGroup", groups_enabled_->isChecked());
     settings.setValue("preferences/modeling/2dDragAuto", two_d_drag_auto_->isChecked());
     settings.setValue("preferences/modeling/controlIntersections", control_intersections_->isChecked());
     settings.setValue("preferences/modeling/gizmo3dEnable", gizmo_3d_enable_->isChecked());
+    settings.setValue(
+        "preferences/picture/navigationPreset",
+        navigation_preset_->currentData().toString());
     emit SettingsApplied();
 }

@@ -59,6 +59,19 @@ C:\My_projects\Dom3D_Pro\build\Dom3D_Pro.sln
 
 Подробно: `VISUAL_STUDIO.md`.
 
+## База знаний
+
+- [Wiki Dom3D Pro](docs/knowledge/README.md)
+- [Автоматическая карта исходников](docs/knowledge/generated/project-map.md)
+- [CMesh3D::TrimByPline — карта метода](docs/knowledge/mesh/trimming/trim-by-pline.md)
+- [Тримминг сетки: острова как эталон для SLX](docs/knowledge/mesh-trimming-slx-islands-reference.md)
+
+Открыть локальную HTML-Wiki:
+
+```powershell
+cmake --build build --target OpenWiki --config Release
+```
+
 ### Через консоль
 
 Открой `Developer Command Prompt for Visual Studio` и выполни:

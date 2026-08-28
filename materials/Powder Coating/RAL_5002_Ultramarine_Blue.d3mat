@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<material version="1" id="41008" name="Powder Coating RAL 5002 Ultramarine Blue" alpha="1" specular="0.32" shininess="42" reflectivity="0.04" roughness="0.64" metallic="0" coatWeight="0" coatRoughness="0.12" normalStrength="0.12" displacementScale="0" textureOffsetU="0" textureOffsetV="0" textureScaleU="0.4" textureScaleV="0.4" textureRotation="0" textureFitToSurface="0">
+    <ambient r="0.027608" g="0.028471" b="0.068157"/>
+    <diffuse r="0.12549" g="0.129412" b="0.309804"/>
+    <emission r="0" g="0" b="0"/>
+    <textures color="" light="" bump="" normal="Powder Coating/Textures/Powder_Wrinkle_NormalGL.png" roughness="" metallic="" displacement=""/>
+</material>

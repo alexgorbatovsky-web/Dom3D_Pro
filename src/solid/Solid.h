@@ -226,6 +226,7 @@ public:
 	float lenEdgeMax;
 	bool DrawNet;
 	bool MeshQuadro;
+	bool MeshQuadroHoleSLX;
 	bool MeshQuadroOld;
 	int m_TypeGeom;
 

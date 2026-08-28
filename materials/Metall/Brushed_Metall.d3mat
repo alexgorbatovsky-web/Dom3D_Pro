@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<material version="1" id="6001" name="Brushed Metall" alpha="1" specular="0.72" shininess="86" reflectivity="0.42">
+    <ambient r="0.18" g="0.18" b="0.17"/>
+    <diffuse r="0.62" g="0.61" b="0.56"/>
+    <emission r="0" g="0" b="0"/>
+    <textures color="" light="" bump=""/>
+</material>

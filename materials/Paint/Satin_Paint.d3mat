@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<material version="1" id="3001" name="Satin Paint" alpha="1" specular="0.24" shininess="52" reflectivity="0.03">
+    <ambient r="0.18" g="0.18" b="0.17"/>
+    <diffuse r="0.72" g="0.70" b="0.64"/>
+    <emission r="0" g="0" b="0"/>
+    <textures color="" light="" bump=""/>
+</material>

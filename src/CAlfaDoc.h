@@ -225,6 +225,12 @@ public:
                           SelectionAction action = SelectionAction::Replace);
     void ClearPointSelection();
     bool HasSelection() const;
+    void SetGroupInteractionEnabled(bool enabled) {
+        group_interaction_enabled_ = enabled;
+    }
+    bool IsGroupInteractionEnabled() const {
+        return group_interaction_enabled_;
+    }
     bool ExpandSelectedGroups();
     bool HasSelectedPoint() const;
     bool HasSelectedSolidEdge() const;
@@ -419,6 +425,9 @@ public:
     Material& UpsertMaterial(Material material);
     bool DeleteMaterial(unsigned long id);
 
+    const std::string& GetDraftingData() const { return drafting_data_; }
+    void SetDraftingData(std::string data) { drafting_data_ = std::move(data); }
+
     size_t GetTotalPointCount() const;
     std::shared_ptr<const Snapshot> CreateSnapshot() const;
     bool RestoreSnapshot(const Snapshot& snapshot);
@@ -438,6 +447,7 @@ private:
     std::vector<size_t> GetSelectedTransformRootIndices() const;
 
     ObjectList objects_;
+    std::string drafting_data_;
     std::vector<Material> materials_;
     unsigned long next_object_id_ = 1;
     size_t active_object_index_ = 0;
@@ -457,6 +467,7 @@ private:
     bool has_selected_solid_face_ = false;
     bool has_selected_object_ = false;
     bool has_selected_point_ = false;
+    bool group_interaction_enabled_ = true;
     bool has_transform_gizmo_origin_ = false;
     Vec3 transform_gizmo_origin_{};
     size_t hidden_selection_highlight_index_ = static_cast<size_t>(-1);

@@ -1,5 +1,6 @@
 #include "PropertyPanel.h"
 
+#include "LanguageManager.h"
 #include "MeasurementUnits.h"
 
 #include <QCheckBox>
@@ -185,10 +186,11 @@ private:
 class DragValueLabel final : public QLabel {
 public:
     explicit DragValueLabel(const QString& text, QWidget* parent = nullptr)
-        : QLabel(QString::fromUtf8("◀%1▶").arg(text), parent) {
+        : QLabel(parent), source_text_(text) {
         setCursor(Qt::SizeHorCursor);
-        setToolTip(QString("%1: drag horizontally; Shift — precise, Ctrl — fast")
-            .arg(text));
+        UpdateTranslation();
+        connect(&LanguageManager::Instance(), &LanguageManager::LanguageChanged,
+                this, [this]() { UpdateTranslation(); });
     }
 
     std::function<int()> current_position;
@@ -242,6 +244,16 @@ protected:
     }
 
 private:
+    void UpdateTranslation() {
+        const auto& language = LanguageManager::Instance();
+        const QString translated_text = language.Translate(source_text_);
+        setText(QString::fromUtf8("◀%1▶").arg(translated_text));
+        setToolTip(language.Translate(
+            QString("%1: drag horizontally; Shift — precise, Ctrl — fast")
+                .arg(source_text_)));
+    }
+
+    QString source_text_;
     bool dragging_ = false;
     double drag_start_x_ = 0.0;
     int drag_start_position_ = 0;
@@ -283,8 +295,13 @@ bool IsIntegerParameter(const ToolParameter& parameter) {
 }
 
 bool IsInternalPlacementParameter(const ToolParameter& parameter) {
+    if (parameter.id == "hole.distance1"
+        || parameter.id == "hole.distance2") {
+        return false;
+    }
     return parameter.id.rfind("origin.", 0) == 0
         || parameter.id.rfind("axis.", 0) == 0
+        || parameter.id.rfind("hole.", 0) == 0
         || parameter.id.rfind("width.scale.", 0) == 0
         || parameter.id.rfind("height.scale.", 0) == 0
         || parameter.id == "profile.id"
@@ -459,6 +476,7 @@ bool IsSliderParameter(const ActiveParametricObject& active,
     return tool_id == "SolidBeamTool"
         || tool_id == "SolidBox"
         || tool_id == "SolidCylinder"
+        || tool_id == "SolidHole"
         || tool_id == "SolidSphereTool"
         || tool_id == "SolidTorusTool"
         || tool_id == "SolidPrismTool"

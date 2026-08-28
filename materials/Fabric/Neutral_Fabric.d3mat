@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<material version="1" id="5001" name="Neutral Fabric" alpha="1" specular="0.06" shininess="12" reflectivity="0">
+    <ambient r="0.17" g="0.16" b="0.15"/>
+    <diffuse r="0.55" g="0.52" b="0.48"/>
+    <emission r="0" g="0" b="0"/>
+    <textures color="" light="" bump=""/>
+</material>

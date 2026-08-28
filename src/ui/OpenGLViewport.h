@@ -74,6 +74,7 @@ public:
     void SetFloorGridVisible(bool visible);
     void SetBackgroundColor(const QColor& color);
     Vec3 GetBackgroundColor() const;
+    QImage CaptureSceneImage(const QSize& requested_size);
     void ReloadModelingPreferences();
     void RefreshSurfaceMeshQuality();
     void BeginMaterialPaint(const Material& material);
@@ -116,6 +117,9 @@ public:
     void BeginPickXYPoint(const QString& prompt = {});
     void BeginPick3DPoint(const QString& prompt = {});
     void BeginPick3DPointOnObject(unsigned long object_id, const QString& prompt = {});
+    void BeginPick3DPointOnPlane(CPoint3d plane_origin,
+                                 Vec3 plane_normal,
+                                 const QString& prompt = {});
     void BeginPickArchitectureWall(const QString& prompt = {});
     void CancelArchitectureWallPick();
     void SetPointPickMarkers(const std::vector<CPoint3d>& points);
@@ -193,6 +197,13 @@ protected:
     void dropEvent(QDropEvent* event) override;
 
 private:
+    enum class NavigationDrag {
+        None,
+        Orbit,
+        Pan,
+        Zoom
+    };
+
     enum class SketchHandleKind {
         None,
         Node,
@@ -202,6 +213,8 @@ private:
     };
 
     void SelectAt(const QPoint& point, SelectionAction action);
+    NavigationDrag NavigationDragFor(const QMouseEvent& event) const;
+    bool UsesAltNavigationModifier() const;
     void DrawCurveAt(const QPoint& point);
     void DrawBSplineAt(const QPoint& point);
     void BeginDrawSplineStroke(const QPoint& point);
@@ -335,8 +348,10 @@ private:
     bool alt_navigation_modifier_down_ = false;
     bool pan_navigation_modifier_down_ = false;
     bool zooming_ = false;
+    bool right_navigation_active_ = false;
     QPoint right_button_press_{};
     bool right_button_dragged_ = false;
+    QString navigation_preset_ = "dom3d";
     bool xy_plane_view_enabled_ = false;
     bool dragging_transform_ = false;
     bool dragging_face_extrude_ = false;
@@ -375,6 +390,9 @@ private:
     bool selection_confirmation_mode_ = false;
     bool picking_xy_point_ = false;
     bool picking_3d_point_ = false;
+    bool point_pick_plane_enabled_ = false;
+    Vec3 point_pick_plane_origin_{};
+    Vec3 point_pick_plane_normal_{0.0f, 0.0f, 1.0f};
     bool picking_architecture_wall_ = false;
     unsigned long point_pick_object_id_ = 0;
     bool picking_rotation_axis_ = false;

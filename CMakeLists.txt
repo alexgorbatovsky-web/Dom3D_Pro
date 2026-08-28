@@ -4,6 +4,47 @@ project(Dom3D_Pro LANGUAGES CXX)
 
 include(CTest)
 
+if(WIN32)
+    find_program(DOM3D_POWERSHELL_EXECUTABLE NAMES pwsh powershell)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(DOM3D_POWERSHELL_EXECUTABLE)
+        add_custom_target(CodeWiki
+            COMMAND "${DOM3D_POWERSHELL_EXECUTABLE}"
+                -NoProfile
+                -ExecutionPolicy Bypass
+                -File "${CMAKE_CURRENT_SOURCE_DIR}/tools/Generate-CodeWiki.ps1"
+                -ProjectRoot "${CMAKE_CURRENT_SOURCE_DIR}"
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+            COMMENT "Generating Dom3D Pro Code Wiki from project files"
+            VERBATIM
+        )
+        if(Python3_Interpreter_FOUND)
+            add_custom_target(HtmlWiki
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tools/Generate-HtmlWiki.py"
+                    --project-root "${CMAKE_CURRENT_SOURCE_DIR}"
+                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+                COMMENT "Generating local Dom3D Pro HTML Wiki"
+                VERBATIM
+            )
+            add_dependencies(HtmlWiki CodeWiki)
+
+            add_custom_target(OpenWiki
+                COMMAND "${DOM3D_POWERSHELL_EXECUTABLE}"
+                    -NoProfile
+                    -ExecutionPolicy Bypass
+                    -File "${CMAKE_CURRENT_SOURCE_DIR}/tools/Open-CodeWiki.ps1"
+                    -ProjectRoot "${CMAKE_CURRENT_SOURCE_DIR}"
+                    -PythonExecutable "${Python3_EXECUTABLE}"
+                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+                COMMENT "Opening local Dom3D Pro Wiki"
+                VERBATIM
+            )
+            add_dependencies(OpenWiki HtmlWiki)
+        endif()
+    endif()
+endif()
+
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 
@@ -12,7 +53,7 @@ if(EXISTS "${DOM3D_QT_MSVC2022_PATH}/lib/cmake/Qt6/Qt6Config.cmake")
     list(PREPEND CMAKE_PREFIX_PATH "${DOM3D_QT_MSVC2022_PATH}")
 endif()
 
-find_package(Qt6 COMPONENTS Widgets OpenGLWidgets Xml QUIET)
+find_package(Qt6 COMPONENTS Widgets OpenGLWidgets Xml PrintSupport QUIET)
 if(NOT Qt6_FOUND)
     message(FATAL_ERROR
         "Qt 6 was not found. Expected Qt MSVC 2022 x64 at:\n"
@@ -184,6 +225,7 @@ set(DOM3D_SOURCES
     src/Line2D.cpp
     src/Net.cpp
     src/SurfaceUVMapping.cpp
+    src/SurfacePatchBuilder.cpp
     src/CBSpline.cpp
     src/CPolyline.cpp
     src/Conic.cpp
@@ -216,6 +258,7 @@ set(DOM3D_SOURCES
     src/solid/SolidTool.cpp
     src/solid/TrimShapeBuilder.cpp
     src/ui/MainWindow.cpp
+    src/ui/DraftingWorkspace.cpp
     src/ui/MeasurementUnits.cpp
     src/ui/MaterialEditorDialog.cpp
     src/ui/MaterialDrag.cpp
@@ -283,6 +326,7 @@ set(DOM3D_HEADERS
     src/FillContour.h
     src/ContourQuadrangulator3DCoat.h
     src/Line2D.h
+    src/SurfacePatchBuilder.h
     src/Net.h
     src/CBSpline.h
     src/CPolyline.h
@@ -315,6 +359,7 @@ set(DOM3D_HEADERS
     src/solid/SolidTool.h
     src/solid/TrimShapeBuilder.h
     src/ui/MainWindow.h
+    src/ui/DraftingWorkspace.h
     src/ui/MeasurementUnits.h
     src/ui/MaterialEditorDialog.h
     src/ui/MaterialDrag.h
@@ -449,6 +494,7 @@ target_link_libraries(Dom3D_Pro PRIVATE
     Qt6::Widgets
     Qt6::OpenGLWidgets
     Qt6::Xml
+    Qt6::PrintSupport
     OpenGL::GL
     raytrace
     dom3d_comms
@@ -488,6 +534,17 @@ add_custom_command(TARGET Dom3D_Pro POST_BUILD
         "$<TARGET_FILE_DIR:Dom3D_Pro>/Languages"
     COMMENT "Copying language files"
 )
+
+set(DOM3D_USER_MANUAL
+    "${CMAKE_CURRENT_SOURCE_DIR}/output/pdf/User Manual Dom3D Pro.pdf")
+if(EXISTS "${DOM3D_USER_MANUAL}")
+    add_custom_command(TARGET Dom3D_Pro POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${DOM3D_USER_MANUAL}"
+            "$<TARGET_FILE_DIR:Dom3D_Pro>/User Manual Dom3D Pro.pdf"
+        COMMENT "Copying Dom3D Pro user manual"
+    )
+endif()
 
 set(DOM3D_WINDEPLOYQT "${DOM3D_QT_MSVC2022_PATH}/bin/windeployqt.exe")
 if(WIN32 AND EXISTS "${DOM3D_WINDEPLOYQT}")
@@ -534,6 +591,17 @@ if(MSVC)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(SurfacePatchBuilderTests
+        tests/SurfacePatchBuilderTests.cpp
+        src/SurfacePatchBuilder.cpp
+        src/SurfacePatchBuilder.h)
+    target_compile_features(SurfacePatchBuilderTests PRIVATE cxx_std_17)
+    target_include_directories(SurfacePatchBuilderTests PRIVATE src)
+    if(MSVC)
+        target_compile_options(SurfacePatchBuilderTests PRIVATE /W4 /permissive-)
+    endif()
+    add_test(NAME SurfacePatchBuilderTests COMMAND SurfacePatchBuilderTests)
+
     add_executable(CommsSmokeTests tests/CommsSmokeTests.cpp)
     target_compile_features(CommsSmokeTests PRIVATE cxx_std_17)
     target_link_libraries(CommsSmokeTests PRIVATE dom3d_comms)
@@ -596,7 +664,7 @@ if(BUILD_TESTING)
         "${DOM3D_OPENCASCADE_LIBRARY_DIR}"
     )
     target_link_libraries(CatalogImportTests PRIVATE
-        Qt6::Widgets Qt6::OpenGLWidgets Qt6::Xml OpenGL::GL
+        Qt6::Widgets Qt6::OpenGLWidgets Qt6::Xml Qt6::PrintSupport OpenGL::GL
         raytrace
         ${DOM3D_OPENCASCADE_LIBS}
     )
@@ -611,8 +679,14 @@ if(BUILD_TESTING)
         )
     endif()
     add_test(NAME CatalogImportTests COMMAND CatalogImportTests)
+    add_test(NAME MeshRegressionCorpus
+        COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+            -File "${CMAKE_CURRENT_SOURCE_DIR}/tools/Test-MeshRegression.ps1"
+            -BuildDirectory "${CMAKE_CURRENT_BINARY_DIR}"
+            -Configuration "$<CONFIG>"
+    )
     string(REPLACE ";" "\\;" DOM3D_CTEST_HOST_PATH "$ENV{PATH}")
-    set_tests_properties(CatalogImportTests PROPERTIES
+    set_tests_properties(CatalogImportTests MeshRegressionCorpus PROPERTIES
         ENVIRONMENT "PATH=${DOM3D_QT_MSVC2022_PATH}/bin\;${DOM3D_OPENCASCADE_BINARY_DIR}\;${DOM3D_CTEST_HOST_PATH}"
     )
 

@@ -3,7 +3,11 @@
 #include <QAction>
 #include <QAbstractItemView>
 #include <QDialogButtonBox>
+#include <QFileDialog>
 #include <QHeaderView>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QKeyEvent>
 #include <QKeySequence>
 #include <QLabel>
@@ -14,6 +18,7 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QSaveFile>
 #include <QSettings>
 #include <QSet>
 #include <QTreeWidget>
@@ -191,6 +196,10 @@ HotkeyManagerDialog::HotkeyManagerDialog(QMainWindow* main_window,
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel
             | QDialogButtonBox::RestoreDefaults,
         this);
+    auto* save_to_file = buttons->addButton(
+        "Save to File", QDialogButtonBox::ActionRole);
+    auto* load_from_file = buttons->addButton(
+        "Load From File", QDialogButtonBox::ActionRole);
     layout->addWidget(buttons);
 
     Populate();
@@ -209,6 +218,10 @@ HotkeyManagerDialog::HotkeyManagerDialog(QMainWindow* main_window,
     connect(buttons->button(QDialogButtonBox::RestoreDefaults),
             &QPushButton::clicked,
             this, &HotkeyManagerDialog::RestoreDefaults);
+    connect(save_to_file, &QPushButton::clicked,
+            this, &HotkeyManagerDialog::SaveToFile);
+    connect(load_from_file, &QPushButton::clicked,
+            this, &HotkeyManagerDialog::LoadFromFile);
 }
 
 void HotkeyManagerDialog::Populate() {
@@ -301,6 +314,177 @@ void HotkeyManagerDialog::RestoreDefaults() {
             2, entry.shortcut.toString(QKeySequence::NativeText));
     }
     ApplyFilter(search_->text());
+}
+
+void HotkeyManagerDialog::SaveToFile() {
+    QSettings settings;
+    const QString previous_file = settings.value(
+        "HotKeys/LastFile", "Dom3D_HotKeys.json").toString();
+    QString file_name = QFileDialog::getSaveFileName(
+        this,
+        "Save Hot Keys",
+        previous_file,
+        "Dom3D Hot Keys (*.json);;All Files (*.*)");
+    if (file_name.isEmpty()) {
+        return;
+    }
+    if (!file_name.endsWith(".json", Qt::CaseInsensitive)) {
+        file_name += ".json";
+    }
+
+    QJsonArray hotkeys;
+    for (const Entry& entry : entries_) {
+        QJsonObject hotkey;
+        hotkey.insert("id", entry.id);
+        hotkey.insert("command", entry.command);
+        hotkey.insert("category", entry.category);
+        hotkey.insert(
+            "shortcut",
+            entry.shortcut.toString(QKeySequence::PortableText));
+        hotkeys.append(hotkey);
+    }
+
+    QJsonObject root;
+    root.insert("format", "Dom3D Pro Hot Keys");
+    root.insert("version", 1);
+    root.insert("hotkeys", hotkeys);
+
+    QSaveFile file(file_name);
+    if (!file.open(QIODevice::WriteOnly)
+        || file.write(QJsonDocument(root).toJson(QJsonDocument::Indented)) < 0
+        || !file.commit()) {
+        QMessageBox::critical(
+            this,
+            "Save Hot Keys",
+            QString("Could not save the file:\n%1").arg(file_name));
+        return;
+    }
+
+    settings.setValue("HotKeys/LastFile", file_name);
+    QMessageBox::information(
+        this,
+        "Save Hot Keys",
+        QString("Hot keys saved to:\n%1").arg(file_name));
+}
+
+void HotkeyManagerDialog::LoadFromFile() {
+    QSettings settings;
+    const QString previous_file = settings.value(
+        "HotKeys/LastFile", QString()).toString();
+    const QString file_name = QFileDialog::getOpenFileName(
+        this,
+        "Load Hot Keys",
+        previous_file,
+        "Dom3D Hot Keys (*.json);;All Files (*.*)");
+    if (file_name.isEmpty()) {
+        return;
+    }
+
+    QFile file(file_name);
+    if (!file.open(QIODevice::ReadOnly)) {
+        QMessageBox::critical(
+            this,
+            "Load Hot Keys",
+            QString("Could not open the file:\n%1").arg(file_name));
+        return;
+    }
+
+    QJsonParseError parse_error;
+    const QJsonDocument json = QJsonDocument::fromJson(
+        file.readAll(), &parse_error);
+    if (parse_error.error != QJsonParseError::NoError
+        || !json.isObject()
+        || !json.object().value("hotkeys").isArray()) {
+        QMessageBox::critical(
+            this,
+            "Load Hot Keys",
+            QString("Invalid hot key file:\n%1").arg(file_name));
+        return;
+    }
+
+    int loaded_count = 0;
+    int missing_count = 0;
+    QSet<int> loaded_entries;
+    const QJsonArray hotkeys = json.object().value("hotkeys").toArray();
+    for (const QJsonValue& value : hotkeys) {
+        if (!value.isObject()) {
+            ++missing_count;
+            continue;
+        }
+        const QJsonObject hotkey = value.toObject();
+        const QString id = hotkey.value("id").toString();
+        const QString command = hotkey.value("command").toString();
+        const QString category = hotkey.value("category").toString();
+        const QString shortcut_text = hotkey.value("shortcut").toString();
+
+        int match = -1;
+        for (int index = 0; index < static_cast<int>(entries_.size()); ++index) {
+            if (!loaded_entries.contains(index) && entries_[index].id == id) {
+                match = index;
+                break;
+            }
+        }
+        if (match < 0) {
+            for (int index = 0; index < static_cast<int>(entries_.size()); ++index) {
+                if (!loaded_entries.contains(index)
+                    && entries_[index].command == command
+                    && entries_[index].category == category) {
+                    match = index;
+                    break;
+                }
+            }
+        }
+        if (match < 0) {
+            int command_match = -1;
+            for (int index = 0; index < static_cast<int>(entries_.size()); ++index) {
+                if (!loaded_entries.contains(index)
+                    && entries_[index].command == command) {
+                    if (command_match >= 0) {
+                        command_match = -1;
+                        break;
+                    }
+                    command_match = index;
+                }
+            }
+            match = command_match;
+        }
+        if (match < 0) {
+            ++missing_count;
+            continue;
+        }
+
+        const QKeySequence shortcut = QKeySequence::fromString(
+            shortcut_text, QKeySequence::PortableText);
+        if (!shortcut.isEmpty()) {
+            for (Entry& entry : entries_) {
+                if (&entry != &entries_[static_cast<size_t>(match)]
+                    && entry.shortcut == shortcut) {
+                    entry.shortcut = {};
+                    entry.item->setText(2, {});
+                }
+            }
+        }
+        Entry& entry = entries_[static_cast<size_t>(match)];
+        entry.shortcut = shortcut;
+        entry.item->setText(
+            2, shortcut.toString(QKeySequence::NativeText));
+        loaded_entries.insert(match);
+        ++loaded_count;
+    }
+
+    settings.setValue("HotKeys/LastFile", file_name);
+    ApplyFilter(search_->text());
+    QMessageBox::information(
+        this,
+        "Load Hot Keys",
+        missing_count > 0
+            ? QString("Loaded %1 hot keys. %2 commands were not found.\n\n"
+                      "Press OK to apply the loaded settings.")
+                  .arg(loaded_count)
+                  .arg(missing_count)
+            : QString("Loaded %1 hot keys.\n\n"
+                      "Press OK to apply the loaded settings.")
+                  .arg(loaded_count));
 }
 
 void HotkeyManagerDialog::SaveAndApply() {

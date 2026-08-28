@@ -30,7 +30,7 @@
   </TextItem>
   <TextItem>
     <ID>HelpTopics</ID>
-    <Text>Help &amp;Topics</Text>
+    <Text>User &amp;Manual</Text>
   </TextItem>
   <TextItem>
     <ID>LanguageChangedStatus</ID>
@@ -10055,5 +10055,49 @@ Layer</Text>
   <TextItem>
     <ID>Auto_9A07470F56497F</ID>
     <Text>Upper Corner Door</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Auto_31D4754849FD6C</ID>
+    <Text>Other Params...</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Auto_708BF6F62E354F</ID>
+    <Text>Other Parameters</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Auto_37BF3FAB36AE7B</ID>
+    <Text>Open facade, construction, hardware and material parameters</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Auto_6E1BDC4B95D82D</ID>
+    <Text>Print Scene...</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Auto_596D9A615D2961</ID>
+    <Text>Export Scene to PDF...</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Auto_193AF178A8AB33</ID>
+    <Text>Print Scene</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Auto_B9987A459375FD</ID>
+    <Text>Could not capture the 3D scene.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Auto_73796F54C108D9</ID>
+    <Text>Print Preview — 3D Scene</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Auto_E2509003241135</ID>
+    <Text>Export Scene to PDF</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Auto_2663BFA608E1B2</ID>
+    <Text>Scene PDF saved</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Auto_27CC776E2C1E8F</ID>
+    <Text>Dom3D Scene</Text>
   </TextItem>
 </ClassArray.TextItem>

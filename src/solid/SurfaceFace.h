@@ -7,6 +7,8 @@
 #include <AIS_Shape.hxx>
 
 #include <functional>
+#include <memory>
+#include <string>
 #include <vector>
 
 
@@ -116,7 +118,22 @@ public:
 	bool GetRegularMeshBoundaryPoints(int edge_index, std::vector<CPoint3d>& points) const;
 	void DumpPreparedPolylinesToScene() const;
 	bool BuildTrimmingMesh(CSolid* psol, float Deflection);
-	void MakeFilledContour(const std::vector<Vec3>& contour, Vec3 normal, CMesh3D* quad_mesh);
+	bool MakeFilledContour(const std::vector<Vec3>& contour, Vec3 normal,
+		CMesh3D* quad_mesh, bool prefer_safe_quads = false,
+		std::string* error = nullptr,
+		CMesh3D* contour_to_fill_mesh = nullptr,
+		std::string* quadrangulator_rejection = nullptr);
+	bool BuildFilledMeshWhithHoles(float Deflection,
+		bool use_mesh_quadro_hole_slx = false);
+	float GetLastLowPolyDensity() const { return m_LastLowPolyDensity; }
+	const std::string& GetLastIslandFillError() const {
+		return m_LastIslandFillError;
+	}
+	const std::string& GetLastQuadrangulationDiagnostic() const {
+		return m_LastQuadrangulationDiagnostic;
+	}
+	bool CreateLastIslandBoundaryPolylines(
+		std::vector<std::unique_ptr<CPolyline>>& boundaries);
 	bool MakeQuadMeshFromBoundary(float density,
 	                              CMesh3D* quad_mesh,
 	                              std::vector<Vec3>* triangulation_boundary = nullptr);
@@ -144,6 +161,10 @@ public:
 	bool IsSelected;
 	SurfaceTextureTransform TextureTransform;
 	SurfaceMaterialOverride MaterialOverride;
+	float m_LastLowPolyDensity = 0.0f;
+	std::vector<std::vector<CPoint3d>> m_LastIslandBoundariesUV;
+	std::string m_LastIslandFillError;
+	std::string m_LastQuadrangulationDiagnostic;
 
 
 protected:
@@ -151,6 +172,7 @@ protected:
 	std::vector<CSplineCurve*> BoundSpl;
 	std::vector<CSplineCurve*> m_Edges;
 	std::vector<TopoDS_Edge> m_TopoEdges;
+	std::vector<TopoDS_Edge> m_PreparedTopoEdges;
 	std::vector<CPolyline*> TrimLine;
 	std::vector<CPolyline*> TrimLine2D;
 	std::vector<CPolyline*> LinesJoin;

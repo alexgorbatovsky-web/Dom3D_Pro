@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<material version="1" id="41020" name="Powder Coating RAL 8017 Chocolate Brown" alpha="1" specular="0.32" shininess="42" reflectivity="0.04" roughness="0.64" metallic="0" coatWeight="0" coatRoughness="0.12" normalStrength="0.12" displacementScale="0" textureOffsetU="0" textureOffsetV="0" textureScaleU="0.4" textureScaleV="0.4" textureRotation="0" textureFitToSurface="0">
+    <ambient r="0.059529" g="0.043137" b="0.039686"/>
+    <diffuse r="0.270588" g="0.196078" b="0.180392"/>
+    <emission r="0" g="0" b="0"/>
+    <textures color="" light="" bump="" normal="Powder Coating/Textures/Powder_Wrinkle_NormalGL.png" roughness="" metallic="" displacement=""/>
+</material>

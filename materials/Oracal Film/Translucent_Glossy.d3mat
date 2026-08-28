@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<material version="1" id="42002" name="Oracal Film Translucent Glossy RAL 3020" alpha="0.58" specular="0.85" shininess="180" reflectivity="0.18" roughness="0.08" metallic="0" coatWeight="1" coatRoughness="0.02" normalStrength="0" displacementScale="0" textureOffsetU="0" textureOffsetV="0" textureScaleU="1" textureScaleV="1" textureRotation="0" textureFitToSurface="0">
+    <ambient r="0.176" g="0.0052" b="0.0043"/>
+    <diffuse r="0.8" g="0.0235" b="0.0196"/>
+    <emission r="0" g="0" b="0"/>
+    <textures color="" light="" bump="" normal="" roughness="" metallic="" displacement=""/>
+</material>

@@ -30,7 +30,7 @@
   </TextItem>
   <TextItem>
     <ID>HelpTopics</ID>
-    <Text>Разделы &amp;справки</Text>
+    <Text>&amp;Руководство пользователя</Text>
   </TextItem>
   <TextItem>
     <ID>LanguageChangedStatus</ID>
@@ -212,7 +212,7 @@
   </TextItem>
   <TextItem>
     <ID>Auto_0B0D832B2B4C68</ID>
-    <Text>%10,5f</Text>
+    <Text>%10.5f</Text>
   </TextItem>
   <TextItem>
     <ID>Auto_F1BBA1C26D1615</ID>
@@ -392,7 +392,7 @@
   </TextItem>
   <TextItem>
     <ID>Auto_5DF29B80B97DAB</ID>
-    <Text>%д</Text>
+    <Text>%d</Text>
   </TextItem>
   <TextItem>
     <ID>Auto_347CD9C53FF77D</ID>
@@ -420,7 +420,7 @@
   </TextItem>
   <TextItem>
     <ID>Auto_A1F0E99AF8B76B</ID>
-    <Text>%с.</Text>
+    <Text>%s.</Text>
   </TextItem>
   <TextItem>
     <ID>Auto_83053107952569</ID>
@@ -4708,7 +4708,7 @@
   </TextItem>
   <TextItem>
     <ID>Auto_DADE7E4CED9D19</ID>
-    <Text>К=%д</Text>
+    <Text>К=%d</Text>
   </TextItem>
   <TextItem>
     <ID>Auto_503204C0938BCD</ID>
@@ -6080,7 +6080,7 @@
   </TextItem>
   <TextItem>
     <ID>Auto_7592CC25B985C8</ID>
-    <Text>Смещение %-5,2f</Text>
+    <Text>Смещение %-5.2f</Text>
   </TextItem>
   <TextItem>
     <ID>Auto_FADE9C926BF4F1</ID>
@@ -6710,7 +6710,7 @@
   <TextItem>
     <ID>Auto_D7DE7AE998C05B</ID>
     <Text>ПОЛИЛИНИЯ
-%зу</Text>
+%zu</Text>
   </TextItem>
   <TextItem>
     <ID>Auto_B569C913EBC06A</ID>
@@ -7010,7 +7010,7 @@
   </TextItem>
   <TextItem>
     <ID>Auto_9219FFAAA2B23C</ID>
-    <Text>Радиус = %-5,2f</Text>
+    <Text>Радиус = %-5.2f</Text>
   </TextItem>
   <TextItem>
     <ID>Auto_1311732D7D361E</ID>
@@ -8195,7 +8195,7 @@
   <TextItem>
     <ID>Auto_95870C3BCBBC8D</ID>
     <Text>СПЛАЙН
-%д</Text>
+%d</Text>
   </TextItem>
   <TextItem>
     <ID>Auto_4EC9465E7A2BB5</ID>
@@ -10055,5 +10055,49 @@
   <TextItem>
     <ID>Auto_9A07470F56497F</ID>
     <Text>Верхняя угловая дверь</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Auto_31D4754849FD6C</ID>
+    <Text>Другие параметры...</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Auto_708BF6F62E354F</ID>
+    <Text>Другие параметры</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Auto_37BF3FAB36AE7B</ID>
+    <Text>Открыть параметры фасада, конструкции, фурнитуры и материалов</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Auto_6E1BDC4B95D82D</ID>
+    <Text>Печать сцены...</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Auto_596D9A615D2961</ID>
+    <Text>Экспорт сцены в PDF...</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Auto_193AF178A8AB33</ID>
+    <Text>Печать сцены</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Auto_B9987A459375FD</ID>
+    <Text>Не удалось получить изображение 3D-сцены.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Auto_73796F54C108D9</ID>
+    <Text>Предварительный просмотр — 3D-сцена</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Auto_E2509003241135</ID>
+    <Text>Экспорт сцены в PDF</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Auto_2663BFA608E1B2</ID>
+    <Text>PDF сцены сохранён</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Auto_27CC776E2C1E8F</ID>
+    <Text>Сцена Dom3D</Text>
   </TextItem>
 </ClassArray.TextItem>

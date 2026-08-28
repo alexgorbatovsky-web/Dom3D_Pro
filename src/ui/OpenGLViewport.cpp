@@ -24,6 +24,9 @@
 #include <QLabel>
 #include <QMimeData>
 #include <QMouseEvent>
+#include <QOpenGLContext>
+#include <QOpenGLFramebufferObject>
+#include <QOpenGLFunctions>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
@@ -270,6 +273,64 @@ double parameter_value(const std::vector<ToolParameter>& parameters,
             return candidate.id == id;
         });
     return parameter == parameters.end() ? fallback : parameter->value;
+}
+
+Vec3 hole_center_for_dimensions(
+    const std::vector<ToolParameter>& parameters,
+    std::array<Vec3, 2>* edge_starts = nullptr,
+    std::array<Vec3, 2>* edge_ends = nullptr) {
+    const Vec3 saved_center{
+        static_cast<float>(parameter_value(parameters, "hole.center.x", 0.0)),
+        static_cast<float>(parameter_value(parameters, "hole.center.y", 0.0)),
+        static_cast<float>(parameter_value(parameters, "hole.center.z", 0.0))};
+    if (parameter_value(parameters, "hole.refs.valid", 0.0) < 0.5)
+        return saved_center;
+
+    std::array<Vec3, 2> starts{};
+    std::array<Vec3, 2> ends{};
+    std::array<double, 2> sides{};
+    std::array<double, 2> distances{};
+    for (int index = 0; index < 2; ++index) {
+        const std::string prefix = "hole.edge" + std::to_string(index + 1);
+        starts[static_cast<size_t>(index)] = {
+            static_cast<float>(parameter_value(parameters,
+                (prefix + ".start.x").c_str(), 0.0)),
+            static_cast<float>(parameter_value(parameters,
+                (prefix + ".start.y").c_str(), 0.0)),
+            static_cast<float>(parameter_value(parameters,
+                (prefix + ".start.z").c_str(), 0.0))};
+        ends[static_cast<size_t>(index)] = {
+            static_cast<float>(parameter_value(parameters,
+                (prefix + ".end.x").c_str(), 0.0)),
+            static_cast<float>(parameter_value(parameters,
+                (prefix + ".end.y").c_str(), 0.0)),
+            static_cast<float>(parameter_value(parameters,
+                (prefix + ".end.z").c_str(), 0.0))};
+        sides[static_cast<size_t>(index)] = parameter_value(parameters,
+            (prefix + ".side").c_str(), 1.0) < 0.0 ? -1.0 : 1.0;
+        distances[static_cast<size_t>(index)] = parameter_value(parameters,
+            index == 0 ? "hole.distance1" : "hole.distance2", 0.0);
+    }
+    if (edge_starts) *edge_starts = starts;
+    if (edge_ends) *edge_ends = ends;
+
+    Vec3 face_normal{
+        static_cast<float>(parameter_value(parameters, "hole.normal.x", 0.0)),
+        static_cast<float>(parameter_value(parameters, "hole.normal.y", 0.0)),
+        static_cast<float>(parameter_value(parameters, "hole.normal.z", 1.0))};
+    face_normal = normalize(face_normal);
+    const Vec3 normal1 = normalize(cross(face_normal, normalize(ends[0] - starts[0])));
+    const Vec3 normal2 = normalize(cross(face_normal, normalize(ends[1] - starts[1])));
+    const double determinant = dot(normal1, cross(normal2, face_normal));
+    if (std::fabs(determinant) <= 1.0e-8)
+        return saved_center;
+    const double rhs1 = dot(normal1, starts[0]) + sides[0] * distances[0];
+    const double rhs2 = dot(normal2, starts[1]) + sides[1] * distances[1];
+    const double rhs3 = dot(face_normal, saved_center);
+    return (cross(normal2, face_normal) * static_cast<float>(rhs1)
+        + cross(face_normal, normal1) * static_cast<float>(rhs2)
+        + cross(normal1, normal2) * static_cast<float>(rhs3))
+        * static_cast<float>(1.0 / determinant);
 }
 
 double saved_parameter_value(const std::vector<ParametricParameterValue>& parameters,
@@ -613,6 +674,11 @@ OpenGLViewport::OpenGLViewport(QWidget* parent)
 
 void OpenGLViewport::SetDocument(CAlfaDoc* document) {
     document_ = document;
+    if (document_) {
+        QSettings settings("Dom3D", "Dom3D_Pro");
+        document_->SetGroupInteractionEnabled(settings.value(
+            "preferences/modeling/changeGroup", true).toBool());
+    }
     update();
 }
 
@@ -636,6 +702,9 @@ void OpenGLViewport::SetTool(ToolMode tool) {
     orbiting_ = false;
     alt_orbiting_ = false;
     panning_ = false;
+    pan_navigation_modifier_down_ = false;
+    right_navigation_active_ = false;
+    right_button_dragged_ = false;
     dragging_transform_ = false;
     dragging_face_extrude_ = false;
     dragging_draft_face_ = false;
@@ -746,6 +815,105 @@ void OpenGLViewport::RestoreDefaultToolCursor() {
     } else {
         unsetCursor();
     }
+}
+
+OpenGLViewport::NavigationDrag OpenGLViewport::NavigationDragFor(
+    const QMouseEvent& event) const {
+    const Qt::MouseButton button = event.button();
+    const Qt::KeyboardModifiers modifiers = event.modifiers()
+        & (Qt::ShiftModifier | Qt::ControlModifier
+           | Qt::AltModifier | Qt::MetaModifier);
+    const auto exact = [modifiers](Qt::KeyboardModifiers expected) {
+        return modifiers == expected;
+    };
+
+    // Shift + RMB has a dedicated gizmo-origin command in Transform mode.
+    if (tool_ == ToolMode::Transform
+        && button == Qt::RightButton
+        && modifiers.testFlag(Qt::ShiftModifier)) {
+        return NavigationDrag::None;
+    }
+
+    if (navigation_preset_ == "dom3d") {
+        if (button == Qt::LeftButton && tool_ == ToolMode::Orbit) {
+            return modifiers.testFlag(Qt::ControlModifier)
+                ? NavigationDrag::Pan : NavigationDrag::Orbit;
+        }
+        if (button == Qt::MiddleButton) return NavigationDrag::Pan;
+        if (button == Qt::RightButton) return NavigationDrag::Zoom;
+    } else if (navigation_preset_ == "3dcoat") {
+        if (button == Qt::LeftButton
+            && (exact(Qt::AltModifier) || tool_ == ToolMode::Orbit)) {
+            return NavigationDrag::Orbit;
+        }
+        if (button == Qt::MiddleButton
+            && (exact(Qt::NoModifier) || exact(Qt::AltModifier))) {
+            return NavigationDrag::Pan;
+        }
+        if (button == Qt::RightButton
+            && (exact(Qt::NoModifier) || exact(Qt::AltModifier))) {
+            return NavigationDrag::Zoom;
+        }
+    } else if (navigation_preset_ == "3dsmax") {
+        if (button == Qt::MiddleButton && exact(Qt::AltModifier)) {
+            return NavigationDrag::Orbit;
+        }
+        if (button == Qt::MiddleButton && exact(Qt::NoModifier)) {
+            return NavigationDrag::Pan;
+        }
+        if (button == Qt::MiddleButton
+            && exact(Qt::ControlModifier | Qt::AltModifier)) {
+            return NavigationDrag::Zoom;
+        }
+    } else if (navigation_preset_ == "maya"
+               || navigation_preset_ == "houdini") {
+        if (exact(Qt::AltModifier)) {
+            if (button == Qt::LeftButton) return NavigationDrag::Orbit;
+            if (button == Qt::MiddleButton) return NavigationDrag::Pan;
+            if (button == Qt::RightButton) return NavigationDrag::Zoom;
+        }
+    } else if (navigation_preset_ == "fusion360") {
+        if (button == Qt::MiddleButton && exact(Qt::ShiftModifier)) {
+            return NavigationDrag::Orbit;
+        }
+        if (button == Qt::MiddleButton && exact(Qt::NoModifier)) {
+            return NavigationDrag::Pan;
+        }
+    } else if (navigation_preset_ == "blender"
+               || navigation_preset_ == "plasticity") {
+        if (button == Qt::MiddleButton && exact(Qt::NoModifier)) {
+            return NavigationDrag::Orbit;
+        }
+        if (button == Qt::MiddleButton && exact(Qt::ShiftModifier)) {
+            return NavigationDrag::Pan;
+        }
+    } else if (navigation_preset_ == "zbrush") {
+        if (button == Qt::RightButton && exact(Qt::NoModifier)) {
+            return NavigationDrag::Orbit;
+        }
+        if (button == Qt::RightButton && exact(Qt::AltModifier)) {
+            return NavigationDrag::Pan;
+        }
+        if (button == Qt::RightButton && exact(Qt::ControlModifier)) {
+            return NavigationDrag::Zoom;
+        }
+    } else if (navigation_preset_ == "shapr3d") {
+        if (button == Qt::RightButton && exact(Qt::NoModifier)) {
+            return NavigationDrag::Orbit;
+        }
+        if ((button == Qt::MiddleButton && exact(Qt::NoModifier))
+            || (button == Qt::RightButton && exact(Qt::ShiftModifier))) {
+            return NavigationDrag::Pan;
+        }
+    }
+    return NavigationDrag::None;
+}
+
+bool OpenGLViewport::UsesAltNavigationModifier() const {
+    return navigation_preset_ == "3dcoat"
+        || navigation_preset_ == "3dsmax"
+        || navigation_preset_ == "maya"
+        || navigation_preset_ == "houdini";
 }
 
 void OpenGLViewport::SetTransformOperation(TransformOperation operation) {
@@ -1075,6 +1243,12 @@ void OpenGLViewport::ReloadModelingPreferences() {
         settings.value("preferences/modeling/captureDistance", 6).toInt(),
         1,
         50);
+    navigation_preset_ = settings.value(
+        "preferences/picture/navigationPreset", "dom3d").toString();
+    if (document_) {
+        document_->SetGroupInteractionEnabled(settings.value(
+            "preferences/modeling/changeGroup", true).toBool());
+    }
     if (!snapping_enabled_) {
         SetCreationSnapCursor(false);
     }
@@ -1649,6 +1823,7 @@ void OpenGLViewport::SetSolidDimensionEdit(
         active_object.tool_id == "SolidBox"
         || active_object.tool_id == "SolidCylinder"
         || active_object.tool_id == "SolidPrismTool"
+        || active_object.tool_id == "SolidHole"
         || active_object.tool_id == "fillet_edge"
         || active_object.tool_id == "fillet_all_edges"
         || active_object.tool_id == "cabinet"
@@ -1877,6 +2052,34 @@ void OpenGLViewport::SetSolidDimensionEdit(
             "height",
             "Height",
             height_value);
+    } else if (solid_dimension_object_.tool_id == "SolidHole") {
+        const auto& parameters = solid_dimension_object_.parameters;
+        if (parameter_value(parameters, "hole.refs.valid", 0.0) >= 0.5) {
+            std::array<Vec3, 2> starts{};
+            std::array<Vec3, 2> ends{};
+            const Vec3 center = hole_center_for_dimensions(
+                parameters, &starts, &ends);
+            const double diameter = parameter_value(parameters, "diameter", 10.0);
+            const double offset = std::max(1.0, std::abs(diameter) * 0.65);
+            for (int edge = 0; edge < 2; ++edge) {
+                const Vec3 direction = normalize(
+                    ends[static_cast<size_t>(edge)]
+                    - starts[static_cast<size_t>(edge)]);
+                const Vec3 from_start = center - starts[static_cast<size_t>(edge)];
+                const Vec3 foot = starts[static_cast<size_t>(edge)]
+                    + direction * dot(from_start, direction);
+                const double distance = parameter_value(parameters,
+                    edge == 0 ? "hole.distance1" : "hole.distance2", 0.0);
+                add_dimension(
+                    CPoint3d(foot.x, foot.y, foot.z),
+                    CPoint3d(center.x, center.y, center.z),
+                    CPoint3d(direction.x, direction.y, direction.z),
+                    edge == 0 ? offset : -offset,
+                    edge == 0 ? "hole.distance1" : "hole.distance2",
+                    edge == 0 ? "Distance to Edge 1" : "Distance to Edge 2",
+                    distance);
+            }
+        }
     } else if (solid_dimension_object_.tool_id == "cabinet"
                || solid_dimension_object_.tool_id == "cabinet_advanced"
                || solid_dimension_object_.tool_id == "cabinet_advanced_slx"
@@ -1929,7 +2132,7 @@ void OpenGLViewport::SetSolidDimensionEdit(
         const int radius_mode = std::clamp(static_cast<int>(parameter_value(
             solid_dimension_object_.parameters, "radius_type", 0.0)), 0, 2);
         const double radius = parameter_value(
-            solid_dimension_object_.parameters, "radius", 2.0);
+            solid_dimension_object_.parameters, "radius", 1.0);
         CSolid* solid = nullptr;
         if (document_
             && solid_dimension_object_.object_index
@@ -2150,6 +2353,7 @@ void OpenGLViewport::BeginPickXYPoint(const QString& prompt) {
 
 void OpenGLViewport::BeginPick3DPoint(const QString& prompt) {
     point_pick_object_id_ = 0;
+    point_pick_plane_enabled_ = false;
     picking_3d_point_ = true;
     orbiting_ = false;
     alt_orbiting_ = false;
@@ -2166,6 +2370,17 @@ void OpenGLViewport::BeginPick3DPointOnObject(
     unsigned long object_id, const QString& prompt) {
     BeginPick3DPoint(prompt);
     point_pick_object_id_ = object_id;
+}
+
+void OpenGLViewport::BeginPick3DPointOnPlane(
+    CPoint3d plane_origin, Vec3 plane_normal, const QString& prompt) {
+    BeginPick3DPoint(prompt);
+    point_pick_plane_enabled_ = true;
+    point_pick_plane_origin_ = {
+        static_cast<float>(plane_origin.x),
+        static_cast<float>(plane_origin.y),
+        static_cast<float>(plane_origin.z)};
+    point_pick_plane_normal_ = normalize(plane_normal);
 }
 
 void OpenGLViewport::BeginPickArchitectureWall(const QString& prompt) {
@@ -2360,32 +2575,73 @@ void OpenGLViewport::paintGL() {
     }
 }
 
+QImage OpenGLViewport::CaptureSceneImage(const QSize& requested_size) {
+    if (!document_ || !isValid() || requested_size.isEmpty()) {
+        return {};
+    }
+
+    makeCurrent();
+    QOpenGLFunctions* functions = context() ? context()->functions() : nullptr;
+    if (!functions) {
+        doneCurrent();
+        return {};
+    }
+
+    GLint maximum_size = 0;
+    functions->glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &maximum_size);
+    QSize capture_size = requested_size;
+    if (maximum_size > 0
+        && (capture_size.width() > maximum_size
+            || capture_size.height() > maximum_size)) {
+        capture_size.scale(maximum_size, maximum_size, Qt::KeepAspectRatio);
+    }
+    capture_size.setWidth(std::max(1, capture_size.width()));
+    capture_size.setHeight(std::max(1, capture_size.height()));
+
+    GLint previous_framebuffer = 0;
+    functions->glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previous_framebuffer);
+
+    QOpenGLFramebufferObjectFormat format;
+    format.setAttachment(QOpenGLFramebufferObject::CombinedDepthStencil);
+    format.setSamples(4);
+    auto framebuffer = std::make_unique<QOpenGLFramebufferObject>(
+        capture_size, format);
+    if (!framebuffer->isValid()) {
+        format.setSamples(0);
+        framebuffer = std::make_unique<QOpenGLFramebufferObject>(
+            capture_size, format);
+    }
+    if (!framebuffer->isValid() || !framebuffer->bind()) {
+        functions->glBindFramebuffer(
+            GL_FRAMEBUFFER, static_cast<GLuint>(previous_framebuffer));
+        doneCurrent();
+        return {};
+    }
+
+    // Print a clean client view: preserve the camera, materials, lighting and
+    // background, but omit editing gizmos, grids, axes and FPS overlays.
+    renderer_.Render(
+        *document_, camera_, orthographic_projection_, false, false,
+        xy_plane_view_enabled_, grid_size_, grid_step_, grid_subdivisions_,
+        ToolMode::Select, TransformOperation::Move, TransformAxis::None,
+        0.0f, {}, false, capture_size.width(), capture_size.height());
+    functions->glFinish();
+    QImage image = framebuffer->toImage(true);
+
+    functions->glBindFramebuffer(
+        GL_FRAMEBUFFER, static_cast<GLuint>(previous_framebuffer));
+    functions->glViewport(0, 0, width(), height());
+    doneCurrent();
+    update();
+    return image;
+}
+
 void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
     last_mouse_ = event->pos();
 
     if (tool_ == ToolMode::Walk
         && event->button() == Qt::LeftButton
         && PlaceWalkCameraFromMiniMap(event->pos())) {
-        event->accept();
-        return;
-    }
-
-    if (event->button() == Qt::MiddleButton) {
-        panning_ = true;
-        setCursor(pan_scene_cursor());
-        return;
-    }
-
-    // Pen tablets generally have no middle mouse button. Match classic
-    // Dom-3D navigation: Ctrl + left drag pans the scene and must take
-    // precedence over selection and the active modeling tool.
-    if (event->button() == Qt::LeftButton
-        && event->modifiers().testFlag(Qt::ControlModifier)) {
-        panning_ = true;
-        orbiting_ = false;
-        alt_orbiting_ = false;
-        zooming_ = false;
-        setCursor(pan_scene_cursor());
         event->accept();
         return;
     }
@@ -2414,13 +2670,35 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
         return;
     }
 
+    const NavigationDrag navigation_drag = NavigationDragFor(*event);
+    if (navigation_drag != NavigationDrag::None) {
+        orbiting_ = navigation_drag == NavigationDrag::Orbit;
+        alt_orbiting_ = false;
+        panning_ = navigation_drag == NavigationDrag::Pan;
+        zooming_ = navigation_drag == NavigationDrag::Zoom;
+        dragging_transform_ = false;
+        if (event->button() == Qt::RightButton) {
+            right_navigation_active_ = true;
+            right_button_press_ = event->pos();
+            right_button_dragged_ = false;
+        }
+        if (panning_) {
+            setCursor(pan_scene_cursor());
+        } else if (orbiting_) {
+            setCursor(orbit_cursor());
+        }
+        event->accept();
+        return;
+    }
+
     if (event->button() == Qt::RightButton) {
-        zooming_ = true;
+        right_navigation_active_ = true;
         right_button_press_ = event->pos();
         right_button_dragged_ = false;
         orbiting_ = false;
         alt_orbiting_ = false;
         panning_ = false;
+        zooming_ = false;
         dragging_transform_ = false;
         return;
     }
@@ -2630,8 +2908,13 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
 
     if (picking_3d_point_) {
         CPoint3d picked{};
-        if (PickModelingPoint(event->pos(), picked)) {
+        const bool point_found = point_pick_plane_enabled_
+            ? ScreenToWorldPlane(event->pos(), point_pick_plane_origin_,
+                                 point_pick_plane_normal_, picked)
+            : PickModelingPoint(event->pos(), picked);
+        if (point_found) {
             picking_3d_point_ = false;
+            point_pick_plane_enabled_ = false;
             RestoreDefaultToolCursor();
             // Publish coordinates first. A command handling the point can
             // then replace this with its next-step or result message.
@@ -2641,7 +2924,9 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
                 .arg(picked.z, 0, 'f', 3));
             emit Point3DPicked(picked);
         } else {
-            emit StatusTextChanged("GetPoint3D: move the cursor to a visible vertex or curve point");
+            emit StatusTextChanged(point_pick_plane_enabled_
+                ? "Point: current view ray is parallel to the selected face"
+                : "GetPoint3D: move the cursor to a visible vertex or curve point");
         }
         event->accept();
         return;
@@ -2695,17 +2980,6 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
         material_interaction_mode_ = MaterialInteractionMode::None;
         RestoreDefaultToolCursor();
         update();
-        return;
-    }
-
-    if (event->modifiers().testFlag(Qt::AltModifier) && !xy_plane_view_enabled_ && !sketch_active_) {
-        alt_orbiting_ = true;
-        orbiting_ = false;
-        panning_ = false;
-        dragging_transform_ = false;
-        active_transform_axis_ = TransformAxis::None;
-        highlighted_transform_axis_ = TransformAxis::None;
-        setCursor(orbit_cursor());
         return;
     }
 
@@ -2900,9 +3174,9 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
         SelectionAction action = SelectionAction::Replace;
         const bool shift = event->modifiers().testFlag(Qt::ShiftModifier);
         const bool control = event->modifiers().testFlag(Qt::ControlModifier);
-        if (shift && control) {
+        if (control) {
             action = SelectionAction::Remove;
-        } else if (shift || control) {
+        } else if (shift) {
             action = SelectionAction::Add;
         }
         selecting_with_rect_ = true;
@@ -2914,9 +3188,6 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
         return;
     }
 
-    if (!xy_plane_view_enabled_ && !sketch_active_) {
-        orbiting_ = true;
-    }
 }
 
 void OpenGLViewport::mouseDoubleClickEvent(QMouseEvent* event) {
@@ -3268,11 +3539,24 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
         cursor_world_valid);
     const QPoint delta = event->pos() - last_mouse_;
 
+    if (right_navigation_active_
+        && event->buttons().testFlag(Qt::RightButton)) {
+        const QPoint total_delta = event->pos() - right_button_press_;
+        if (!right_button_dragged_
+            && total_delta.x() * total_delta.x()
+                   + total_delta.y() * total_delta.y() > 6 * 6) {
+            right_button_dragged_ = true;
+        }
+    }
+
     if (event->buttons() == Qt::NoButton) {
         pan_navigation_modifier_down_ =
-            event->modifiers().testFlag(Qt::ControlModifier);
+            navigation_preset_ == "dom3d"
+            && tool_ == ToolMode::Orbit
+            && event->modifiers().testFlag(Qt::ControlModifier);
         alt_navigation_modifier_down_ =
-            event->modifiers().testFlag(Qt::AltModifier)
+            UsesAltNavigationModifier()
+            && event->modifiers().testFlag(Qt::AltModifier)
             && !xy_plane_view_enabled_ && !sketch_active_;
         if (tool_ == ToolMode::Orbit
             || pan_navigation_modifier_down_
@@ -3831,10 +4115,15 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
 }
 
 void OpenGLViewport::mouseReleaseEvent(QMouseEvent* event) {
-    if (event->button() == Qt::RightButton && zooming_) {
+    if (event->button() == Qt::RightButton && right_navigation_active_) {
         const bool show_popup = !right_button_dragged_;
+        right_navigation_active_ = false;
         zooming_ = false;
+        orbiting_ = false;
+        alt_orbiting_ = false;
+        panning_ = false;
         right_button_dragged_ = false;
+        RestoreDefaultToolCursor();
         if (show_popup) {
             emit ViewportPopupMenuRequested(mapToGlobal(event->pos()));
         }
@@ -4043,9 +4332,11 @@ void OpenGLViewport::mouseReleaseEvent(QMouseEvent* event) {
 
 void OpenGLViewport::keyPressEvent(QKeyEvent* event) {
     if (event->key() == Qt::Key_Control) {
-        pan_navigation_modifier_down_ = true;
+        pan_navigation_modifier_down_ = navigation_preset_ == "dom3d"
+            && tool_ == ToolMode::Orbit;
         RestoreDefaultToolCursor();
     } else if (event->key() == Qt::Key_Alt
+               && UsesAltNavigationModifier()
                && !xy_plane_view_enabled_ && !sketch_active_) {
         alt_navigation_modifier_down_ = true;
         RestoreDefaultToolCursor();
@@ -4075,6 +4366,7 @@ void OpenGLViewport::keyPressEvent(QKeyEvent* event) {
     }
     if (event->key() == Qt::Key_C && picking_3d_point_) {
         picking_3d_point_ = false;
+        point_pick_plane_enabled_ = false;
         RestoreDefaultToolCursor();
         emit Point3DPickCloseRequested();
         event->accept();
@@ -4083,6 +4375,7 @@ void OpenGLViewport::keyPressEvent(QKeyEvent* event) {
     if ((event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter)
         && picking_3d_point_) {
         picking_3d_point_ = false;
+        point_pick_plane_enabled_ = false;
         RestoreDefaultToolCursor();
         emit Point3DPickFinished();
         event->accept();
@@ -4100,6 +4393,7 @@ void OpenGLViewport::keyPressEvent(QKeyEvent* event) {
     }
     if (event->key() == Qt::Key_Escape && picking_3d_point_) {
         picking_3d_point_ = false;
+        point_pick_plane_enabled_ = false;
         RestoreDefaultToolCursor();
         emit Point3DPickCanceled();
         emit StatusTextChanged("GetPoint3D canceled");

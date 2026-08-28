@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<material version="1" id="4001" name="Brown Leather" alpha="1" specular="0.18" shininess="24" reflectivity="0.02">
+    <ambient r="0.14" g="0.09" b="0.05"/>
+    <diffuse r="0.42" g="0.25" b="0.12"/>
+    <emission r="0" g="0" b="0"/>
+    <textures color="" light="" bump=""/>
+</material>

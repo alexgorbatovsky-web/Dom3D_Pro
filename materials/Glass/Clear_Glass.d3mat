@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<material version="1" id="7001" name="Clear Glass" alpha="0.38" specular="0.88" shininess="110" reflectivity="0.18">
+    <ambient r="0.10" g="0.13" b="0.15"/>
+    <diffuse r="0.64" g="0.82" b="0.92"/>
+    <emission r="0" g="0" b="0"/>
+    <textures color="" light="" bump=""/>
+</material>

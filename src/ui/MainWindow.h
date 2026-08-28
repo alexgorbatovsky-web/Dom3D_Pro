@@ -20,6 +20,7 @@
 #include <QStringList>
 
 #include <functional>
+#include <array>
 #include <string>
 #include <vector>
 
@@ -47,6 +48,8 @@ class QTreeWidgetItem;
 class QToolBar;
 class QToolButton;
 class CDrawingText;
+class DraftingWorkspace;
+class QStackedWidget;
 enum class ReferenceImageAxis;
 
 class MainWindow : public QMainWindow {
@@ -62,6 +65,7 @@ private:
     void CreateVerticalToolBar();
     void CreateMaterialLibraryDock();
     void CreateToolsPanel(QDockWidget* dock);
+    void ShowModelingPanels();
     void PopulateToolsPanelForTab(int tab_index);
     void AddToolButton(QGridLayout* layout, QWidget* parent, const std::string& key, int row, int column);
     void AddPlaceholderButton(QGridLayout* layout, QWidget* parent, const QString& icon_key, const QString& title, int row, int column);
@@ -122,6 +126,9 @@ private:
     void BeginMoveTwoPointEntry();
     void ShowPreciseRotateDialog();
     void ShowPreciseScaleDialog();
+    void ShowLinearArrayDialog();
+    void ShowRadialArrayDialog();
+    void ShowRectangularArrayDialog();
     void BeginNewSketch();
     enum class SpatialCurveKind {
         None,
@@ -165,6 +172,12 @@ private:
     bool ReverseSelectedCurves();
     void BeginSolidBox();
     void BeginSolidCylinder();
+    void BeginHoleTool();
+    void CompleteHoleFacePick();
+    void CompleteHoleCenterPick(CPoint3d point);
+    void CompleteHoleEdgePick();
+    void ShowHoleDialog();
+    void CancelHoleTool(const QString& message = {});
     void BeginSketchFillet();
     void BeginDrawSpline();
     void ShowDrawSplineDialog();
@@ -178,6 +191,9 @@ private:
     void CancelPendingTrim(const QString& status_text = {});
     void ShowLowPolyTool();
     void ShowMeshFillContourTool();
+    void BeginMeshIslandBoundaryTool();
+    void CreateSelectedSurfaceIslandBoundaries();
+    void WeldSelectedMeshVertices();
     void ShowMeshBoundaryLineTool();
     void ShowTrimMeshTestTool();
     void ShowClassifyFaceCutTool();
@@ -205,10 +221,15 @@ private:
     void OpenProjectFromPath(const QString& path);
     void SaveProject(bool save_as = false);
     void SaveProjectAs();
+    void UpdateAutoSaveTimer();
+    void AutoSaveProject();
     QString SelectProjectToOpen();
     QImage CaptureProjectThumbnail() const;
     QImage CaptureSelectionThumbnail(
         const std::vector<size_t>& selected_indices);
+    QImage CapturePrintableScene();
+    void ShowScenePrintPreview();
+    void ExportScenePdf();
     void UpdateWindowTitle();
     void ShowPreferences();
     void ShowLightingDialog();
@@ -281,12 +302,21 @@ private:
     };
 
     OpenGLViewport* viewport_ = nullptr;
+    QStackedWidget* workspace_stack_ = nullptr;
+    DraftingWorkspace* drafting_workspace_ = nullptr;
     QTreeWidget* scene_tree_ = nullptr;
+    QCheckBox* scene_tree_parts_filter_ = nullptr;
+    QCheckBox* scene_tree_layers_filter_ = nullptr;
+    QCheckBox* scene_tree_figures_filter_ = nullptr;
     PropertyPanel* property_panel_ = nullptr;
     QDockWidget* tools_dock_ = nullptr;
     QDockWidget* vertical_tools_dock_ = nullptr;
     QDockWidget* scene_tree_dock_ = nullptr;
     QDockWidget* material_library_dock_ = nullptr;
+    bool drafting_docks_hidden_ = false;
+    bool scene_tree_visible_before_drafting_ = true;
+    bool materials_visible_before_drafting_ = true;
+    int last_modeling_tab_index_ = 0;
     QDockWidget* sketch_dock_ = nullptr;
     QWidget* tools_panel_ = nullptr;
     QGridLayout* tools_layout_ = nullptr;
@@ -387,9 +417,34 @@ private:
     unsigned long pending_trim_plane_curve_id_ = 0;
     bool object_color_pick_pending_ = false;
     bool low_poly_pick_pending_ = false;
+    bool mesh_island_boundary_pick_active_ = false;
+    bool mesh_island_boundary_generation_pending_ = false;
+    enum class HolePickStage {
+        None,
+        Face,
+        Center,
+        Edge1,
+        Edge2
+    };
+    HolePickStage hole_pick_stage_ = HolePickStage::None;
+    unsigned long hole_body_id_ = 0;
+    int hole_face_index_ = -1;
+    Vec3 hole_plane_origin_{};
+    Vec3 hole_plane_x_axis_{1.0f, 0.0f, 0.0f};
+    Vec3 hole_plane_y_axis_{0.0f, 1.0f, 0.0f};
+    Vec3 hole_plane_normal_{0.0f, 0.0f, 1.0f};
+    CPoint3d hole_center_seed_{};
+    std::array<Vec3, 2> hole_edge_starts_{};
+    std::array<Vec3, 2> hole_edge_ends_{};
+    int hole_edge_count_ = 0;
     bool edge_tool_started_from_face_quick_menu_ = false;
+    double last_fillet_radius_ = 1.0;
+    double last_fillet_start_radius_ = 1.0;
+    double last_fillet_end_radius_ = 1.0;
+    double last_chamfer_distance_ = 1.0;
     QTimer* furniture_animation_timer_ = nullptr;
     QTimer* live_fillet_update_timer_ = nullptr;
+    QTimer* auto_save_timer_ = nullptr;
     bool live_fillet_build_running_ = false;
     bool live_fillet_build_pending_ = false;
     unsigned long long live_fillet_build_generation_ = 0;

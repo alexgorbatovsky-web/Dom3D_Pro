@@ -14,6 +14,58 @@ namespace {
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kEpsilon = 1.0e-9;
 
+using OutputVec3 = Vec3;
+
+// 3DCoat's qContourPoint uses dVec3.  Keeping the advancing front in the
+// application's float Vec3 changes close candidate costs and can select a
+// different expansion on large, uneven contours.
+struct DVec3 {
+    double x = 0.0;
+    double y = 0.0;
+    double z = 0.0;
+
+    DVec3() = default;
+    DVec3(double x_value, double y_value, double z_value)
+        : x(x_value), y(y_value), z(z_value) {}
+    DVec3(OutputVec3 value) : x(value.x), y(value.y), z(value.z) {}
+    explicit operator OutputVec3() const {
+        return {static_cast<float>(x), static_cast<float>(y),
+                static_cast<float>(z)};
+    }
+    DVec3 operator+(DVec3 other) const {
+        return {x + other.x, y + other.y, z + other.z};
+    }
+    DVec3 operator-(DVec3 other) const {
+        return {x - other.x, y - other.y, z - other.z};
+    }
+    DVec3 operator*(double scale) const {
+        return {x * scale, y * scale, z * scale};
+    }
+    DVec3& operator+=(DVec3 other) {
+        x += other.x;
+        y += other.y;
+        z += other.z;
+        return *this;
+    }
+};
+
+double dot(DVec3 first, DVec3 second) {
+    return first.x * second.x + first.y * second.y + first.z * second.z;
+}
+
+DVec3 cross(DVec3 first, DVec3 second) {
+    return {first.y * second.z - first.z * second.y,
+            first.z * second.x - first.x * second.z,
+            first.x * second.y - first.y * second.x};
+}
+
+DVec3 normalize(DVec3 value) {
+    const double squared = dot(value, value);
+    return squared > 0.0 ? value * (1.0 / std::sqrt(squared)) : DVec3{};
+}
+
+#define Vec3 DVec3
+
 double lengthSquared(Vec3 value) { return static_cast<double>(dot(value, value)); }
 double distance(Vec3 first, Vec3 second) { return std::sqrt(lengthSquared(first - second)); }
 
@@ -57,8 +109,10 @@ double quadrilateralQuality(Vec3 v1, Vec3 v2, Vec3 v3, Vec3 v4)
     const auto angle = [](Vec3 first, Vec3 center, Vec3 third) {
         Vec3 d1 = safeNormal(first - center);
         Vec3 d2 = safeNormal(third - center);
-        return std::acos(std::clamp(static_cast<double>(dot(d1, d2)), -1.0, 1.0))
-            * 180.0 / kPi;
+        double cosine = static_cast<double>(dot(d1, d2));
+        if (cosine > 0.999999)
+            cosine = 0.999999;
+        return std::acos(std::max(cosine, -1.0)) * 180.0 / kPi;
     };
     return std::min({angle(v1, v2, v3), angle(v2, v3, v4),
                      angle(v3, v4, v1), angle(v4, v1, v2)});
@@ -116,7 +170,7 @@ private:
         if (v < -1.0e-6 || u + v > 1.0 + 1.0e-6)
             return false;
         ray_distance = dot(edge2, q) * inverse;
-        hit = origin + direction * static_cast<float>(ray_distance);
+        hit = origin + direction * ray_distance;
         return true;
     }
 
@@ -240,25 +294,117 @@ double segmentDistanceSquared(Vec3 p1, Vec3 q1, Vec3 p2, Vec3 q2)
             }
         }
     }
-    const Vec3 c1 = p1 + d1 * static_cast<float>(s);
-    const Vec3 c2 = p2 + d2 * static_cast<float>(t);
+    const Vec3 c1 = p1 + d1 * s;
+    const Vec3 c2 = p2 + d2 * t;
     return lengthSquared(c1 - c2);
 }
 
-bool checkSelfIntersections(const std::vector<QuadPoint>& contour)
+std::pair<Vec3, Vec3> closestSegmentPoints(Vec3 p1, Vec3 q1,
+                                           Vec3 p2, Vec3 q2)
 {
+    const Vec3 d1 = q1 - p1;
+    const Vec3 d2 = q2 - p2;
+    const Vec3 r = p1 - p2;
+    const double a = dot(d1, d1);
+    const double e = dot(d2, d2);
+    const double f = dot(d2, r);
+    double s = 0.0;
+    double t = 0.0;
+    if (a <= kEpsilon && e <= kEpsilon)
+        return {p1, p2};
+    if (a <= kEpsilon) {
+        t = std::clamp(f / e, 0.0, 1.0);
+    } else {
+        const double c = dot(d1, r);
+        if (e <= kEpsilon) {
+            s = std::clamp(-c / a, 0.0, 1.0);
+        } else {
+            const double b = dot(d1, d2);
+            const double denominator = a * e - b * b;
+            if (std::fabs(denominator) > kEpsilon)
+                s = std::clamp((b * f - c * e) / denominator, 0.0, 1.0);
+            t = (b * s + f) / e;
+            if (t < 0.0) {
+                t = 0.0;
+                s = std::clamp(-c / a, 0.0, 1.0);
+            } else if (t > 1.0) {
+                t = 1.0;
+                s = std::clamp((b - c) / a, 0.0, 1.0);
+            }
+        }
+    }
+    return {p1 + d1 * s, p2 + d2 * t};
+}
+
+bool segmentsIntersectLike3DCoat(Vec3 first_start, Vec3 first_end,
+                                 Vec3 second_start, Vec3 second_end)
+{
+    constexpr double endpoint_epsilon = 1.0e-12;
+    const Vec3 first_center = (first_start + first_end) * 0.5f;
+    const Vec3 second_center = (second_start + second_end) * 0.5f;
+    const double first_length = distance(first_start, first_end);
+    const double second_half_length = distance(second_start, second_end) * 0.5;
+    if (distance(first_center, second_center)
+        >= first_length + second_half_length) {
+        return false;
+    }
+    const double tolerance = std::min(first_length, second_half_length) * 0.1;
+    const auto closest = closestSegmentPoints(
+        first_start, first_end, second_start, second_end);
+    return distance(closest.first, closest.second) < tolerance
+        && lengthSquared(closest.first - first_start) > endpoint_epsilon
+        && lengthSquared(closest.first - first_end) > endpoint_epsilon
+        && lengthSquared(closest.second - second_start) > endpoint_epsilon
+        && lengthSquared(closest.second - second_end) > endpoint_epsilon;
+}
+
+bool checkSelfIntersections(const std::vector<QuadPoint>& contour,
+                            bool exact_reference)
+{
+    if (exact_reference) {
+        for (size_t i = 0; i < contour.size(); ++i) {
+            const int next_point = contour[i].next;
+            if (next_point < 0)
+                continue;
+            int current = contour[next_point].next;
+            if (current < 0 || current == static_cast<int>(i))
+                continue;
+            for (size_t guard = 0; guard < contour.size(); ++guard) {
+                const int next = contour[current].next;
+                if (next < 0 || next == static_cast<int>(i))
+                    break;
+                if (segmentsIntersectLike3DCoat(
+                        contour[i].position, contour[next_point].position,
+                        contour[next].position, contour[current].position)) {
+                    return true;
+                }
+                const int parent = contour[current].parent_vertex;
+                if (parent >= 0 && parent < static_cast<int>(contour.size())
+                    && segmentsIntersectLike3DCoat(
+                        contour[i].position, contour[next_point].position,
+                        contour[parent].position, contour[current].position)) {
+                    return true;
+                }
+                current = next;
+            }
+        }
+        return false;
+    }
     for (size_t i = 0; i < contour.size(); ++i) {
         const int i_next = contour[i].next;
         if (i_next < 0)
             continue;
-        const double first_length = distance(contour[i].position, contour[i_next].position);
+        const double first_length = distance(
+            contour[i].position, contour[i_next].position);
         for (size_t j = i + 1; j < contour.size(); ++j) {
             const int j_next = contour[j].next;
             if (j_next < 0 || static_cast<int>(i) == j_next
                 || i_next == static_cast<int>(j) || i_next == j_next)
                 continue;
-            const double second_length = distance(contour[j].position, contour[j_next].position);
-            const double tolerance = std::min(first_length, second_length) * 0.1;
+            const double second_length = distance(
+                contour[j].position, contour[j_next].position);
+            const double tolerance = std::min(
+                first_length, second_length) * 0.1;
             if (segmentDistanceSquared(
                     contour[i].position, contour[i_next].position,
                     contour[j].position, contour[j_next].position)
@@ -277,7 +423,8 @@ struct Expansion {
 
 Expansion tryExpand(const std::vector<QuadPoint>& source,
                     int start_point,
-                    const TriangleSnapper& snapper)
+                    const TriangleSnapper& snapper,
+                    bool exact_reference)
 {
     Expansion result;
     result.contour = source;
@@ -334,6 +481,7 @@ Expansion tryExpand(const std::vector<QuadPoint>& source,
     std::vector<int> old_ids;
     double minimum_angle = 90.0;
     double proportion = 1.0;
+    double topology_penalty = 0.0;
 
     if (start_point != end_point) {
         const int pre_start = contour[start_point].previous;
@@ -364,6 +512,8 @@ Expansion tryExpand(const std::vector<QuadPoint>& source,
         old_ids.push_back(start_point);
         int current = start_point;
         int part = 1;
+        double generated_length = 0.0;
+        Vec3 previous_generated = pre_position;
         do {
             current = contour[current].next;
             if (current < 0)
@@ -371,17 +521,21 @@ Expansion tryExpand(const std::vector<QuadPoint>& source,
             QuadPoint& current_point = contour[current];
             old_points.push_back(current_point.position);
             old_ids.push_back(current);
-            const double alpha = static_cast<double>(part++) / chunk_count;
+            // The reference stores this interpolation parameter in a float,
+            // even though all contour positions are dVec3.
+            const float alpha = static_cast<float>(part++) / chunk_count;
             const double front = start_front * (1.0 - alpha) + end_front * alpha;
             const double tangent = start_tangent * (1.0 - alpha) + end_tangent * alpha;
             Vec3 new_position = current == end_point
                 ? post_position
                 : current_point.position
-                    + current_point.front2 * static_cast<float>(front)
-                    + current_point.tangent2 * static_cast<float>(tangent);
+                    + current_point.front2 * front
+                    + current_point.tangent2 * tangent;
             chunks.push_back(new_position);
             chunk_normals.push_back(current_point.normal);
             chunk_ids.push_back(-1);
+            generated_length += distance(previous_generated, new_position);
+            previous_generated = new_position;
         } while (current != end_point);
         if (end_type != -1)
             chunk_ids.back() = post_end;
@@ -399,15 +553,14 @@ Expansion tryExpand(const std::vector<QuadPoint>& source,
                 chunks[i] = chunks[i] + tangent * dot(tangent, delta) * 0.35f + delta * 0.15f;
             }
         }
-        double old_length = 0.0;
-        double new_length = 0.0;
         for (size_t i = 0; i + 1 < chunks.size(); ++i) {
-            old_length += distance(old_points[i], old_points[i + 1]);
-            new_length += distance(chunks[i], chunks[i + 1]);
             minimum_angle = std::min(minimum_angle, quadrilateralQuality(
                 chunks[i], chunks[i + 1], old_points[i + 1], old_points[i]));
         }
-        proportion = new_length / std::max(derived_length * chunk_count, kEpsilon);
+        // Shpagin scores the unsmoothed generated front. Recomputing this
+        // length after relaxation changes which candidate wins.
+        proportion = (generated_length / chunk_count)
+            / (derived_length + 0.000001);
 
         int erase_start = start_type == 1 ? start_point : contour[start_point].next;
         const int erase_last = end_type == 1 ? end_point : contour[end_point].previous;
@@ -451,7 +604,23 @@ Expansion tryExpand(const std::vector<QuadPoint>& source,
         }
         for (size_t i = 0; i + 1 < chunks.size(); ++i)
             result.faces.push_back({old_ids[i], old_ids[i + 1], chunk_ids[i + 1], chunk_ids[i]});
+        // These terms are part of Shpagin's original expansion cost. Without
+        // them the port prefers cheap-looking expansions that leave a narrow
+        // concave sector until the end and later cannot close the contour.
+        if (start_type == -1)
+            topology_penalty += 4.0;
+        if (end_type == -1)
+            topology_penalty += 4.0;
+        if (old_points.size() <= 2
+            && (start_type == -1 || end_type == -1)) {
+            topology_penalty += 5.0;
+        }
+        if (old_points.size() == 2
+            && (start_type == 1 || end_type == 1)) {
+            topology_penalty -= 5.0;
+        }
     } else {
+        const bool sharp_case = contour[start_point].angle < 110.0;
         int current = start_point;
         std::vector<Vec3> old_ring;
         std::vector<Vec3> new_ring;
@@ -467,7 +636,7 @@ Expansion tryExpand(const std::vector<QuadPoint>& source,
             old_ring.push_back(current_point.position);
             new_ring.push_back(current_point.position
                 + safeNormal(current_point.front1 + current_point.front2)
-                    * static_cast<float>(local_length));
+                    * local_length);
             ring_normals.push_back(current_point.normal);
             old_ring_ids.push_back(current);
             const int next = current_point.next;
@@ -486,36 +655,83 @@ Expansion tryExpand(const std::vector<QuadPoint>& source,
                 new_ring[i] = new_ring[i] + tangent * dot(tangent, delta) * 0.15f + delta * 0.05f;
             }
         }
+        if (sharp_case && exact_reference)
+            old_ring[1] = old_ring.back() = old_ring[0];
         for (size_t i = 0; i < new_ring.size(); ++i)
             snapper.Snap(new_ring[i], ring_normals[i]);
         std::vector<int> new_ring_ids(new_ring.size(), -1);
-        for (size_t i = 0; i < new_ring.size(); ++i) {
-            QuadPoint new_point;
-            new_point.position = new_ring[i];
-            new_point.normal = ring_normals[i];
-            new_point.parent_vertex = old_ring_ids[i];
-            new_point.derived_edge_length = contour[old_ring_ids[i]].derived_edge_length;
-            new_ring_ids[i] = static_cast<int>(contour.size());
-            contour.push_back(new_point);
-        }
         double old_length = 0.0;
         double new_length = 0.0;
-        for (size_t i = 0; i < new_ring.size(); ++i) {
-            const size_t next = (i + 1) % new_ring.size();
-            contour[new_ring_ids[i]].next = new_ring_ids[next];
-            contour[new_ring_ids[next]].previous = new_ring_ids[i];
-            old_length += distance(old_ring[i], old_ring[next]);
-            new_length += distance(new_ring[i], new_ring[next]);
-            result.faces.push_back({old_ring_ids[i], old_ring_ids[next],
-                                    new_ring_ids[next], new_ring_ids[i]});
+        if (sharp_case) {
+            // Faithful port of the original sharp closed-front case: collapse
+            // the two neighbours of the sharp point to one new front vertex.
+            // The generic ring contraction used previously retained all front
+            // nodes and is the main behavioural difference visible on the
+            // long right-hand island.
+            for (size_t i = 0; i + 1 < new_ring.size(); ++i) {
+                if (i == 1)
+                    continue;
+                QuadPoint new_point;
+                new_point.position = new_ring[i];
+                new_point.normal = ring_normals[i];
+                new_point.parent_vertex = old_ring_ids[i];
+                new_point.derived_edge_length =
+                    contour[old_ring_ids[i]].derived_edge_length;
+                new_ring_ids[i] = static_cast<int>(contour.size());
+                contour.push_back(new_point);
+            }
+            new_ring_ids[1] = new_ring_ids.back() = new_ring_ids[0];
+            for (size_t i = 0; i + 1 < new_ring_ids.size(); ++i) {
+                if (i == 1)
+                    continue;
+                size_t next = (i + 1) % new_ring_ids.size();
+                size_t previous = (i + new_ring_ids.size() - 1)
+                    % new_ring_ids.size();
+                if (i == 0) {
+                    next = 2;
+                    previous = new_ring_ids.size() - 2;
+                }
+                QuadPoint& ring_point = contour[new_ring_ids[i]];
+                ring_point.next = new_ring_ids[next];
+                ring_point.previous = new_ring_ids[previous];
+                old_length += distance(old_ring[i], old_ring[next]);
+                new_length += distance(new_ring[i], new_ring[next]);
+            }
+            for (size_t i = 1; i + 1 < old_ring.size(); ++i) {
+                const size_t next = i + 1;
+                result.faces.push_back({old_ring_ids[i], old_ring_ids[next],
+                                        new_ring_ids[next], new_ring_ids[i]});
+            }
+            result.faces.push_back({old_ring_ids[0], old_ring_ids[1],
+                                    new_ring_ids[0], old_ring_ids.back()});
+        } else {
+            for (size_t i = 0; i < new_ring.size(); ++i) {
+                QuadPoint new_point;
+                new_point.position = new_ring[i];
+                new_point.normal = ring_normals[i];
+                new_point.parent_vertex = old_ring_ids[i];
+                new_point.derived_edge_length =
+                    contour[old_ring_ids[i]].derived_edge_length;
+                new_ring_ids[i] = static_cast<int>(contour.size());
+                contour.push_back(new_point);
+            }
+            for (size_t i = 0; i < new_ring.size(); ++i) {
+                const size_t next = (i + 1) % new_ring.size();
+                contour[new_ring_ids[i]].next = new_ring_ids[next];
+                contour[new_ring_ids[next]].previous = new_ring_ids[i];
+                old_length += distance(old_ring[i], old_ring[next]);
+                new_length += distance(new_ring[i], new_ring[next]);
+                result.faces.push_back({old_ring_ids[i], old_ring_ids[next],
+                                        new_ring_ids[next], new_ring_ids[i]});
+            }
         }
-        proportion = old_length / std::max(new_length, kEpsilon);
+        proportion = (old_length + 0.000001) / (new_length + 0.000001);
     }
 
     if (!validLinks(contour))
         return result;
     const double distortion = proportion > 1.0 ? proportion - 1.0 : 1.0 / std::max(proportion, kEpsilon) - 1.0;
-    result.cost = distortion + old_points.size() / 3.0
+    result.cost = distortion + topology_penalty + old_points.size() / 3.0
         + (95.0 / (minimum_angle + 5.0) - 1.0) * 0.25 + edge_distance / 5.0;
     return result;
 }
@@ -536,11 +752,44 @@ void addAdjacency(const std::vector<QuadFace>& faces,
     }
 }
 
-} // namespace
+void updateDistanceField(std::vector<QuadPoint>& contour,
+                         const std::vector<std::set<int>>& adjacency)
+{
+    for (QuadPoint& point : contour)
+        point.average_distance = point.initial ? 0 : -1;
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (size_t first = 0; first < adjacency.size(); ++first) {
+            if (first >= contour.size())
+                break;
+            for (int second : adjacency[first]) {
+                if (second < 0 || second >= static_cast<int>(contour.size()))
+                    continue;
+                QuadPoint& a = contour[first];
+                QuadPoint& b = contour[second];
+                if (a.average_distance >= 0
+                    && (b.average_distance < 0
+                        || b.average_distance > a.average_distance + 1)) {
+                    b.average_distance = a.average_distance + 1;
+                    changed = true;
+                }
+                if (b.average_distance >= 0
+                    && (a.average_distance < 0
+                        || a.average_distance > b.average_distance + 1)) {
+                    a.average_distance = b.average_distance + 1;
+                    changed = true;
+                }
+            }
+        }
+    }
+}
 
-bool Build3DCoatQuadrangulation(const std::vector<Vec3>& vertices,
-                                const std::vector<CMesh3D::Face>& triangles,
-                                CMesh3D* result)
+bool build3DCoatQuadrangulationCandidate(
+    const std::vector<Vec3>& vertices,
+    const std::vector<CMesh3D::Face>& triangles,
+    CMesh3D* result,
+    bool exact_reference)
 {
     if (!result || vertices.empty() || triangles.empty())
         return false;
@@ -571,11 +820,8 @@ bool Build3DCoatQuadrangulation(const std::vector<Vec3>& vertices,
 
     std::map<size_t, int> encoding;
     std::vector<QuadPoint> contour;
-    for (const auto& entry : edge_counts) {
-        if (entry.second != 1)
-            continue;
-        const auto direction = edge_directions[entry.first];
-        for (size_t vertex : {direction.first, direction.second}) {
+    const auto add_boundary_edge = [&](size_t first, size_t second) {
+        for (size_t vertex : {first, second}) {
             if (!encoding.count(vertex)) {
                 QuadPoint point;
                 point.position = vertices[vertex];
@@ -585,8 +831,32 @@ bool Build3DCoatQuadrangulation(const std::vector<Vec3>& vertices,
                 contour.push_back(point);
             }
         }
-        contour[encoding[direction.first]].next = encoding[direction.second];
-        contour[encoding[direction.second]].previous = encoding[direction.first];
+        contour[encoding[first]].next = encoding[second];
+        contour[encoding[second]].previous = encoding[first];
+    };
+    if (exact_reference) {
+        // Match the raw-face traversal order used by 3DCoat. Candidate ties
+        // are resolved by the first contour node.
+        for (const CMesh3D::Face& face : triangles) {
+            const std::array<size_t, 3> face_vertices{
+                face.corners[0].v, face.corners[1].v, face.corners[2].v};
+            for (size_t edge_index = 0; edge_index < 3; ++edge_index) {
+                const size_t first = face_vertices[edge_index];
+                const size_t second = face_vertices[(edge_index + 1) % 3];
+                if (edge_counts[orderedEdge(first, second)] == 1)
+                    add_boundary_edge(first, second);
+            }
+        }
+    } else {
+        // Retain Dom's previous deterministic ordering as the independent safe
+        // candidate; it performs better on several complete multi-hole faces.
+        for (const auto& entry : edge_counts) {
+            if (entry.second != 1)
+                continue;
+            add_boundary_edge(
+                edge_directions[entry.first].first,
+                edge_directions[entry.first].second);
+        }
     }
     if (contour.size() < 4 || !validLinks(contour))
         return false;
@@ -628,11 +898,13 @@ bool Build3DCoatQuadrangulation(const std::vector<Vec3>& vertices,
             break;
 
         for (int start : starts) {
-            Expansion candidate = tryExpand(contour, start, snapper);
+            Expansion candidate = tryExpand(
+                contour, start, snapper, exact_reference);
             if (candidate.cost >= best.cost)
                 continue;
             if (!checkFlips(candidate.contour, candidate.faces)
-                || checkSelfIntersections(candidate.contour))
+                || checkSelfIntersections(
+                    candidate.contour, exact_reference))
                 continue;
             best = std::move(candidate);
         }
@@ -642,12 +914,11 @@ bool Build3DCoatQuadrangulation(const std::vector<Vec3>& vertices,
             updateDirections(contour);
             adjacency.resize(contour.size());
             addAdjacency(best.faces, adjacency);
+            updateDistanceField(contour, adjacency);
             crease = 50.0;
         } else {
             crease *= 0.9;
             updateDirections(contour, false, crease);
-            if (crease < 1.0)
-                return false;
         }
 
         double current_area = 0.0;
@@ -665,8 +936,10 @@ bool Build3DCoatQuadrangulation(const std::vector<Vec3>& vertices,
                                              contour[face[3]].position);
             }
         }
+        // 3DCoat stops expanding here but still returns the faces accumulated
+        // so far.  The old port discarded the complete result instead.
         if (current_area > initial_area)
-            return false;
+            break;
     }
 
     if (output_faces.empty())
@@ -686,7 +959,7 @@ bool Build3DCoatQuadrangulation(const std::vector<Vec3>& vertices,
                 sum = sum + contour[neighbour].position;
                 weight += 1.0;
             }
-            smoothed[i] = sum * static_cast<float>(1.0 / weight);
+            smoothed[i] = sum * (1.0 / weight);
         }
         for (size_t i = 0; i < contour.size(); ++i) {
             if (contour[i].initial)
@@ -696,10 +969,10 @@ bool Build3DCoatQuadrangulation(const std::vector<Vec3>& vertices,
         }
     }
 
-    std::vector<Vec3> result_vertices;
+    std::vector<OutputVec3> result_vertices;
     result_vertices.reserve(contour.size());
     for (const QuadPoint& point : contour)
-        result_vertices.push_back(point.position);
+        result_vertices.push_back(static_cast<OutputVec3>(point.position));
     std::vector<CMesh3D::Face> result_faces;
     result_faces.reserve(output_faces.size());
     for (const QuadFace& face : output_faces) {
@@ -714,4 +987,42 @@ bool Build3DCoatQuadrangulation(const std::vector<Vec3>& vertices,
     }
     result->Clear();
     return result->SetGeometry(std::move(result_vertices), std::move(result_faces));
+}
+
+} // namespace
+
+#undef Vec3
+
+bool Build3DCoatQuadrangulation(const std::vector<Vec3>& vertices,
+                                const std::vector<CMesh3D::Face>& triangles,
+                                CMesh3D* result,
+                                bool exact_reference)
+{
+    if (!result)
+        return false;
+    const std::vector<DVec3> work_vertices(vertices.begin(), vertices.end());
+    CMesh3D reference_candidate;
+    const bool reference_created = build3DCoatQuadrangulationCandidate(
+        work_vertices, triangles, &reference_candidate, true);
+    if (exact_reference) {
+        if (!reference_created)
+            return false;
+        result->Clear();
+        return result->SetGeometry(
+            reference_candidate.GetVertices(), reference_candidate.GetFaces(),
+            reference_candidate.GetUVs(), reference_candidate.GetNormals());
+    }
+
+    CMesh3D safe_candidate;
+    const bool safe_created = build3DCoatQuadrangulationCandidate(
+        work_vertices, triangles, &safe_candidate, false);
+    if (!reference_created && !safe_created)
+        return false;
+
+    const CMesh3D& selected = safe_created
+        ? safe_candidate : reference_candidate;
+    result->Clear();
+    return result->SetGeometry(
+        selected.GetVertices(), selected.GetFaces(),
+        selected.GetUVs(), selected.GetNormals());
 }

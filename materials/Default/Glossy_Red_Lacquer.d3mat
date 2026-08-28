@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<material version="1" id="1002" name="Glossy Red Lacquer" alpha="1" specular="0.9" shininess="160" reflectivity="0.22" textureOffsetU="0" textureOffsetV="0" textureScaleU="1" textureScaleV="1" textureRotation="0" textureFitToSurface="0">
+    <ambient r="0.20" g="0.008" b="0.006"/>
+    <diffuse r="0.82" g="0.018" b="0.012"/>
+    <emission r="0" g="0" b="0"/>
+    <textures color="" light="" bump=""/>
+</material>

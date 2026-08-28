@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<material version="1" id="42001" name="Oracal Film Matte RAL 3020" alpha="1" specular="0.28" shininess="38" reflectivity="0.03" roughness="0.68" metallic="0" coatWeight="0" coatRoughness="0.12" normalStrength="0" displacementScale="0" textureOffsetU="0" textureOffsetV="0" textureScaleU="1" textureScaleV="1" textureRotation="0" textureFitToSurface="0">
+    <ambient r="0.176" g="0.0052" b="0.0043"/>
+    <diffuse r="0.8" g="0.0235" b="0.0196"/>
+    <emission r="0" g="0" b="0"/>
+    <textures color="" light="" bump="" normal="" roughness="" metallic="" displacement=""/>
+</material>
+

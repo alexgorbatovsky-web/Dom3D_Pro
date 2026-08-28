@@ -45,3 +45,8 @@ private:
 
 bool FillContorByTriangles(CMesh3D* mesh, const std::vector<Vec3>& contour, Vec3 normal);
 bool FillContourByTriangles(CMesh3D* mesh, const std::vector<Vec3>& contour, Vec3 normal);
+bool FillContourByEarTriangles(CMesh3D* mesh, const std::vector<Vec3>& contour,
+                               Vec3 normal, size_t ear_offset = 0);
+bool FillContourByQuadEars(CMesh3D* mesh, const std::vector<Vec3>& contour,
+                           Vec3 normal, size_t ear_offset = 0);
+bool PairTriangleMeshToQuads(const CMesh3D* triangles, CMesh3D* quads);

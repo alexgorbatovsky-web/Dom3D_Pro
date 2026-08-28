@@ -632,6 +632,9 @@ void sync_trim_lines_from_regular_mesh(const std::vector<CSurfaceFace*>& surface
 			std::vector<CPoint3d> boundary_points;
 			if (!donor->GetRegularMeshBoundaryPoints(donor_edge_index, boundary_points))
 				continue;
+			TopoDS_Edge donor_topo_edge;
+			const bool has_donor_topo_edge = donor->GetPreparedTopoEdge(
+				donor_edge_index, donor_topo_edge);
 
 			double boundary_length = 0.0;
 			for (size_t i = 1; i < boundary_points.size(); ++i) {
@@ -653,12 +656,43 @@ void sync_trim_lines_from_regular_mesh(const std::vector<CSurfaceFace*>& surface
 			for (CSurfaceFace* receiver : surfaces) {
 				if (!receiver || receiver == donor || receiver->m_TypeMesh == REGULAR_MESH)
 					continue;
+				bool receiver_has_shared_topo_edge = false;
+				if (has_donor_topo_edge) {
+					for (int receiver_edge_index = 0;
+					     receiver_edge_index < receiver->GetPreparedPolylineCount();
+					     ++receiver_edge_index) {
+						TopoDS_Edge candidate_topo_edge;
+						if (receiver->GetPreparedTopoEdge(
+								receiver_edge_index, candidate_topo_edge)
+							&& candidate_topo_edge.IsSame(donor_topo_edge)) {
+							receiver_has_shared_topo_edge = true;
+							break;
+						}
+					}
+				}
 
 				int best_receiver_edge = -1;
 				double best_score = std::numeric_limits<double>::max();
 				for (int receiver_edge_index = 0;
 				     receiver_edge_index < receiver->GetPreparedPolylineCount();
 				     ++receiver_edge_index) {
+					// Geometry alone is ambiguous at a rounded corner: the two
+					// incident trimming edges are tangent and can lie within the
+					// same matching tolerance.  Synchronizing the adjacent edge
+					// inserts a quad strip in the wrong direction.  Faces of the
+					// same solid share the OCCT edge identity, so use it whenever
+					// it is available and reserve the distance test for imported
+					// or reconstructed surfaces without topology metadata.
+					TopoDS_Edge receiver_topo_edge;
+					const bool has_receiver_topo_edge =
+						receiver->GetPreparedTopoEdge(
+							receiver_edge_index, receiver_topo_edge);
+					if (has_donor_topo_edge && receiver_has_shared_topo_edge) {
+						if (!has_receiver_topo_edge
+							|| !receiver_topo_edge.IsSame(donor_topo_edge)) {
+							continue;
+						}
+					}
 					std::vector<CPoint3d> prepared_points;
 					if (!receiver->GetPreparedPolylinePoints(receiver_edge_index, prepared_points)
 						|| prepared_points.size() < 2) {
@@ -695,7 +729,13 @@ void sync_trim_lines_from_regular_mesh(const std::vector<CSurfaceFace*>& surface
 					}
 				}
 
-				if (best_receiver_edge < 0 || best_score > match_tolerance_sq)
+				// A closed circular edge can use a different seam phase on the
+				// neighbouring cone/cylinder. Point-to-segment distance then exceeds
+				// the geometric threshold even though OCCT identifies the exact same
+				// topological edge. Topology is authoritative in that case.
+				if (best_receiver_edge < 0
+					|| (!receiver_has_shared_topo_edge
+						&& best_score > match_tolerance_sq))
 					continue;
 
 				std::vector<CPoint3d> receiver_points = boundary_points;
@@ -1360,6 +1400,7 @@ void CSolid::Alloc()
 	IsInitEdges = false;
 //	ptchDensityOld = ptchDensity;
 	MeshQuadro = false;
+	MeshQuadroHoleSLX = false;
 //	Selected = false;
 	EditingSolid = NULL;
 	Surface_ID = 0;
@@ -1501,43 +1542,82 @@ bool CSolid::HitTestFaceScreen(DomPoint point,
 
 	for (int surface_i = 0; surface_i < static_cast<int>(m_Surfaces.size()); ++surface_i) {
 		const CSurfaceFace* surface = m_Surfaces[static_cast<size_t>(surface_i)];
-		if (!surface || !surface->pMesh3D || (planar_only && !surface->IsPlanar()))
+		if (!surface || (planar_only && !surface->IsPlanar()))
 			continue;
 
-		const std::vector<Vec3>& vertices = surface->pMesh3D->GetVertices();
-		const std::vector<CMesh3D::Face>& faces = surface->pMesh3D->GetFaces();
-		for (const CMesh3D::Face& face : faces) {
-			if (face.deleted || face.corners.size() < 3)
-				continue;
+		bool low_poly_surface_hit = false;
+		const auto test_triangle = [&](Vec3 a, Vec3 b, Vec3 c) {
+			DomPoint screen[3]{};
+			float vertex_depth[3]{};
+			if (!project_world(a, screen[0], vertex_depth[0])
+				|| !project_world(b, screen[1], vertex_depth[1])
+				|| !project_world(c, screen[2], vertex_depth[2])) {
+				return false;
+			}
+			float weight_a = 0.0f;
+			float weight_b = 0.0f;
+			float weight_c = 0.0f;
+			if (!point_in_screen_triangle(point, screen[0], screen[1], screen[2],
+			                              weight_a, weight_b, weight_c)) {
+				return false;
+			}
+			const float hit_depth = weight_a * vertex_depth[0]
+				+ weight_b * vertex_depth[1] + weight_c * vertex_depth[2];
+			if (hit_depth > 0.0f && hit_depth < best_depth) {
+				best_depth = hit_depth;
+				best_surface = surface_i;
+				found = true;
+			}
+			return hit_depth > 0.0f;
+		};
 
-			for (size_t i = 1; i + 1 < face.corners.size(); ++i) {
-				const size_t indices[] = {face.corners[0].v, face.corners[i].v, face.corners[i + 1].v};
-				if (indices[0] >= vertices.size() || indices[1] >= vertices.size() || indices[2] >= vertices.size())
+		if (surface->pMesh3D) {
+			const std::vector<Vec3>& vertices = surface->pMesh3D->GetVertices();
+			const std::vector<CMesh3D::Face>& faces = surface->pMesh3D->GetFaces();
+			for (const CMesh3D::Face& face : faces) {
+				if (face.deleted || face.corners.size() < 3)
 					continue;
-
-				DomPoint screen[3]{};
-				float vertex_depth[3]{};
-				bool projected = true;
-				for (int j = 0; j < 3; ++j) {
-					if (!project_world(vertices[indices[j]], screen[j], vertex_depth[j])) {
-						projected = false;
-						break;
+				for (size_t i = 1; i + 1 < face.corners.size(); ++i) {
+					const size_t indices[] = {
+						face.corners[0].v, face.corners[i].v, face.corners[i + 1].v};
+					if (indices[0] >= vertices.size() || indices[1] >= vertices.size()
+						|| indices[2] >= vertices.size()) {
+						continue;
 					}
+					low_poly_surface_hit = test_triangle(
+						vertices[indices[0]], vertices[indices[1]], vertices[indices[2]])
+						|| low_poly_surface_hit;
 				}
-				if (!projected)
-					continue;
+			}
+		}
 
-				float weight_a = 0.0f;
-				float weight_b = 0.0f;
-				float weight_c = 0.0f;
-				if (!point_in_screen_triangle(point, screen[0], screen[1], screen[2], weight_a, weight_b, weight_c))
-					continue;
-
-				const float hit_depth = weight_a * vertex_depth[0] + weight_b * vertex_depth[1] + weight_c * vertex_depth[2];
-				if (hit_depth > 0.0f && hit_depth < best_depth) {
-					best_depth = hit_depth;
-					best_surface = surface_i;
-					found = true;
+		// The diagnostic Low Poly mesh can contain deleted cleanup faces or
+		// non-convex polygons that are unsuitable for fan-based screen picking.
+		// The underlying OCCT triangulation still identifies the exact
+		// CSurfaceFace and respects its trimming wires and holes.
+		if (!low_poly_surface_hit && !surface->m_Face.IsNull()) {
+			TopLoc_Location location;
+			const Handle(Poly_Triangulation) triangulation =
+				BRep_Tool::Triangulation(TopoDS::Face(surface->m_Face), location);
+			if (!triangulation.IsNull()) {
+				const gp_Trsf transform = location.Transformation();
+				for (int triangle_index = 1;
+					 triangle_index <= triangulation->NbTriangles(); ++triangle_index) {
+					int node_a = 0;
+					int node_b = 0;
+					int node_c = 0;
+					triangulation->Triangle(triangle_index).Get(
+						node_a, node_b, node_c);
+					const gp_Pnt a = triangulation->Node(node_a).Transformed(transform);
+					const gp_Pnt b = triangulation->Node(node_b).Transformed(transform);
+					const gp_Pnt c = triangulation->Node(node_c).Transformed(transform);
+					test_triangle(
+						{static_cast<float>(a.X()), static_cast<float>(a.Y()),
+						 static_cast<float>(a.Z())},
+						{static_cast<float>(b.X()), static_cast<float>(b.Y()),
+						 static_cast<float>(b.Z())},
+						{static_cast<float>(c.X()), static_cast<float>(c.Y()),
+						 static_cast<float>(c.Z())});
 				}
 			}
 		}
@@ -2314,6 +2394,18 @@ void CSolid::Render3d(bool selected) const
 //	const Color solid_color = surface_material.diffuse;
 	const Color solid_color = GetColor();
 	const bool render_batch = EnsureRenderBatch();
+	const auto draw_open_edges = [this, render_batch]() {
+		if (!CMesh3D::IsOpenEdgeDisplayEnabled())
+			return;
+		if (render_batch && m_RenderBatch) {
+			m_RenderBatch->RenderOpenEdges();
+			return;
+		}
+		for (const CSurfaceFace* surface : m_Surfaces) {
+			if (surface && surface->pMesh3D)
+				surface->pMesh3D->RenderOpenEdges();
+		}
+	};
 	const bool imported_step =
 		GetGroupName().find("STEP") != std::string::npos
 		|| GetName().find("Imported STEP") != std::string::npos;
@@ -2445,6 +2537,7 @@ void CSolid::Render3d(bool selected) const
 				solid_color, selected_edges, true, surface_selected);
 		}
 		draw_surface_indices();
+		draw_open_edges();
 		return;
 	}
 
@@ -2461,6 +2554,7 @@ void CSolid::Render3d(bool selected) const
 			}
 		}
 		draw_surface_indices();
+		draw_open_edges();
 		return;
 	}
 
@@ -2546,6 +2640,7 @@ void CSolid::Render3d(bool selected) const
 
 	if (!draw_edges && m_SelectedEdges.empty()) {
 		draw_surface_indices();
+		draw_open_edges();
 		return;
 	}
 
@@ -2568,6 +2663,7 @@ void CSolid::Render3d(bool selected) const
 		}
 	}
 	draw_surface_indices();
+	draw_open_edges();
 }
 
 void CSolid::Render2d(float center_x, float center_y, float scale) const

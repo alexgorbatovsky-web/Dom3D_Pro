@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<material version="1" id="41005" name="Powder Coating RAL 3002 Carmine Red" alpha="1" specular="0.32" shininess="42" reflectivity="0.04" roughness="0.64" metallic="0" coatWeight="0" coatRoughness="0.12" normalStrength="0.12" displacementScale="0" textureOffsetU="0" textureOffsetV="0" textureScaleU="0.4" textureScaleV="0.4" textureRotation="0" textureFitToSurface="0">
+    <ambient r="0.139765" g="0.030196" b="0.02502"/>
+    <diffuse r="0.635294" g="0.137255" b="0.113725"/>
+    <emission r="0" g="0" b="0"/>
+    <textures color="" light="" bump="" normal="Powder Coating/Textures/Powder_Wrinkle_NormalGL.png" roughness="" metallic="" displacement=""/>
+</material>

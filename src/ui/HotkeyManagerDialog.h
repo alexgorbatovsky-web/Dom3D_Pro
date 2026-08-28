@@ -37,6 +37,8 @@ private:
     void ApplyFilter(const QString& text);
     void AssignShortcut(QTreeWidgetItem* item, const QKeySequence& shortcut);
     void RestoreDefaults();
+    void SaveToFile();
+    void LoadFromFile();
     void SaveAndApply();
 
     QMainWindow* main_window_ = nullptr;

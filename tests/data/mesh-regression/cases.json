@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "id": "boolean-fill-singular-bspline",
+      "file": "Boolean_Fill.dom3d",
+      "sha256": "0BC3273204A8CFB080ED4F2F677E030D7B7C5D00046950974F350B8BECF1CD3E",
+      "referenceStep": {
+        "file": "Boolean_Fill-export.step",
+        "sha256": "77B2BFB4CA13F11D386E309B64215C1DD756830549C4A6014E260A988049FC66",
+        "result": "3DCoat completes the quad mesh, with controlled local irregular topology at complex blend junctions"
+      },
+      "meshMode": "quadro",
+      "densities": [0.10, 0.25, 0.50, 1.00, 1.50],
+      "status": "known_failure",
+      "expected": {
+        "solidName": "Boolean Cut",
+        "surfaceCount": 68,
+        "rebuild": false,
+        "emptySurfaces": [51, 66]
+      },
+      "notes": "Two regular three-sided B-Spline patches have one degenerated OCCT edge. CNet fails while evaluating a normal at the singular UV boundary. Operation-tree rebuild is outside this mesh regression."
+    }
+  ]
+}

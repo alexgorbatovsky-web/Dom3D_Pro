@@ -152,13 +152,12 @@ QOpenGLShaderProgram* mesh_shader_program() {
         void main() {
             vec3 n = normalize(eyeNormal);
             vec3 viewDirection = normalize(-eyePosition);
-            // Use the geometric front/back side of the triangle for
-            // two-sided lighting.  Flipping an interpolated smooth normal
-            // when its dot product with the eye crosses zero makes lighting
-            // jump at an arbitrary viewing angle and creates moving patches
-            // on curved surfaces.
-            if (!gl_FrontFacing) n = -n;
-            vec3 coatNormal = n;
+            // RGB diagnostics visualize the stored CAD normal.  It must not
+            // change with the camera-facing classification of an individual
+            // GPU triangle; doing so paints one half of a non-planar quad in
+            // the complementary colour and makes a valid rounded corner look
+            // torn.  This also keeps the fast shader consistent with the CPU
+            // fallback path below.
             if (diagnosticColor) {
                 float direction = selectedObject ? -1.0 : 1.0;
                 gl_FragColor = vec4(clamp((direction * n + vec3(1.0))
@@ -166,6 +165,13 @@ QOpenGLShaderProgram* mesh_shader_program() {
                                     baseColor.a);
                 return;
             }
+            // Use the geometric front/back side of the triangle for
+            // two-sided lighting.  Flipping an interpolated smooth normal
+            // when its dot product with the eye crosses zero makes lighting
+            // jump at an arbitrary viewing angle and creates moving patches
+            // on curved surfaces.
+            if (!gl_FrontFacing) n = -n;
+            vec3 coatNormal = n;
             mat3 tangentFrame = cotangentFrame(n, eyePosition, textureUV);
             vec2 uv = textureUV;
             if (useDisplacementTexture) {
@@ -919,54 +925,11 @@ bool should_delete_closed_trim_face(const CMesh3D::Face& face,
                                     bool keep_inside)
 {
     const PointFacePos center_pos = ClassifyPointInFace2(trim_polygon, face_center_2d(face, vertices), EPS2D);
-    if (center_pos != PFP_BOUNDARY) {
-        const bool center_inside = center_pos != PFP_OUTSIDE;
-        return center_inside != keep_inside;
-    }
+    if (center_pos == PFP_BOUNDARY)
+        return false;
 
-    bool has_delete_sample = false;
-    int delete_samples = 0;
-    int keep_samples = 0;
-    for (const MeshCorner& corner : face.corners) {
-        if (corner.v >= vertices.size())
-            continue;
-
-        const PointFacePos pos = ClassifyPointInFace2(trim_polygon, mesh_vertex_2d(vertices, corner.v), EPS2D);
-        if (pos == PFP_BOUNDARY)
-            continue;
-
-        const bool sample_inside = pos != PFP_OUTSIDE;
-        if (sample_inside == keep_inside) {
-            ++keep_samples;
-        } else {
-            has_delete_sample = true;
-            ++delete_samples;
-        }
-    }
-
-    return has_delete_sample && delete_samples >= keep_samples;
-}
-
-bool face_has_closed_trim_delete_sample(const CMesh3D::Face& face,
-                                        const std::vector<Vec3>& vertices,
-                                        const Face2D& trim_polygon,
-                                        bool keep_inside)
-{
-    const PointFacePos center_pos = ClassifyPointInFace2(trim_polygon, face_center_2d(face, vertices), EPS2D);
-    if (center_pos != PFP_BOUNDARY && ((center_pos != PFP_OUTSIDE) != keep_inside))
-        return true;
-
-    for (const MeshCorner& corner : face.corners) {
-        if (corner.v >= vertices.size())
-            continue;
-
-        const PointFacePos pos = ClassifyPointInFace2(trim_polygon, mesh_vertex_2d(vertices, corner.v), EPS2D);
-        if (pos == PFP_BOUNDARY)
-            continue;
-        if ((pos != PFP_OUTSIDE) != keep_inside)
-            return true;
-    }
-    return false;
+    const bool center_inside = center_pos != PFP_OUTSIDE;
+    return center_inside != keep_inside;
 }
 
 double distance2(const cVec2& a, const cVec2& b)
@@ -1279,6 +1242,229 @@ void PrepareAndMoveVertexToTrimLinePro(std::vector<CMesh3D::Face>& faces,
         vertices[vertex].y = static_cast<float>(point.y);
         vertices[vertex].z = 0.0f;
     }
+}
+
+double trim_face_twice_area(const CMesh3D::Face& face,
+                            const std::vector<Vec3>& vertices)
+{
+    double area = 0.0;
+    if (face.deleted || face.corners.size() < 3)
+        return area;
+    for (size_t i = 0; i < face.corners.size(); ++i) {
+        const size_t first = face.corners[i].v;
+        const size_t second = face.corners[(i + 1) % face.corners.size()].v;
+        if (first >= vertices.size() || second >= vertices.size())
+            return 0.0;
+        area += static_cast<double>(vertices[first].x) * vertices[second].y
+            - static_cast<double>(vertices[second].x) * vertices[first].y;
+    }
+    return area;
+}
+
+bool heal_closed_trim_boundary(std::vector<CMesh3D::Face>& faces,
+                               std::vector<Vec3>& vertices,
+                               const std::vector<cVec2>& cut,
+                               double eps)
+{
+    std::vector<cVec2> nodes;
+    nodes.reserve(cut.size());
+    for (const cVec2& point : cut) {
+        if (nodes.empty() || !EqualPoint2(nodes.back(), point, eps))
+            nodes.push_back(point);
+    }
+    if (nodes.size() > 1 && EqualPoint2(nodes.front(), nodes.back(), eps))
+        nodes.pop_back();
+    if (nodes.size() < 3)
+        return false;
+
+    std::vector<double> cumulative(nodes.size() + 1, 0.0);
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        cumulative[i + 1] = cumulative[i]
+            + std::sqrt(distance2(nodes[i], nodes[(i + 1) % nodes.size()]));
+    }
+    const double total_length = cumulative.back();
+    if (!(total_length > eps))
+        return false;
+
+    double min_x = vertices.front().x;
+    double max_x = vertices.front().x;
+    double min_y = vertices.front().y;
+    double max_y = vertices.front().y;
+    for (const Vec3& vertex : vertices) {
+        min_x = std::min(min_x, static_cast<double>(vertex.x));
+        max_x = std::max(max_x, static_cast<double>(vertex.x));
+        min_y = std::min(min_y, static_cast<double>(vertex.y));
+        max_y = std::max(max_y, static_cast<double>(vertex.y));
+    }
+    const double diagonal = std::hypot(max_x - min_x, max_y - min_y);
+    const double tolerance = std::max(eps * 10.0, diagonal * 1.0e-6);
+    const double tolerance2 = tolerance * tolerance;
+
+    struct Projection {
+        double parameter = 0.0;
+        double dist2 = std::numeric_limits<double>::max();
+    };
+    const auto project = [&](const cVec2& point) {
+        Projection best;
+        for (size_t i = 0; i < nodes.size(); ++i) {
+            const cVec2 first = nodes[i];
+            const cVec2 second = nodes[(i + 1) % nodes.size()];
+            const cVec2 direction = second - first;
+            const double length2 = Length2(direction);
+            const double alpha = length2 > 0.0
+                ? std::clamp(((point.x - first.x) * direction.x
+                    + (point.y - first.y) * direction.y) / length2,
+                    0.0, 1.0)
+                : 0.0;
+            const cVec2 nearest = first + direction * alpha;
+            const double dist = distance2(point, nearest);
+            if (dist < best.dist2) {
+                best.dist2 = dist;
+                best.parameter = cumulative[i]
+                    + std::sqrt(length2) * alpha;
+                if (best.parameter >= total_length)
+                    best.parameter = 0.0;
+            }
+        }
+        return best;
+    };
+
+    struct BoundaryEdge {
+        size_t face = 0;
+        size_t corner = 0;
+        size_t first = 0;
+        size_t second = 0;
+    };
+    std::map<std::pair<size_t, size_t>, std::vector<BoundaryEdge>> edge_uses;
+    for (size_t face_index = 0; face_index < faces.size(); ++face_index) {
+        const CMesh3D::Face& face = faces[face_index];
+        if (face.deleted || face.corners.size() < 3)
+            continue;
+        for (size_t corner = 0; corner < face.corners.size(); ++corner) {
+            const size_t first = face.corners[corner].v;
+            const size_t second = face.corners[(corner + 1) % face.corners.size()].v;
+            if (first >= vertices.size() || second >= vertices.size())
+                continue;
+            edge_uses[std::minmax(first, second)].push_back(
+                {face_index, corner, first, second});
+        }
+    }
+
+    std::vector<BoundaryEdge> boundary_edges;
+    for (const auto& edge : edge_uses) {
+        if (edge.second.size() == 1)
+            boundary_edges.push_back(edge.second.front());
+    }
+
+    bool changed = false;
+    for (const BoundaryEdge& edge : boundary_edges) {
+        if (edge.face >= faces.size() || edge.first >= vertices.size()
+            || edge.second >= vertices.size()) {
+            continue;
+        }
+        CMesh3D::Face& face = faces[edge.face];
+        if (face.deleted || edge.corner >= face.corners.size()
+            || face.corners[edge.corner].v != edge.first
+            || face.corners[(edge.corner + 1) % face.corners.size()].v != edge.second) {
+            continue;
+        }
+
+        const Projection first_projection = project(mesh_vertex_2d(vertices, edge.first));
+        const Projection second_projection = project(mesh_vertex_2d(vertices, edge.second));
+        if (first_projection.dist2 > tolerance2
+            || second_projection.dist2 > tolerance2) {
+            continue;
+        }
+
+        double forward = second_projection.parameter - first_projection.parameter;
+        if (forward < 0.0)
+            forward += total_length;
+        const bool forward_direction = forward <= total_length * 0.5;
+        const double span = forward_direction ? forward : total_length - forward;
+        if (span <= tolerance)
+            continue;
+
+        std::vector<std::pair<double, size_t>> missing;
+        for (size_t node = 0; node < nodes.size(); ++node) {
+            double distance_along = forward_direction
+                ? cumulative[node] - first_projection.parameter
+                : first_projection.parameter - cumulative[node];
+            if (distance_along < 0.0)
+                distance_along += total_length;
+            if (distance_along > tolerance && distance_along < span - tolerance)
+                missing.emplace_back(distance_along, node);
+        }
+        if (missing.empty())
+            continue;
+        std::sort(missing.begin(), missing.end());
+
+        std::vector<MeshCorner> inserted;
+        inserted.reserve(missing.size());
+        for (const auto& entry : missing) {
+            const size_t vertex = add_or_find_vertex_2d(vertices, nodes[entry.second], tolerance);
+            if (vertex == edge.first || vertex == edge.second)
+                continue;
+            inserted.push_back({vertex, vertex, vertex});
+        }
+        if (inserted.empty())
+            continue;
+        face.corners.insert(face.corners.begin()
+                + static_cast<std::ptrdiff_t>(edge.corner + 1),
+            inserted.begin(), inserted.end());
+        changed = true;
+    }
+    return changed;
+}
+
+bool sanitize_trim_faces(std::vector<CMesh3D::Face>& faces,
+                         const std::vector<Vec3>& vertices,
+                         double reference_area,
+                         double eps)
+{
+    bool changed = false;
+    const double eps2 = eps * eps;
+    for (CMesh3D::Face& face : faces) {
+        if (face.deleted)
+            continue;
+        std::vector<MeshCorner> clean;
+        clean.reserve(face.corners.size());
+        for (const MeshCorner& corner : face.corners) {
+            if (corner.v >= vertices.size())
+                continue;
+            if (!clean.empty()) {
+                const size_t previous = clean.back().v;
+                if (previous == corner.v
+                    || distance2(mesh_vertex_2d(vertices, previous),
+                                 mesh_vertex_2d(vertices, corner.v)) <= eps2) {
+                    changed = true;
+                    continue;
+                }
+            }
+            clean.push_back(corner);
+        }
+        if (clean.size() > 1) {
+            const size_t first = clean.front().v;
+            const size_t last = clean.back().v;
+            if (first == last
+                || distance2(mesh_vertex_2d(vertices, first),
+                             mesh_vertex_2d(vertices, last)) <= eps2) {
+                clean.pop_back();
+                changed = true;
+            }
+        }
+        face.corners = std::move(clean);
+        const double area = trim_face_twice_area(face, vertices);
+        if (face.corners.size() < 3 || std::fabs(area) <= eps2) {
+            face.deleted = true;
+            changed = true;
+            continue;
+        }
+        if (reference_area != 0.0 && area * reference_area < 0.0) {
+            std::reverse(face.corners.begin(), face.corners.end());
+            changed = true;
+        }
+    }
+    return changed;
 }
 
 } // namespace
@@ -1919,9 +2105,24 @@ bool CMesh3D::SplitFaceByVar5(int f1, int v1i, int edgeIndex, cVec2& pm)
 
     return true;
 }
-bool CMesh3D::SplitFaceByVar6(int face_index, int v1, int edgeIndex, cVec2& pm)
+bool CMesh3D::SplitFaceByVar6(int face_index, int v1, int v2, int edgeIndex, cVec2& pm)
 {
-    return true;
+    if (face_index < 0 || face_index >= static_cast<int>(faces_.size()))
+        return false;
+
+    MeshFace& face = faces_[static_cast<size_t>(face_index)];
+    if (face.deleted || face.corners.size() < 3)
+        return false;
+
+    // Variant 6 has two face vertices touched by the trim contour and one
+    // trim node inside the face.  The old implementation was an empty stub,
+    // so the exterior triangular parts were never created and the original
+    // intersected face was subsequently deleted as a whole.
+    //
+    // edgeIndex is useful for classifying this case, while the actual split
+    // is completely defined by the two touched vertices and the inner point.
+    (void)edgeIndex;
+    return SplitFaceByPoint(face_index, v1, v2, pm);
 }
 bool CMesh3D::SplitFaceByVar7(int f1, int v1, int edgeIndex)
 {
@@ -2302,6 +2503,7 @@ CMesh3D::CMesh3D()
 Material CMesh3D::material_Defailt = Material::DefaultMesh();
 float CMesh3D::s_SurfaceOpacity = 1.0f;
 MeshDisplayMode CMesh3D::s_DisplayMode = MeshDisplayMode::SurfaceGray;
+bool CMesh3D::s_OpenEdgeDisplayEnabled = false;
 bool CMesh3D::s_ZebraAnalysisEnabled = false;
 bool CMesh3D::s_ZebraAnalysisTarget = false;
 bool CMesh3D::s_ZebraOrthographic = false;
@@ -2630,55 +2832,152 @@ int CMesh3D::SynchronizeBoundaryVertices(const std::vector<Vec3>& master_points,
             continue;
         }
 
-        const BoundaryEdge edge = boundary_edges[nearest_edge_index];
-        if (edge.face_index >= faces_.size())
+        const BoundaryEdge start_edge = boundary_edges[nearest_edge_index];
+        if (start_edge.face_index >= faces_.size())
             continue;
-        Face& face = faces_[edge.face_index];
-        if (!IsValidFace(face, vertices_.size()) || edge.corner_index >= face.corners.size())
+        const Face& start_face = faces_[start_edge.face_index];
+        if (!IsValidFace(start_face, vertices_.size())
+            || start_face.corners.size() != 4
+            || start_edge.corner_index >= start_face.corners.size()) {
             continue;
-
-        const size_t old_vertex_count = vertices_.size();
-        const MeshCorner first_corner = face.corners[edge.corner_index];
-        const MeshCorner second_corner = face.corners[(edge.corner_index + 1) % face.corners.size()];
-        vertices_.push_back(master);
-
-        size_t uv_index = 0;
-        if (uvs_.size() == old_vertex_count
-            && first_corner.uv < uvs_.size() && second_corner.uv < uvs_.size()) {
-            const UV& first_uv = uvs_[first_corner.uv];
-            const UV& second_uv = uvs_[second_corner.uv];
-            uvs_.push_back({
-                first_uv.u + (second_uv.u - first_uv.u) * nearest_edge_alpha,
-                first_uv.v + (second_uv.v - first_uv.v) * nearest_edge_alpha
-            });
-            uv_index = uvs_.size() - 1;
         }
 
-        size_t normal_index = 0;
-        if (normals_.size() == old_vertex_count
-            && first_corner.n < normals_.size() && second_corner.n < normals_.size()) {
-            normals_.push_back(normalize(
-                normals_[first_corner.n] * (1.0f - nearest_edge_alpha)
-                + normals_[second_corner.n] * nearest_edge_alpha));
-            normal_index = normals_.size() - 1;
+        const auto append_interpolated_vertex = [&](const MeshCorner& first,
+                                                     const MeshCorner& second,
+                                                     Vec3 position,
+                                                     float alpha) {
+            const size_t old_vertex_count = vertices_.size();
+            vertices_.push_back(position);
+            size_t uv_index = 0;
+            if (uvs_.size() == old_vertex_count
+                && first.uv < uvs_.size() && second.uv < uvs_.size()) {
+                const UV first_uv = uvs_[first.uv];
+                const UV second_uv = uvs_[second.uv];
+                uvs_.push_back({
+                    first_uv.u + (second_uv.u - first_uv.u) * alpha,
+                    first_uv.v + (second_uv.v - first_uv.v) * alpha});
+                uv_index = uvs_.size() - 1;
+            }
+            size_t normal_index = 0;
+            if (normals_.size() == old_vertex_count
+                && first.n < normals_.size() && second.n < normals_.size()) {
+                const Vec3 first_normal = normals_[first.n];
+                const Vec3 second_normal = normals_[second.n];
+                normals_.push_back(normalize(
+                    first_normal * (1.0f - alpha) + second_normal * alpha));
+                normal_index = normals_.size() - 1;
+            }
+            return MeshCorner{vertices_.size() - 1, uv_index, normal_index};
+        };
+
+        const MeshCorner start_first =
+            start_face.corners[start_edge.corner_index];
+        const MeshCorner start_second = start_face.corners[
+            (start_edge.corner_index + 1) % start_face.corners.size()];
+        MeshCorner entry_corner = append_interpolated_vertex(
+            start_first, start_second, master, nearest_edge_alpha);
+        size_t current_face_index = start_edge.face_index;
+        size_t entry_first = start_edge.first;
+        size_t entry_second = start_edge.second;
+        std::set<size_t> visited_faces;
+        bool inserted_quad_strip = false;
+
+        while (current_face_index < faces_.size()
+            && visited_faces.insert(current_face_index).second) {
+            const Face original = faces_[current_face_index];
+            if (!IsValidFace(original, vertices_.size())
+                || original.corners.size() != 4) {
+                break;
+            }
+
+            size_t entry_edge_index = original.corners.size();
+            for (size_t corner = 0; corner < original.corners.size(); ++corner) {
+                const size_t first = original.corners[corner].v;
+                const size_t second = original.corners[
+                    (corner + 1) % original.corners.size()].v;
+                if ((first == entry_first && second == entry_second)
+                    || (first == entry_second && second == entry_first)) {
+                    entry_edge_index = corner;
+                    break;
+                }
+            }
+            if (entry_edge_index >= original.corners.size())
+                break;
+
+            std::array<MeshCorner, 4> rotated{};
+            for (size_t i = 0; i < 4; ++i) {
+                rotated[i] = original.corners[
+                    (entry_edge_index + i) % original.corners.size()];
+            }
+            const Vec3 edge_start = vertices_[rotated[0].v];
+            const Vec3 edge_end = vertices_[rotated[1].v];
+            const Vec3 edge_direction = edge_end - edge_start;
+            const float edge_length_sq = dot(edge_direction, edge_direction);
+            if (edge_length_sq <= 1.0e-20f)
+                break;
+            const float alpha = std::clamp(
+                dot(vertices_[entry_corner.v] - edge_start, edge_direction)
+                    / edge_length_sq,
+                0.0f, 1.0f);
+
+            const size_t opposite_first = rotated[2].v;
+            const size_t opposite_second = rotated[3].v;
+            size_t neighbour_face = faces_.size();
+            for (size_t face_index = 0; face_index < faces_.size(); ++face_index) {
+                if (face_index == current_face_index
+                    || visited_faces.find(face_index) != visited_faces.end()) {
+                    continue;
+                }
+                const Face& candidate = faces_[face_index];
+                if (!IsValidFace(candidate, vertices_.size()))
+                    continue;
+                for (size_t corner = 0; corner < candidate.corners.size(); ++corner) {
+                    const size_t first = candidate.corners[corner].v;
+                    const size_t second = candidate.corners[
+                        (corner + 1) % candidate.corners.size()].v;
+                    if ((first == opposite_first && second == opposite_second)
+                        || (first == opposite_second && second == opposite_first)) {
+                        neighbour_face = face_index;
+                        break;
+                    }
+                }
+                if (neighbour_face < faces_.size())
+                    break;
+            }
+            const bool has_neighbour = neighbour_face < faces_.size();
+
+            // The corresponding point on the opposite edge continues the
+            // insertion as a complete quad strip instead of leaving a T-node.
+            const Vec3 exit_position =
+                vertices_[rotated[3].v] * (1.0f - alpha)
+                + vertices_[rotated[2].v] * alpha;
+            const MeshCorner exit_corner = append_interpolated_vertex(
+                rotated[3], rotated[2], exit_position, alpha);
+
+            Face first_half = original;
+            first_half.corners = {
+                rotated[0], entry_corner, exit_corner, rotated[3]};
+            first_half.normal = FaceNormal(first_half);
+            Face second_half = original;
+            second_half.corners = {
+                entry_corner, rotated[1], rotated[2], exit_corner};
+            second_half.normal = FaceNormal(second_half);
+            faces_[current_face_index] = std::move(first_half);
+            faces_.push_back(std::move(second_half));
+            inserted_quad_strip = true;
+
+            if (!has_neighbour)
+                break;
+            current_face_index = neighbour_face;
+            entry_first = opposite_first;
+            entry_second = opposite_second;
+            entry_corner = exit_corner;
         }
-        const MeshCorner inserted{vertices_.size() - 1, uv_index, normal_index};
-
-        std::vector<MeshCorner> rotated;
-        rotated.reserve(face.corners.size());
-        for (size_t i = 0; i < face.corners.size(); ++i)
-            rotated.push_back(face.corners[(edge.corner_index + i) % face.corners.size()]);
-
-        Face second_face = face;
-        face.corners = {rotated.front(), inserted, rotated.back()};
-        second_face.corners.clear();
-        second_face.corners.push_back(inserted);
-        second_face.corners.insert(second_face.corners.end(), rotated.begin() + 1, rotated.end());
-        face.normal = FaceNormal(face);
-        second_face.normal = FaceNormal(second_face);
-        faces_.push_back(std::move(second_face));
-        ++changes;
+        if (inserted_quad_strip)
+            ++changes;
     }
+    if (changes > 0)
+        InvalidateGpuCache();
     return changes;
 }
 
@@ -3009,7 +3308,8 @@ bool CMesh3D::CreateFromBoundary(CPolyline* bond, float Density)
     }
     faces = std::move(triangle_and_quad_faces);
 
-    if (!vertices.empty() && !faces.empty() && SetGeometry(std::move(vertices), std::move(faces), {}, std::move(normals))) {
+    if (!vertices.empty() && !faces.empty()
+        && SetGeometry(std::move(vertices), std::move(faces), {}, std::move(normals))) {
         ContourQuadrangulator quadrangulator;
         quadrangulator.CreateFromMesh(this);
         quadrangulator.Quadrangulate(this);
@@ -3227,6 +3527,110 @@ bool CMesh3D::SetGeometry(std::vector<Vec3> vertices,
     return true;
 }
 
+std::unique_ptr<CMesh3D> CMesh3D::CreateWelded(
+    const std::vector<const CMesh3D*>& meshes,
+    size_t* welded_vertex_count,
+    float* used_tolerance) {
+    if (welded_vertex_count) *welded_vertex_count = 0;
+    if (used_tolerance) *used_tolerance = 0.0f;
+
+    const CMesh3D* first_mesh = nullptr;
+    double len_min = std::numeric_limits<double>::infinity();
+    size_t source_vertex_count = 0;
+    for (const CMesh3D* mesh : meshes) {
+        if (!mesh || mesh->vertices_.empty() || mesh->faces_.empty())
+            continue;
+        if (!first_mesh) first_mesh = mesh;
+        source_vertex_count += mesh->vertices_.size();
+        for (const Face& face : mesh->faces_) {
+            if (!mesh->IsValidFace(face, mesh->vertices_.size()))
+                continue;
+            for (size_t corner = 0; corner < face.corners.size(); ++corner) {
+                const size_t first = face.corners[corner].v;
+                const size_t second =
+                    face.corners[(corner + 1) % face.corners.size()].v;
+                const Vec3 delta =
+                    mesh->vertices_[second] - mesh->vertices_[first];
+                const double length =
+                    std::sqrt(static_cast<double>(dot(delta, delta)));
+                if (length > 0.0 && std::isfinite(length))
+                    len_min = std::min(len_min, length);
+            }
+        }
+    }
+    if (!first_mesh || !std::isfinite(len_min))
+        return nullptr;
+
+    const double tolerance = len_min / 3.0;
+    if (used_tolerance) *used_tolerance = static_cast<float>(tolerance);
+    std::vector<Vec3> vertices;
+    std::vector<UV> uvs;
+    std::vector<Vec3> normals;
+    std::vector<Face> faces;
+    vertices.reserve(source_vertex_count);
+    std::multimap<float, size_t> vertices_by_x;
+
+    const auto welded_index = [&](Vec3 vertex) {
+        const float min_x = static_cast<float>(vertex.x - tolerance);
+        const float max_x = static_cast<float>(vertex.x + tolerance);
+        for (auto candidate = vertices_by_x.lower_bound(min_x);
+             candidate != vertices_by_x.end() && candidate->first <= max_x;
+             ++candidate) {
+            const Vec3 delta = vertices[candidate->second] - vertex;
+            if (static_cast<double>(dot(delta, delta)) <= tolerance * tolerance)
+                return candidate->second;
+        }
+        const size_t index = vertices.size();
+        vertices.push_back(vertex);
+        vertices_by_x.emplace(vertex.x, index);
+        return index;
+    };
+
+    for (const CMesh3D* mesh : meshes) {
+        if (!mesh || mesh->vertices_.empty() || mesh->faces_.empty())
+            continue;
+        std::vector<size_t> remapped_vertices(mesh->vertices_.size());
+        for (size_t index = 0; index < mesh->vertices_.size(); ++index)
+            remapped_vertices[index] = welded_index(mesh->vertices_[index]);
+
+        for (const Face& source_face : mesh->faces_) {
+            if (!mesh->IsValidFace(source_face, mesh->vertices_.size()))
+                continue;
+            Face face = source_face;
+            face.deleted = false;
+            face.selected = false;
+            face.corners.clear();
+            const Vec3 fallback_normal = mesh->FaceNormal(source_face);
+            for (const MeshCorner& source_corner : source_face.corners) {
+                MeshCorner corner;
+                corner.v = remapped_vertices[source_corner.v];
+                corner.uv = uvs.size();
+                uvs.push_back(source_corner.uv < mesh->uvs_.size()
+                    ? mesh->uvs_[source_corner.uv] : UV{});
+                corner.n = normals.size();
+                normals.push_back(source_corner.n < mesh->normals_.size()
+                    ? mesh->normals_[source_corner.n] : fallback_normal);
+                face.corners.push_back(corner);
+            }
+            faces.push_back(std::move(face));
+        }
+    }
+
+    auto result = std::make_unique<CMesh3D>(
+        meshes.size() == 1
+            ? first_mesh->GetName() + " Welded" : "Welded Mesh");
+    result->SetMaterial(first_mesh->GetMaterial());
+    result->SetColor(first_mesh->GetColor());
+    if (!result->SetGeometry(
+            std::move(vertices), std::move(faces),
+            std::move(uvs), std::move(normals))) {
+        return nullptr;
+    }
+    if (welded_vertex_count)
+        *welded_vertex_count = source_vertex_count - result->vertices_.size();
+    return result;
+}
+
 void CMesh3D::GeneratePlanarUVs() {
     uvs_.clear();
     uvs_.resize(vertices_.size());
@@ -3278,6 +3682,7 @@ void CMesh3D::Render3d(bool selected) const {
         const Color background = CSolid::GetHiddenLineBackgroundColor();
         RenderHiddenLineDepth(background);
         RenderHiddenLineEdges(false, background, selected);
+        RenderOpenEdges();
         return;
     }
 
@@ -3287,10 +3692,12 @@ void CMesh3D::Render3d(bool selected) const {
         || solid_mode == SolidDisplayMode::MeshOnly;
     if (!rgb_selected && !zebra && mode == MeshDisplayMode::Wire && !solid_requests_fill) {
         RenderWire(selected, true, nullptr);
+        RenderOpenEdges();
         return;
     }
     if (wire_only && !rgb_selected) {
         RenderWire(selected, true, nullptr);
+        RenderOpenEdges();
         return;
     }
 
@@ -3312,6 +3719,7 @@ void CMesh3D::Render3d(bool selected) const {
     if (draw_edges) {
         RenderWire(selected, true, nullptr);
     }
+    RenderOpenEdges();
 }
 
 void CMesh3D::RenderFaces(bool selected,
@@ -3713,6 +4121,64 @@ void CMesh3D::RenderWire(bool selected,
     glDepthMask(depth_write_enabled);
 }
 
+void CMesh3D::RenderOpenEdges() const {
+    if (!s_OpenEdgeDisplayEnabled || vertices_.empty() || faces_.empty())
+        return;
+
+    struct EdgeUse {
+        size_t first = 0;
+        size_t second = 0;
+        size_t count = 0;
+    };
+    std::unordered_map<unsigned long long, EdgeUse> edge_uses;
+    edge_uses.reserve(faces_.size() * 3);
+    for (const Face& face : faces_) {
+        if (!IsValidFace(face, vertices_.size()))
+            continue;
+        for (size_t corner = 0; corner < face.corners.size(); ++corner) {
+            const size_t first = face.corners[corner].v;
+            const size_t second =
+                face.corners[(corner + 1) % face.corners.size()].v;
+            const size_t edge_min = std::min(first, second);
+            const size_t edge_max = std::max(first, second);
+            const unsigned long long key =
+                (static_cast<unsigned long long>(edge_min) << 32)
+                | static_cast<unsigned long long>(edge_max);
+            EdgeUse& use = edge_uses[key];
+            use.first = first;
+            use.second = second;
+            ++use.count;
+        }
+    }
+
+    GLboolean depth_write_enabled = GL_TRUE;
+    glGetBooleanv(GL_DEPTH_WRITEMASK, &depth_write_enabled);
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
+    glDepthFunc(GL_LEQUAL);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_LINE_SMOOTH);
+    glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
+    glLineWidth(3.0f);
+    glColor4f(1.0f, 0.04f, 0.02f, 1.0f);
+    glBegin(GL_LINES);
+    for (const auto& [key, use] : edge_uses) {
+        (void)key;
+        if (use.count != 1)
+            continue;
+        const Vec3& first = vertices_[use.first];
+        const Vec3& second = vertices_[use.second];
+        glVertex3f(first.x, first.y, first.z);
+        glVertex3f(second.x, second.y, second.z);
+    }
+    glEnd();
+    glDisable(GL_LINE_SMOOTH);
+    glDisable(GL_BLEND);
+    glDepthFunc(GL_LESS);
+    glDepthMask(depth_write_enabled);
+}
+
 void CMesh3D::RenderHiddenLineDepth(const Color& background) const {
     Material material;
     material.diffuse = background;
@@ -3750,6 +4216,14 @@ MeshDisplayMode CMesh3D::GetDisplayMode() {
 
 void CMesh3D::SetDisplayMode(MeshDisplayMode mode) {
     s_DisplayMode = mode;
+}
+
+bool CMesh3D::IsOpenEdgeDisplayEnabled() {
+    return s_OpenEdgeDisplayEnabled;
+}
+
+void CMesh3D::SetOpenEdgeDisplayEnabled(bool enabled) {
+    s_OpenEdgeDisplayEnabled = enabled;
 }
 
 bool CMesh3D::IsZebraAnalysisEnabled() {
@@ -4238,7 +4712,8 @@ bool CMesh3D::TrimByPline(CPolyline* pLine, CPoint3d pc) {
     if (!pLine || pLine->GetPointCount() < 2 || vertices_.empty() || faces_.empty()) {
         return false;
     }
-
+//    ExportToObj("c:\\temp\\Mesh3D_NO_Trimmed.obj");
+//	pLine->printToFile("c:\\temp\\TrimLine.txt");
     const std::vector<cVec2> cut = make_cut_2d(pLine);
     if (cut.size() < 2) {
         return false;
@@ -4280,6 +4755,9 @@ bool CMesh3D::TrimByPline(CPolyline* pLine, CPoint3d pc) {
 
     const std::vector<Vec3> original_vertices = vertices_;
     const std::vector<Face> original_faces = faces_;
+    double reference_area = 0.0;
+    for (const Face& face : original_faces)
+        reference_area += trim_face_twice_area(face, original_vertices);
 
     std::vector<DataToMoveVerts> data_to_move_storage;
     data_to_move_storage.reserve(affected_faces.size());
@@ -4365,7 +4843,8 @@ bool CMesh3D::TrimByPline(CPolyline* pLine, CPoint3d pc) {
             SplitFaceByVar5(faceData.FaceID, faceData.v1, faceData.edgeIndex, point);
 			break;
         case 6:
-            SplitFaceByVar6(faceData.FaceID, faceData.v1, faceData.edgeIndex, point);
+            SplitFaceByVar6(faceData.FaceID, faceData.v1, faceData.v2,
+                            faceData.edgeIndex, point);
             break;
         case 7:
             SplitFaceByVar7(faceData.FaceID, faceData.v1, faceData.edgeIndex);
@@ -4378,26 +4857,26 @@ bool CMesh3D::TrimByPline(CPolyline* pLine, CPoint3d pc) {
             break;
         }
     }
-    return true;
     if (cut_is_closed(cut)) {
         bool changed = false;
         for (Face& face : faces_) {
             if (face.deleted || face.corners.size() < 3)
                 continue;
 
-            const Face2D face_2d = make_face_2d(face, vertices_);
-            CellCutInfo info;
-            const bool face_touches_cut = AnalyzeFaceCut(face_2d, cut, info, EPS2D);
-            const PointFacePos center_pos = ClassifyPointInFace2(trim_polygon, face_center_2d(face, vertices_), EPS2D);
-            const bool center_delete_side = center_pos != PFP_BOUNDARY
-                && ((center_pos != PFP_OUTSIDE) != keep_inside);
-            if (should_delete_closed_trim_face(face, vertices_, trim_polygon, keep_inside)
-                || (face_touches_cut && (center_delete_side
-                    || face_has_closed_trim_delete_sample(face, vertices_, trim_polygon, keep_inside)))) {
+            if (should_delete_closed_trim_face(
+                    face, vertices_, trim_polygon, keep_inside)) {
                 face.deleted = true;
                 changed = true;
             }
         }
+        changed = sanitize_trim_faces(
+                faces_, vertices_, reference_area, EPS2D) || changed;
+        changed = heal_closed_trim_boundary(
+                faces_, vertices_, cut, EPS2D) || changed;
+        changed = sanitize_trim_faces(
+                faces_, vertices_, reference_area, EPS2D) || changed;
+        if (changed)
+            InvalidateGpuCache();
         return changed || !affected_faces.empty();
     }
 

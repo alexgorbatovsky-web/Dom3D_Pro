@@ -821,6 +821,14 @@ bool Dom3DProjectSerializer::Save(const QString& path,
     }
     xml.writeEndElement();
 
+    if (!document.GetDraftingData().empty()) {
+        xml.writeStartElement("drafting");
+        xml.writeAttribute("encoding", "json-base64");
+        xml.writeCharacters(QString::fromLatin1(
+            QByteArray::fromStdString(document.GetDraftingData()).toBase64()));
+        xml.writeEndElement();
+    }
+
     xml.writeStartElement("materials");
     for (const Material& material : document.GetMaterials()) {
         write_material(xml, material);
@@ -1291,6 +1299,17 @@ bool Dom3DProjectSerializer::Load(const QString& path,
     }
     if (!read_view_state(metadata, view_state, error)) {
         return false;
+    }
+
+    std::string loaded_drafting_data;
+    const QDomElement drafting_element = root.firstChildElement("drafting");
+    if (!drafting_element.isNull()) {
+        if (drafting_element.attribute("encoding") != "json-base64") {
+            error = "Unsupported Drafting data encoding.";
+            return false;
+        }
+        loaded_drafting_data = QByteArray::fromBase64(
+            drafting_element.text().toLatin1()).toStdString();
     }
 
     report(25, "Loading materials and layers...");
@@ -2118,6 +2137,7 @@ bool Dom3DProjectSerializer::Load(const QString& path,
     document.EnsureDefaultLayer();
     document.GetMaterials() = std::move(loaded_materials);
     document.GetObjects() = std::move(loaded_objects);
+    document.SetDraftingData(std::move(loaded_drafting_data));
     document.EnsureObjectIds();
     if (document.GetObjects().empty()) {
         document.CreatePolyline();

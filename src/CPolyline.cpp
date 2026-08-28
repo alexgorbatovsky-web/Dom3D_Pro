@@ -410,10 +410,6 @@ bool CPolyline::ApplyFillet(size_t point_index, double radius) {
     return SetVertexRadius(point_index, radius);
 }
 
-double CPolyline::GetVertexRadius(size_t point_index) const {
-    return point_index < vertex_radii_.size() ? vertex_radii_[point_index] : 0.0;
-}
-
 const std::vector<double>& CPolyline::GetVertexRadii() const {
     return vertex_radii_;
 }

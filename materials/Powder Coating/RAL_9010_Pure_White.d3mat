@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<material version="1" id="41024" name="Powder Coating RAL 9010 Pure White" alpha="1" specular="0.32" shininess="42" reflectivity="0.04" roughness="0.64" metallic="0" coatWeight="0" coatRoughness="0.12" normalStrength="0.12" displacementScale="0" textureOffsetU="0" textureOffsetV="0" textureScaleU="0.4" textureScaleV="0.4" textureRotation="0" textureFitToSurface="0">
+    <ambient r="0.213098" g="0.214824" b="0.206196"/>
+    <diffuse r="0.968627" g="0.976471" b="0.937255"/>
+    <emission r="0" g="0" b="0"/>
+    <textures color="" light="" bump="" normal="Powder Coating/Textures/Powder_Wrinkle_NormalGL.png" roughness="" metallic="" displacement=""/>
+</material>

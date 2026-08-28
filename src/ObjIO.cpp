@@ -447,6 +447,45 @@ bool load_mtl(const std::filesystem::path& path,
 }
 }
 
+struct ObjIO::ObjExportVertexPool {
+    explicit ObjExportVertexPool(size_t first_index)
+        : first_global_index(first_index) {}
+
+    size_t FindOrAdd(Vec3 vertex, double tolerance, bool& inserted) {
+        inserted = false;
+        if (tolerance > 0.0 && std::isfinite(tolerance)) {
+            const float min_x = static_cast<float>(vertex.x - tolerance);
+            const float max_x = static_cast<float>(vertex.x + tolerance);
+            for (auto candidate = vertices_by_x.lower_bound(min_x);
+                 candidate != vertices_by_x.end() && candidate->first <= max_x;
+                 ++candidate) {
+                const size_t index = candidate->second;
+                const double pair_tolerance = std::min(tolerance, tolerances[index]);
+                if (pair_tolerance <= 0.0)
+                    continue;
+                const Vec3 delta = positions[index] - vertex;
+                const double distance_sq = static_cast<double>(dot(delta, delta));
+                if (distance_sq <= pair_tolerance * pair_tolerance)
+                    return first_global_index + index;
+            }
+        }
+
+        const size_t index = positions.size();
+        positions.push_back(vertex);
+        tolerances.push_back(tolerance);
+        vertices_by_x.emplace(vertex.x, index);
+        inserted = true;
+        return first_global_index + index;
+    }
+
+    size_t VertexCount() const { return positions.size(); }
+
+    size_t first_global_index = 0;
+    std::vector<Vec3> positions;
+    std::vector<double> tolerances;
+    std::multimap<float, size_t> vertices_by_x;
+};
+
 bool ObjIO::Import(const std::string& path, std::vector<std::unique_ptr<CMesh3D>>& meshes, std::string& error) const {
     meshes.clear();
     std::ifstream file(path);
@@ -629,7 +668,7 @@ bool ObjIO::Export(const std::string& path,
     file << kDom3DObjUnitsPrefix << obj_unit_key(unit) << "\n";
     file << "mtllib " << mtl_path.filename().generic_string() << "\n\n";
     material_file << "# Dom3D Pro material library\n\n";
-    size_t vertex_offset = 0;
+    size_t exported_vertex_count = 0;
     size_t uv_offset = 0;
     size_t normal_offset = 0;
     size_t next_smoothing_group = 1;
@@ -654,13 +693,14 @@ bool ObjIO::Export(const std::string& path,
     for (const auto& object : document.GetObjects()) {
         const auto* mesh = dynamic_cast<const CMesh3D*>(object.get());
         if (mesh && mesh->IsVisible()) {
+            ObjExportVertexPool vertex_pool(exported_vertex_count);
             const Material material = mesh->GetMaterial();
             const std::string material_name = export_material(material, mesh->GetName());
             if (!ExportMesh(file,
                             *mesh,
                             material,
                             material_name,
-                            vertex_offset,
+                            vertex_pool,
                             uv_offset,
                             normal_offset,
                             next_smoothing_group,
@@ -669,6 +709,7 @@ bool ObjIO::Export(const std::string& path,
                 error = "Could not write mesh data.";
                 return false;
             }
+            exported_vertex_count += vertex_pool.VertexCount();
             ++mesh_count;
             continue;
         }
@@ -679,6 +720,7 @@ bool ObjIO::Export(const std::string& path,
         }
 
         const Material solid_material = solid->GetMaterial();
+        ObjExportVertexPool vertex_pool(exported_vertex_count);
         const std::string solid_material_name = export_material(solid_material, solid->GetName());
         file << "o " << obj_identifier(solid->GetName(), "Solid") << "\n";
         for (int surface_index = 0; surface_index < solid->GetNumSurfaces(); ++surface_index) {
@@ -700,7 +742,7 @@ bool ObjIO::Export(const std::string& path,
                             *surface->pMesh3D,
                             material,
                             solid_material_name,
-                            vertex_offset,
+                            vertex_pool,
                             uv_offset,
                             normal_offset,
                             next_smoothing_group,
@@ -713,6 +755,7 @@ bool ObjIO::Export(const std::string& path,
             }
             ++mesh_count;
         }
+        exported_vertex_count += vertex_pool.VertexCount();
     }
 
     if (mesh_count == 0) {
@@ -731,7 +774,7 @@ bool ObjIO::ExportMesh(std::ostream& stream,
                        const CMesh3D& mesh,
                        const Material& material,
                        const std::string& material_name,
-                       size_t& vertex_offset,
+                       ObjExportVertexPool& vertex_pool,
                        size_t& uv_offset,
                        size_t& normal_offset,
                        size_t& next_smoothing_group,
@@ -743,7 +786,34 @@ bool ObjIO::ExportMesh(std::ostream& stream,
            << obj_identifier(object_name, "Object") << "\n";
     stream << "usemtl " << material_name << "\n";
 
-    for (const Vec3& vertex : mesh.GetVertices()) {
+    double len_min = std::numeric_limits<double>::infinity();
+    for (const CMesh3D::Face& face : mesh.GetFaces()) {
+        if (face.deleted || face.corners.size() < 2)
+            continue;
+        for (size_t corner = 0; corner < face.corners.size(); ++corner) {
+            const size_t first = face.corners[corner].v;
+            const size_t second =
+                face.corners[(corner + 1) % face.corners.size()].v;
+            if (first >= mesh.GetVertices().size()
+                || second >= mesh.GetVertices().size()) {
+                return false;
+            }
+            const Vec3 delta =
+                mesh.GetVertices()[second] - mesh.GetVertices()[first];
+            const double length = std::sqrt(static_cast<double>(dot(delta, delta)));
+            if (length > 0.0 && std::isfinite(length))
+                len_min = std::min(len_min, length);
+        }
+    }
+    const double weld_tolerance = std::isfinite(len_min) ? len_min / 3.0 : 0.0;
+    std::vector<size_t> welded_vertex_indices(mesh.GetVertices().size(), 0);
+    for (size_t index = 0; index < mesh.GetVertices().size(); ++index) {
+        const Vec3& vertex = mesh.GetVertices()[index];
+        bool inserted = false;
+        welded_vertex_indices[index] =
+            vertex_pool.FindOrAdd(vertex, weld_tolerance, inserted);
+        if (!inserted)
+            continue;
         stream << "v "
                << static_cast<double>(vertex.x) * vertex_scale << " "
                << static_cast<double>(vertex.y) * vertex_scale << " "
@@ -816,7 +886,7 @@ bool ObjIO::ExportMesh(std::ostream& stream,
             if (index >= mesh.GetVertices().size()) {
                 return false;
             }
-            stream << " " << (index + vertex_offset + 1);
+            stream << " " << (welded_vertex_indices[index] + 1);
             if (has_uvs || has_normals) {
                 stream << "/";
                 if (has_uvs) {
@@ -837,7 +907,6 @@ bool ObjIO::ExportMesh(std::ostream& stream,
         stream << "\n";
     }
 
-    vertex_offset += mesh.GetVertices().size();
     if (has_uvs) {
         uv_offset += mesh.GetUVs().size();
     }

@@ -1697,6 +1697,7 @@ CAlfaDoc::~CAlfaDoc() {
 
 void CAlfaDoc::Clear() {
     objects_.clear();
+    drafting_data_.clear();
     ResetDefaultMaterials();
     for (CLayer* layer : m_Layers) {
         delete layer;
@@ -3118,7 +3119,9 @@ bool CAlfaDoc::UpdateAttachedSketches() {
         }
 
         int best_face_index = -1;
-        double best_score = std::numeric_limits<double>::max();
+        double best_plane_distance = std::numeric_limits<double>::max();
+        double best_face_distance = std::numeric_limits<double>::max();
+        bool best_is_saved_face = false;
         Vec3 best_center{};
         Vec3 best_normal{};
         for (int face_index = 0;
@@ -3169,12 +3172,27 @@ bool CAlfaDoc::UpdateAttachedSketches() {
             } catch (const Standard_Failure&) {
             }
 
-            double score = plane_distance * 4.0 + face_distance;
-            if (face_index == attachment.face_index) {
-                score *= 0.999;
-            }
-            if (score < best_score) {
-                best_score = score;
+            // The supporting plane is the persistent identity of an attached
+            // sketch. After a Pocket, the point at old_origin lies on the new
+            // pocket floor while the original host face has a hole there.
+            // Mixing plane and shape distances therefore moved the sketch to
+            // the floor, and the next replay started the cut inside the body.
+            // Compare plane distance first; use distance to the trimmed face
+            // only to distinguish faces on the same plane.
+            constexpr double plane_tolerance = 1.0e-6;
+            const bool is_saved_face = face_index == attachment.face_index;
+            const bool closer_plane =
+                plane_distance < best_plane_distance - plane_tolerance;
+            const bool same_plane = std::fabs(
+                plane_distance - best_plane_distance) <= plane_tolerance;
+            const bool better_same_plane = same_plane
+                && ((is_saved_face && !best_is_saved_face)
+                    || (is_saved_face == best_is_saved_face
+                        && face_distance < best_face_distance));
+            if (closer_plane || better_same_plane) {
+                best_plane_distance = plane_distance;
+                best_face_distance = face_distance;
+                best_is_saved_face = is_saved_face;
                 best_face_index = face_index;
                 best_center = center;
                 best_normal = normal;
@@ -4378,37 +4396,50 @@ bool CAlfaDoc::SelectObjectsInScreenRect(
         if (!object || !IsObjectSelectable(*object)) {
             continue;
         }
+        // With group interaction disabled, rectangle selection must target
+        // the actual members. A CGroup has the combined bounds of its
+        // children, so including it here would select the container even when
+        // the rectangle only touches one member.
+        if (!group_interaction_enabled_
+            && dynamic_cast<const CGroup*>(object)) {
+            continue;
+        }
 
         if (object_matches(*object)) {
             found_indices.push_back(object_index);
         }
     }
 
-    std::set<unsigned long> grouped_element_ids;
-    std::set<unsigned long> visited_group_ids;
-    std::function<void(const CGroup&)> collect_group_elements;
-    collect_group_elements = [&](const CGroup& group) {
-        if (!visited_group_ids.insert(group.m_id).second) {
-            return;
-        }
-        for (unsigned long id : group.GetElementIds()) {
-            grouped_element_ids.insert(id);
-            if (const auto* child_group = dynamic_cast<const CGroup*>(FindObjectById(id))) {
-                collect_group_elements(*child_group);
+    if (group_interaction_enabled_) {
+        std::set<unsigned long> grouped_element_ids;
+        std::set<unsigned long> visited_group_ids;
+        std::function<void(const CGroup&)> collect_group_elements;
+        collect_group_elements = [&](const CGroup& group) {
+            if (!visited_group_ids.insert(group.m_id).second) {
+                return;
+            }
+            for (unsigned long id : group.GetElementIds()) {
+                grouped_element_ids.insert(id);
+                if (const auto* child_group =
+                        dynamic_cast<const CGroup*>(FindObjectById(id))) {
+                    collect_group_elements(*child_group);
+                }
+            }
+        };
+        for (size_t index : found_indices) {
+            if (const auto* group =
+                    dynamic_cast<const CGroup*>(objects_[index].get())) {
+                collect_group_elements(*group);
             }
         }
-    };
-    for (size_t index : found_indices) {
-        if (const auto* group = dynamic_cast<const CGroup*>(objects_[index].get())) {
-            collect_group_elements(*group);
-        }
+        found_indices.erase(
+            std::remove_if(
+                found_indices.begin(), found_indices.end(), [&](size_t index) {
+                    return !dynamic_cast<const CGroup*>(objects_[index].get())
+                        && grouped_element_ids.count(objects_[index]->m_id) > 0;
+                }),
+            found_indices.end());
     }
-    found_indices.erase(
-        std::remove_if(found_indices.begin(), found_indices.end(), [&](size_t index) {
-            return !dynamic_cast<const CGroup*>(objects_[index].get())
-                && grouped_element_ids.count(objects_[index]->m_id) > 0;
-        }),
-        found_indices.end());
 
     const std::vector<size_t> previous_selection = selected_object_indices_;
     if (action == SelectionAction::Add) {
@@ -4772,7 +4803,7 @@ bool CAlfaDoc::HasSelection() const {
 }
 
 bool CAlfaDoc::ExpandSelectedGroups() {
-    if (!HasSelection()) {
+    if (!group_interaction_enabled_ || !HasSelection()) {
         return false;
     }
 
@@ -5258,6 +5289,10 @@ bool CAlfaDoc::DuplicateSelectedObject() {
                     return 0;
                 }
 
+                // Layer membership belongs to the source object, not to the
+                // current work layer. Enforce it here for every concrete
+                // Clone() implementation and every node of copied assemblies.
+                copy->m_LayerID = source.m_LayerID;
                 copy->m_id = 0;
                 EnsureObjectId(*copy);
                 AssignDefaultMaterial(*copy);
@@ -5344,6 +5379,7 @@ bool CAlfaDoc::DuplicateSelectedObject() {
         if (!copy) {
             continue;
         }
+        copy->m_LayerID = objects_[source_index]->m_LayerID;
         if (!copy->GetGroupName().empty()) {
             copy->SetGroupName(unique_group_name(copy->GetGroupName()));
         }
@@ -8093,7 +8129,8 @@ bool CAlfaDoc::RebuildTwoSketchSolid(size_t object_index) {
 }
 
 size_t CAlfaDoc::ResolveGroupSelectionIndex(size_t object_index) const {
-    if (object_index >= objects_.size() || !objects_[object_index]) {
+    if (!group_interaction_enabled_
+        || object_index >= objects_.size() || !objects_[object_index]) {
         return object_index;
     }
 

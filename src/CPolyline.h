@@ -77,7 +77,9 @@ public:
     bool GetLockedPlane(Vec3& plane_point, Vec3& plane_normal) const;
     bool ApplyFillet(size_t point_index, double radius);
     bool SetVertexRadius(size_t point_index, double radius);
-    double GetVertexRadius(size_t point_index) const;
+    double GetVertexRadius(size_t point_index) const {
+        return point_index < vertex_radii_.size() ? vertex_radii_[point_index] : 0.0;
+    }
     const std::vector<double>& GetVertexRadii() const;
     bool GetFilletGeometry(size_t point_index, CPolylineFilletGeometry& geometry) const;
     std::vector<CPoint3d> GetRoundedPathPoints(double maximum_angle_step = 0.17453292519943295) const;
