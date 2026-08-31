@@ -502,6 +502,7 @@ bool ObjIO::Import(const std::string& path, std::vector<std::unique_ptr<CMesh3D>
     ObjMeshPart* current = &parts.back();
     std::string current_object_name = current->name;
     std::string current_material_name;
+    bool has_explicit_object = false;
     double vertex_scale = 1.0;
     const std::filesystem::path obj_path(path);
     const auto start_part = [&]() -> ObjMeshPart* {
@@ -558,9 +559,20 @@ bool ObjIO::Import(const std::string& path, std::vector<std::unique_ptr<CMesh3D>
                 load_mtl(mtl_path.lexically_normal(), materials);
             }
         } else if (keyword == "usemtl") {
-            current_material_name = read_obj_name(line_stream, {});
+            const std::string material_name = read_obj_name(line_stream, {});
+            if (material_name != current_material_name) {
+                current_material_name = material_name;
+                current = start_part();
+            }
+        } else if (keyword == "o") {
+            const std::string fallback = "Imported OBJ " + std::to_string(parts.size() + (current->faces.empty() ? 0 : 1));
+            current_object_name = read_obj_name(line_stream, fallback);
             current = start_part();
-        } else if (keyword == "o" || keyword == "g") {
+            has_explicit_object = true;
+        } else if (keyword == "g" && !has_explicit_object) {
+            // A Dom3D OBJ object represents one source Solid, while groups
+            // inside it represent the Solid's individual surfaces. Use a
+            // group as a Mesh boundary only when no object was declared.
             const std::string fallback = "Imported OBJ " + std::to_string(parts.size() + (current->faces.empty() ? 0 : 1));
             current_object_name = read_obj_name(line_stream, fallback);
             current = start_part();

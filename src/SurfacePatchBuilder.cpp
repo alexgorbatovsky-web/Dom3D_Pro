@@ -567,7 +567,13 @@ bool split_patch(const std::vector<SurfacePatchPoint>& patch,
         for (size_t i = 0; i < bridge_intervals.size(); ++i) {
             if (static_cast<int>(bridge_intervals[i] & 1U)
                 != best_parities[i]) {
-                ++bridge_intervals[i];
+				// Both adjacent counts have the requested parity. Prefer the lower
+				// one: always rounding a three-interval short bridge upward to four
+				// doubled its auxiliary nodes. The one-interval minimum is the only
+				// case that must grow instead.
+				bridge_intervals[i] = bridge_intervals[i] > 1
+					? bridge_intervals[i] - 1
+					: bridge_intervals[i] + 1;
             }
         }
 

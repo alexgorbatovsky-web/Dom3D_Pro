@@ -1008,6 +1008,96 @@ double point_distance(const CPoint3d& first, const CPoint3d& second)
     return std::sqrt(x * x + y * y + z * z);
 }
 
+bool curve_to_polyline_samples_by_length(
+    const CAlfaObject& curve,
+    double requested_length,
+    std::vector<CPoint3d>& result,
+    bool& closed)
+{
+    result.clear();
+    closed = false;
+    if (!std::isfinite(requested_length) || requested_length <= 0.0) {
+        return false;
+    }
+
+    SweepCurveSamples source;
+    if (!sweep_curve_samples(curve, source) || source.points.size() < 2) {
+        return false;
+    }
+
+    // Length-based conversion needs a considerably finer intermediate curve
+    // than the regular viewport/sweep preview, especially for a long spline
+    // with only a few control points.
+    if (const auto* spline = dynamic_cast<const CBSpline*>(&curve)) {
+        const int samples = std::max(
+            1024, static_cast<int>(spline->GetPointCount()) * 256);
+        source.points.clear();
+        source.points.reserve(static_cast<std::size_t>(samples + 1));
+        for (int index = 0; index <= samples; ++index) {
+            source.points.push_back(spline->Evaluate(
+                static_cast<float>(index) / static_cast<float>(samples)));
+        }
+        source.closed = spline->IsClosed();
+    }
+
+    closed = source.closed;
+    if (closed
+        && point_distance(source.points.front(), source.points.back())
+            > 1.0e-9) {
+        source.points.push_back(source.points.front());
+    }
+
+    std::vector<double> cumulative(source.points.size(), 0.0);
+    for (std::size_t index = 1; index < source.points.size(); ++index) {
+        cumulative[index] = cumulative[index - 1]
+            + point_distance(source.points[index - 1], source.points[index]);
+    }
+    const double total_length = cumulative.back();
+    if (total_length <= 1.0e-9) {
+        return false;
+    }
+
+    // Preserve the Old Dom rule exactly. requested_length determines Qty;
+    // the resulting knots are then equidistant over the complete curve.
+    const double raw_quantity = std::floor(total_length / requested_length) + 1.0;
+    if (raw_quantity > 1000000.0) {
+        return false;
+    }
+    const int quantity = static_cast<int>(raw_quantity);
+    if (quantity < 2 || (closed && quantity < 4)) {
+        return false;
+    }
+
+    result.reserve(static_cast<std::size_t>(quantity));
+    std::size_t source_index = 1;
+    for (int index = 0; index < quantity; ++index) {
+        const double target = total_length
+            * static_cast<double>(index)
+            / static_cast<double>(quantity - 1);
+        while (source_index + 1 < cumulative.size()
+               && cumulative[source_index] < target) {
+            ++source_index;
+        }
+        const std::size_t previous = source_index - 1;
+        const double interval = cumulative[source_index] - cumulative[previous];
+        const double fraction = interval <= 1.0e-12
+            ? 0.0
+            : (target - cumulative[previous]) / interval;
+        const CPoint3d& first = source.points[previous];
+        const CPoint3d& second = source.points[source_index];
+        result.emplace_back(
+            first.x + (second.x - first.x) * fraction,
+            first.y + (second.y - first.y) * fraction,
+            first.z + (second.z - first.z) * fraction);
+    }
+
+    if (closed && result.size() > 1
+        && point_distance(result.front(), result.back()) <= 1.0e-7) {
+        result.pop_back();
+    }
+    return result.size() >= 2;
+}
+
 TopoDS_Wire make_wire_from_curve_object(const CAlfaObject& object)
 {
     if (const auto* spline = dynamic_cast<const CBSpline*>(&object)) {
@@ -2082,6 +2172,93 @@ bool CAlfaDoc::CreateMeshFromSelectedPolyline(CVector3d dir, float dist) {
     selected_object_indices_ = {selected_object_index_};
     has_selected_object_ = true;
     ClearPointSelection();
+    return true;
+}
+
+bool CAlfaDoc::CreateSurfaceFromSelectedSketch(
+    std::string* error_message) {
+    const auto fail = [error_message](const char* message) {
+        if (error_message) {
+            *error_message = message;
+        }
+        return false;
+    };
+    if (error_message) {
+        error_message->clear();
+    }
+
+    const CSmartLine* sketch = GetSelectedSketch();
+    if (!sketch) {
+        return fail("Select a sketch first.");
+    }
+    if (!sketch->IsClosed()) {
+        return fail("The sketch must be closed to create a surface.");
+    }
+
+    TopoDS_Face profile_face;
+    Vec3 profile_normal{};
+    if (!BuildSketchProfileFace(*sketch, profile_face, profile_normal)
+        || profile_face.IsNull()) {
+        return fail("The sketch does not form a valid planar surface boundary.");
+    }
+
+    TopoDS_Shape shape = profile_face;
+    auto surface = std::make_unique<CSurfaceSet>(shape);
+    surface->SetName(sketch->GetName().empty()
+        ? "Sketch Surface"
+        : sketch->GetName() + " Surface");
+    surface->SetColor({0.58f, 0.68f, 0.76f});
+    if (!surface->InitSurfaces()) {
+        return fail("Could not initialize the trimmed surface.");
+    }
+    surface->InitEdges();
+    AddObject(std::move(surface));
+    return true;
+}
+
+bool CAlfaDoc::CreatePolylineFromSelectedCurveByLength(
+    double segment_length,
+    std::string* error_message) {
+    const auto fail = [error_message](const char* message) {
+        if (error_message) {
+            *error_message = message;
+        }
+        return false;
+    };
+    if (error_message) {
+        error_message->clear();
+    }
+
+    const CAlfaObject* curve = GetSelectedObject();
+    const bool supported = dynamic_cast<const CBSpline*>(curve)
+        || dynamic_cast<const CSmartLine*>(curve)
+        || dynamic_cast<const CCadCurve3D*>(curve);
+    if (!curve || !supported) {
+        return fail("Select a curve or sketch first.");
+    }
+    if (!std::isfinite(segment_length) || segment_length <= 0.0) {
+        return fail("Polyline segment length must be positive.");
+    }
+
+    std::vector<CPoint3d> points;
+    bool closed = false;
+    if (!curve_to_polyline_samples_by_length(
+            *curve, segment_length, points, closed)) {
+        return fail(
+            "Could not divide the curve. Use a length smaller than the curve length.");
+    }
+
+    auto polyline = std::make_unique<CPolyline>(
+        curve->GetName().empty()
+            ? "Curve Polyline"
+            : curve->GetName() + " Polyline");
+    for (const CPoint3d& point : points) {
+        polyline->AddPoint(point);
+    }
+    polyline->SetClosed(closed);
+    polyline->SetColor(curve->GetColor());
+    polyline->SetGroupName(curve->GetGroupName());
+    AddObject(std::move(polyline));
     return true;
 }
 
@@ -5017,7 +5194,8 @@ void CAlfaDoc::EnsureObjectIds() {
     }
 }
 
-void CAlfaDoc::AddObject(std::unique_ptr<CAlfaObject> object) {
+void CAlfaDoc::AddObject(std::unique_ptr<CAlfaObject> object,
+                         bool select_object) {
     if (!object) {
         return;
     }
@@ -5026,10 +5204,12 @@ void CAlfaDoc::AddObject(std::unique_ptr<CAlfaObject> object) {
     AssignDefaultMaterial(*object);
     AssignObjectToWorkLayer(*object);
     objects_.push_back(std::move(object));
-    selected_object_index_ = objects_.size() - 1;
-    selected_object_indices_ = {selected_object_index_};
-    has_selected_object_ = true;
-    ClearPointSelection();
+    if (select_object) {
+        selected_object_index_ = objects_.size() - 1;
+        selected_object_indices_ = {selected_object_index_};
+        has_selected_object_ = true;
+        ClearPointSelection();
+    }
 }
 
 void CAlfaDoc::AddMesh(std::unique_ptr<CMesh3D> mesh) {

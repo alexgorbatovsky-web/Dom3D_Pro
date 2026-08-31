@@ -118,6 +118,7 @@ public:
 	bool GetRegularMeshBoundaryPoints(int edge_index, std::vector<CPoint3d>& points) const;
 	void DumpPreparedPolylinesToScene() const;
 	bool BuildTrimmingMesh(CSolid* psol, float Deflection);
+	bool RemoveOutsideMeshFaces3D();
 	bool MakeFilledContour(const std::vector<Vec3>& contour, Vec3 normal,
 		CMesh3D* quad_mesh, bool prefer_safe_quads = false,
 		std::string* error = nullptr,
@@ -134,6 +135,8 @@ public:
 	}
 	bool CreateLastIslandBoundaryPolylines(
 		std::vector<std::unique_ptr<CPolyline>>& boundaries);
+	bool CreateLastQuadrangulationBoundaryPolylines(
+		std::vector<std::unique_ptr<CPolyline>>& boundaries) const;
 	bool MakeQuadMeshFromBoundary(float density,
 	                              CMesh3D* quad_mesh,
 	                              std::vector<Vec3>* triangulation_boundary = nullptr);
@@ -163,6 +166,7 @@ public:
 	SurfaceMaterialOverride MaterialOverride;
 	float m_LastLowPolyDensity = 0.0f;
 	std::vector<std::vector<CPoint3d>> m_LastIslandBoundariesUV;
+	std::vector<std::vector<CPoint3d>> m_LastQuadrangulationBoundariesXY;
 	std::string m_LastIslandFillError;
 	std::string m_LastQuadrangulationDiagnostic;
 

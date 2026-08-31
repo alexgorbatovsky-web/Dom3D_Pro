@@ -823,8 +823,12 @@ void main() {
 
 Color wire_color(Color base, MeshDisplayMode mode, bool selected) {
     if (mode == MeshDisplayMode::SurfaceGray
-        || mode == MeshDisplayMode::SurfaceColored) {
-        return selected ? Color{0.045f, 0.050f, 0.052f} : Color{0.075f, 0.083f, 0.087f};
+        || mode == MeshDisplayMode::SurfaceColored
+        || mode == MeshDisplayMode::SurfaceMaterialWithMesh) {
+        // In these modes the face material is controlled independently from
+        // the object's color, so the object color is the user's wire color.
+        // Replacing it with near-black made the Color command appear broken.
+        return base;
     }
     if (mode == MeshDisplayMode::Wire) {
         const float luminance = base.r * 0.30f + base.g * 0.59f + base.b * 0.11f;
@@ -899,6 +903,92 @@ std::vector<cVec2> make_cut_2d(const CPolyline* line)
 bool cut_is_closed(const std::vector<cVec2>& cut)
 {
     return cut.size() > 2 && EqualPoint2(cut.front(), cut.back(), TRIM_CLOSURE_EPS);
+}
+
+constexpr const char* kTrimDiagnosticsLayerName =
+    "Trim Classification Diagnostics";
+
+Color trim_diagnostic_color(int variant)
+{
+    switch (variant) {
+    case 0:
+        return {1.0f, 67.0f / 255.0f, 146.0f / 255.0f};
+    case 2:
+        return {0.0f, 0.0f, 1.0f};
+    case 3:
+        return {0.0f, 1.0f, 0.0f};
+    case 5:
+        return {1.0f, 1.0f, 0.0f};
+    case 6:
+        return {139.0f / 255.0f, 65.0f / 255.0f, 0.0f};
+    case 7:
+        return {0.0f, 1.0f, 1.0f};
+    case 8:
+        return {1.0f, 0.0f, 0.0f};
+    case 11:
+        return {0.5f, 0.5f, 0.5f};
+    default:
+        return {1.0f, 1.0f, 1.0f};
+    }
+}
+
+int ensure_trim_diagnostics_layer(CAlfaDoc& document)
+{
+    document.EnsureDefaultLayer();
+    for (const CLayer* layer : document.m_Layers) {
+        if (layer && layer->Name == kTrimDiagnosticsLayerName)
+            return layer->ID();
+    }
+
+    const int originalWorkLayer = document.GetWorkLayerID();
+    CLayer* layer = document.AddLayer(kTrimDiagnosticsLayerName);
+    if (originalWorkLayer != 0)
+        document.SetWorkLayer(originalWorkLayer);
+    return layer ? layer->ID() : 0;
+}
+
+void add_trim_classification_diagnostic(
+    CAlfaDoc& document,
+    int layerId,
+    const CMesh3D::Face& face,
+    const std::vector<Vec3>& vertices,
+    int variant)
+{
+    if (layerId == 0 || face.deleted || face.corners.size() < 3)
+        return;
+
+    auto polyline = std::make_unique<CPolyline>(
+        "VariantCut = " + std::to_string(variant));
+    for (const MeshCorner& corner : face.corners) {
+        if (corner.v >= vertices.size())
+            return;
+        const Vec3& vertex = vertices[corner.v];
+        polyline->AddPoint(CPoint3d(vertex.x, vertex.y, vertex.z));
+    }
+    polyline->SetClosed(true);
+    polyline->SetColor(trim_diagnostic_color(variant));
+    polyline->SetLineWidth(1.0);
+
+    CPolyline* added = polyline.get();
+    document.AddObject(std::move(polyline), false);
+    added->m_LayerID = layerId;
+}
+
+void add_trim_mesh_diagnostic_snapshot(
+    CAlfaDoc& document,
+    int layerId,
+    const CMesh3D& mesh)
+{
+    if (layerId == 0)
+        return;
+
+    std::unique_ptr<CAlfaObject> snapshot = mesh.Clone();
+    if (!snapshot)
+        return;
+    snapshot->SetName(mesh.GetName() + " - Before Trim");
+    CAlfaObject* added = snapshot.get();
+    document.AddObject(std::move(snapshot), false);
+    added->m_LayerID = layerId;
 }
 
 cVec2 face_center_2d(const CMesh3D::Face& face, const std::vector<Vec3>& vertices)
@@ -2127,31 +2217,33 @@ bool CMesh3D::SplitFaceByVar6(int face_index, int v1, int v2, int edgeIndex, cVe
 bool CMesh3D::SplitFaceByVar7(int f1, int v1, int edgeIndex)
 {
   //  Step("SplitFaceByVar7");
-    if (edgeIndex == -1)
+    if (f1 < 0 || f1 >= static_cast<int>(faces_.size())
+        || edgeIndex < 0 || edgeIndex >= 4 || v1 < 0 || v1 >= 4) {
         return false;
-    MeshFace& face = faces_[f1];
-    if (face.m_Trimmed)
+    }
+    MeshFace& face = faces_[static_cast<size_t>(f1)];
+    if (face.deleted || face.m_Trimmed)
         return true;
-    if(face.corners.size() != 4)
+    if (face.corners.size() != 4)
         return false;
 //    auto pLine1 = std::make_unique<CPolyline>();
 //    MakePolyline(f1, *pLine1);
  //   pLine1->SetName("Face_f1");
  //  pDoc->AddObject(std::move(pLine1));
 
-    int ev1 = face.corners[edgeIndex].v;
-    int VrtIndex2 = edgeIndex + 1;
-    if (edgeIndex == 3)
-        VrtIndex2 = 0;
-    int ev2 = face.corners[VrtIndex2].v;
+    const int ev1 = static_cast<int>(
+        face.corners[static_cast<size_t>(edgeIndex)].v);
+    const int vertexIndex2 = (edgeIndex + 1) % 4;
+    const int ev2 = static_cast<int>(
+        face.corners[static_cast<size_t>(vertexIndex2)].v);
 
     Edge ed(ev1, ev2);
  //   int f1 = FindFirstFace3d(ed);
     int f2 = FindSecondCFace3d(f1, ed);
     if (f2 == -1)
         return true;
-    MeshFace& face2 = faces_[f2];
-    if (face2.corners.size() != 4)
+    MeshFace& face2 = faces_[static_cast<size_t>(f2)];
+    if (face2.deleted || face2.corners.size() != 4)
         return false;
  
  //   auto pLine2 = std::make_unique<CPolyline>();
@@ -2199,7 +2291,20 @@ bool CMesh3D::SplitFaceByVar7(int f1, int v1, int edgeIndex)
 
     int ind5 = 0;
     int ind6 = 0;
-	int edgeIndex2 = face2.edgeIndex;
+    int edgeIndex2 = -1;
+    for (int index = 0; index < 4; ++index) {
+        const int next = (index + 1) % 4;
+        const Edge candidate(
+            static_cast<int>(face2.corners[static_cast<size_t>(index)].v),
+            static_cast<int>(face2.corners[static_cast<size_t>(next)].v));
+        if (candidate == ed) {
+            edgeIndex2 = index;
+            break;
+        }
+    }
+    if (edgeIndex2 == -1)
+        return false;
+
     if (edgeIndex2 == 0) {
         ind5 = 2;
         ind6 = 3;
@@ -2221,9 +2326,16 @@ bool CMesh3D::SplitFaceByVar7(int f1, int v1, int edgeIndex)
         MakeVar1 = false;
 
     std::vector<MeshCorner> seq4;
-    seq4.push_back(face.corners[ind1]);
-    seq4.push_back(face2.corners[ind6]);
-    seq4.push_back(face.corners[ind3]);
+    if (MakeVar1) {
+        seq4.push_back(face.corners[static_cast<size_t>(ind1)]);
+        seq4.push_back(face2.corners[static_cast<size_t>(ind6)]);
+        seq4.push_back(face.corners[static_cast<size_t>(ind3)]);
+    }
+    else {
+        seq4.push_back(face.corners[static_cast<size_t>(ind1)]);
+        seq4.push_back(face2.corners[static_cast<size_t>(ind5)]);
+        seq4.push_back(face.corners[static_cast<size_t>(ind4)]);
+    }
 
     MeshFace face4 = face;
     face4.corners = std::move(seq4);
@@ -2277,26 +2389,25 @@ bool CMesh3D::SplitFaceByVar7(int f1, int v1, int edgeIndex)
 
     
     if (MakeVar1) {
-        if (edgeIndex == 0) {
+        if (edgeIndex2 == 0) {
+            faces_[f2].corners[0] = faces_[f2].corners[3];
+        }
+        if (edgeIndex2 == 1) {
             faces_[f2].corners[1] = faces_[f2].corners[2];
             faces_[f2].corners[2] = faces_[f2].corners[3];
         }
-        if (edgeIndex == 1) {
-            faces_[f2].corners[1] = faces_[f2].corners[2];
-            faces_[f2].corners[2] = faces_[f2].corners[3];
-		}
-        if (edgeIndex == 2) 
+        if (edgeIndex2 == 2)
 			faces_[f2].corners[2] = faces_[f2].corners[3];
     }
     else {
-         if (edgeIndex == 0) {
+         if (edgeIndex2 == 0) {
             faces_[f2].corners[1] = faces_[f2].corners[2];
             faces_[f2].corners[2] = faces_[f2].corners[3];
         }
-        if (edgeIndex == 1) {
+        if (edgeIndex2 == 1) {
             faces_[f2].corners[2] = faces_[f2].corners[3];
         }
-        if (edgeIndex == 3) {
+        if (edgeIndex2 == 3) {
             faces_[f2].corners[0] = faces_[f2].corners[3];
 		}
 	}
@@ -2504,6 +2615,7 @@ Material CMesh3D::material_Defailt = Material::DefaultMesh();
 float CMesh3D::s_SurfaceOpacity = 1.0f;
 MeshDisplayMode CMesh3D::s_DisplayMode = MeshDisplayMode::SurfaceGray;
 bool CMesh3D::s_OpenEdgeDisplayEnabled = false;
+bool CMesh3D::s_TrimClassificationDiagnosticsEnabled = false;
 bool CMesh3D::s_ZebraAnalysisEnabled = false;
 bool CMesh3D::s_ZebraAnalysisTarget = false;
 bool CMesh3D::s_ZebraOrthographic = false;
@@ -3536,6 +3648,7 @@ std::unique_ptr<CMesh3D> CMesh3D::CreateWelded(
 
     const CMesh3D* first_mesh = nullptr;
     double len_min = std::numeric_limits<double>::infinity();
+    std::vector<double> source_edge_lengths;
     size_t source_vertex_count = 0;
     for (const CMesh3D* mesh : meshes) {
         if (!mesh || mesh->vertices_.empty() || mesh->faces_.empty())
@@ -3543,7 +3656,8 @@ std::unique_ptr<CMesh3D> CMesh3D::CreateWelded(
         if (!first_mesh) first_mesh = mesh;
         source_vertex_count += mesh->vertices_.size();
         for (const Face& face : mesh->faces_) {
-            if (!mesh->IsValidFace(face, mesh->vertices_.size()))
+            if (face.deleted
+                || !mesh->IsValidFace(face, mesh->vertices_.size()))
                 continue;
             for (size_t corner = 0; corner < face.corners.size(); ++corner) {
                 const size_t first = face.corners[corner].v;
@@ -3553,48 +3667,116 @@ std::unique_ptr<CMesh3D> CMesh3D::CreateWelded(
                     mesh->vertices_[second] - mesh->vertices_[first];
                 const double length =
                     std::sqrt(static_cast<double>(dot(delta, delta)));
-                if (length > 0.0 && std::isfinite(length))
+                if (length > 0.0 && std::isfinite(length)) {
                     len_min = std::min(len_min, length);
+                    source_edge_lengths.push_back(length);
+                }
             }
         }
     }
     if (!first_mesh || !std::isfinite(len_min))
         return nullptr;
 
+    std::sort(source_edge_lengths.begin(), source_edge_lengths.end());
     const double tolerance = len_min / 3.0;
-    if (used_tolerance) *used_tolerance = static_cast<float>(tolerance);
+    // A single tiny transition edge must not reduce the tolerance for every
+    // seam in the object. The 10th percentile remains well below the normal
+    // mesh step, while tolerating the small independent approximation error
+    // between two surfaces. It is used only for boundary vertices belonging
+    // to different source surfaces; ordinary intra-surface welding retains
+    // the conservative minimum-edge tolerance above.
+    const double cross_surface_tolerance = std::max(tolerance,
+        source_edge_lengths[source_edge_lengths.size() / 10] / 2.0);
+    if (used_tolerance)
+        *used_tolerance = static_cast<float>(cross_surface_tolerance);
     std::vector<Vec3> vertices;
     std::vector<UV> uvs;
     std::vector<Vec3> normals;
     std::vector<Face> faces;
     vertices.reserve(source_vertex_count);
     std::multimap<float, size_t> vertices_by_x;
+	std::vector<size_t> welded_mesh_indices;
+	std::vector<int> welded_source_faces;
+	std::vector<bool> welded_boundary_vertices;
 
-    const auto welded_index = [&](Vec3 vertex) {
-        const float min_x = static_cast<float>(vertex.x - tolerance);
-        const float max_x = static_cast<float>(vertex.x + tolerance);
+    const auto welded_index = [&](Vec3 vertex, size_t mesh_index,
+        int source_face, bool boundary_vertex) {
+        const float min_x = static_cast<float>(
+            vertex.x - cross_surface_tolerance);
+        const float max_x = static_cast<float>(
+            vertex.x + cross_surface_tolerance);
         for (auto candidate = vertices_by_x.lower_bound(min_x);
              candidate != vertices_by_x.end() && candidate->first <= max_x;
              ++candidate) {
             const Vec3 delta = vertices[candidate->second] - vertex;
-            if (static_cast<double>(dot(delta, delta)) <= tolerance * tolerance)
+			const size_t candidate_index = candidate->second;
+			const bool different_source_surface =
+				welded_mesh_indices[candidate_index] != mesh_index
+				|| (source_face >= 0
+					&& welded_source_faces[candidate_index] >= 0
+					&& welded_source_faces[candidate_index] != source_face);
+			const double candidate_tolerance = boundary_vertex
+				&& welded_boundary_vertices[candidate_index]
+				&& different_source_surface
+				? cross_surface_tolerance : tolerance;
+            if (static_cast<double>(dot(delta, delta))
+				<= candidate_tolerance * candidate_tolerance) {
                 return candidate->second;
+			}
         }
         const size_t index = vertices.size();
         vertices.push_back(vertex);
         vertices_by_x.emplace(vertex.x, index);
+		welded_mesh_indices.push_back(mesh_index);
+		welded_source_faces.push_back(source_face);
+		welded_boundary_vertices.push_back(boundary_vertex);
         return index;
     };
 
-    for (const CMesh3D* mesh : meshes) {
+    for (size_t mesh_index = 0; mesh_index < meshes.size(); ++mesh_index) {
+		const CMesh3D* mesh = meshes[mesh_index];
         if (!mesh || mesh->vertices_.empty() || mesh->faces_.empty())
             continue;
+		std::vector<int> vertex_source_face(mesh->vertices_.size(), -1);
+		std::vector<bool> vertex_has_source(mesh->vertices_.size(), false);
+		std::vector<bool> boundary_vertex(mesh->vertices_.size(), false);
+		using SourceEdge = std::tuple<int, size_t, size_t>;
+		std::map<SourceEdge, size_t> source_edge_use;
+		for (const Face& face : mesh->faces_) {
+			if (face.deleted
+				|| !mesh->IsValidFace(face, mesh->vertices_.size())) {
+				continue;
+			}
+			for (size_t corner = 0; corner < face.corners.size(); ++corner) {
+				const size_t first = face.corners[corner].v;
+				const size_t second = face.corners[
+					(corner + 1) % face.corners.size()].v;
+				if (!vertex_has_source[first]) {
+					vertex_source_face[first] = face.sourceFaceId;
+					vertex_has_source[first] = true;
+				} else if (vertex_source_face[first] != face.sourceFaceId) {
+					vertex_source_face[first] = -1;
+				}
+				const auto edge = std::minmax(first, second);
+				++source_edge_use[{face.sourceFaceId,
+					edge.first, edge.second}];
+			}
+		}
+		for (const auto& edge : source_edge_use) {
+			if (edge.second != 1)
+				continue;
+			boundary_vertex[std::get<1>(edge.first)] = true;
+			boundary_vertex[std::get<2>(edge.first)] = true;
+		}
         std::vector<size_t> remapped_vertices(mesh->vertices_.size());
-        for (size_t index = 0; index < mesh->vertices_.size(); ++index)
-            remapped_vertices[index] = welded_index(mesh->vertices_[index]);
+        for (size_t index = 0; index < mesh->vertices_.size(); ++index) {
+			remapped_vertices[index] = welded_index(mesh->vertices_[index],
+				mesh_index, vertex_source_face[index], boundary_vertex[index]);
+		}
 
         for (const Face& source_face : mesh->faces_) {
-            if (!mesh->IsValidFace(source_face, mesh->vertices_.size()))
+            if (source_face.deleted
+				|| !mesh->IsValidFace(source_face, mesh->vertices_.size()))
                 continue;
             Face face = source_face;
             face.deleted = false;
@@ -3669,6 +3851,7 @@ void CMesh3D::Render() {
 void CMesh3D::Render3d(bool selected) const {
     const MeshDisplayMode mode = GetDisplayMode();
     const bool shaded_mode = mode == MeshDisplayMode::SurfaceMaterial
+        || mode == MeshDisplayMode::SurfaceMaterialWithMesh
         || mode == MeshDisplayMode::SurfaceGray
         || mode == MeshDisplayMode::SurfaceColored;
     const bool zebra = IsZebraAnalysisTarget();
@@ -3708,12 +3891,12 @@ void CMesh3D::Render3d(bool selected) const {
         material.bump_texture_path.clear();
     }
 
-    // Texture is the finished material presentation.  Imported meshes use
-    // their triangle boundaries as construction mesh lines, not as BRep
-    // silhouette edges.  Let Gray/RGB keep those diagnostic lines, but never
-    // overlay them on Texture: the legacy Dom renderer also showed textured
-    // mesh faces without the triangulation.
-    const bool draw_edges = mode != MeshDisplayMode::SurfaceMaterial;
+    // Plain Texture is the finished material presentation and intentionally
+    // hides polygon boundaries. Texture + Mesh is the CAD2Quads-style mode:
+    // it keeps the material and overlays the source quad/triangle topology.
+    const bool draw_edges = mode == MeshDisplayMode::SurfaceGray
+        || mode == MeshDisplayMode::SurfaceColored
+        || mode == MeshDisplayMode::SurfaceMaterialWithMesh;
     RenderFaces(rgb_selected, draw_edges, &material,
                 rgb_selected || mode == MeshDisplayMode::SurfaceColored);
     if (draw_edges) {
@@ -4069,7 +4252,9 @@ void CMesh3D::RenderWire(bool selected,
         glEnable(GL_LINE_STIPPLE);
         glLineStipple(1, 0x0F0F);
     }
-    const Color wire = color_override ? base_color : wire_color(base_color, mode, selected);
+    const Color wire = color_override
+        ? base_color
+        : ResolveWireColor(base_color, mode, selected);
     const float alpha = draw_on_top
         ? (selected ? 0.98f : 0.92f)
         : (selected ? 0.88f : 0.82f);
@@ -4198,7 +4383,7 @@ void CMesh3D::RenderHiddenLineEdges(bool hidden,
     const Color line_color = hidden
         ? (luminance > 0.5f ? Color{0.62f, 0.62f, 0.62f}
                             : Color{0.42f, 0.42f, 0.42f})
-        : wire_color(GetColor(), GetDisplayMode(), selected);
+        : ResolveWireColor(GetColor(), GetDisplayMode(), selected);
     RenderWire(selected, false, &line_color, hidden);
 }
 
@@ -4218,12 +4403,25 @@ void CMesh3D::SetDisplayMode(MeshDisplayMode mode) {
     s_DisplayMode = mode;
 }
 
+Color CMesh3D::ResolveWireColor(
+    Color base, MeshDisplayMode mode, bool selected) {
+    return wire_color(base, mode, selected);
+}
+
 bool CMesh3D::IsOpenEdgeDisplayEnabled() {
     return s_OpenEdgeDisplayEnabled;
 }
 
 void CMesh3D::SetOpenEdgeDisplayEnabled(bool enabled) {
     s_OpenEdgeDisplayEnabled = enabled;
+}
+
+bool CMesh3D::IsTrimClassificationDiagnosticsEnabled() {
+    return s_TrimClassificationDiagnosticsEnabled;
+}
+
+void CMesh3D::SetTrimClassificationDiagnosticsEnabled(bool enabled) {
+    s_TrimClassificationDiagnosticsEnabled = enabled;
 }
 
 bool CMesh3D::IsZebraAnalysisEnabled() {
@@ -4753,6 +4951,16 @@ bool CMesh3D::TrimByPline(CPolyline* pLine, CPoint3d pc) {
         return false;
     }
 
+    CAlfaDoc* diagnosticDocument =
+        s_TrimClassificationDiagnosticsEnabled ? GetAlfaDoc() : nullptr;
+    const int diagnosticLayerId = diagnosticDocument
+        ? ensure_trim_diagnostics_layer(*diagnosticDocument)
+        : 0;
+    if (diagnosticDocument) {
+        add_trim_mesh_diagnostic_snapshot(
+            *diagnosticDocument, diagnosticLayerId, *this);
+    }
+
     const std::vector<Vec3> original_vertices = vertices_;
     const std::vector<Face> original_faces = faces_;
     double reference_area = 0.0;
@@ -4790,6 +4998,12 @@ bool CMesh3D::TrimByPline(CPolyline* pLine, CPoint3d pc) {
         if (!AnalyzeFaceCut(face_2d, cut, info, EPS2D))
             continue;
         ClassifyFaceCut(face_2d, cut, info, EPS2D);
+
+        if (diagnosticDocument) {
+            add_trim_classification_diagnostic(
+                *diagnosticDocument, diagnosticLayerId,
+                face, vertices_, info.VariantCut);
+        }
 	//	char buffer[256];
 	//	sprintf(buffer, "Face %d: VariantCut=%d, edgeIndex1=%d, vertexToMove=%d", static_cast<int>(face_index), info.VariantCut, info.edgeIndex1, info.vertexToMove);
    //     Step(buffer);
@@ -4826,6 +5040,15 @@ bool CMesh3D::TrimByPline(CPolyline* pLine, CPoint3d pc) {
         FacesData.push_back(face_data);
     }
 
+	// Var-7 owns a pair of adjacent quads.  It must run before a local split of
+	// either member (notably Var-6); otherwise its neighbour has already become
+	// a triangle and the paired topology cannot be constructed.  This conflict
+	// was hidden in the old project because its Var-6 implementation was empty.
+	std::stable_sort(FacesData.begin(), FacesData.end(),
+		[](const TrimFaceData& first, const TrimFaceData& second) {
+			return (first.VariantCut == 7 ? 0 : 1)
+				< (second.VariantCut == 7 ? 0 : 1);
+		});
     for (int j = 0; j < FacesData.size(); j++) {
         TrimFaceData& faceData = FacesData[j];
     //    char buffer[256];
@@ -4857,6 +5080,7 @@ bool CMesh3D::TrimByPline(CPolyline* pLine, CPoint3d pc) {
             break;
         }
     }
+
     if (cut_is_closed(cut)) {
         bool changed = false;
         for (Face& face : faces_) {

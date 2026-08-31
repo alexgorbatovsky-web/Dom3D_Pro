@@ -111,7 +111,7 @@ public:
     void mod_coord_ma(CSystemCoord* sc);
     bool IsAllPointsZeroZ();
     bool GetPlaneSC(CSystemCoord* msc);
-
+    bool ChangeBegin(int i_min);
 private:
     static CPoint3d ToPoint3d(CurvePoint point);
     static CurvePoint ToCurvePoint(const CPoint3d& point);

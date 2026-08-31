@@ -586,6 +586,35 @@ void sync_surface_edge_polyline_counts(const std::vector<CSurfaceFace*>& surface
 	}
 }
 
+bool sync_four_sided_opposite_edge_counts(
+	const std::vector<CSurfaceFace*>& surfaces)
+{
+	bool changed = false;
+	for (CSurfaceFace* surface : surfaces) {
+		if (!surface || surface->GetPreparedPolylineCount() != 4)
+			continue;
+		for (int first = 0; first < 2; ++first) {
+			const int opposite = first + 2;
+			const int first_count =
+				surface->GetPreparedPolylinePointCount(first);
+			const int opposite_count =
+				surface->GetPreparedPolylinePointCount(opposite);
+			const int common_count = std::max(first_count, opposite_count);
+			if (common_count < 2)
+				continue;
+			if (first_count != common_count) {
+				changed = surface->SetPreparedPolylinePointCount(
+					first, common_count) || changed;
+			}
+			if (opposite_count != common_count) {
+				changed = surface->SetPreparedPolylinePointCount(
+					opposite, common_count) || changed;
+			}
+		}
+	}
+	return changed;
+}
+
 void sync_regular_surface_mesh_steps(const std::vector<CSurfaceFace*>& surfaces)
 {
 	bool has_regular_boundaries = false;
@@ -763,6 +792,25 @@ void sync_trim_lines_from_regular_mesh(const std::vector<CSurfaceFace*>& surface
 				}
 				receiver->SetPreparedPolylinePoints(best_receiver_edge, receiver_points);
 				if (receiver->IsInitMesh && receiver->pMesh3D) {
+					bool structured_four_sided_bspline = false;
+					try {
+						if (BRepAdaptor_Surface(
+								TopoDS::Face(receiver->m_Face)).GetType()
+							== GeomAbs_BSplineSurface) {
+							size_t edge_count = 0;
+							for (TopExp_Explorer edge(receiver->m_Face,
+								TopAbs_EDGE); edge.More(); edge.Next()) {
+								++edge_count;
+							}
+							structured_four_sided_bspline = edge_count == 4;
+						}
+					} catch (const Standard_Failure&) {
+					}
+					// Its tensor-product CNet already has the synchronized
+					// boundary count. Inserting a full quad strip for every
+					// small positional discrepancy destroys that structure.
+					if (structured_four_sided_bspline)
+						continue;
 					std::vector<Vec3> master_vertices;
 					master_vertices.reserve(receiver_points.size());
 					for (const CPoint3d& point : receiver_points) {
@@ -2262,6 +2310,13 @@ bool CSolid::BuildQuadroMesh(float Deflection)
 	for (int i = 0; i < m_Surfaces.size(); i++)
 		m_Surfaces[i]->PrepareEdges(Deflection, true);
 	sync_surface_edge_polyline_counts(m_Surfaces);
+	// A structured four-sided patch has one node dimension for each pair of
+	// opposite sides. If those sides request different counts, CNet necessarily
+	// uses the larger one but the neighbouring face still keeps the smaller
+	// count, creating T-junctions after welding. Resolve the constraint before
+	// any surface mesh is built, then propagate it through the shared edges.
+	if (sync_four_sided_opposite_edge_counts(m_Surfaces))
+		sync_surface_edge_polyline_counts(m_Surfaces);
 	for (CSurfaceFace* surface : m_Surfaces) {
 		if (surface)
 			surface->UpdateMeshTypeFromBoundary();
@@ -2308,6 +2363,34 @@ bool CSolid::BuildQuadroMesh(float Deflection)
 	sync_trim_lines_from_regular_mesh(m_Surfaces);
 
 	snap_surface_mesh_seams(m_Surfaces);
+
+	// Boundary synchronization can split cells after an individual face has
+	// already been classified. On nearly closed four-sided BSpline transitions
+	// those new wraparound cells may lie just outside the OCCT face (the small
+	// coloured tab visible in Ball-Filed). Perform one final 3D classification
+	// after all topology and seam edits are complete.
+	for (CSurfaceFace* surface : m_Surfaces) {
+		if (!surface || surface->m_TypeMesh == REGULAR_MESH)
+			continue;
+		try {
+			if (BRepAdaptor_Surface(TopoDS::Face(surface->m_Face)).GetType()
+				!= GeomAbs_BSplineSurface) {
+				continue;
+			}
+			size_t edge_count = 0;
+			for (TopExp_Explorer edge(surface->m_Face, TopAbs_EDGE);
+				edge.More(); edge.Next()) {
+				++edge_count;
+			}
+			if (edge_count == 4)
+				surface->RemoveOutsideMeshFaces3D();
+		} catch (const Standard_Failure&) {
+		}
+	}
+
+	// Average only already coincident vertices after the final classification;
+	// CreateWelded performs the topology-aware join across surface boundaries.
+	snap_surface_mesh_seams(m_Surfaces);
 	
 	return ok;
 }
@@ -2341,6 +2424,7 @@ void CSolid::Render3d(bool selected) const
 		: GetDisplayMode();
 	const MeshDisplayMode mesh_mode = CMesh3D::GetDisplayMode();
 	const bool shaded_mesh_mode = mesh_mode == MeshDisplayMode::SurfaceMaterial
+		|| mesh_mode == MeshDisplayMode::SurfaceMaterialWithMesh
 		|| mesh_mode == MeshDisplayMode::SurfaceGray
 		|| mesh_mode == MeshDisplayMode::SurfaceColored;
 	const bool shaded_solid_mode = mode == SolidDisplayMode::SurfacesAndEdges
@@ -2394,18 +2478,6 @@ void CSolid::Render3d(bool selected) const
 //	const Color solid_color = surface_material.diffuse;
 	const Color solid_color = GetColor();
 	const bool render_batch = EnsureRenderBatch();
-	const auto draw_open_edges = [this, render_batch]() {
-		if (!CMesh3D::IsOpenEdgeDisplayEnabled())
-			return;
-		if (render_batch && m_RenderBatch) {
-			m_RenderBatch->RenderOpenEdges();
-			return;
-		}
-		for (const CSurfaceFace* surface : m_Surfaces) {
-			if (surface && surface->pMesh3D)
-				surface->pMesh3D->RenderOpenEdges();
-		}
-	};
 	const bool imported_step =
 		GetGroupName().find("STEP") != std::string::npos
 		|| GetName().find("Imported STEP") != std::string::npos;
@@ -2537,7 +2609,6 @@ void CSolid::Render3d(bool selected) const
 				solid_color, selected_edges, true, surface_selected);
 		}
 		draw_surface_indices();
-		draw_open_edges();
 		return;
 	}
 
@@ -2554,7 +2625,6 @@ void CSolid::Render3d(bool selected) const
 			}
 		}
 		draw_surface_indices();
-		draw_open_edges();
 		return;
 	}
 
@@ -2625,22 +2695,21 @@ void CSolid::Render3d(bool selected) const
 	if (draw_mesh) {
 		if (render_batch) {
 			m_RenderBatch->RenderWire(
-				false, mode == SolidDisplayMode::SurfacesAndRaisedMesh, nullptr);
+				false, mode == SolidDisplayMode::SurfacesAndRaisedMesh, &solid_color);
 		} else {
 			for (CSurfaceFace* surface : m_Surfaces) {
 				if (!surface || !surface->pMesh3D)
 					continue;
-				// Let CMesh3D choose a contrasting wire color. Passing the solid
-				// object color can make the grid identical to the shaded fill.
+				// The solid object color is the user-controlled wire color. Face
+				// shading is supplied separately by the material/display mode.
 				surface->pMesh3D->RenderWire(
-					false, mode == SolidDisplayMode::SurfacesAndRaisedMesh, nullptr);
+					false, mode == SolidDisplayMode::SurfacesAndRaisedMesh, &solid_color);
 			}
 		}
 	}
 
 	if (!draw_edges && m_SelectedEdges.empty()) {
 		draw_surface_indices();
-		draw_open_edges();
 		return;
 	}
 
@@ -2663,7 +2732,6 @@ void CSolid::Render3d(bool selected) const
 		}
 	}
 	draw_surface_indices();
-	draw_open_edges();
 }
 
 void CSolid::Render2d(float center_x, float center_y, float scale) const

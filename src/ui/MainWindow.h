@@ -20,6 +20,8 @@
 #include <QStringList>
 #include <QByteArray>
 
+#include <TopoDS_Shape.hxx>
+
 #include <functional>
 #include <array>
 #include <string>
@@ -89,6 +91,8 @@ private:
     void ShowMaterialEditor(const Material* initial_material = nullptr, const QString& material_file_path = {});
     void ShowSurfaceTextureEditor();
     void ShowViewportPopupMenu(const QPoint& global_position);
+    void ShowCurveQuickPalette();
+    void BeginShapeEditNodes();
     void RequestObjectColor();
     void EditSelectedObjectColor();
     void ShowLineWeightDialog();
@@ -210,6 +214,10 @@ private:
     bool TryStartLivePolylineExtrudeFromSelection();
     bool TryStartLivePolylineRevolveFromSelection();
     void ClearActiveProperties();
+    void RemovePendingFaceBooleanTools(unsigned long body_id);
+    bool UpdateFacePrimitiveBooleanPreview();
+    void RestoreFacePrimitiveBooleanPreview();
+    void ForgetFacePrimitiveBooleanPreview();
     bool ApplyActiveCabinetProperties();
     void AcceptActiveProperties();
     void CancelActiveProperties();
@@ -335,6 +343,7 @@ private:
     QAction* fullscreen_scene_action_ = nullptr;
     QShortcut* exit_fullscreen_f11_shortcut_ = nullptr;
     QShortcut* exit_fullscreen_escape_shortcut_ = nullptr;
+    QDialog* curve_quick_palette_ = nullptr;
     QAction* cad_orbit_action_ = nullptr;
     QAction* architectural_orbit_action_ = nullptr;
     QAction* surfaces_edges_action_ = nullptr;
@@ -400,6 +409,10 @@ private:
     int solid_body_selected_operation_index_ = 0;
     bool solid_body_all_dimensions_ = false;
     bool active_parametric_edit_existing_ = false;
+    bool face_primitive_boolean_preview_active_ = false;
+    unsigned long face_primitive_boolean_preview_body_id_ = 0;
+    unsigned long face_primitive_boolean_preview_tool_id_ = 0;
+    TopoDS_Shape face_primitive_boolean_preview_body_shape_;
     bool active_cabinet_parameters_dirty_ = false;
     bool solid_body_edit_mode_ = false;
     bool solid_body_dimensions_modified_ = false;
@@ -477,6 +490,9 @@ private:
     std::vector<unsigned long> furniture_animation_selection_ids_;
     std::string furniture_animation_parameter_id_;
     std::string pending_trim_tool_id_;
+    unsigned long pending_trim_cutter_id_ = 0;
+    unsigned long pending_sketch_cut_profile_id_ = 0;
+    unsigned long pending_sweep_section_id_ = 0;
     std::string pending_architecture_opening_tool_id_;
     PendingGroupCommand pending_group_command_ = PendingGroupCommand::None;
     PendingPreciseTransform pending_precise_transform_ = PendingPreciseTransform::None;

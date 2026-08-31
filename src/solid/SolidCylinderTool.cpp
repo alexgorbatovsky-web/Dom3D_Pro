@@ -7,6 +7,7 @@
 #include <gp_Ax2.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Vec.hxx>
 #include <Standard_Real.hxx>
 
 #include <algorithm>
@@ -61,12 +62,13 @@ bool SolidCylinderTool::DoParamOperation(CAlfaDoc& document, size_t object_index
 }
 
 bool SolidCylinderTool::RebuildShape(CSolid& solid, const std::vector<ToolParameter>& parameters) const {
+	constexpr double kFaceBooleanOverlap = 0.01;
     const float diameter = static_cast<float>(std::max(GetParameter(parameters, "diameter", Diameter), 0.001));
     const float height = static_cast<float>(GetParameter(parameters, "height", Height));
     if (std::fabs(height) <= 0.001f) {
         return false;
     }
-    const gp_Pnt origin(GetParameter(parameters, "origin.x", 0.0),
+	gp_Pnt origin(GetParameter(parameters, "origin.x", 0.0),
                         GetParameter(parameters, "origin.y", 0.0),
                         GetParameter(parameters, "origin.z", 0.0));
     try {
@@ -76,6 +78,13 @@ bool SolidCylinderTool::RebuildShape(CSolid& solid, const std::vector<ToolParame
         const gp_Dir u_direction(GetParameter(parameters, "axis.u.x", 1.0),
                                  GetParameter(parameters, "axis.u.y", 0.0),
                                  GetParameter(parameters, "axis.u.z", 0.0));
+		if (GetParameter(parameters, "boolean.body_id", 0.0) > 0.0) {
+			gp_Dir extrusion_direction = normal;
+			if (height < 0.0f)
+				extrusion_direction.Reverse();
+			origin.Translate(gp_Vec(extrusion_direction)
+				* -kFaceBooleanOverlap);
+		}
         return CreateCylinder(solid, diameter, height, origin, normal, u_direction);
     } catch (...) {
         return false;

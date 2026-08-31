@@ -66,13 +66,14 @@ bool SolidBoxTool::DoParamOperation(CAlfaDoc& document, size_t object_index, con
 }
 
 bool SolidBoxTool::RebuildShape(CSolid& solid, const std::vector<ToolParameter>& parameters) const {
+	constexpr double kFaceBooleanOverlap = 0.01;
     const float width = static_cast<float>(std::max(GetParameter(parameters, "width", Width), 0.001));
     const float height = static_cast<float>(std::max(GetParameter(parameters, "height", Height), 0.001));
     const float depth = static_cast<float>(GetParameter(parameters, "depth", Depth));
     if (std::fabs(depth) <= 0.001f) {
         return false;
     }
-    const gp_Pnt origin(GetParameter(parameters, "origin.x", 0.0),
+	gp_Pnt origin(GetParameter(parameters, "origin.x", 0.0),
                         GetParameter(parameters, "origin.y", 0.0),
                         GetParameter(parameters, "origin.z", 0.0));
     gp_Dir normal(0.0, 0.0, 1.0);
@@ -93,6 +94,13 @@ bool SolidBoxTool::RebuildShape(CSolid& solid, const std::vector<ToolParameter>&
         u_direction = gp_Dir(1.0, 0.0, 0.0);
         v_direction = gp_Dir(0.0, 1.0, 0.0);
     }
+	if (GetParameter(parameters, "boolean.body_id", 0.0) > 0.0) {
+		gp_Dir extrusion_direction = normal;
+		if (depth < 0.0f)
+			extrusion_direction.Reverse();
+		origin.Translate(gp_Vec(extrusion_direction)
+			* -kFaceBooleanOverlap);
+	}
 
     return CreateBox(solid, width, height, depth, origin, normal, u_direction, v_direction);
 }

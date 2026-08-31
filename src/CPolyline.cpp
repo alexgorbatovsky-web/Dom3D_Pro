@@ -1143,3 +1143,24 @@ void CPolyline::mod_coord_ma(CSystemCoord* sc)
 {
     mod_coord_ma(&sc->p0, &sc->cx, &sc->cy, &sc->cz);
 }
+
+bool CPolyline::ChangeBegin(int i_min)
+{//i_min is the new starting point
+ //shifting the beginning of the closed line
+    if (i_min == 0 || i_min == np() - 1)
+        return true;
+
+	CPoint3d* ptns = new CPoint3d[np()+1];
+    if (ptns == 0)
+        return false;
+    for (int i = 0; i <= i_min; i++)
+        ptns[i] = *P(i);//keep your head
+    int i = 0;
+    for (int j = i_min; j < np(); i++, j++)
+        *P(i) = *P(j);//we move the tail
+    for (int j = 1; j < i_min; i++, j++)
+        *P(i) = ptns[j];//we move the head
+    delete[] ptns;
+
+    return true;
+}

@@ -591,6 +591,17 @@ if(MSVC)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(Line2DTests
+        tests/Line2DTests.cpp
+        src/Line2D.cpp
+        src/Line2D.h)
+    target_compile_features(Line2DTests PRIVATE cxx_std_17)
+    target_include_directories(Line2DTests PRIVATE src)
+    if(MSVC)
+        target_compile_options(Line2DTests PRIVATE /W4 /permissive-)
+    endif()
+    add_test(NAME Line2DTests COMMAND Line2DTests)
+
     add_executable(SurfacePatchBuilderTests
         tests/SurfacePatchBuilderTests.cpp
         src/SurfacePatchBuilder.cpp
@@ -679,6 +690,28 @@ if(BUILD_TESTING)
         )
     endif()
     add_test(NAME CatalogImportTests COMMAND CatalogImportTests)
+    add_test(NAME MeshVar7Regression
+        COMMAND CatalogImportTests --test-mesh-var7)
+    add_test(NAME TrimClassificationDiagnostics
+        COMMAND CatalogImportTests --test-trim-diagnostics)
+    add_test(NAME CreateSketchSurface
+        COMMAND CatalogImportTests --test-create-sketch-surface)
+    add_test(NAME CurveToPolylineByLength
+        COMMAND CatalogImportTests --test-curve-to-polyline-by-length)
+    add_test(NAME MeshWireColor
+        COMMAND CatalogImportTests --test-mesh-wire-color)
+    add_test(NAME LowPolyDensityCalibration
+        COMMAND CatalogImportTests --test-low-poly-density-calibration)
+    add_test(NAME SurfacePatchWelding
+        COMMAND CatalogImportTests --test-surface-patch-welding)
+    add_test(NAME SmallHoleSlxCollar
+        COMMAND CatalogImportTests --test-small-hole-slx-collar)
+    add_test(NAME FusionCylinderFrontGuard
+        COMMAND CatalogImportTests --fusion-cylinder-front-guard)
+    add_test(NAME CylinderSeamTrimDirection
+        COMMAND CatalogImportTests --test-cylinder-seam-trim)
+    add_test(NAME SpherePoleQuadro
+        COMMAND CatalogImportTests --test-sphere-pole-quadro)
     add_test(NAME MeshRegressionCorpus
         COMMAND powershell -NoProfile -ExecutionPolicy Bypass
             -File "${CMAKE_CURRENT_SOURCE_DIR}/tools/Test-MeshRegression.ps1"
@@ -686,9 +719,16 @@ if(BUILD_TESTING)
             -Configuration "$<CONFIG>"
     )
     string(REPLACE ";" "\\;" DOM3D_CTEST_HOST_PATH "$ENV{PATH}")
-    set_tests_properties(CatalogImportTests MeshRegressionCorpus PROPERTIES
+    set_tests_properties(CatalogImportTests MeshVar7Regression
+        TrimClassificationDiagnostics CreateSketchSurface
+        CurveToPolylineByLength MeshWireColor LowPolyDensityCalibration
+        SurfacePatchWelding SmallHoleSlxCollar FusionCylinderFrontGuard
+        CylinderSeamTrimDirection SpherePoleQuadro
+        MeshRegressionCorpus PROPERTIES
         ENVIRONMENT "PATH=${DOM3D_QT_MSVC2022_PATH}/bin\;${DOM3D_OPENCASCADE_BINARY_DIR}\;${DOM3D_CTEST_HOST_PATH}"
     )
+    set_tests_properties(FusionCylinderFrontGuard PROPERTIES TIMEOUT 10)
+    set_tests_properties(CylinderSeamTrimDirection PROPERTIES TIMEOUT 20)
 
     add_executable(ExchangeIOTests
         tests/ExchangeIOTests.cpp
@@ -705,7 +745,7 @@ if(BUILD_TESTING)
         "${DOM3D_OPENCASCADE_LIBRARY_DIR}"
     )
     target_link_libraries(ExchangeIOTests PRIVATE
-        Qt6::Widgets Qt6::OpenGLWidgets Qt6::Xml OpenGL::GL
+        Qt6::Widgets Qt6::OpenGLWidgets Qt6::Xml Qt6::PrintSupport OpenGL::GL
         raytrace
         ${DOM3D_OPENCASCADE_LIBS}
     )

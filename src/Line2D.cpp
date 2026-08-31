@@ -268,17 +268,18 @@ bool AnalyzeFaceCut(const Face2D& face, const std::vector<cVec2>& cut, CellCutIn
     return true;
 }
 
-static void FindPointOfFaceinCut(const Face2D& face, std::vector<int>& vrts, const std::vector<cVec2>& cut, std::vector<int>& points, double eps)
+static void FindPointOfFaceinCut(const Face2D& face, const std::vector<int>& vrts, const std::vector<cVec2>& cut, std::vector<int>& points, double eps)
 {
     bool IClosed = EqualPoint2(cut.front(), cut.back(), eps);
     int n = (int)cut.size();
     if (IClosed)
         n--;
-    for (size_t i = 0; i < n; ++i)
+    for (int i = 0; i < n; ++i)
     {
         for (size_t j = 0; j < vrts.size(); ++j)
         {
-            if (SamePoint2(cut[i], face.verts[vrts[j]], eps))
+            if (SamePoint2(cut[static_cast<size_t>(i)],
+                           face.verts[static_cast<size_t>(vrts[j])], eps))
             {
                 points.push_back(i);
                 break;
@@ -292,40 +293,49 @@ static int AnalizPointOfFaceinCut(const Face2D& face, const std::vector<cVec2>& 
     if (points.size() != 3)
         return 0;
     std::sort(points.begin(), points.end());
-    int inx1 = -1;
-    int np = 4;
-    if (face.verts.size() == 5)
-        np = 4;
-    for (size_t j = 0; j < np; ++j) {
-        if (SamePoint2(cut[points[0]], face.verts[j], eps))
-            inx1 = j;
+    int faceVertexCount = static_cast<int>(face.verts.size());
+    if (faceVertexCount > 3
+        && SamePoint2(face.verts.front(), face.verts.back(), eps)) {
+        --faceVertexCount;
     }
-    int inx2 = -1;
-    for (size_t j = 0; j < np; ++j) {
-        if (SamePoint2(cut[points[1]], face.verts[j], eps))
-            inx2 = j;
-    }
-    if (inx1 != -1 && inx2 != -1) {
-        if (fabs(inx1 - inx2) == 2) {
-            v1 = inx1;
-            v2 = inx2;
-            return 2;
+
+    // Var-2A is a quadrilateral case: of the three touched vertices, the
+    // segment joining opposite vertices is the segment that splits the face.
+    if (faceVertexCount != 4)
+        return 0;
+
+    int faceIndices[3] = {-1, -1, -1};
+    for (size_t pointIndex = 0; pointIndex < points.size(); ++pointIndex) {
+        for (int faceIndex = 0; faceIndex < faceVertexCount; ++faceIndex) {
+            if (SamePoint2(cut[static_cast<size_t>(points[pointIndex])],
+                           face.verts[static_cast<size_t>(faceIndex)], eps)) {
+                faceIndices[pointIndex] = faceIndex;
+                break;
+            }
         }
     }
 
+    const auto detectOppositePair = [&](int first, int second) {
+        if (faceIndices[first] < 0 || faceIndices[second] < 0)
+            return false;
+        if (std::abs(faceIndices[first] - faceIndices[second]) != 2)
+            return false;
+        v1 = faceIndices[first];
+        v2 = faceIndices[second];
+        return true;
+    };
 
-    int inx3 = -1;
-    for (size_t j = 0; j < np; ++j) {
-        if (SamePoint2(cut[points[2]], face.verts[j], eps))
-            inx3 = j;
-    }
-    if (inx2 != -1 && inx3 != -1) {
-        if (fabs(inx2 - inx3) == 2) {
-            v1 = inx2;
-            v2 = inx3;
-            return 2;
-        }
-    }
+    if (detectOppositePair(0, 1) || detectOppositePair(1, 2))
+        return 2;
+
+    // For a closed contour, the last unique node and the first node are also
+    // consecutive.  Omitting this pair made Var-2A depend on where the same
+    // contour happened to start.
+    const bool closed = cut.size() > 1
+        && SamePoint2(cut.front(), cut.back(), eps);
+    if (closed && detectOppositePair(2, 0))
+        return 2;
+
     return 0;
 }
 
@@ -347,11 +357,6 @@ static bool AreAdjacentFaceVertices(int v0, int v1, int vertexCount)
     const int next1 = (v1 + 1) % vertexCount;
 
     return next0 == v1 || next1 == v0;
-}
-
-static bool ContainsIndex(const std::vector<int>& indices, int index)
-{
-    return std::find(indices.begin(), indices.end(), index) != indices.end();
 }
 
 static bool DetectVariant8(
@@ -418,6 +423,26 @@ static bool DetectVariant8(
     return true;
 }
 
+static bool CutHitSegmentContainsFaceVertex(
+    const Face2D& face,
+    const std::vector<cVec2>& cut,
+    const CellCutHit& hit,
+    int faceVertex,
+    double eps)
+{
+    if (faceVertex < 0
+        || faceVertex >= static_cast<int>(face.verts.size())
+        || hit.segIndex < 0
+        || hit.segIndex + 1 >= static_cast<int>(cut.size())) {
+        return false;
+    }
+
+    return PointOnSegment2(
+        face.verts[static_cast<size_t>(faceVertex)],
+        cut[static_cast<size_t>(hit.segIndex)],
+        cut[static_cast<size_t>(hit.segIndex + 1)], eps);
+}
+
 
 void ClassifyFaceCut(const Face2D& face, const std::vector<cVec2>& cut, CellCutInfo& info, double eps)
 {
@@ -473,15 +498,22 @@ void ClassifyFaceCut(const Face2D& face, const std::vector<cVec2>& cut, CellCutI
     info.NumCutVertex = NumCutVertex;
 
     if (info.touchedFaceVertices.size() == 2 && info.NumCutEdge == 1 && info.interiorNodeCount == 0) {
-        for (int i = 0; i < info.hits.size(); ++i) {
-            DetectVariant8(face, info.hits[i], info.touchedFaceVertices[0], info, eps);
-            if (info.VariantCut == 8)
-                return;
-        }
-       for (int i = 0; i < info.hits.size(); ++i) {
-            DetectVariant8(face, info.hits[i], info.touchedFaceVertices[1], info, eps);
-            if (info.VariantCut == 8)
-                return;
+        for (const CellCutHit& hit : info.hits) {
+            for (int touchedVertex : info.touchedFaceVertices) {
+                // Var-8 moves the endpoint of the crossed face edge which is
+                // adjacent to the vertex reached by that same cut segment.
+                // Choosing either touched vertex merely by vector order can
+                // move the opposite shared mesh vertex and create a fan of
+                // distorted cells at a trim corner.
+                if (!CutHitSegmentContainsFaceVertex(
+                        face, cut, hit, touchedVertex, eps)) {
+                    continue;
+                }
+                if (DetectVariant8(
+                        face, hit, touchedVertex, info, eps)) {
+                    return;
+                }
+            }
         }
     }
 
@@ -499,9 +531,7 @@ void ClassifyFaceCut(const Face2D& face, const std::vector<cVec2>& cut, CellCutI
         if (v == 2) {
             info.VariantCut = 2;
             info.cutCase = FACECUT_SPLIT_2;
-            info.touchedFaceVertices.erase(info.touchedFaceVertices.begin());
-            info.touchedFaceVertices[0] = v1;
-            info.touchedFaceVertices[1] = v2;
+            info.touchedFaceVertices = {v1, v2};
             return;
         }
         else {

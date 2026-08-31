@@ -7567,12 +7567,54 @@ ActiveParametricObject ToolRegistry::ApplySketchFeatureToSelection(
         }
     } else if (selected_body_index < objects.size()) {
         auto* selected_body = dynamic_cast<CSolid*>(objects[selected_body_index].get());
-        if (!selected_body || !selected_body->HasSelectedFace()) {
+        if (!selected_body) {
             return {};
         }
         document.EnsureObjectId(*selected_body);
-        face_index = selected_body->GetSelectedFaceIndex();
-        sketch->SetFaceAttachment(selected_body->m_id, face_index);
+        if (selected_body->HasSelectedFace()) {
+            face_index = selected_body->GetSelectedFaceIndex();
+        } else {
+            const SketchCoordinateSystem& system = sketch->GetCoordinateSystem();
+            const Vec3 sketch_origin = point_to_vec3(system.origin);
+            const Vec3 sketch_normal = normalize(point_to_vec3(system.normal));
+            double best_plane_distance = std::numeric_limits<double>::max();
+            for (int candidate = 0;
+                 candidate < selected_body->GetNumSurfaces(); ++candidate) {
+                const TopoDS_Face face = selected_body->GetTopoFace(candidate);
+                if (face.IsNull()) {
+                    continue;
+                }
+                try {
+                    if (BRepAdaptor_Surface(face, true).GetType()
+                        != GeomAbs_Plane) {
+                        continue;
+                    }
+                } catch (const Standard_Failure&) {
+                    continue;
+                }
+                Vec3 face_center{};
+                Vec3 face_normal{};
+                if (!selected_body->GetFaceCenterAndNormal(
+                        candidate, face_center, face_normal)) {
+                    continue;
+                }
+                face_normal = normalize(face_normal);
+                if (std::fabs(dot(face_normal, sketch_normal)) < 0.999f) {
+                    continue;
+                }
+                const double plane_distance = std::fabs(
+                    static_cast<double>(dot(
+                        face_center - sketch_origin, face_normal)));
+                if (plane_distance <= 1.0e-3
+                    && plane_distance < best_plane_distance) {
+                    best_plane_distance = plane_distance;
+                    face_index = candidate;
+                }
+            }
+        }
+        if (face_index >= 0) {
+            sketch->SetFaceAttachment(selected_body->m_id, face_index);
+        }
     }
 
     auto* body = body_index < objects.size()
@@ -8204,19 +8246,24 @@ ActiveParametricObject ToolRegistry::ActiveObjectFromDocument(
                 }
                 const CSolid* boolean_tool =
                     solid->GetBooleanTool(static_cast<size_t>(boolean_tool_index));
-                const ParametricFunction* box_operation =
+                const ParametricFunction* primitive_operation =
                     boolean_tool ? boolean_tool->GetOperation(0) : nullptr;
-                if (box_operation && box_operation->ToolId == "SolidBox") {
-                    const ToolDefinition* box_definition = Find("SolidBox");
-                    if (!box_definition) {
+                if (primitive_operation
+                    && (primitive_operation->ToolId == "SolidBox"
+                        || primitive_operation->ToolId == "SolidCylinder")) {
+                    const std::string primitive_tool_id =
+                        primitive_operation->ToolId;
+                    const ToolDefinition* primitive_definition =
+                        Find(primitive_tool_id);
+                    if (!primitive_definition) {
                         return {};
                     }
                     std::vector<ToolParameter> parameters =
                         merge_saved_parameters(
-                            box_definition->defaults,
-                            box_operation->Parameters);
+                            primitive_definition->defaults,
+                            primitive_operation->Parameters);
                     for (const ParametricParameterValue& saved :
-                         box_operation->Parameters) {
+                         primitive_operation->Parameters) {
                         if (saved.id == "boolean.body_id") {
                             parameters.push_back({
                                 saved.id,
@@ -8235,7 +8282,7 @@ ActiveParametricObject ToolRegistry::ActiveObjectFromDocument(
                         1000000.0,
                         1.0});
                     return {
-                        "SolidBox",
+                        primitive_tool_id,
                         object_index,
                         operation_index,
                         std::move(parameters)};

@@ -373,7 +373,13 @@ double CPoint3d::DistTo(CPoint3d* p2)
 	double az = p2->z - z;
 	return sqrt(pow(ax, 2) + pow(ay, 2) + pow(az, 2));
 }
-
+double CPoint3d::DistTo(Vec3* p2)
+{
+	double ax = p2->x - x;
+	double ay = p2->y - y;
+	double az = p2->z - z;
+	return sqrt(pow(ax, 2) + pow(ay, 2) + pow(az, 2));
+}
 double CPoint3d::GetDistLineSegment(CPoint3d* p1, CPoint3d* p2)
 {
 	if (p1->DistTo(p2) < 0.001)

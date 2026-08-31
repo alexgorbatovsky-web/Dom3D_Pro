@@ -90,6 +90,10 @@ public:
                            unsigned long body_id,
                            int face_index);
     bool BeginEditSelectedSketch();
+    // Enters the same node-editing workflow for every editable curve type.
+    // SmartLine sketches expose their richer Bezier/arc handles while spatial
+    // polylines and splines use the common point editor.
+    bool BeginEditSelectedCurve();
     void EndDirectCurveEdit();
     void SetSketchRectangleTool();
     void SetSketchPolylineTool();
@@ -173,6 +177,7 @@ signals:
     void SolidDimensionGripChanged(int operation_index, QString parameter_id, double value, bool finished);
     void EdgeQuickMenuRequested(QPoint global_position);
     void FaceQuickMenuRequested(QPoint global_position);
+    void SketchQuickMenuRequested(QPoint global_position);
     void ObjectQuickMenuRequested(QPoint global_position);
     void ViewportPopupMenuRequested(QPoint global_position);
     void ObjectDoubleClicked();

@@ -1,6 +1,6 @@
 # Generated project map
 
-Generated from project files: 2026-08-27.  
+Generated from project files: 2026-08-30.  
 Generator: [`tools/Generate-CodeWiki.ps1`](../../../tools/Generate-CodeWiki.ps1)
 
 > This page is generated. Manual edits are replaced by the next `CodeWiki` run.
@@ -9,8 +9,8 @@ Generator: [`tools/Generate-CodeWiki.ps1`](../../../tools/Generate-CodeWiki.ps1)
 
 - C/C++ source files: **372**
 - Class and struct definitions found: **435**
-- CMake targets: **24**
-- `*Tests.cpp` files: **19**
+- CMake targets: **25**
+- `*Tests.cpp` files: **20**
 
 ## Subsystems
 
@@ -43,6 +43,7 @@ Generator: [`tools/Generate-CodeWiki.ps1`](../../../tools/Generate-CodeWiki.ps1)
 | `FourSplineSurfaceBuilderTests` | `executable` |
 | `FourSplineSurfaceComparison` | `executable` |
 | `IgesShapeCollectorTests` | `executable` |
+| `Line2DTests` | `executable` |
 | `MeshContainerAdapterTests` | `executable` |
 | `OffsetFaceShapeBuilderTests` | `executable` |
 | `PbrMaterialLibraryTests` | `executable` |
@@ -65,6 +66,7 @@ Generator: [`tools/Generate-CodeWiki.ps1`](../../../tools/Generate-CodeWiki.ps1)
 - [FacadeFrameShapeBuilderTests](../../../tests/FacadeFrameShapeBuilderTests.cpp)
 - [FourSplineSurfaceBuilderTests](../../../tests/FourSplineSurfaceBuilderTests.cpp)
 - [IgesShapeCollectorTests](../../../tests/IgesShapeCollectorTests.cpp)
+- [Line2DTests](../../../tests/Line2DTests.cpp)
 - [MeshContainerAdapterTests](../../../tests/MeshContainerAdapterTests.cpp)
 - [OffsetFaceShapeBuilderTests](../../../tests/OffsetFaceShapeBuilderTests.cpp)
 - [PbrMaterialLibraryTests](../../../tests/PbrMaterialLibraryTests.cpp)

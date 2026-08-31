@@ -156,8 +156,12 @@ public:
     static void SetSurfaceOpacity(float opacity);
     static MeshDisplayMode GetDisplayMode();
     static void SetDisplayMode(MeshDisplayMode mode);
+    static Color ResolveWireColor(
+        Color base, MeshDisplayMode mode, bool selected);
     static bool IsOpenEdgeDisplayEnabled();
     static void SetOpenEdgeDisplayEnabled(bool enabled);
+    static bool IsTrimClassificationDiagnosticsEnabled();
+    static void SetTrimClassificationDiagnosticsEnabled(bool enabled);
     static bool IsZebraAnalysisEnabled();
     static bool IsZebraAnalysisTarget();
     static void SetZebraAnalysisEnabled(bool enabled);
@@ -231,6 +235,7 @@ private:
     static float s_SurfaceOpacity;
     static MeshDisplayMode s_DisplayMode;
     static bool s_OpenEdgeDisplayEnabled;
+    static bool s_TrimClassificationDiagnosticsEnabled;
     static bool s_ZebraAnalysisEnabled;
     static bool s_ZebraAnalysisTarget;
     static bool s_ZebraOrthographic;

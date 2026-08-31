@@ -9,6 +9,7 @@
 #include "ContourQuadrangulator3DCoat.h"
 #include "FillContour.h"
 #include "SurfacePatchBuilder.h"
+#include "SurfaceUVMapping.h"
 #include "CPart.h"
 #include "CPolyline.h"
 #include "Conic.h"
@@ -29,6 +30,7 @@
 #include "ui/ToolRegistry.h"
 #include "solid/Solid.h"
 #include "solid/SheetBendShapeBuilder.h"
+#include "solid/SurfaceSet.h"
 #include "StepIO.h"
 
 #include <BRepAlgoAPI_Cut.hxx>
@@ -82,6 +84,104 @@ void require(bool condition, const char* message) {
     }
 }
 
+size_t ActiveFaceEdgeComponentCount(const CMesh3D& mesh) {
+    const std::vector<CMesh3D::Face>& faces = mesh.GetFaces();
+    std::vector<std::vector<size_t>> neighbours(faces.size());
+    std::map<std::pair<size_t, size_t>, std::vector<size_t>> edge_faces;
+    size_t active_face_count = 0;
+    for (size_t face_index = 0; face_index < faces.size(); ++face_index) {
+        const CMesh3D::Face& face = faces[face_index];
+        if (face.deleted || face.corners.size() < 3)
+            continue;
+        ++active_face_count;
+        for (size_t corner = 0; corner < face.corners.size(); ++corner) {
+            const size_t first = face.corners[corner].v;
+            const size_t second = face.corners[
+                (corner + 1) % face.corners.size()].v;
+            if (first != second)
+                edge_faces[std::minmax(first, second)].push_back(face_index);
+        }
+    }
+    for (const auto& entry : edge_faces) {
+        const std::vector<size_t>& owners = entry.second;
+        for (size_t first = 0; first < owners.size(); ++first) {
+            for (size_t second = first + 1; second < owners.size(); ++second) {
+                neighbours[owners[first]].push_back(owners[second]);
+                neighbours[owners[second]].push_back(owners[first]);
+            }
+        }
+    }
+    size_t component_count = 0;
+    std::vector<bool> visited(faces.size(), false);
+    for (size_t start = 0; start < faces.size(); ++start) {
+        if (visited[start] || faces[start].deleted
+            || faces[start].corners.size() < 3) {
+            continue;
+        }
+        ++component_count;
+        std::vector<size_t> pending{start};
+        visited[start] = true;
+        while (!pending.empty()) {
+            const size_t current = pending.back();
+            pending.pop_back();
+            for (size_t neighbour : neighbours[current]) {
+                if (!visited[neighbour]) {
+                    visited[neighbour] = true;
+                    pending.push_back(neighbour);
+                }
+            }
+        }
+    }
+    return active_face_count == 0 ? 0 : component_count;
+}
+
+size_t ClosedMeshBoundaryLoopCount(const CMesh3D& mesh, bool& manifold) {
+    manifold = true;
+    std::map<std::pair<size_t, size_t>, size_t> edge_use;
+    for (const CMesh3D::Face& face : mesh.GetFaces()) {
+        if (face.deleted || face.corners.size() < 3)
+            continue;
+        for (size_t corner = 0; corner < face.corners.size(); ++corner) {
+            const size_t first = face.corners[corner].v;
+            const size_t second = face.corners[
+                (corner + 1) % face.corners.size()].v;
+            if (first != second)
+                ++edge_use[std::minmax(first, second)];
+        }
+    }
+    std::map<size_t, std::vector<size_t>> boundary_neighbours;
+    for (const auto& entry : edge_use) {
+        if (entry.second > 2)
+            manifold = false;
+        if (entry.second == 1) {
+            boundary_neighbours[entry.first.first].push_back(entry.first.second);
+            boundary_neighbours[entry.first.second].push_back(entry.first.first);
+        }
+    }
+    for (const auto& entry : boundary_neighbours) {
+        if (entry.second.size() != 2)
+            manifold = false;
+    }
+    size_t loops = 0;
+    std::set<size_t> visited;
+    for (const auto& entry : boundary_neighbours) {
+        if (visited.count(entry.first) != 0)
+            continue;
+        ++loops;
+        std::vector<size_t> pending{entry.first};
+        visited.insert(entry.first);
+        while (!pending.empty()) {
+            const size_t current = pending.back();
+            pending.pop_back();
+            for (size_t neighbour : boundary_neighbours[current]) {
+                if (visited.insert(neighbour).second)
+                    pending.push_back(neighbour);
+            }
+        }
+    }
+    return loops;
+}
+
 void TestDenseNotchBoundaryQuadrangulation() {
     std::vector<Vec3> contour{
         {239.1999f, 22.1790f, 0.0f}, {240.2272f, 28.6650f, 0.0f},
@@ -132,6 +232,276 @@ void TestDenseNotchBoundaryQuadrangulation() {
             "Dense notch topology differs from the 3DCoat reference mesh.");
     require(std::fabs(covered_area - 58648.4852) < 0.1,
             "Dense notch area differs from the 3DCoat reference mesh.");
+}
+
+void TestFusionCylinderFrontGuard() {
+    // UV boundary captured from Extrude-Fusion at Density 0.40. The reference
+    // advancing front used to grow from these 10 nodes to thousands of points
+    // and never closed. A rejected candidate must return promptly and the
+    // deterministic triangle pairing must recover the four strip quads.
+    const std::vector<Vec3> contour{
+        {0.000000594f, 0.000002228f, 0.0f},
+        {-0.000000666f, 3.749998842f, 0.0f},
+        {0.000000100f, 7.500000191f, 0.0f},
+        {-0.000000386f, 11.249999771f, 0.0f},
+        {0.000000380f, 15.000001120f, 0.0f},
+        {-0.868399696f, 13.902750723f, 0.0f},
+        {-1.570796450f, 11.899998957f, 0.0f},
+        {-1.570796450f, 7.500002292f, 0.0f},
+        {-1.570796450f, 3.100002661f, 0.0f},
+        {-0.868399231f, 1.097250952f, 0.0f}};
+    CSurfaceFace fill_surface;
+    CMesh3D result;
+    CMesh3D triangles;
+    std::string error;
+    std::string rejection;
+    require(fill_surface.MakeFilledContour(contour, {0.0f, 0.0f, 1.0f},
+                &result, false, &error, &triangles, &rejection),
+            error.c_str());
+    size_t quads = 0;
+    size_t other_faces = 0;
+    for (const CMesh3D::Face& face : result.GetFaces()) {
+        if (face.deleted)
+            continue;
+        if (face.corners.size() == 4)
+            ++quads;
+        else
+            ++other_faces;
+    }
+    require(!rejection.empty() && quads == 4 && other_faces == 0,
+            "Fusion cylinder fallback did not recover four local quads.");
+
+    const std::vector<Vec3> double_fillet_contour{
+        {0.0f, 0.000000514f, 0.0f},
+        {0.785398146f, 0.000000514f, 0.0f},
+        {1.570796421f, 0.000000514f, 0.0f},
+        {1.570796421f, 7.642077006f, 0.0f},
+        {1.570796421f, 15.284153499f, 0.0f},
+        {1.570796421f, 22.926229991f, 0.0f},
+        {1.570796421f, 30.568307437f, 0.0f},
+        {0.785432706f, 30.709334888f, 0.0f},
+        {0.0f, 30.767757930f, 0.0f},
+        {0.0f, 23.075818576f, 0.0f},
+        {0.0f, 15.383879222f, 0.0f},
+        {0.0f, 7.691938914f, 0.0f}};
+    result.Clear();
+    triangles.Clear();
+    error.clear();
+    rejection.clear();
+    require(fill_surface.MakeFilledContour(double_fillet_contour,
+                {0.0f, 0.0f, 1.0f}, &result, false, &error,
+                &triangles, &rejection), error.c_str());
+    quads = 0;
+    size_t result_triangles = 0;
+    for (const CMesh3D::Face& face : result.GetFaces()) {
+        if (face.deleted)
+            continue;
+        quads += face.corners.size() == 4;
+        result_triangles += face.corners.size() == 3;
+        for (const MeshCorner& corner : face.corners) {
+            require(corner.v < result.GetVertices().size(),
+                    "Double-fillet fallback contains an invalid vertex.");
+            const Vec3 point = result.GetVertices()[corner.v];
+            require(point.x >= -1.0e-5f && point.x <= 1.57081f
+                        && point.y >= -1.0e-5f && point.y <= 30.76777f,
+                    "Double-fillet quadrangulation escaped its UV contour.");
+        }
+    }
+    require(!rejection.empty() && quads == 4 && result_triangles == 2,
+            "Double-fillet fallback did not recover its bounded local mesh.");
+    std::vector<std::unique_ptr<CPolyline>> saved_boundaries;
+    require(fill_surface.CreateLastQuadrangulationBoundaryPolylines(
+                saved_boundaries)
+                && saved_boundaries.size() == 2
+                && saved_boundaries.back()->IsClosed()
+                && saved_boundaries.back()->GetPointCount()
+                    == double_fillet_contour.size(),
+            "Rejected quadrangulator input was not retained as an XY boundary line.");
+
+    // The same UV contour belongs to a radius-12 cylindrical fillet. Its U
+    // coordinate is angular, so the quadrangulator must see the exact metric
+    // development X=12*U rather than the misleading 1.57 x 30.7 UV strip.
+    CSurfaceFace metric_cylinder_surface;
+    const TopoDS_Shape cylinder =
+        BRepPrimAPI_MakeCylinder(12.0, 31.0).Shape();
+    for (TopExp_Explorer face(cylinder, TopAbs_FACE); face.More(); face.Next()) {
+        const TopoDS_Face candidate = TopoDS::Face(face.Current());
+        if (BRepAdaptor_Surface(candidate).GetType() == GeomAbs_Cylinder) {
+            metric_cylinder_surface.m_Face = candidate;
+            break;
+        }
+    }
+    require(!metric_cylinder_surface.m_Face.IsNull(),
+            "Could not construct the metric cylinder regression face.");
+    result.Clear();
+    triangles.Clear();
+    error.clear();
+    rejection.clear();
+    require(metric_cylinder_surface.MakeFilledContour(double_fillet_contour,
+                {0.0f, 0.0f, 1.0f}, &result, false, &error,
+                &triangles, &rejection), error.c_str());
+    quads = 0;
+    result_triangles = 0;
+    for (const CMesh3D::Face& face : result.GetFaces()) {
+        if (face.deleted)
+            continue;
+        quads += face.corners.size() == 4;
+        result_triangles += face.corners.size() == 3;
+    }
+    require(rejection.empty() && quads == 8 && result_triangles == 0,
+            "Metric cylinder development did not produce eight bounded quads.");
+}
+
+void TestSpherePoleQuadroProjection() {
+    CSurfaceFace sphere_surface;
+    const TopoDS_Shape sphere = BRepPrimAPI_MakeSphere(10.0).Shape();
+    for (TopExp_Explorer face(sphere, TopAbs_FACE); face.More(); face.Next()) {
+        const TopoDS_Face candidate = TopoDS::Face(face.Current());
+        if (BRepAdaptor_Surface(candidate).GetType() == GeomAbs_Sphere) {
+            sphere_surface.m_Face = candidate;
+            break;
+        }
+    }
+    require(!sphere_surface.m_Face.IsNull(),
+            "Could not construct the sphere-pole regression face.");
+
+    // UV boundary captured from the pole-bearing spherical face in Ball-Filed.
+    // In the native angular plane it crosses U=0 and has a misleading long
+    // closing chord. In the sphere's polar metric it is one ordinary loop.
+    const std::vector<Vec3> contour{
+        {1.534514f, 1.252845f, 0.0f}, {1.184406f, 1.226769f, 0.0f},
+        {0.913796f, 1.165219f, 0.0f}, {0.726968f, 1.081420f, 0.0f},
+        {0.600404f, 0.984870f, 0.0f}, {0.513108f, 0.880935f, 0.0f},
+        {0.451423f, 0.772534f, 0.0f}, {0.407014f, 0.661308f, 0.0f},
+        {0.374774f, 0.548231f, 0.0f}, {0.351520f, 0.433913f, 0.0f},
+        {0.335233f, 0.318766f, 0.0f}, {0.324643f, 0.203078f, 0.0f},
+        {0.318986f, 0.087075f, 0.0f}, {0.159665f, 0.087067f, 0.0f},
+        {0.000000f, 0.087066f, 0.0f}, {6.169028f, 0.087066f, 0.0f},
+        {6.056111f, 0.087067f, 0.0f}, {5.943671f, 0.087067f, 0.0f},
+        {5.831147f, 0.087067f, 0.0f}, {5.718157f, 0.087067f, 0.0f},
+        {5.604464f, 0.087067f, 0.0f}, {5.489953f, 0.087067f, 0.0f},
+        {5.374596f, 0.087067f, 0.0f}, {5.258427f, 0.087067f, 0.0f},
+        {5.141520f, 0.087067f, 0.0f}, {5.023967f, 0.087067f, 0.0f},
+        {4.905871f, 0.087067f, 0.0f}, {4.787337f, 0.087066f, 0.0f},
+        {4.668469f, 0.087066f, 0.0f}, {4.549376f, 0.087067f, 0.0f},
+        {4.430180f, 0.087067f, 0.0f}, {4.311020f, 0.087067f, 0.0f},
+        {4.192060f, 0.087067f, 0.0f}, {4.073488f, 0.087067f, 0.0f},
+        {3.955509f, 0.087068f, 0.0f}, {3.838339f, 0.087068f, 0.0f},
+        {3.722178f, 0.087069f, 0.0f}, {3.607193f, 0.087069f, 0.0f},
+        {3.493475f, 0.087069f, 0.0f}, {3.381004f, 0.087068f, 0.0f},
+        {3.269600f, 0.087067f, 0.0f}, {3.158868f, 0.087066f, 0.0f},
+        {3.048152f, 0.087067f, 0.0f}, {2.936491f, 0.087070f, 0.0f},
+        {2.822605f, 0.087075f, 0.0f}, {2.816819f, 0.204964f, 0.0f},
+        {2.805925f, 0.322523f, 0.0f}, {2.789112f, 0.439517f, 0.0f},
+        {2.765020f, 0.555635f, 0.0f}, {2.731474f, 0.670438f, 0.0f},
+        {2.685012f, 0.783263f, 0.0f}, {2.620032f, 0.893041f, 0.0f},
+        {2.527305f, 0.997942f, 0.0f}, {2.391624f, 1.094664f, 0.0f},
+        {2.189955f, 1.177073f, 0.0f}, {1.899250f, 1.234429f, 0.0f}};
+
+    CMesh3D mesh;
+    std::string error;
+    require(sphere_surface.MakeFilledContour(contour,
+                {0.0f, 0.0f, 1.0f}, &mesh, false, &error),
+            error.c_str());
+    require(mesh.RestoreTo3DFromUVSurface(&sphere_surface),
+            "Could not restore the sphere-pole quad mesh to 3D.");
+    size_t quads = 0;
+    size_t other_faces = 0;
+    double maximum_edge = 0.0;
+    const auto& vertices = mesh.GetVertices();
+    for (const CMesh3D::Face& face : mesh.GetFaces()) {
+        if (face.deleted || face.corners.size() < 3)
+            continue;
+        quads += face.corners.size() == 4;
+        other_faces += face.corners.size() != 4;
+        for (size_t corner = 0; corner < face.corners.size(); ++corner) {
+            const size_t first = face.corners[corner].v;
+            const size_t second = face.corners[(corner + 1) % face.corners.size()].v;
+            require(first < vertices.size() && second < vertices.size(),
+                    "Sphere-pole mesh contains an invalid vertex index.");
+            const Vec3 edge = vertices[second] - vertices[first];
+            maximum_edge = std::max(maximum_edge,
+                std::sqrt(static_cast<double>(dot(edge, edge))));
+        }
+    }
+    require(quads > 100 && other_faces == 0,
+            "Sphere-pole projection did not produce an all-quad mesh.");
+    require(ActiveFaceEdgeComponentCount(mesh) == 1,
+            "Sphere-pole projection split the mesh into islands.");
+    require(maximum_edge < 5.0,
+            "Sphere-pole projection retained an angular seam chord.");
+}
+
+void TestCylinderSeamTrimDirection() {
+    constexpr double radius = 5.0;
+    constexpr double height = 13.2;
+    constexpr double cut_x = 1.372295;
+    constexpr double cut_z_min = 2.053276;
+    constexpr double cut_z_max = 10.553276;
+    const TopoDS_Shape cylinder =
+        BRepPrimAPI_MakeCylinder(radius, height).Shape();
+    const TopoDS_Shape cutter = BRepPrimAPI_MakeBox(
+        gp_Pnt(cut_x, -6.0, cut_z_min),
+        gp_Pnt(6.0, 6.0, cut_z_max)).Shape();
+    TopoDS_Shape cut_shape =
+        BRepAlgoAPI_Cut(cylinder, cutter).Shape();
+
+    CSolid solid(cut_shape);
+    solid.MeshQuadro = true;
+    require(solid.InitSurfaces() && solid.InitEdges()
+                && solid.ReBuldMesh(1.0f / 0.50f),
+            "Could not build the cylinder seam-trim regression solid.");
+
+    bool verified_cylinder = false;
+    for (int surface_index = 0;
+         surface_index < solid.GetNumSurfaces(); ++surface_index) {
+        CSurfaceFace* surface = solid.GetSurfaceFace(surface_index);
+        if (!surface || !surface->pMesh3D
+            || BRepAdaptor_Surface(TopoDS::Face(surface->m_Face)).GetType()
+                != GeomAbs_Cylinder
+            || surface->GetPreparedPolylineCount() < 8) {
+            continue;
+        }
+        bool kept_back_side = false;
+        size_t quads = 0;
+        size_t other_faces = 0;
+        double maximum_edge = 0.0;
+        const auto& vertices = surface->pMesh3D->GetVertices();
+        for (const CMesh3D::Face& face : surface->pMesh3D->GetFaces()) {
+            if (face.deleted || face.corners.size() < 3)
+                continue;
+            quads += face.corners.size() == 4;
+            other_faces += face.corners.size() != 4;
+            Vec3 center{};
+            for (size_t corner = 0; corner < face.corners.size(); ++corner) {
+                const size_t first = face.corners[corner].v;
+                const size_t second = face.corners[
+                    (corner + 1) % face.corners.size()].v;
+                require(first < vertices.size() && second < vertices.size(),
+                        "Cylinder seam trim produced an invalid mesh index.");
+                center = center + vertices[first];
+                const Vec3 edge = vertices[second] - vertices[first];
+                maximum_edge = std::max(maximum_edge,
+                    std::sqrt(static_cast<double>(dot(edge, edge))));
+            }
+            center = center * (1.0f / static_cast<float>(face.corners.size()));
+            if (center.z > cut_z_min + 0.05
+                && center.z < cut_z_max - 0.05) {
+                require(center.x <= cut_x + 0.05,
+                        "Cylinder seam trim retained the OCCT OUT side.");
+                kept_back_side = kept_back_side || center.x < -3.0f;
+            }
+        }
+        require(quads > 0 && other_faces == 0 && kept_back_side,
+                "Cylinder seam trim did not retain the connected back side.");
+        require(ActiveFaceEdgeComponentCount(*surface->pMesh3D) == 1,
+                "Cylinder seam trim split the surface mesh into islands.");
+        require(maximum_edge < 3.0,
+                "Cylinder seam relocation left an undersampled long edge.");
+        verified_cylinder = true;
+    }
+    require(verified_cylinder,
+            "The seam-trim regression did not inspect its cylinder face.");
 }
 
 double PatchSignedArea(const std::vector<SurfacePatchPoint>& polygon) {
@@ -571,8 +941,8 @@ void TestLowPolyQuadroBranch(bool skip_seam_regression = false) {
     require(small_cube_counts == large_cube_counts,
             "Density 0.2 depends on the absolute cube size.");
     require(std::all_of(small_cube_counts.begin(), small_cube_counts.end(),
-                        [](size_t count) { return count == 16; }),
-            "Density 0.2 did not create a 4 by 4 grid per cube face.");
+                        [](size_t count) { return count == 144; }),
+            "Density 0.2 did not create the calibrated 12 by 12 grid per cube face.");
 
     const TopoDS_Shape outer =
         BRepPrimAPI_MakeBox(40.0, 40.0, 10.0).Shape();
@@ -645,6 +1015,8 @@ void TestLowPolyQuadroBranch(bool skip_seam_regression = false) {
             found_trimmed_surface = true;
             require(surface->BuildFilledMeshWhithHoles(2.0f),
                     "The direct UV patch builder rejected a trimmed surface.");
+            require(ActiveFaceEdgeComponentCount(*surface->pMesh3D) == 1,
+                    "UV patches of one trimmed surface were not welded into one mesh.");
             require(std::fabs(surface->GetLastLowPolyDensity() - 0.5f)
                         < 1.0e-6f,
                     "Trimmed surface forgot its last Low Poly density.");
@@ -874,6 +1246,8 @@ void TestLowPolyQuadroBranch(bool skip_seam_regression = false) {
             continue;
         require(surface->BuildFilledMeshWhithHoles(2.0f),
                 "The UV patch builder rejected a face with two holes.");
+        require(ActiveFaceEdgeComponentCount(*surface->pMesh3D) == 1,
+                "Two-hole UV patches were not welded into one mesh.");
         require(surface->BuildFilledMeshWhithHoles(2.0f, true),
                 "Mesh Quadro Hole SLX rejected a face with two holes.");
         bool slx_has_active_face = false;
@@ -982,6 +1356,8 @@ void TestLowPolyQuadroBranch(bool skip_seam_regression = false) {
             const bool coarse_builder_ok =
                 surface->BuildFilledMeshWhithHoles(1.0f / density);
             require(coarse_builder_ok, coarse_builder_error.c_str());
+            require(ActiveFaceEdgeComponentCount(*surface->pMesh3D) == 1,
+                    "Coarse round-hole UV patches were not welded into one mesh.");
             const std::vector<UV>& uvs = surface->pMesh3D->GetUVs();
             double mesh_area = 0.0;
             for (const CMesh3D::Face& mesh_face : surface->pMesh3D->GetFaces()) {
@@ -2229,6 +2605,232 @@ void TestBossPocketRegression() {
             "Boss did not extrude outward from the oriented host face.");
 }
 
+void TestFaceBasedPrimitiveBooleanOverlap() {
+	ToolRegistry registry;
+	const auto verify = [&](const char* tool_id,
+		const char* extrusion_parameter, double extrusion) {
+		const ToolDefinition* definition = registry.Find(tool_id);
+		require(definition != nullptr,
+			"Face-overlap primitive tool is not registered.");
+		std::vector<ToolParameter> parameters = definition->defaults;
+		for (ToolParameter& parameter : parameters) {
+			if (parameter.id == extrusion_parameter)
+				parameter.value = extrusion;
+		}
+		parameters.push_back({
+			"boolean.body_id", "Boolean Body", 1.0, 0.0,
+			static_cast<double>(std::numeric_limits<unsigned long>::max()), 1.0});
+		CAlfaDoc document;
+		ActiveParametricObject object = registry.CreateParametricObject(
+			tool_id, document, parameters);
+		const CSolid* solid = object.object_index < document.GetObjects().size()
+			? dynamic_cast<const CSolid*>(
+				document.GetObjects()[object.object_index].get())
+			: nullptr;
+		require(solid != nullptr,
+			"Face-overlap primitive was not created.");
+		Vec3 minimum{};
+		Vec3 maximum{};
+		require(solid->GetBounds(minimum, maximum),
+			"Face-overlap primitive has no bounds.");
+		constexpr double delta = 0.01;
+		constexpr double tolerance = 2.0e-4;
+		const double expected_minimum = extrusion > 0.0
+			? -delta : extrusion + delta;
+		const double expected_maximum = extrusion > 0.0
+			? extrusion - delta : delta;
+		require(std::fabs(minimum.z - expected_minimum) <= tolerance
+				&& std::fabs(maximum.z - expected_maximum) <= tolerance,
+			"Face-based primitive does not overlap the base plane by Delta 0.01.");
+	};
+
+	verify("SolidBox", "depth", 5.0);
+	verify("SolidBox", "depth", -5.0);
+	verify("SolidCylinder", "height", 5.0);
+	verify("SolidCylinder", "height", -5.0);
+
+	// A Box created on a Solid face is committed into the host as a second
+	// editable parametric operation, rather than remaining a separate body.
+	CAlfaDoc document;
+	document.GetObjects().clear();
+	const ToolDefinition* box_definition = registry.Find("SolidBox");
+	require(box_definition != nullptr, "SolidBox tool is not registered.");
+	std::vector<ToolParameter> host_parameters = box_definition->defaults;
+	for (ToolParameter& parameter : host_parameters) {
+		if (parameter.id == "width" || parameter.id == "height")
+			parameter.value = 20.0;
+		else if (parameter.id == "depth")
+			parameter.value = 10.0;
+	}
+	const ActiveParametricObject host = registry.CreateParametricObject(
+		"SolidBox", document, host_parameters);
+	require(host.object_index < document.GetObjects().size(),
+		"Could not create the host Box.");
+	const unsigned long host_id =
+		document.GetObjects()[host.object_index]->m_id;
+
+	std::vector<ToolParameter> cutter_parameters = box_definition->defaults;
+	for (ToolParameter& parameter : cutter_parameters) {
+		if (parameter.id == "width" || parameter.id == "height")
+			parameter.value = 5.0;
+		else if (parameter.id == "depth")
+			parameter.value = -5.0;
+		else if (parameter.id == "origin.z")
+			parameter.value = 10.0;
+	}
+	cutter_parameters.push_back({
+		"boolean.body_id", "Boolean Body", static_cast<double>(host_id),
+		0.0, static_cast<double>(std::numeric_limits<unsigned long>::max()), 1.0});
+	const ActiveParametricObject cutter = registry.CreateParametricObject(
+		"SolidBox", document, cutter_parameters);
+	require(cutter.object_index < document.GetObjects().size()
+			&& document.ApplyBooleanToSolids(
+				host.object_index, cutter.object_index, BooleanOperation::Cut),
+		"Face-based Box was not committed as a Boolean Cut.");
+	require(document.GetObjects().size() == 1,
+		"Face-based Boolean left the cutter as a separate object.");
+	auto* result = dynamic_cast<CSolid*>(document.GetObjects().front().get());
+	require(result && result->GetNumOperations() == 2
+			&& result->GetOperation(1)
+			&& result->GetOperation(1)->ToolId == "boolean",
+		"Face-based Box did not add the second parametric operation.");
+
+	GProp_GProps deep_cut_properties;
+	BRepGProp::VolumeProperties(result->m_Shape, deep_cut_properties);
+	ActiveParametricObject editable = registry.ActiveObjectFromDocument(
+		0, *result, 1, &document);
+	require(editable.tool_id == "SolidBox",
+		"The second Box operation cannot be reopened for editing.");
+	for (ToolParameter& parameter : editable.parameters) {
+		if (parameter.id == "depth")
+			parameter.value = -2.0;
+	}
+	registry.Rebuild(editable, document);
+	result = dynamic_cast<CSolid*>(document.GetObjects().front().get());
+	GProp_GProps shallow_cut_properties;
+	if (result)
+		BRepGProp::VolumeProperties(result->m_Shape, shallow_cut_properties);
+	require(result && result->GetNumOperations() == 2
+			&& shallow_cut_properties.Mass() > deep_cut_properties.Mass() + 70.0,
+		"Editing the second Box operation did not rebuild the host body.");
+
+	// The same operation-history editing path must work for a face-based
+	// Cylinder.  It used to reopen only Box boolean tools.
+	CAlfaDoc cylinder_document;
+	cylinder_document.GetObjects().clear();
+	const ActiveParametricObject cylinder_host =
+		registry.CreateParametricObject(
+			"SolidBox", cylinder_document, host_parameters);
+	require(cylinder_host.object_index
+			< cylinder_document.GetObjects().size(),
+		"Could not create the Cylinder test host.");
+	const unsigned long cylinder_host_id =
+		cylinder_document.GetObjects()[cylinder_host.object_index]->m_id;
+	const ToolDefinition* cylinder_definition = registry.Find("SolidCylinder");
+	require(cylinder_definition != nullptr,
+		"SolidCylinder tool is not registered.");
+	std::vector<ToolParameter> cylinder_parameters =
+		cylinder_definition->defaults;
+	for (ToolParameter& parameter : cylinder_parameters) {
+		if (parameter.id == "diameter")
+			parameter.value = 6.0;
+		else if (parameter.id == "height")
+			parameter.value = -5.0;
+		else if (parameter.id == "origin.x"
+				|| parameter.id == "origin.y")
+			parameter.value = 10.0;
+		else if (parameter.id == "origin.z")
+			parameter.value = 10.0;
+	}
+	cylinder_parameters.push_back({
+		"boolean.body_id", "Boolean Body",
+		static_cast<double>(cylinder_host_id), 0.0,
+		static_cast<double>(std::numeric_limits<unsigned long>::max()), 1.0});
+	const ActiveParametricObject cylinder_cutter =
+		registry.CreateParametricObject(
+			"SolidCylinder", cylinder_document, cylinder_parameters);
+	require(cylinder_cutter.object_index
+				< cylinder_document.GetObjects().size()
+			&& cylinder_document.ApplyBooleanToSolids(
+				cylinder_host.object_index,
+				cylinder_cutter.object_index,
+				BooleanOperation::Cut),
+		"Face-based Cylinder was not committed as a Boolean Cut.");
+	auto* cylinder_result = dynamic_cast<CSolid*>(
+		cylinder_document.GetObjects().front().get());
+	require(cylinder_result && cylinder_result->GetNumOperations() == 2,
+		"Face-based Cylinder did not add the second parametric operation.");
+	GProp_GProps narrow_cylinder_properties;
+	BRepGProp::VolumeProperties(
+		cylinder_result->m_Shape, narrow_cylinder_properties);
+	ActiveParametricObject editable_cylinder =
+		registry.ActiveObjectFromDocument(
+			0, *cylinder_result, 1, &cylinder_document);
+	require(editable_cylinder.tool_id == "SolidCylinder",
+		"The second Cylinder operation cannot be reopened for editing.");
+	for (ToolParameter& parameter : editable_cylinder.parameters) {
+		if (parameter.id == "diameter")
+			parameter.value = 8.0;
+	}
+	registry.Rebuild(editable_cylinder, cylinder_document);
+	cylinder_result = dynamic_cast<CSolid*>(
+		cylinder_document.GetObjects().front().get());
+	GProp_GProps wide_cylinder_properties;
+	if (cylinder_result)
+		BRepGProp::VolumeProperties(
+			cylinder_result->m_Shape, wide_cylinder_properties);
+	require(cylinder_result && cylinder_result->GetNumOperations() == 2
+			&& wide_cylinder_properties.Mass()
+				< narrow_cylinder_properties.Mass() - 100.0,
+		"Editing the second Cylinder operation did not rebuild the host body.");
+
+	// A pocket crossing the outer edge turns the top into one concave planar
+	// face.  It must use its actual contour, not the rectangular UV bounds.
+	TopoDS_Shape notched_shape = BRepAlgoAPI_Cut(
+		BRepPrimAPI_MakeBox(100.0, 80.0, 30.0).Shape(),
+		BRepPrimAPI_MakeBox(
+			gp_Pnt(30.0, -1.0, 15.0), 25.0, 20.0, 15.01).Shape()).Shape();
+	CSolid notched(notched_shape);
+	notched.MeshQuadro = true;
+	require(notched.InitSurfaces() && notched.InitEdges()
+			&& notched.ReBuldMesh(2.0f),
+		"Could not build the edge-pocket Quadro regression solid.");
+	bool tested_top = false;
+	for (int surface_index = 0;
+		surface_index < notched.GetNumSurfaces(); ++surface_index) {
+		const CSurfaceFace* surface = notched.GetSurfaceFace(surface_index);
+		if (!surface || !surface->pMesh3D || !surface->IsPlanar())
+			continue;
+		Vec3 center{};
+		Vec3 normal{};
+		if (!surface->GetCenterAndNormal(center, normal)
+			|| normal.z < 0.9f || center.z < 29.9f)
+			continue;
+		tested_top = true;
+		double mesh_area = 0.0;
+		for (const CMesh3D::Face& face : surface->pMesh3D->GetFaces()) {
+			if (face.deleted || face.corners.size() < 3)
+				continue;
+			const Vec3 first = surface->pMesh3D->GetVertices()[
+				face.corners.front().v];
+			for (size_t corner = 1; corner + 1 < face.corners.size(); ++corner) {
+				const Vec3 second = surface->pMesh3D->GetVertices()[
+					face.corners[corner].v];
+				const Vec3 third = surface->pMesh3D->GetVertices()[
+					face.corners[corner + 1].v];
+				const Vec3 area_vector = cross(second - first, third - first);
+				mesh_area += 0.5 * std::sqrt(
+					static_cast<double>(dot(area_vector, area_vector)));
+			}
+		}
+		const double expected_area = 100.0 * 80.0 - 25.0 * 19.0;
+		require(std::fabs(mesh_area - expected_area) < 1.0,
+			"Quadro filled the concave top face across the boolean edge pocket.");
+	}
+	require(tested_top,
+		"The edge-pocket regression did not find the concave top face.");
+}
+
 void TestDraftingPersistence() {
     QTemporaryDir directory;
     require(directory.isValid(), "Could not create Drafting test directory.");
@@ -2251,6 +2853,353 @@ void TestDraftingPersistence() {
     require(loaded.GetDraftingData() == drafting,
             "Drafting sheets were not preserved by DOM3D serialization.");
 }
+
+void TestMeshVar7Regression() {
+    const auto require_case = [](int touchedVertex,
+                                 const std::array<std::array<size_t, 3>, 4>& expected) {
+        CMesh3D mesh;
+        require(mesh.SetGeometry(
+                    {{0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f},
+                     {1.0f, 1.0f, 0.0f}, {0.0f, 1.0f, 0.0f},
+                     {2.0f, 0.0f, 0.0f}, {2.0f, 1.0f, 0.0f}},
+                    {CMesh3D::Face{0, 1, 2, 3},
+                     CMesh3D::Face{1, 4, 5, 2}}),
+                "Could not prepare the Var-7 regression mesh.");
+
+        // This field deliberately does not describe the shared edge.  Var-7
+        // must derive the neighbour's local edge index from mesh topology.
+        mesh.GetFaces()[1].edgeIndex = 0;
+        require(mesh.SplitFaceByVar7(0, touchedVertex, 1),
+                "SplitFaceByVar7 rejected a valid pair of quads.");
+        require(mesh.GetFaces().size() == 4,
+                "SplitFaceByVar7 did not create two replacement triangles.");
+
+        for (size_t faceIndex = 0; faceIndex < expected.size(); ++faceIndex) {
+            const CMesh3D::Face& face = mesh.GetFaces()[faceIndex];
+            require(face.corners.size() == 3,
+                    "SplitFaceByVar7 left a non-triangular result face.");
+            for (size_t corner = 0; corner < 3; ++corner) {
+                require(face.corners[corner].v == expected[faceIndex][corner],
+                        "SplitFaceByVar7 produced the wrong Var-7 topology.");
+            }
+        }
+        require(mesh.GetFaces()[0].m_Trimmed && mesh.GetFaces()[1].m_Trimmed,
+                "SplitFaceByVar7 did not mark both source faces as processed.");
+    };
+
+    // Shared edge 1 of the first quad is edge 3 of the second quad.
+    require_case(3, {{{0, 1, 3}, {1, 4, 5}, {1, 5, 3}, {5, 2, 3}}});
+    require_case(0, {{{0, 2, 3}, {2, 4, 5}, {1, 4, 0}, {4, 2, 0}}});
+}
+
+void TestTrimClassificationDiagnostics() {
+    CAlfaDoc document;
+    const int originalWorkLayer = document.GetWorkLayerID();
+    const size_t originalObjectCount = document.GetObjects().size();
+    const CAlfaObject* originalSelection = document.GetSelectedObject();
+    CMesh3D::SetTrimClassificationDiagnosticsEnabled(true);
+
+    CMesh3D mesh;
+    require(mesh.SetGeometry(
+                {{0.0f, 0.0f, 0.0f}, {10.0f, 0.0f, 0.0f},
+                 {10.0f, 10.0f, 0.0f}, {0.0f, 10.0f, 0.0f}},
+                {CMesh3D::Face{0, 1, 2, 3}}),
+            "Could not prepare the trim diagnostics mesh.");
+    CPolyline trim;
+    trim.AddPoint({0.0, 0.0, 0.0});
+    trim.AddPoint({10.0, 0.0, 0.0});
+    trim.AddPoint({10.0, 10.0, 0.0});
+    trim.SetClosed(true);
+    require(mesh.TrimByPline(&trim, {0.0, 10.0, 0.0}),
+            "Trim diagnostics regression contour was not processed.");
+
+    require(document.GetObjects().size() == originalObjectCount + 2,
+            "Trim diagnostics did not create a mesh snapshot and face polyline.");
+    const auto* snapshot = dynamic_cast<const CMesh3D*>(
+        document.GetObjects()[originalObjectCount].get());
+    require(snapshot
+                && snapshot->GetName() == "Mesh3D - Before Trim"
+                && snapshot->GetVertices().size() == 4
+                && snapshot->GetFaces().size() == 1
+                && snapshot->GetFaces().front().corners.size() == 4,
+            "Trim diagnostics did not preserve the pre-trim mesh.");
+    const auto* diagnostic = dynamic_cast<const CPolyline*>(
+        document.GetObjects().back().get());
+    require(diagnostic && diagnostic->GetName() == "VariantCut = 2"
+                && diagnostic->IsClosed()
+                && diagnostic->GetPointCount() == 4,
+            "Trim diagnostics created an invalid Var-2 polyline.");
+    const CLayer* diagnosticLayer = document.GetLayerByID(
+        diagnostic->m_LayerID);
+    require(diagnosticLayer
+                && diagnosticLayer->Name == "Trim Classification Diagnostics",
+            "Trim diagnostics polyline is not on its dedicated layer.");
+    require(snapshot->m_LayerID == diagnostic->m_LayerID,
+            "Pre-trim mesh snapshot is not on the diagnostic layer.");
+    require(std::fabs(diagnostic->GetLineWidth() - 1.0) < 1.0e-8,
+            "Trim diagnostic polyline does not use line width 1.");
+    require(document.GetWorkLayerID() == originalWorkLayer,
+            "Trim diagnostics changed the document work layer.");
+    require(document.GetSelectedObject() == originalSelection,
+            "Trim diagnostics changed the document selection.");
+    const Color color = diagnostic->GetColor();
+    require(color.b > 0.99f && color.r < 0.01f && color.g < 0.01f,
+            "Var-2 diagnostic polyline is not blue.");
+
+    CMesh3D::SetTrimClassificationDiagnosticsEnabled(false);
+}
+
+void TestCreateSurfaceFromSketch() {
+    CAlfaDoc document;
+    const size_t initial_object_count = document.GetObjects().size();
+    auto sketch = std::make_unique<CSmartLine>("L-shaped sketch");
+    require(sketch->Add(new CLinkLine(
+                {0.0, 0.0, 0.0}, {10.0, 0.0, 0.0}))
+            && sketch->Add(new CLinkLine(
+                {10.0, 0.0, 0.0}, {10.0, 4.0, 0.0}))
+            && sketch->Add(new CLinkLine(
+                {10.0, 4.0, 0.0}, {4.0, 4.0, 0.0}))
+            && sketch->Add(new CLinkLine(
+                {4.0, 4.0, 0.0}, {4.0, 10.0, 0.0}))
+            && sketch->Add(new CLinkLine(
+                {4.0, 10.0, 0.0}, {0.0, 10.0, 0.0}))
+            && sketch->Add(new CLinkLine(
+                {0.0, 10.0, 0.0}, {0.0, 0.0, 0.0}))
+            && sketch->SetClosed(true),
+            "Could not prepare the trimmed surface sketch.");
+    document.AddObject(std::move(sketch));
+
+    std::string error;
+    require(document.CreateSurfaceFromSelectedSketch(&error),
+            error.empty() ? "Create Surface rejected a valid sketch."
+                          : error.c_str());
+    require(document.GetObjects().size() == initial_object_count + 2,
+            "Create Surface did not add exactly one document object.");
+    const auto* surface = dynamic_cast<const CSurfaceSet*>(
+        document.GetObjects().back().get());
+    require(surface && surface->GetName() == "L-shaped sketch Surface"
+                && surface->GetNumSurfaces() == 1,
+            "Create Surface did not create a named Surface Set.");
+
+    GProp_GProps properties;
+    BRepGProp::SurfaceProperties(surface->GetTopoFace(0), properties);
+    require(std::abs(properties.Mass() - 64.0) < 1.0e-6,
+            "Create Surface lost the sketch trimming boundary.");
+    require(document.GetSelectedObject() == surface,
+            "Create Surface did not select the new surface.");
+}
+
+void TestCurveToPolylineByLength() {
+    CAlfaDoc document;
+    const size_t initial_object_count = document.GetObjects().size();
+    auto curve = std::make_unique<CBSpline>("Length curve");
+    curve->AddPoint({0.0, 0.0, 0.0});
+    curve->AddPoint({100.0, 0.0, 0.0});
+    document.AddObject(std::move(curve));
+
+    std::string error;
+    require(document.CreatePolylineFromSelectedCurveByLength(30.0, &error),
+            error.empty() ? "Curve To Polyline rejected a valid curve."
+                          : error.c_str());
+    require(document.GetObjects().size() == initial_object_count + 2,
+            "Curve To Polyline did not add exactly one object.");
+    const auto* polyline = dynamic_cast<const CPolyline*>(
+        document.GetObjects().back().get());
+    require(polyline && polyline->GetName() == "Length curve Polyline"
+                && !polyline->IsClosed()
+                && polyline->GetPointCount() == 4,
+            "Curve To Polyline did not preserve the Old Dom Qty rule.");
+    for (size_t index = 0; index < polyline->GetPointCount(); ++index) {
+        const double expected = 100.0 * static_cast<double>(index) / 3.0;
+        require(std::abs(polyline->GetPoints()[index].x - expected) < 1.0e-5
+                    && std::abs(polyline->GetPoints()[index].y) < 1.0e-8
+                    && std::abs(polyline->GetPoints()[index].z) < 1.0e-8,
+                "Curve To Polyline knots are not equidistant by curve length.");
+    }
+}
+
+void TestMeshWireColor() {
+    const Color chosen{0.08f, 0.24f, 0.91f};
+    const auto require_chosen = [chosen](MeshDisplayMode mode, bool selected) {
+        const Color resolved = CMesh3D::ResolveWireColor(
+            chosen, mode, selected);
+        require(std::abs(resolved.r - chosen.r) < 1.0e-7f
+                    && std::abs(resolved.g - chosen.g) < 1.0e-7f
+                    && std::abs(resolved.b - chosen.b) < 1.0e-7f,
+                "Mesh wire rendering ignored the selected object color.");
+    };
+    require_chosen(MeshDisplayMode::SurfaceGray, false);
+    require_chosen(MeshDisplayMode::SurfaceGray, true);
+    require_chosen(MeshDisplayMode::SurfaceColored, false);
+    require_chosen(MeshDisplayMode::SurfaceColored, true);
+    require_chosen(MeshDisplayMode::SurfaceMaterialWithMesh, false);
+    require_chosen(MeshDisplayMode::SurfaceMaterialWithMesh, true);
+}
+
+void TestLowPolyDensityCalibration() {
+    constexpr double longestEdge = 218.098;
+    constexpr double bossEdge = 55.1373;
+    const std::array<std::pair<float, int>, 5> cases{{
+        {0.200f, 3},
+        // Do not let the boss edge stay at Qty Min after the background grid
+        // has already crossed to its denser 0.25 level.
+        {0.250f, 5},
+        {0.296f, 5},
+        {0.520f, 7},
+        {0.693f, 11},
+    }};
+
+    for (const auto& [density, expectedPointCount] : cases) {
+        TopoDS_Shape shape = BRepPrimAPI_MakeBox(
+            longestEdge, bossEdge, 10.0).Shape();
+        CSolid solid(shape);
+        solid.MeshQuadro = true;
+        require(solid.InitSurfaces() && solid.InitEdges()
+                    && solid.ReBuldMesh(1.0f / density),
+                "Could not build the Low Poly density calibration box.");
+
+        int matchingEdges = 0;
+        for (int surfaceIndex = 0;
+             surfaceIndex < solid.GetNumSurfaces(); ++surfaceIndex) {
+            const CSurfaceFace* surface = solid.GetSurfaceFace(surfaceIndex);
+            if (!surface)
+                continue;
+            for (int edgeIndex = 0;
+                 edgeIndex < surface->GetPreparedPolylineCount();
+                 ++edgeIndex) {
+                std::vector<CPoint3d> points;
+                if (!surface->GetPreparedPolylinePoints(edgeIndex, points)
+                    || points.size() < 2) {
+                    continue;
+                }
+                double length = 0.0;
+                for (size_t pointIndex = 1;
+                     pointIndex < points.size(); ++pointIndex) {
+                    length += points[pointIndex - 1].DistTo(
+                        &points[pointIndex]);
+                }
+                if (std::abs(length - bossEdge) > 1.0e-3)
+                    continue;
+                ++matchingEdges;
+                require(static_cast<int>(points.size()) == expectedPointCount,
+                        "Low Poly density does not match the calibrated 3DCoat progression.");
+            }
+        }
+        require(matchingEdges > 0,
+                "The Low Poly density calibration edge was not found.");
+    }
+}
+
+void TestSurfacePatchWelding() {
+    TopoDS_Shape shape = BRepPrimAPI_MakeBox(60.0, 36.0, 8.0).Shape();
+    shape = BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeBox(
+        gp_Pnt(10.0, 10.0, -1.0), 10.0, 10.0, 10.0).Shape()).Shape();
+    shape = BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeBox(
+        gp_Pnt(40.0, 10.0, -1.0), 10.0, 10.0, 10.0).Shape()).Shape();
+
+    CSolid solid(shape);
+    solid.MeshQuadro = true;
+    require(solid.InitSurfaces() && solid.InitEdges()
+                && solid.ReBuldMesh(2.0f),
+            "Could not prepare the surface-patch welding regression solid.");
+
+    bool tested = false;
+    for (int index = 0; index < solid.GetNumSurfaces(); ++index) {
+        CSurfaceFace* surface = solid.GetSurfaceFace(index);
+        if (!surface || surface->m_TypeMesh == REGULAR_MESH
+            || surface->GetPreparedPolylineCount() < 8) {
+            continue;
+        }
+        require(surface->BuildFilledMeshWhithHoles(2.0f),
+                "Could not build the two-hole UV patch mesh.");
+        require(surface->pMesh3D
+                    && ActiveFaceEdgeComponentCount(*surface->pMesh3D) == 1,
+                "Patches of one surface remained separate mesh islands.");
+        bool manifold = false;
+        require(ClosedMeshBoundaryLoopCount(*surface->pMesh3D, manifold) == 3
+                    && manifold,
+                "A welded two-hole surface retained an internal open patch seam.");
+        tested = true;
+    }
+    require(tested, "The patch-welding regression found no two-hole surface.");
+}
+
+void TestSmallHoleSlxCollar() {
+    const std::array<gp_Pnt, 3> centers{{
+        gp_Pnt(50.0, 50.0, -1.0),
+        gp_Pnt(43.0, 47.0, -1.0),
+        gp_Pnt(51.5, 43.5, -1.0)}};
+	for (const float density : {0.15f, 0.20f, 0.25f}) {
+	for (const gp_Pnt& center : centers) {
+        TopoDS_Shape shape = BRepPrimAPI_MakeBox(100.0, 100.0, 10.0).Shape();
+        const TopoDS_Shape cutter = BRepPrimAPI_MakeCylinder(
+            gp_Ax2(center, gp_Dir(0.0, 0.0, 1.0)), 3.0, 12.0).Shape();
+        shape = BRepAlgoAPI_Cut(shape, cutter).Shape();
+
+        CSolid solid(shape);
+        solid.MeshQuadro = true;
+        solid.MeshQuadroHoleSLX = true;
+        require(solid.InitSurfaces() && solid.InitEdges()
+                    && solid.ReBuldMesh(1.0f / density),
+                "Could not build the small-hole SLX regression solid.");
+
+        bool tested = false;
+        for (int index = 0; index < solid.GetNumSurfaces(); ++index) {
+            CSurfaceFace* surface = solid.GetSurfaceFace(index);
+            if (!surface || surface->m_TypeMesh == REGULAR_MESH
+                || BRepAdaptor_Surface(TopoDS::Face(surface->m_Face)).GetType()
+                    != GeomAbs_Plane) {
+                continue;
+            }
+            require(surface->BuildFilledMeshWhithHoles(1.0f / density, true),
+                    "SLX rejected a small circular hole.");
+            require(ActiveFaceEdgeComponentCount(*surface->pMesh3D) == 1,
+                    "The small-hole collar is disconnected from the background mesh.");
+			double minimum_collar_reach =
+				std::numeric_limits<double>::max();
+            for (const CMesh3D::Face& face : surface->pMesh3D->GetFaces()) {
+				if (face.deleted)
+					continue;
+				require(face.corners.size() == 3 || face.corners.size() == 4,
+						"The small-hole collar contains a non-local polygon.");
+				bool touches_hole = false;
+				double face_reach = 0.0;
+				double longest_edge = 0.0;
+				for (const MeshCorner& corner : face.corners) {
+					const Vec3 vertex = surface->pMesh3D->GetVertices()[corner.v];
+					const double radius = std::hypot(
+						static_cast<double>(vertex.x) - center.X(),
+						static_cast<double>(vertex.y) - center.Y());
+					touches_hole = touches_hole
+						|| std::fabs(radius - 3.0) <= 0.05;
+					face_reach = std::max(face_reach, radius);
+				}
+				for (size_t corner = 0; corner < face.corners.size(); ++corner) {
+					const Vec3 first = surface->pMesh3D->GetVertices()[
+						face.corners[corner].v];
+					const Vec3 second = surface->pMesh3D->GetVertices()[
+						face.corners[(corner + 1) % face.corners.size()].v];
+					const Vec3 edge = second - first;
+					longest_edge = std::max(longest_edge,
+						std::sqrt(static_cast<double>(dot(edge, edge))));
+				}
+				if (face.corners.size() == 3) {
+					require(longest_edge <= 20.0,
+							"The small-hole collar retained a long radial triangle fan.");
+				}
+				if (touches_hole)
+					minimum_collar_reach = std::min(
+						minimum_collar_reach, face_reach);
+            }
+			require(std::isfinite(minimum_collar_reach)
+					&& minimum_collar_reach >= 6.0,
+					"The small-hole SLX collar is narrower than one useful mesh transition.");
+            tested = true;
+        }
+        require(tested, "The small-hole regression found no trimmed planar face.");
+    }
+	}
+}
 }
 
 int main(int argc, char** argv) {
@@ -2260,9 +3209,32 @@ int main(int argc, char** argv) {
         std::cout << "Low Poly Quadro tests passed.\n";
         return 0;
     }
+    if (argc == 2 && std::string(argv[1]) == "--test-surface-patch-welding") {
+        TestSurfacePatchWelding();
+        std::cout << "Surface patch welding tests passed.\n";
+        return 0;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--test-small-hole-slx-collar") {
+        TestSmallHoleSlxCollar();
+        std::cout << "Small-hole SLX collar tests passed.\n";
+        return 0;
+    }
     if (argc == 2 && std::string(argv[1]) == "--test-boss-pocket") {
         TestBossPocketRegression();
+		TestFaceBasedPrimitiveBooleanOverlap();
         std::cout << "Boss/Pocket tests passed.\n";
+        return 0;
+    }
+    if (argc == 2
+        && std::string(argv[1]) == "--test-cylinder-seam-trim") {
+        TestCylinderSeamTrimDirection();
+        std::cout << "Cylinder seam trim tests passed.\n";
+        return 0;
+    }
+    if (argc == 2
+        && std::string(argv[1]) == "--test-sphere-pole-quadro") {
+        TestSpherePoleQuadroProjection();
+        std::cout << "Sphere-pole Quadro tests passed.\n";
         return 0;
     }
     if (argc == 2 && std::string(argv[1]) == "--test-drafting") {
@@ -2270,7 +3242,41 @@ int main(int argc, char** argv) {
         std::cout << "Drafting persistence tests passed.\n";
         return 0;
     }
-    if (argc == 4
+    if (argc == 2 && std::string(argv[1]) == "--test-mesh-var7") {
+        TestMeshVar7Regression();
+        std::cout << "Mesh Var-7 tests passed.\n";
+        return 0;
+    }
+    if (argc == 2
+        && std::string(argv[1]) == "--test-trim-diagnostics") {
+        TestTrimClassificationDiagnostics();
+        std::cout << "Trim classification diagnostics tests passed.\n";
+        return 0;
+    }
+    if (argc == 2
+        && std::string(argv[1]) == "--test-create-sketch-surface") {
+        TestCreateSurfaceFromSketch();
+        std::cout << "Create Surface from sketch tests passed.\n";
+        return 0;
+    }
+    if (argc == 2
+        && std::string(argv[1]) == "--test-curve-to-polyline-by-length") {
+        TestCurveToPolylineByLength();
+        std::cout << "Curve To Polyline By length tests passed.\n";
+        return 0;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--test-mesh-wire-color") {
+        TestMeshWireColor();
+        std::cout << "Mesh wire color tests passed.\n";
+        return 0;
+    }
+    if (argc == 2
+        && std::string(argv[1]) == "--test-low-poly-density-calibration") {
+        TestLowPolyDensityCalibration();
+        std::cout << "Low Poly density calibration tests passed.\n";
+        return 0;
+    }
+    if ((argc == 4 || argc == 5)
         && std::string(argv[1]) == "--diagnose-project-quadro") {
         CAlfaDoc document;
         Dom3DProjectSerializer serializer;
@@ -2282,11 +3288,13 @@ int main(int argc, char** argv) {
                 error.toLocal8Bit().constData());
         const float density = std::stof(argv[3]);
         require(density > 0.0f, "Density must be positive.");
+        const bool useSlx = argc == 5 && std::string(argv[4]) == "slx";
         for (const auto& object : document.GetObjects()) {
             auto* solid = dynamic_cast<CSolid*>(object.get());
             if (!solid)
                 continue;
             solid->MeshQuadro = true;
+            solid->MeshQuadroHoleSLX = useSlx;
             const bool rebuilt = solid->ReBuldMesh(1.0f / density);
             std::cout << "solid=\"" << solid->GetName() << "\" rebuilt="
                       << rebuilt << " surfaces=" << solid->GetNumSurfaces()
@@ -2314,15 +3322,102 @@ int main(int argc, char** argv) {
                 size_t triangles = 0;
                 size_t quads = 0;
                 size_t vertices = 0;
+                double maximum_mesh_edge = 0.0;
+                double minimum_mesh_edge = std::numeric_limits<double>::max();
+				Vec3 minimum_edge_first{};
+				Vec3 minimum_edge_second{};
+                size_t non_manifold_index_edges = 0;
+                size_t overlapping_geometric_edges = 0;
+                size_t mesh_components = 0;
+                size_t occt_outside_faces = 0;
+                Vec3 mesh_min{
+                    std::numeric_limits<float>::max(),
+                    std::numeric_limits<float>::max(),
+                    std::numeric_limits<float>::max()};
+                Vec3 mesh_max{
+                    std::numeric_limits<float>::lowest(),
+                    std::numeric_limits<float>::lowest(),
+                    std::numeric_limits<float>::lowest()};
                 if (surface->pMesh3D) {
+					SurfaceUVMapping surface_mapping(surface);
+					std::map<std::pair<size_t, size_t>, size_t> index_edge_use;
+					using PositionKey = std::array<long long, 3>;
+					std::map<std::pair<PositionKey, PositionKey>, size_t>
+						geometric_edge_use;
+					const auto position_key = [](Vec3 point) {
+						constexpr double scale = 100000.0;
+						return PositionKey{
+							std::llround(point.x * scale),
+							std::llround(point.y * scale),
+							std::llround(point.z * scale)};
+					};
                     vertices = surface->pMesh3D->GetVertices().size();
+                    for (const Vec3& vertex : surface->pMesh3D->GetVertices()) {
+                        mesh_min.x = std::min(mesh_min.x, vertex.x);
+                        mesh_min.y = std::min(mesh_min.y, vertex.y);
+                        mesh_min.z = std::min(mesh_min.z, vertex.z);
+                        mesh_max.x = std::max(mesh_max.x, vertex.x);
+                        mesh_max.y = std::max(mesh_max.y, vertex.y);
+                        mesh_max.z = std::max(mesh_max.z, vertex.z);
+                    }
                     for (const CMesh3D::Face& face :
                          surface->pMesh3D->GetFaces()) {
                         if (face.deleted)
                             continue;
+						Vec3 face_center{};
+						for (const MeshCorner& corner : face.corners) {
+							if (corner.v < surface->pMesh3D->GetVertices().size())
+								face_center = face_center
+									+ surface->pMesh3D->GetVertices()[corner.v];
+						}
+						if (!face.corners.empty()) {
+							face_center = face_center * (1.0f
+								/ static_cast<float>(face.corners.size()));
+							SurfaceUVPoint uv;
+							if (surface_mapping.Project(face_center, uv)) {
+								BRepClass_FaceClassifier classifier(
+									TopoDS::Face(surface->m_Face),
+									gp_Pnt2d(uv.u, uv.v), 1.0e-7,
+									Standard_False);
+								occt_outside_faces +=
+									classifier.State() == TopAbs_OUT;
+							}
+						}
                         triangles += face.corners.size() == 3;
                         quads += face.corners.size() == 4;
+                        for (size_t corner = 0; corner < face.corners.size(); ++corner) {
+                            const size_t first = face.corners[corner].v;
+                            const size_t second = face.corners[
+                                (corner + 1) % face.corners.size()].v;
+                            if (first >= surface->pMesh3D->GetVertices().size()
+                                || second >= surface->pMesh3D->GetVertices().size()) {
+                                continue;
+                            }
+                            const Vec3 edge = surface->pMesh3D->GetVertices()[second]
+                                - surface->pMesh3D->GetVertices()[first];
+							const double edge_length = std::sqrt(
+								static_cast<double>(dot(edge, edge)));
+                            maximum_mesh_edge = std::max(maximum_mesh_edge, edge_length);
+							if (edge_length < minimum_mesh_edge) {
+								minimum_mesh_edge = edge_length;
+								minimum_edge_first = surface->pMesh3D->GetVertices()[first];
+								minimum_edge_second = surface->pMesh3D->GetVertices()[second];
+							}
+							++index_edge_use[std::minmax(first, second)];
+							PositionKey first_key = position_key(
+								surface->pMesh3D->GetVertices()[first]);
+							PositionKey second_key = position_key(
+								surface->pMesh3D->GetVertices()[second]);
+							if (second_key < first_key)
+								std::swap(first_key, second_key);
+							++geometric_edge_use[{first_key, second_key}];
+                        }
                     }
+					for (const auto& edge : index_edge_use)
+						non_manifold_index_edges += edge.second > 2;
+					for (const auto& edge : geometric_edge_use)
+						overlapping_geometric_edges += edge.second > 2;
+					mesh_components = ActiveFaceEdgeComponentCount(*surface->pMesh3D);
                 }
                 int adaptive_net_result = -1;
                 if (vertices == 0) {
@@ -2338,6 +3433,23 @@ int main(int argc, char** argv) {
                           << " degenerated=" << degenerated_edges
                           << " prepared="
                           << surface->GetPreparedPolylineCount()
+						  << " preparedEdges=[";
+				for (int edge_index = 0;
+					edge_index < surface->GetPreparedPolylineCount(); ++edge_index) {
+					std::vector<CPoint3d> edge_points;
+					double edge_length = 0.0;
+					if (surface->GetPreparedPolylinePoints(edge_index, edge_points)) {
+						for (size_t point_index = 1;
+							point_index < edge_points.size(); ++point_index) {
+							edge_length += edge_points[point_index - 1].DistTo(
+								&edge_points[point_index]);
+						}
+					}
+					if (edge_index > 0)
+						std::cout << ',';
+					std::cout << edge_points.size() << '@' << edge_length;
+				}
+				std::cout << ']'
                           << " qty=" << surface->m_QtyU
                           << 'x' << surface->m_QtyV
                           << " initialized=" << surface->IsInitMesh
@@ -2345,7 +3457,24 @@ int main(int argc, char** argv) {
                           << " vertices=" << vertices
                           << " adaptiveResult=" << adaptive_net_result
                           << " triangles=" << triangles
-                          << " quads=" << quads;
+                          << " quads=" << quads
+                          << " minEdge=" << (std::isfinite(minimum_mesh_edge)
+						? minimum_mesh_edge : 0.0)
+                          << " maxEdge=" << maximum_mesh_edge
+					  << " minEdgeAt=[" << minimum_edge_first.x << ','
+					  << minimum_edge_first.y << ',' << minimum_edge_first.z
+					  << "]-[" << minimum_edge_second.x << ','
+					  << minimum_edge_second.y << ',' << minimum_edge_second.z << ']'
+					  << " components=" << mesh_components
+					  << " nonManifold=" << non_manifold_index_edges
+					  << " overlappingEdges=" << overlapping_geometric_edges;
+				std::cout << " occtOutside=" << occt_outside_faces;
+                if (vertices > 0) {
+                    std::cout << " meshBounds=["
+                              << mesh_min.x << ',' << mesh_min.y << ',' << mesh_min.z
+                              << "]-[" << mesh_max.x << ',' << mesh_max.y << ','
+                              << mesh_max.z << ']';
+                }
                 if (!surface->GetLastIslandFillError().empty())
                     std::cout << " error=\""
                               << surface->GetLastIslandFillError() << '"';
@@ -2353,8 +3482,136 @@ int main(int argc, char** argv) {
                     std::cout << " diagnostic=\""
                               << surface->GetLastQuadrangulationDiagnostic()
                               << '"';
+				std::vector<std::unique_ptr<CPolyline>> island_boundaries;
+				if (surface->CreateLastQuadrangulationBoundaryPolylines(
+					island_boundaries)) {
+					std::cout << " islandBoundaries=[";
+					for (size_t boundary_index = 0;
+						boundary_index < island_boundaries.size(); ++boundary_index) {
+						if (boundary_index > 0)
+							std::cout << ',';
+						std::cout << island_boundaries[boundary_index]->GetPointCount();
+					}
+					std::cout << ']';
+				}
                 std::cout << '\n';
             }
+			std::vector<Vec3> combined_vertices;
+			std::vector<CMesh3D::Face> combined_faces;
+			for (int surface_index = 0;
+				surface_index < solid->GetNumSurfaces(); ++surface_index) {
+				const CSurfaceFace* surface = solid->GetSurfaceFace(surface_index);
+				if (!surface || !surface->pMesh3D)
+					continue;
+				const size_t offset = combined_vertices.size();
+				combined_vertices.insert(combined_vertices.end(),
+					surface->pMesh3D->GetVertices().begin(),
+					surface->pMesh3D->GetVertices().end());
+				for (CMesh3D::Face face : surface->pMesh3D->GetFaces()) {
+					if (face.deleted || face.corners.size() < 3)
+						continue;
+					for (MeshCorner& corner : face.corners) {
+						corner.v += offset;
+						corner.uv = corner.v;
+						corner.n = corner.v;
+					}
+					face.sourceFaceId = surface_index;
+					combined_faces.push_back(std::move(face));
+				}
+			}
+			CMesh3D combined("Diagnostic Low Poly");
+			if (combined.SetGeometry(std::move(combined_vertices),
+					std::move(combined_faces))) {
+				size_t welded_vertices = 0;
+				float weld_tolerance = 0.0f;
+				std::unique_ptr<CMesh3D> welded = CMesh3D::CreateWelded(
+					{&combined}, &welded_vertices, &weld_tolerance);
+				if (welded) {
+					bool manifold = true;
+					const size_t boundary_loops = ClosedMeshBoundaryLoopCount(
+						*welded, manifold);
+					size_t boundary_edges = 0;
+					std::map<std::pair<size_t, size_t>, size_t> edge_use;
+					std::map<std::pair<size_t, size_t>, int> edge_source;
+					std::map<int, size_t> boundary_edges_by_surface;
+					std::vector<double> mesh_edge_lengths;
+					for (const CMesh3D::Face& face : welded->GetFaces()) {
+						if (face.deleted || face.corners.size() < 3)
+							continue;
+						for (size_t corner = 0; corner < face.corners.size(); ++corner) {
+							const auto edge = std::minmax(face.corners[corner].v,
+								face.corners[(corner + 1) % face.corners.size()].v);
+							++edge_use[edge];
+							edge_source[edge] = face.sourceFaceId;
+							const Vec3 delta = welded->GetVertices()[edge.second]
+								- welded->GetVertices()[edge.first];
+							const double length = std::sqrt(
+								static_cast<double>(dot(delta, delta)));
+							if (length > 0.0)
+								mesh_edge_lengths.push_back(length);
+						}
+					}
+					for (const auto& edge : edge_use) {
+						if (edge.second == 1) {
+							++boundary_edges;
+							++boundary_edges_by_surface[edge_source[edge.first]];
+						}
+					}
+					std::cout << "  welded vertices="
+						<< welded->GetVertices().size()
+						<< " merged=" << welded_vertices
+						<< " tolerance=" << weld_tolerance
+						<< " boundaryEdges=" << boundary_edges
+						<< " boundaryLoops=" << boundary_loops
+						<< " manifold=" << manifold << " bySurface=[";
+					for (const auto& item : boundary_edges_by_surface)
+						std::cout << item.first << ':' << item.second << ',';
+					std::cout << ']';
+					std::sort(mesh_edge_lengths.begin(), mesh_edge_lengths.end());
+					if (!mesh_edge_lengths.empty()) {
+						std::cout << " edge[p10/p25/median]="
+							<< mesh_edge_lengths[mesh_edge_lengths.size() / 10] << '/'
+							<< mesh_edge_lengths[mesh_edge_lengths.size() / 4] << '/'
+							<< mesh_edge_lengths[mesh_edge_lengths.size() / 2];
+					}
+					std::map<int, std::set<size_t>> boundary_vertices_by_surface;
+					for (const auto& edge : edge_use) {
+						if (edge.second != 1)
+							continue;
+						const int source = edge_source[edge.first];
+						boundary_vertices_by_surface[source].insert(edge.first.first);
+						boundary_vertices_by_surface[source].insert(edge.first.second);
+					}
+					std::vector<double> nearest_other_surface;
+					for (const auto& source : boundary_vertices_by_surface) {
+						for (size_t vertex : source.second) {
+							double nearest = std::numeric_limits<double>::max();
+							for (const auto& other : boundary_vertices_by_surface) {
+								if (other.first == source.first)
+									continue;
+								for (size_t candidate : other.second) {
+									const Vec3 delta = welded->GetVertices()[candidate]
+										- welded->GetVertices()[vertex];
+									nearest = std::min(nearest, std::sqrt(
+										static_cast<double>(dot(delta, delta))));
+								}
+							}
+							if (std::isfinite(nearest))
+								nearest_other_surface.push_back(nearest);
+						}
+					}
+					std::sort(nearest_other_surface.begin(),
+						nearest_other_surface.end());
+					if (!nearest_other_surface.empty()) {
+						std::cout << " nearestOther[min/median/max]="
+							<< nearest_other_surface.front() << '/'
+							<< nearest_other_surface[
+								nearest_other_surface.size() / 2] << '/'
+							<< nearest_other_surface.back();
+					}
+					std::cout << '\n';
+				}
+			}
         }
         return EXIT_SUCCESS;
     }
@@ -2366,6 +3623,11 @@ int main(int argc, char** argv) {
     if (argc == 2
         && std::string(argv[1]) == "--dense-notch-quadrangulation") {
         TestDenseNotchBoundaryQuadrangulation();
+        return EXIT_SUCCESS;
+    }
+    if (argc == 2
+        && std::string(argv[1]) == "--fusion-cylinder-front-guard") {
+        TestFusionCylinderFrontGuard();
         return EXIT_SUCCESS;
     }
     if (argc == 2

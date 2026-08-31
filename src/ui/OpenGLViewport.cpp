@@ -806,6 +806,9 @@ void OpenGLViewport::RestoreDefaultToolCursor() {
         setCursor(Qt::OpenHandCursor);
     } else if (tool_ == ToolMode::ZoomRect) {
         setCursor(zoom_rect_cursor());
+    } else if (picking_3d_point_ || picking_xy_point_
+               || picking_architecture_wall_) {
+        setCursor(Qt::CrossCursor);
     } else if (tool_ == ToolMode::Select
         || tool_ == ToolMode::Transform
         || tool_ == ToolMode::Boolean
@@ -1631,15 +1634,53 @@ bool OpenGLViewport::BeginEditSelectedSketch() {
     return true;
 }
 
+bool OpenGLViewport::BeginEditSelectedCurve() {
+    if (!document_) {
+        return false;
+    }
+
+    CAlfaObject* curve = document_->GetSelectedObject();
+    if (dynamic_cast<CSmartLine*>(curve)) {
+        return BeginEditSelectedSketch();
+    }
+
+    if (!dynamic_cast<CPolyline*>(curve)
+        && !dynamic_cast<CBSpline*>(curve)) {
+        // Keep Shape / Edit Nodes useful before a curve is selected: the
+        // common point tool can pick nodes from any supported visible curve.
+        EndDirectCurveEdit();
+        SetTool(ToolMode::EditPoint);
+        emit StatusTextChanged(
+            "Shape / Edit Nodes: click a curve node or drag a selection box");
+        return true;
+    }
+
+    EndDirectCurveEdit();
+    SetTool(ToolMode::Select);
+    editing_polyline_ = true;
+    document_->SelectAllPointsOfSelectedCurve();
+    direct_curve_edit_object_id_ = curve->m_id;
+    emit SelectionChanged();
+    emit StatusTextChanged(
+        "Shape / Edit Nodes: drag nodes; double-click the curve to add a node; Esc to finish");
+    update();
+    return true;
+}
+
 void OpenGLViewport::EndDirectCurveEdit() {
-    if (!editing_polyline_) {
+    if (!editing_polyline_ && !editing_sketch_) {
         return;
     }
     editing_polyline_ = false;
+    editing_sketch_ = false;
     dragging_polyline_point_ = false;
+    dragging_sketch_handle_ = false;
     curve_point_drag_changed_ = false;
+    sketch_drag_changed_ = false;
     direct_curve_edit_object_id_ = 0;
     highlighted_polyline_handle_ = false;
+    active_sketch_handle_kind_ = SketchHandleKind::None;
+    highlighted_sketch_handle_kind_ = SketchHandleKind::None;
     curve_point_drag_has_plane_ = false;
     if (document_) {
         document_->ClearPointSelection();
@@ -3183,8 +3224,14 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
                 last_mouse_ = event->pos();
                 setCursor(Qt::ClosedHandCursor);
                 update();
+                return;
             }
-            return;
+            // A click away from the edit handles finishes direct Sketch
+            // editing and continues through the ordinary Select path below.
+            // Previously every click was swallowed here until Esc was
+            // pressed, which looked like object selection had frozen.
+            EndDirectCurveEdit();
+            emit StatusTextChanged("Sketch edit finished");
         }
         if (editing_polyline_ && HitTestSelectedPolylineHandle(event->pos())) {
             const DomPoint screen_point{event->pos().x(), event->pos().y()};
@@ -4243,8 +4290,7 @@ void OpenGLViewport::mouseReleaseEvent(QMouseEvent* event) {
                 || (requested_mode == SelectionMode::Face
                     && document_->HasSelectedSolidFace())
                 || (requested_mode == SelectionMode::Object
-                    && document_->HasSelection()
-                    && !document_->GetSelectedSketch()));
+                    && document_->HasSelection()));
         if (select_click_completed && quick_menu_available) {
             edge_quick_menu_anchor_ = event->pos();
             const unsigned int generation = edge_quick_menu_generation_;
@@ -4255,8 +4301,7 @@ void OpenGLViewport::mouseReleaseEvent(QMouseEvent* event) {
                         || (requested_mode == SelectionMode::Face
                             && document_->HasSelectedSolidFace())
                         || (requested_mode == SelectionMode::Object
-                            && document_->HasSelection()
-                            && !document_->GetSelectedSketch()));
+                            && document_->HasSelection()));
                 if (generation != edge_quick_menu_generation_
                     || tool_ != ToolMode::Select
                     || selection_mode_ != requested_mode
@@ -4275,7 +4320,11 @@ void OpenGLViewport::mouseReleaseEvent(QMouseEvent* event) {
                 } else if (requested_mode == SelectionMode::Face) {
                     emit FaceQuickMenuRequested(menu_position);
                 } else if (requested_mode == SelectionMode::Object) {
-                    emit ObjectQuickMenuRequested(menu_position);
+                    if (document_->GetSelectedSketch()) {
+                        emit SketchQuickMenuRequested(menu_position);
+                    } else {
+                        emit ObjectQuickMenuRequested(menu_position);
+                    }
                 }
             });
         }

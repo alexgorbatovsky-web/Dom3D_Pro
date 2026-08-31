@@ -90,6 +90,11 @@ public:
     bool CloseSelectedOrActivePolyline();
     bool CloseSelectedOrActiveBSpline();
     bool CreateMeshFromSelectedPolyline(CVector3d dir, float dist);
+    bool CreateSurfaceFromSelectedSketch(
+        std::string* error_message = nullptr);
+    bool CreatePolylineFromSelectedCurveByLength(
+        double segment_length,
+        std::string* error_message = nullptr);
     bool BeginLiveExtrudeSelectedPolyline(double distance, bool reverse, double taper_angle_degrees);
     bool HasLivePolylineExtrude() const;
     bool UpdateLiveExtrudeSelectedPolyline(double distance, bool reverse, double taper_angle_degrees);
@@ -259,7 +264,8 @@ public:
     size_t FindObjectIndexById(unsigned long id) const;
     void EnsureObjectId(CAlfaObject& object);
     void EnsureObjectIds();
-    void AddObject(std::unique_ptr<CAlfaObject> object);
+    void AddObject(std::unique_ptr<CAlfaObject> object,
+                   bool select_object = true);
     void AddMesh(std::unique_ptr<CMesh3D> mesh);
     bool CreateGroupFromSelection();
     bool CreateAssemblyFromSelection();

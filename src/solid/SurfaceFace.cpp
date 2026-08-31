@@ -429,10 +429,13 @@ int normalized_quadro_point_quantity(double length,
 		return CSurfaceFace::m_QtyMin;
 	}
 
-	// Keep the original 3DCoat rule literal: QtyMax belongs to lenEdgeMax and
-	// every other edge receives the same length-proportional point quantity.
+	// 3DCoat calibration: at Density 0.20 an edge about one quarter of the
+	// body's longest edge still uses Qty Min, while at 0.296 it already gains
+	// the next pair of intervals. A reference count of 20 left that edge pinned
+	// to Qty Min all the way through Density 0.693. Sixty reproduces the four
+	// measured 3DCoat levels while retaining length-proportional sizing.
 	// Odd point counts are required by the quad front.
-	constexpr double density_reference_quantity = 20.0;
+	constexpr double density_reference_quantity = 60.0;
 	int maximum_quantity = static_cast<int>(
 		density_reference_quantity / deflection);
 	if (maximum_quantity < 4)
@@ -443,7 +446,93 @@ int normalized_quadro_point_quantity(double length,
 		++quantity;
 	if (quantity < CSurfaceFace::m_QtyMin)
 		quantity = CSurfaceFace::m_QtyMin;
+
+	// Flooring point counts creates a severe threshold at low density.  On the
+	// Box_And_Boss regression at Density 0.25 the 218.10 reference edge has a
+	// 15.58 step, while the 55.14 boss edge remained at Qty Min and jumped to a
+	// 27.57 step. Keep the measured 3DCoat levels, including Qty Min at 0.20,
+	// but advance by the next even pair of intervals once a local edge becomes
+	// more than 1.6 times coarser than the body's reference step.
+	int maximum_point_count = maximum_quantity;
+	if (IsEven(maximum_point_count))
+		++maximum_point_count;
+	maximum_point_count = std::max(
+		maximum_point_count, CSurfaceFace::m_QtyMin);
+	const int maximum_segments = std::max(2, maximum_point_count - 1);
+	const double reference_step = maximum_edge_length / maximum_segments;
+	constexpr double maximum_step_ratio = 1.6;
+	while (quantity < maximum_point_count
+		&& length / std::max(2, quantity - 1)
+			> reference_step * maximum_step_ratio) {
+		quantity += 2;
+	}
 	return quantity;
+}
+
+bool has_concave_planar_outer_wire(const TopoDS_Face& face)
+{
+	if (face.IsNull())
+		return false;
+	try {
+		BRepAdaptor_Surface surface(face);
+		if (surface.GetType() != GeomAbs_Plane)
+			return false;
+		const TopoDS_Wire outer = BRepTools::OuterWire(face);
+		if (outer.IsNull())
+			return false;
+
+		std::vector<gp_Pnt2d> points;
+		for (BRepTools_WireExplorer explorer(outer, face);
+			explorer.More(); explorer.Next()) {
+			const TopoDS_Vertex vertex = explorer.CurrentVertex();
+			if (vertex.IsNull())
+				continue;
+			double u = 0.0;
+			double v = 0.0;
+			ElSLib::Parameters(
+				surface.Plane(), BRep_Tool::Pnt(vertex), u, v);
+			if (points.empty()
+				|| points.back().Distance(gp_Pnt2d(u, v)) > 1.0e-8) {
+				points.emplace_back(u, v);
+			}
+		}
+		if (points.size() > 2
+			&& points.front().Distance(points.back()) <= 1.0e-8) {
+			points.pop_back();
+		}
+		if (points.size() < 4)
+			return false;
+
+		double u_min = points.front().X();
+		double u_max = u_min;
+		double v_min = points.front().Y();
+		double v_max = v_min;
+		for (const gp_Pnt2d& point : points) {
+			u_min = std::min(u_min, point.X());
+			u_max = std::max(u_max, point.X());
+			v_min = std::min(v_min, point.Y());
+			v_max = std::max(v_max, point.Y());
+		}
+		const double span = std::max(u_max - u_min, v_max - v_min);
+		const double epsilon = std::max(1.0e-12, span * span * 1.0e-10);
+		bool positive = false;
+		bool negative = false;
+		for (size_t index = 0; index < points.size(); ++index) {
+			const gp_Pnt2d& previous = points[
+				(index + points.size() - 1) % points.size()];
+			const gp_Pnt2d& current = points[index];
+			const gp_Pnt2d& next = points[(index + 1) % points.size()];
+			const double cross_value =
+				(current.X() - previous.X()) * (next.Y() - current.Y())
+				- (current.Y() - previous.Y()) * (next.X() - current.X());
+			positive = positive || cross_value > epsilon;
+			negative = negative || cross_value < -epsilon;
+			if (positive && negative)
+				return true;
+		}
+	} catch (const Standard_Failure&) {
+	}
+	return false;
 }
 
 void adjust_mesh_quantities_from_prepared_edges(CSurfaceFace* surface,
@@ -642,6 +731,116 @@ bool triangulate_mesh_ngons_in_xy(CMesh3D& mesh)
 	}
 	mesh.GetFaces() = std::move(result);
 	return true;
+}
+
+void merge_trim_triangle_pairs_to_quads(CMesh3D& mesh)
+{
+	using Edge = std::pair<size_t, size_t>;
+	std::vector<CMesh3D::Face>& faces = mesh.GetFaces();
+	const std::vector<Vec3>& vertices = mesh.GetVertices();
+	std::map<Edge, std::vector<size_t>> triangle_edges;
+	for (size_t face_index = 0; face_index < faces.size(); ++face_index) {
+		const CMesh3D::Face& face = faces[face_index];
+		if (face.deleted || face.corners.size() != 3)
+			continue;
+		for (size_t corner = 0; corner < 3; ++corner) {
+			const size_t first = face.corners[corner].v;
+			const size_t second = face.corners[(corner + 1) % 3].v;
+			if (first < vertices.size() && second < vertices.size() && first != second)
+				triangle_edges[std::minmax(first, second)].push_back(face_index);
+		}
+	}
+
+	struct Candidate {
+		size_t first = 0;
+		size_t second = 0;
+		double shared_length_sq = 0.0;
+	};
+	std::vector<Candidate> candidates;
+	for (const auto& [edge, owners] : triangle_edges) {
+		if (owners.size() != 2)
+			continue;
+		const Vec3 delta = vertices[edge.second] - vertices[edge.first];
+		candidates.push_back({owners[0], owners[1],
+			static_cast<double>(dot(delta, delta))});
+	}
+	// A trimmed source quad is normally split along its diagonal, which is the
+	// longest common edge. Prefer that diagonal over an unrelated neighbouring
+	// triangle edge when more than one pairing is possible.
+	std::sort(candidates.begin(), candidates.end(),
+		[](const Candidate& first, const Candidate& second) {
+			return first.shared_length_sq > second.shared_length_sq;
+		});
+	std::vector<bool> paired(faces.size(), false);
+	for (const Candidate& candidate : candidates) {
+		if (paired[candidate.first] || paired[candidate.second]
+			|| faces[candidate.first].deleted || faces[candidate.second].deleted)
+			continue;
+
+		std::map<Edge, int> edge_counts;
+		std::map<size_t, std::vector<size_t>> boundary_neighbors;
+		std::map<size_t, MeshCorner> source_corners;
+		for (size_t face_index : {candidate.first, candidate.second}) {
+			const CMesh3D::Face& face = faces[face_index];
+			for (size_t corner = 0; corner < 3; ++corner) {
+				const MeshCorner& first = face.corners[corner];
+				const MeshCorner& second = face.corners[(corner + 1) % 3];
+				++edge_counts[std::minmax(first.v, second.v)];
+				source_corners.emplace(first.v, first);
+			}
+		}
+		for (const auto& [edge, count] : edge_counts) {
+			if (count != 1)
+				continue;
+			boundary_neighbors[edge.first].push_back(edge.second);
+			boundary_neighbors[edge.second].push_back(edge.first);
+		}
+		if (boundary_neighbors.size() != 4)
+			continue;
+		std::vector<size_t> cycle;
+		cycle.reserve(4);
+		size_t previous = std::numeric_limits<size_t>::max();
+		size_t current = boundary_neighbors.begin()->first;
+		bool valid = true;
+		for (size_t corner = 0; corner < 4; ++corner) {
+			cycle.push_back(current);
+			const auto& neighbors = boundary_neighbors[current];
+			if (neighbors.size() != 2) {
+				valid = false;
+				break;
+			}
+			const size_t next = neighbors[0] != previous
+				? neighbors[0] : neighbors[1];
+			previous = current;
+			current = next;
+		}
+		if (!valid || current != cycle.front())
+			continue;
+
+		const auto signed_area = [&](const std::vector<size_t>& indices) {
+			double twice_area = 0.0;
+			for (size_t i = 0; i < indices.size(); ++i) {
+				const Vec3& first = vertices[indices[i]];
+				const Vec3& second = vertices[indices[(i + 1) % indices.size()]];
+				twice_area += static_cast<double>(first.x) * second.y
+					- static_cast<double>(second.x) * first.y;
+			}
+			return twice_area;
+		};
+		std::vector<size_t> reference;
+		for (const MeshCorner& corner : faces[candidate.first].corners)
+			reference.push_back(corner.v);
+		if (signed_area(cycle) * signed_area(reference) < 0.0)
+			std::reverse(cycle.begin(), cycle.end());
+
+		CMesh3D::Face quad;
+		for (size_t vertex : cycle)
+			quad.corners.push_back(source_corners.at(vertex));
+		faces[candidate.first] = std::move(quad);
+		faces[candidate.second].deleted = true;
+		paired[candidate.first] = true;
+		paired[candidate.second] = true;
+	}
 }
 
 // Rejected experiment: splitting a spherical triangular corner into three
@@ -1777,6 +1976,35 @@ bool delete_mesh_faces_outside_occt_face(CMesh3D* mesh, CSurfaceFace* surface)
 		return false;
 
 	const TopoDS_Face face = TopoDS::Face(surface->m_Face);
+	double classifier_u_min = 0.0;
+	double classifier_u_max = 0.0;
+	double classifier_v_min = 0.0;
+	double classifier_v_max = 0.0;
+	bool classifier_u_periodic = false;
+	bool classifier_v_periodic = false;
+	double classifier_u_period = 0.0;
+	double classifier_v_period = 0.0;
+	try {
+		BRepTools::UVBounds(face, classifier_u_min, classifier_u_max,
+			classifier_v_min, classifier_v_max);
+		BRepAdaptor_Surface adaptor(face);
+		classifier_u_periodic = adaptor.IsUPeriodic();
+		classifier_v_periodic = adaptor.IsVPeriodic();
+		classifier_u_period = classifier_u_periodic ? adaptor.UPeriod() : 0.0;
+		classifier_v_period = classifier_v_periodic ? adaptor.VPeriod() : 0.0;
+	} catch (const Standard_Failure&) {
+		classifier_u_periodic = false;
+		classifier_v_periodic = false;
+	}
+	const auto wrap_periodic = [](double value, double minimum,
+		double period) {
+		if (!(period > 0.0) || !std::isfinite(value))
+			return value;
+		double wrapped = minimum + std::fmod(value - minimum, period);
+		if (wrapped < minimum)
+			wrapped += period;
+		return wrapped;
+	};
 	std::vector<Vec3>& vertices = mesh->GetVertices();
 	std::vector<CMesh3D::Face>& faces = mesh->GetFaces();
 	std::vector<size_t> outside_faces;
@@ -1801,6 +2029,12 @@ bool delete_mesh_faces_outside_occt_face(CMesh3D* mesh, CSurfaceFace* surface)
 
 		center.x /= static_cast<double>(count);
 		center.y /= static_cast<double>(count);
+		if (classifier_u_periodic)
+			center.x = wrap_periodic(center.x,
+				classifier_u_min, classifier_u_period);
+		if (classifier_v_periodic)
+			center.y = wrap_periodic(center.y,
+				classifier_v_min, classifier_v_period);
 		try {
 			BRepClass_FaceClassifier classifier(face, gp_Pnt2d(center.x, center.y), EPS2D, Standard_False);
 			if (classifier.State() == TopAbs_OUT) {
@@ -1826,6 +2060,105 @@ bool delete_mesh_faces_outside_occt_face(CMesh3D* mesh, CSurfaceFace* surface)
 	for (size_t face_index : outside_faces)
 		faces[face_index].deleted = true;
 	return true;
+}
+
+bool delete_mesh_faces_outside_occt_face_3d(CMesh3D* mesh,
+	CSurfaceFace* surface)
+{
+	if (!mesh || !surface || surface->m_Face.IsNull())
+		return false;
+	SurfaceUVMapping mapping(surface);
+	if (!mapping.IsValid())
+		return false;
+
+	bool changed = false;
+	const TopoDS_Face face = TopoDS::Face(surface->m_Face);
+	const std::vector<Vec3>& vertices = mesh->GetVertices();
+	std::vector<CMesh3D::Face>& mesh_faces = mesh->GetFaces();
+	std::vector<bool> outside(mesh_faces.size(), false);
+	for (size_t face_index = 0; face_index < mesh_faces.size(); ++face_index) {
+		CMesh3D::Face& mesh_face = mesh_faces[face_index];
+		if (mesh_face.deleted || mesh_face.corners.size() < 3)
+			continue;
+		Vec3 center{};
+		size_t valid_corners = 0;
+		for (const MeshCorner& corner : mesh_face.corners) {
+			if (corner.v >= vertices.size())
+				continue;
+			center = center + vertices[corner.v];
+			++valid_corners;
+		}
+		if (valid_corners != mesh_face.corners.size())
+			continue;
+		center = center * (1.0f / static_cast<float>(valid_corners));
+		SurfaceUVPoint uv;
+		if (!mapping.Project(center, uv))
+			continue;
+		try {
+			BRepClass_FaceClassifier classifier(face,
+				gp_Pnt2d(uv.u, uv.v), 1.0e-7, Standard_False);
+			if (classifier.State() == TopAbs_OUT)
+				outside[face_index] = true;
+		} catch (const Standard_Failure&) {
+		}
+	}
+
+	// Only peel OUT cells that are connected to an existing open boundary.
+	// Numerical projection near a periodic B-Spline seam can classify an
+	// isolated valid cell as OUT; deleting such a cell punches a small hole in
+	// an otherwise watertight quad patch. Real wraparound tabs are attached to
+	// the patch boundary and remain removable by this flood fill.
+	using EdgeKey = std::pair<size_t, size_t>;
+	std::map<EdgeKey, std::vector<size_t>> edge_faces;
+	for (size_t face_index = 0; face_index < mesh_faces.size(); ++face_index) {
+		const CMesh3D::Face& mesh_face = mesh_faces[face_index];
+		if (mesh_face.deleted || mesh_face.corners.size() < 3)
+			continue;
+		for (size_t corner = 0; corner < mesh_face.corners.size(); ++corner) {
+			const size_t first = mesh_face.corners[corner].v;
+			const size_t second = mesh_face.corners[
+				(corner + 1) % mesh_face.corners.size()].v;
+			if (first >= vertices.size() || second >= vertices.size())
+				continue;
+			edge_faces[std::minmax(first, second)].push_back(face_index);
+		}
+	}
+	std::vector<size_t> pending;
+	std::vector<bool> removable(mesh_faces.size(), false);
+	for (const auto& edge : edge_faces) {
+		if (edge.second.size() == 1 && outside[edge.second.front()]) {
+			const size_t face_index = edge.second.front();
+			if (!removable[face_index]) {
+				removable[face_index] = true;
+				pending.push_back(face_index);
+			}
+		}
+	}
+	while (!pending.empty()) {
+		const size_t face_index = pending.back();
+		pending.pop_back();
+		const CMesh3D::Face& mesh_face = mesh_faces[face_index];
+		for (size_t corner = 0; corner < mesh_face.corners.size(); ++corner) {
+			const EdgeKey edge = std::minmax(mesh_face.corners[corner].v,
+				mesh_face.corners[(corner + 1) % mesh_face.corners.size()].v);
+			const auto owners = edge_faces.find(edge);
+			if (owners == edge_faces.end())
+				continue;
+			for (size_t neighbour : owners->second) {
+				if (outside[neighbour] && !removable[neighbour]) {
+					removable[neighbour] = true;
+					pending.push_back(neighbour);
+				}
+			}
+		}
+	}
+	for (size_t face_index = 0; face_index < mesh_faces.size(); ++face_index) {
+		if (removable[face_index]) {
+			mesh_faces[face_index].deleted = true;
+			changed = true;
+		}
+	}
+	return changed;
 }
 }
 #include <TopAbs_Orientation.hxx>
@@ -3291,6 +3624,11 @@ void CSurfaceFace::UpdateMeshTypeFromBoundary()
 		m_TypeMesh = REGULAR_MESH;
 		return;
 	}
+	// A concave planar outer wire must be filled from its real contour.
+	// Treating it as a regular UV rectangle fills back edge notches made by a
+	// boolean Box/Cylinder cut, leaving an apparently solid top over the cavity.
+	if (has_concave_planar_outer_wire(TopoDS::Face(m_Face)))
+		return;
 
 	m_TypeMesh = REGULAR_MESH;
 	for (CPolyline* line : Polylines) {
@@ -3485,7 +3823,20 @@ bool CSurfaceFace::BuildTrimmingMesh(CSolid* psol, float Deflection){
 	// ContourQuadrangulator accepts only one boundary loop.
 	// Keep the former regular-grid trimming path below as a compatibility
 	// fallback for singular or otherwise unprojectable OCCT faces.
-	if (low_poly_quadro && m_TypeMesh != REGULAR_MESH) {
+	size_t topological_edge_count = 0;
+	for (TopExp_Explorer edge(F1, TopAbs_EDGE); edge.More(); edge.Next())
+		++topological_edge_count;
+	// A four-sided BSpline transition is already a regular tensor-product
+	// surface even when tiny endpoint tolerances classify its boundary as
+	// trimmed.  Re-projecting that boundary independently can jump between the
+	// two equivalent ends of the BSpline parameter range and produces a long
+	// diagonal.  Keep the synchronized four sides and build the regular CNet;
+	// the trimming/classification stage below still removes any genuine excess.
+	const bool four_sided_bspline_compatibility = low_poly_quadro
+		&& surface_type_of(F1) == GeomAbs_BSplineSurface
+		&& topological_edge_count == 4;
+	if (low_poly_quadro && m_TypeMesh != REGULAR_MESH
+		&& !four_sided_bspline_compatibility) {
 		if (BuildFilledMeshWhithHoles(Deflection,
 			psol && psol->MeshQuadroHoleSLX))
 			return true;
@@ -3582,6 +3933,15 @@ bool CSurfaceFace::BuildTrimmingMesh(CSolid* psol, float Deflection){
 		IsInitMesh = true;
 		return true;
 	}
+	if (four_sided_bspline_compatibility) {
+		// This mesh is already the synchronized tensor-product grid in 3D.
+		// Sending it through PutOnSurface/RestoreTo3D again can cross the nearly
+		// closed BSpline parameter end, split a few boundary cells and leave the
+		// visible three-quad tab. Classify the original grid directly instead.
+		IsTrimmed = false;
+		IsInitMesh = true;
+		return true;
+	}
 //  ====== Trimming =====
 	const std::vector<Vec3> source_vertices = pMesh3D ? pMesh3D->GetVertices() : std::vector<Vec3>{};
 	const std::vector<CMesh3D::Face> source_faces = pMesh3D ? pMesh3D->GetFaces() : std::vector<CMesh3D::Face>{};
@@ -3616,8 +3976,9 @@ bool CSurfaceFace::BuildTrimmingMesh(CSolid* psol, float Deflection){
 //		pMesh3D->ExportToObj("c:\\temp\\Mesh3D_0Trimmed.obj");
 
 	try {
-		if (pMesh3D)
+		if (pMesh3D) {
 			pMesh3D->RestoreTo3DFromUVSurface(this);
+		}
 	} catch (const Standard_Failure&) {
 		if (pMesh3D && !source_vertices.empty() && !source_faces.empty()) {
 			pMesh3D->SetGeometry(source_vertices, source_faces, source_uvs, source_normals);
@@ -3630,6 +3991,13 @@ bool CSurfaceFace::BuildTrimmingMesh(CSolid* psol, float Deflection){
 	IsTrimmed = trimmed || classified;
 	IsInitMesh = true;
 	return true;
+}
+
+bool CSurfaceFace::RemoveOutsideMeshFaces3D()
+{
+	const bool removed = delete_mesh_faces_outside_occt_face_3d(pMesh3D, this);
+	IsTrimmed = removed || IsTrimmed;
+	return removed;
 }
 
 bool CSurfaceFace::MakeFilledContour(const std::vector<Vec3>& contour,
@@ -3652,15 +4020,101 @@ bool CSurfaceFace::MakeFilledContour(const std::vector<Vec3>& contour,
 			*error = "The contour has fewer than three nodes.";
 		return false;
 	}
-	(void)prefer_safe_quads;
+	// A cylinder's native UV plane is not metric: U is an angle in radians,
+	// while V is a length. Feeding that plane directly to the advancing front
+	// turns an ordinary unrolled cylindrical rectangle into a very narrow strip
+	// (for the Fusion fillet, about 1.57 x 30.7 instead of 18.85 x 30.7).
+	// Quadrangulate the exact cylindrical development X = radius * U, Y = V,
+	// then map the generated vertices back to UV before restoring the mesh to 3D.
+	double metric_u_scale = 1.0;
+	bool use_sphere_pole_projection = false;
+	double sphere_radius = 1.0;
+	double sphere_v_sign = 1.0;
+	if (!m_Face.IsNull()) {
+		try {
+			BRepAdaptor_Surface adaptor(TopoDS::Face(m_Face));
+			if (adaptor.GetType() == GeomAbs_Cylinder) {
+				const double radius = adaptor.Cylinder().Radius();
+				if (std::isfinite(radius) && radius > 1.0e-9)
+					metric_u_scale = radius;
+			} else if (adaptor.GetType() == GeomAbs_Sphere) {
+				bool has_degenerated_edge = false;
+				for (TopExp_Explorer edge(m_Face, TopAbs_EDGE);
+					edge.More(); edge.Next()) {
+					if (BRep_Tool::Degenerated(TopoDS::Edge(edge.Current()))) {
+						has_degenerated_edge = true;
+						break;
+					}
+				}
+				double minimum_v = contour.front().y;
+				double maximum_v = contour.front().y;
+				for (Vec3 point : contour) {
+					minimum_v = std::min(minimum_v,
+						static_cast<double>(point.y));
+					maximum_v = std::max(maximum_v,
+						static_cast<double>(point.y));
+				}
+				const double radius = adaptor.Sphere().Radius();
+				if (has_degenerated_edge
+					&& (minimum_v >= -1.0e-7 || maximum_v <= 1.0e-7)
+					&& std::isfinite(radius) && radius > 1.0e-9) {
+					use_sphere_pole_projection = true;
+					sphere_radius = radius;
+					sphere_v_sign = minimum_v + maximum_v >= 0.0
+						? 1.0 : -1.0;
+				}
+			}
+		} catch (const Standard_Failure&) {
+			metric_u_scale = 1.0;
+			use_sphere_pole_projection = false;
+		}
+	}
+	std::vector<Vec3> working_contour = contour;
+	if (use_sphere_pole_projection) {
+		for (Vec3& point : working_contour) {
+			const double radial = sphere_radius
+				* std::cos(static_cast<double>(point.y));
+			const double u = point.x;
+			point.x = static_cast<float>(radial * std::cos(u));
+			point.y = static_cast<float>(radial * std::sin(u));
+		}
+	} else if (metric_u_scale != 1.0) {
+		for (Vec3& point : working_contour)
+			point.x = static_cast<float>(point.x * metric_u_scale);
+	}
+	const auto copy_working_mesh_to_uv = [metric_u_scale,
+		use_sphere_pole_projection, sphere_radius, sphere_v_sign](
+		const CMesh3D& source, CMesh3D* destination) {
+		if (!destination)
+			return false;
+		std::vector<Vec3> vertices = source.GetVertices();
+		if (use_sphere_pole_projection) {
+			for (Vec3& point : vertices) {
+				const double x = point.x;
+				const double y = point.y;
+				const double normalized_radius = std::clamp(
+					std::hypot(x, y) / sphere_radius, 0.0, 1.0);
+				point.x = static_cast<float>(std::atan2(y, x));
+				point.y = static_cast<float>(sphere_v_sign
+					* std::acos(normalized_radius));
+			}
+		} else if (metric_u_scale != 1.0) {
+			for (Vec3& point : vertices)
+				point.x = static_cast<float>(point.x / metric_u_scale);
+		}
+		return destination->SetGeometry(std::move(vertices), source.GetFaces(),
+			source.GetUVs(), source.GetNormals());
+	};
 	CMesh3D triangle_mesh;
-	if (!FillContorByTriangles(&triangle_mesh, contour, normal)) {
+	if (!FillContorByTriangles(&triangle_mesh, working_contour, normal)) {
 		quad_mesh->Clear();
 		if (error)
 			*error = "ContourToFill could not triangulate the island.";
 		return false;
 	}
 	if (contour_to_fill_mesh) {
+		// Keep this mesh in the actual metric XY plane supplied to the
+		// quadrangulator. It is an A/B diagnostic, not a production UV mesh.
 		contour_to_fill_mesh->SetGeometry(triangle_mesh.GetVertices(),
 			triangle_mesh.GetFaces(), triangle_mesh.GetUVs(),
 			triangle_mesh.GetNormals());
@@ -3677,18 +4131,160 @@ bool CSurfaceFace::MakeFilledContour(const std::vector<Vec3>& contour,
 		[](const CMesh3D::Face& face) {
 			return !face.deleted && face.corners.size() >= 3;
 		});
+	bool shpagin_inside_contour = shpagin_created;
+	bool shpagin_spacing_collapsed = false;
 	if (shpagin_created) {
-		quad_mesh->SetGeometry(moving_front_mesh.GetVertices(),
-			moving_front_mesh.GetFaces(), moving_front_mesh.GetUVs(),
-			moving_front_mesh.GetNormals());
-		return true;
+		float minimum_x = working_contour.front().x;
+		float maximum_x = working_contour.front().x;
+		float minimum_y = working_contour.front().y;
+		float maximum_y = working_contour.front().y;
+		for (Vec3 point : working_contour) {
+			minimum_x = std::min(minimum_x, point.x);
+			maximum_x = std::max(maximum_x, point.x);
+			minimum_y = std::min(minimum_y, point.y);
+			maximum_y = std::max(maximum_y, point.y);
+		}
+		const double diagonal = std::hypot(
+			static_cast<double>(maximum_x - minimum_x),
+			static_cast<double>(maximum_y - minimum_y));
+		const double tolerance = std::max(1.0e-6, diagonal * 1.0e-5);
+		std::vector<double> boundary_edge_lengths;
+		boundary_edge_lengths.reserve(working_contour.size());
+		for (size_t index = 0; index < working_contour.size(); ++index) {
+			const Vec3 first = working_contour[index];
+			const Vec3 second = working_contour[
+				(index + 1) % working_contour.size()];
+			const double edge_length = std::hypot(
+				static_cast<double>(second.x - first.x),
+				static_cast<double>(second.y - first.y));
+			if (edge_length > tolerance) {
+				boundary_edge_lengths.push_back(edge_length);
+			}
+		}
+		std::sort(boundary_edge_lengths.begin(), boundary_edge_lengths.end());
+		const double representative_boundary_edge = boundary_edge_lengths.empty()
+			? std::numeric_limits<double>::max()
+			: boundary_edge_lengths[boundary_edge_lengths.size() / 2];
+		const auto point_on_source_boundary = [&](Vec3 point) {
+			for (size_t index = 0, previous = working_contour.size() - 1;
+				index < working_contour.size(); previous = index++) {
+				const Vec3 first = working_contour[previous];
+				const Vec3 second = working_contour[index];
+				const double edge_x = static_cast<double>(second.x - first.x);
+				const double edge_y = static_cast<double>(second.y - first.y);
+				const double edge_length = std::hypot(edge_x, edge_y);
+				if (edge_length > 1.0e-12) {
+					const double cross_value = edge_x * (point.y - first.y)
+						- edge_y * (point.x - first.x);
+					const double projection = (point.x - first.x) * edge_x
+						+ (point.y - first.y) * edge_y;
+					if (std::fabs(cross_value) <= tolerance * edge_length
+						&& projection >= -tolerance * edge_length
+						&& projection <= edge_length * edge_length
+							+ tolerance * edge_length) {
+						return true;
+					}
+				}
+			}
+			return false;
+		};
+		const auto point_in_source_contour = [&](Vec3 point) {
+			if (point_on_source_boundary(point))
+				return true;
+			bool inside = false;
+			for (size_t index = 0, previous = working_contour.size() - 1;
+				index < working_contour.size(); previous = index++) {
+				const Vec3 first = working_contour[previous];
+				const Vec3 second = working_contour[index];
+				if (((first.y > point.y) != (second.y > point.y))
+					&& point.x < (second.x - first.x) * (point.y - first.y)
+						/ (second.y - first.y) + first.x) {
+					inside = !inside;
+				}
+			}
+			return inside;
+		};
+		const auto& moving_vertices = moving_front_mesh.GetVertices();
+		double minimum_result_edge = std::numeric_limits<double>::max();
+		for (const CMesh3D::Face& face : moving_front_mesh.GetFaces()) {
+			if (face.deleted || face.corners.size() < 3)
+				continue;
+			Vec3 face_center{};
+			for (const MeshCorner& corner : face.corners) {
+				if (corner.v >= moving_vertices.size()) {
+					shpagin_inside_contour = false;
+					break;
+				}
+				const Vec3 point = moving_vertices[corner.v];
+				if (point.x < minimum_x - tolerance
+					|| point.x > maximum_x + tolerance
+					|| point.y < minimum_y - tolerance
+					|| point.y > maximum_y + tolerance) {
+					shpagin_inside_contour = false;
+					break;
+				}
+				face_center = face_center + point;
+			}
+			if (!shpagin_inside_contour)
+				break;
+			face_center = face_center
+				* (1.0f / static_cast<float>(face.corners.size()));
+			if (!point_in_source_contour(face_center)) {
+				shpagin_inside_contour = false;
+				break;
+			}
+			for (size_t index = 0; index < face.corners.size(); ++index) {
+				const Vec3 first = moving_vertices[face.corners[index].v];
+				const Vec3 second = moving_vertices[face.corners[
+					(index + 1) % face.corners.size()].v];
+				if (!(point_on_source_boundary(first)
+					&& point_on_source_boundary(second))) {
+					minimum_result_edge = std::min(minimum_result_edge,
+						std::hypot(static_cast<double>(second.x - first.x),
+							static_cast<double>(second.y - first.y)));
+				}
+				for (float alpha : {0.25f, 0.5f, 0.75f}) {
+					if (!point_in_source_contour(
+							first + (second - first) * alpha)) {
+						shpagin_inside_contour = false;
+						break;
+					}
+				}
+				if (!shpagin_inside_contour)
+					break;
+			}
+			if (!shpagin_inside_contour)
+				break;
+		}
+		if (shpagin_inside_contour && prefer_safe_quads
+			&& std::isfinite(representative_boundary_edge)
+			&& minimum_result_edge < representative_boundary_edge * 0.20) {
+			shpagin_inside_contour = false;
+			shpagin_spacing_collapsed = true;
+		}
 	}
-	if (quadrangulator_rejection)
-		*quadrangulator_rejection = "ContourQuadrangulator returned an empty mesh.";
+	if (shpagin_created && shpagin_inside_contour) {
+		return copy_working_mesh_to_uv(moving_front_mesh, quad_mesh);
+	}
+	if (quadrangulator_rejection) {
+		*quadrangulator_rejection = shpagin_spacing_collapsed
+			? "ContourQuadrangulator collapsed the internal patch spacing."
+			: shpagin_created
+			? "ContourQuadrangulator escaped the source contour."
+			: "ContourQuadrangulator returned an empty mesh.";
+	}
+	std::vector<CPoint3d> rejected_boundary;
+	rejected_boundary.reserve(working_contour.size());
+	for (Vec3 point : working_contour)
+		rejected_boundary.emplace_back(point.x, point.y, 0.0);
+	m_LastQuadrangulationBoundariesXY.push_back(
+		std::move(rejected_boundary));
 	// Only an actually empty Shpagin result may fall back to ContourToFill.
-	quad_mesh->SetGeometry(triangle_mesh.GetVertices(), triangle_mesh.GetFaces(),
-		triangle_mesh.GetUVs(), triangle_mesh.GetNormals());
-	return true;
+	// Pair its local triangulation back into quads where the source diagonal is
+	// unambiguous. This keeps simple cylindrical strips quad-dominant even when
+	// a runaway advancing-front candidate is rejected by its resource guard.
+	merge_trim_triangle_pairs_to_quads(triangle_mesh);
+	return copy_working_mesh_to_uv(triangle_mesh, quad_mesh);
 }
 
 bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
@@ -3697,6 +4293,7 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 	// The diagnostic tool must never expose islands from an earlier build when
 	// the current attempt fails before producing a new patch set.
 	m_LastIslandBoundariesUV.clear();
+	m_LastQuadrangulationBoundariesXY.clear();
 	m_LastIslandFillError.clear();
 	m_LastQuadrangulationDiagnostic.clear();
 
@@ -3798,6 +4395,155 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 	if (uv_contours.empty()) {
 		m_LastIslandFillError = "No closed UV contours were produced.";
 		return false;
+	}
+
+	// A window cut across a cylinder's parameter seam is represented by one
+	// finite-area loop around U=0 plus the top and bottom circles, which collapse
+	// to zero-area horizontal lines in UV. The generic patch builder then mistakes
+	// the cutout for the outer contour and fills the side that OCCT says is OUT.
+	// Move the working seam opposite that loop, synthesize the complete periodic
+	// rectangle as the outer contour, and retain the classified OUT loop as a hole.
+	// This is deliberately limited to one enclosed seam-crossing cut; cylinders
+	// with ordinary outer contours continue through the established path below.
+	try {
+		const TopoDS_Face face = TopoDS::Face(m_Face);
+		BRepAdaptor_Surface adaptor(face);
+		if (adaptor.GetType() == GeomAbs_Cylinder
+			&& adaptor.IsUPeriodic()) {
+			double face_u_min = 0.0;
+			double face_u_max = 0.0;
+			double face_v_min = 0.0;
+			double face_v_max = 0.0;
+			BRepTools::UVBounds(face, face_u_min, face_u_max,
+				face_v_min, face_v_max);
+			const double period = adaptor.UPeriod();
+			const double coordinate_scale = std::max({
+				std::fabs(face_u_max - face_u_min),
+				std::fabs(face_v_max - face_v_min), 1.0});
+			const double epsilon = coordinate_scale * 1.0e-8;
+			const double retrace_epsilon = coordinate_scale * 1.0e-5;
+			if (period > epsilon
+				&& face_u_max - face_u_min >= period - epsilon * 10.0) {
+				const auto same_uv = [retrace_epsilon](SurfacePatchPoint first,
+					SurfacePatchPoint second) {
+					return std::hypot(first.u - second.u,
+						first.v - second.v) <= retrace_epsilon;
+				};
+				const auto remove_retraced_spikes = [&](const auto& source) {
+					std::vector<SurfacePatchPoint> clean;
+					clean.reserve(source.size());
+					for (SurfacePatchPoint point : source) {
+						if (!clean.empty() && same_uv(clean.back(), point))
+							continue;
+						if (clean.size() >= 2
+							&& same_uv(clean[clean.size() - 2], point)) {
+							clean.pop_back();
+							continue;
+						}
+						clean.push_back(point);
+					}
+					return clean;
+				};
+				const auto signed_area = [](const auto& contour) {
+					double area = 0.0;
+					for (size_t index = 0; index < contour.size(); ++index) {
+						const auto& first = contour[index];
+						const auto& second = contour[(index + 1) % contour.size()];
+						area += first.u * second.v - second.u * first.v;
+					}
+					return area * 0.5;
+				};
+
+				std::vector<std::vector<SurfacePatchPoint>> finite_loops;
+				for (const auto& source : uv_contours) {
+					auto clean = remove_retraced_spikes(source);
+					if (clean.size() >= 3
+						&& std::fabs(signed_area(clean)) > epsilon * epsilon) {
+						finite_loops.push_back(std::move(clean));
+					}
+				}
+				if (finite_loops.size() == 1) {
+					auto hole = std::move(finite_loops.front());
+					SurfacePatchPoint center{};
+					for (SurfacePatchPoint point : hole) {
+						center.u += point.u;
+						center.v += point.v;
+					}
+					center.u /= static_cast<double>(hole.size());
+					center.v /= static_cast<double>(hole.size());
+					for (SurfacePatchPoint& point : hole)
+						point.u += std::round((center.u - point.u) / period) * period;
+					double hole_v_min = std::numeric_limits<double>::max();
+					double hole_v_max = std::numeric_limits<double>::lowest();
+					for (SurfacePatchPoint point : hole) {
+						hole_v_min = std::min(hole_v_min, point.v);
+						hole_v_max = std::max(hole_v_max, point.v);
+					}
+					double classifier_u = face_u_min
+						+ std::fmod(center.u - face_u_min, period);
+					if (classifier_u < face_u_min)
+						classifier_u += period;
+					BRepClass_FaceClassifier classifier(face,
+						gp_Pnt2d(classifier_u, center.v), EPS2D,
+						Standard_False);
+					const bool enclosed_in_v = hole_v_min > face_v_min + epsilon
+						&& hole_v_max < face_v_max - epsilon;
+					if (enclosed_in_v && classifier.State() == TopAbs_OUT) {
+						const double work_u_min = center.u - period * 0.5;
+						const double work_u_max = center.u + period * 0.5;
+						std::vector<double> metric_edge_lengths;
+						metric_edge_lengths.reserve(hole.size());
+						const double radius = adaptor.Cylinder().Radius();
+						for (size_t index = 0; index < hole.size(); ++index) {
+							const auto& first = hole[index];
+							const auto& second = hole[(index + 1) % hole.size()];
+							const double length = std::hypot(
+								(second.u - first.u) * radius,
+								second.v - first.v);
+							if (length > epsilon && std::isfinite(length))
+								metric_edge_lengths.push_back(length);
+						}
+						std::sort(metric_edge_lengths.begin(),
+							metric_edge_lengths.end());
+						const double boundary_step = metric_edge_lengths.empty()
+							? std::max(radius * period, face_v_max - face_v_min)
+							: metric_edge_lengths[metric_edge_lengths.size() / 2];
+						const int u_segments = std::max(2,
+							static_cast<int>(std::ceil(radius * period / boundary_step)));
+						const int v_segments = std::max(2,
+							static_cast<int>(std::ceil(
+								(face_v_max - face_v_min) / boundary_step)));
+						std::vector<SurfacePatchPoint> outer;
+						outer.reserve(static_cast<size_t>(
+							u_segments * 2 + v_segments * 2));
+						for (int index = 0; index < u_segments; ++index) {
+							const double alpha = static_cast<double>(index) / u_segments;
+							outer.push_back({work_u_min
+								+ (work_u_max - work_u_min) * alpha, face_v_min});
+						}
+						for (int index = 0; index < v_segments; ++index) {
+							const double alpha = static_cast<double>(index) / v_segments;
+							outer.push_back({work_u_max, face_v_min
+								+ (face_v_max - face_v_min) * alpha});
+						}
+						for (int index = u_segments; index > 0; --index) {
+							const double alpha = static_cast<double>(index) / u_segments;
+							outer.push_back({work_u_min
+								+ (work_u_max - work_u_min) * alpha, face_v_max});
+						}
+						for (int index = v_segments; index > 0; --index) {
+							const double alpha = static_cast<double>(index) / v_segments;
+							outer.push_back({work_u_min, face_v_min
+								+ (face_v_max - face_v_min) * alpha});
+						}
+						uv_contours.clear();
+						uv_contours.push_back(std::move(outer));
+						uv_contours.push_back(std::move(hole));
+					}
+				}
+			}
+		}
+	} catch (const Standard_Failure&) {
 	}
 	size_t topological_wire_count = 0;
 	for (TopExp_Explorer wire(m_Face, TopAbs_WIRE); wire.More(); wire.Next())
@@ -4007,6 +4753,8 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 			struct SlxHoleCollar {
 				size_t contour_index = 0;
 				std::vector<std::vector<SurfacePatchPoint>> rings;
+				bool snap_cut_to_background_cells = false;
+				bool cut_matches_requested_outer = true;
 				bool used = false;
 			};
 			std::vector<SlxHoleCollar> slx_collars;
@@ -4210,8 +4958,19 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 				mean_radius /= static_cast<double>(hole.size());
 				if (mean_radius <= 1.0e-12)
 					continue;
+				const bool small_hole = mean_radius <= background_step;
+				// The collar is a separate mesh. Its outer contour cuts the SLX
+				// background, then the collar is appended and welded to that cut.
+				// A hole whose radius fits in one background edge needs a complete
+				// radial mesh step.  Classifying it by 0.40 * background_step caused
+				// the visible 0.20 -> 0.25 discontinuity: the radius cap suddenly
+				// reduced the collar to roughly one third of the surrounding edges.
+				const double radius_width_limit = small_hole
+					? std::numeric_limits<double>::max() : mean_radius * 1.25;
 				const double collar_width = std::min({
-					background_step * 0.75, mean_radius * 1.25, clearance * 0.30});
+					background_step * (small_hole ? 1.0 : 0.75),
+					radius_width_limit,
+					clearance * (small_hole ? 0.45 : 0.30)});
 				if (!std::isfinite(collar_width)
 					|| collar_width < hole_step * 0.45) {
 					continue;
@@ -4219,6 +4978,8 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 				const int ring_count = collar_width >= hole_step * 1.1 ? 2 : 1;
 				SlxHoleCollar collar;
 				collar.contour_index = contour_index;
+				collar.snap_cut_to_background_cells = small_hole;
+				collar.cut_matches_requested_outer = !small_hole;
 				collar.rings.push_back(hole);
 				bool valid = true;
 				for (int ring = 1; ring <= ring_count && valid; ++ring) {
@@ -4263,20 +5024,50 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 					if (hole.size() >= 16 && maximum_radius > 1.0e-12
 						&& minimum_radius / maximum_radius >= 0.95) {
 						const auto& dense_outer = collar.rings.back();
-						int coarse_count = static_cast<int>((dense_outer.size() + 1) / 2);
+						double outer_perimeter = 0.0;
+						for (size_t point = 0; point < dense_outer.size(); ++point) {
+							const SurfacePatchPoint& first = dense_outer[point];
+							const SurfacePatchPoint& second = dense_outer[
+								(point + 1) % dense_outer.size()];
+							outer_perimeter += std::hypot(
+								second.u - first.u, second.v - first.v);
+						}
+						// Match the outer collar edge length to the local SLX edge
+						// instead of inheriting the dense sampling of the exact hole.
+						int coarse_count = static_cast<int>(std::lround(
+							outer_perimeter / background_step));
 						coarse_count = std::max(coarse_count, 8);
-						if ((coarse_count & 1) != 0)
-							++coarse_count;
 						coarse_count = std::min(
 							coarse_count, static_cast<int>(dense_outer.size()));
 						if (coarse_count < static_cast<int>(dense_outer.size())) {
 							std::vector<SurfacePatchPoint> coarse_outer;
 							coarse_outer.reserve(static_cast<size_t>(coarse_count));
+							double traversed = 0.0;
+							size_t edge = 0;
 							for (int point = 0; point < coarse_count; ++point) {
-								const size_t source = static_cast<size_t>(
-									static_cast<double>(point) * dense_outer.size()
-									/ coarse_count);
-								coarse_outer.push_back(dense_outer[source]);
+								const double target = outer_perimeter * point / coarse_count;
+								while (edge + 1 < dense_outer.size()) {
+									const SurfacePatchPoint& first = dense_outer[edge];
+									const SurfacePatchPoint& second = dense_outer[
+										(edge + 1) % dense_outer.size()];
+									const double edge_length = std::hypot(
+										second.u - first.u, second.v - first.v);
+									if (traversed + edge_length >= target)
+										break;
+									traversed += edge_length;
+									++edge;
+								}
+								const SurfacePatchPoint& first = dense_outer[edge];
+								const SurfacePatchPoint& second = dense_outer[
+									(edge + 1) % dense_outer.size()];
+								const double edge_length = std::hypot(
+									second.u - first.u, second.v - first.v);
+								const double alpha = edge_length > 1.0e-12
+									? std::clamp((target - traversed) / edge_length,
+										0.0, 1.0) : 0.0;
+								coarse_outer.push_back({
+									first.u + (second.u - first.u) * alpha,
+									first.v + (second.v - first.v) * alpha, true});
 							}
 							collar.rings.back() = std::move(coarse_outer);
 						}
@@ -4308,12 +5099,68 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 				}
 				const auto& trim_contour = collar
 					? collar->rings.back() : uv_contours[contour_index];
-				CPolyline hole;
-				for (SurfacePatchPoint point : trim_contour)
-					hole.AddPoint(CPoint3d(point.u, point.v, 0.0));
-				hole.SetClosed(true);
+				if (collar && collar->snap_cut_to_background_cells) {
+					Face2D removal_polygon;
+					for (SurfacePatchPoint point : trim_contour)
+						removal_polygon.verts.emplace_back(point.u, point.v);
+					SurfacePatchPoint center{};
+					for (SurfacePatchPoint point : collar->rings.front()) {
+						center.u += point.u;
+						center.v += point.v;
+					}
+					center.u /= static_cast<double>(collar->rings.front().size());
+					center.v /= static_cast<double>(collar->rings.front().size());
+					for (CMesh3D::Face& face : slx_mesh.GetFaces()) {
+						if (face.deleted || face.corners.size() < 3)
+							continue;
+						Face2D cell;
+						cVec2 cell_center{};
+						bool valid = true;
+						for (const MeshCorner& corner : face.corners) {
+							if (corner.v >= slx_mesh.GetVertices().size()) {
+								valid = false;
+								break;
+							}
+							const Vec3 vertex = slx_mesh.GetVertices()[corner.v];
+							cell.verts.emplace_back(vertex.x, vertex.y);
+							cell_center.x += vertex.x;
+							cell_center.y += vertex.y;
+						}
+						if (!valid)
+							continue;
+						cell_center.x /= static_cast<double>(cell.verts.size());
+						cell_center.y /= static_cast<double>(cell.verts.size());
+						bool intersects_collar = ClassifyPointInFace2(cell,
+								cVec2(center.u, center.v), EPS2D) != PFP_OUTSIDE
+							|| ClassifyPointInFace2(removal_polygon,
+								cell_center, EPS2D) != PFP_OUTSIDE;
+						for (const cVec2& vertex : cell.verts) {
+							intersects_collar = intersects_collar
+								|| ClassifyPointInFace2(removal_polygon,
+									vertex, EPS2D) != PFP_OUTSIDE;
+						}
+						for (SurfacePatchPoint point : trim_contour) {
+							intersects_collar = intersects_collar
+								|| ClassifyPointInFace2(cell,
+									cVec2(point.u, point.v), EPS2D) != PFP_OUTSIDE;
+						}
+						if (intersects_collar) {
+							face.deleted = true;
+						}
+					}
+				} else {
+					CPolyline hole;
+					for (SurfacePatchPoint point : trim_contour)
+						hole.AddPoint(CPoint3d(point.u, point.v, 0.0));
+					hole.SetClosed(true);
 					slx_mesh.TrimByPline(&hole, keep_point);
+				}
 			}
+			const bool trim_created_triangles = std::any_of(
+				slx_mesh.GetFaces().begin(), slx_mesh.GetFaces().end(),
+				[](const CMesh3D::Face& face) {
+					return !face.deleted && face.corners.size() == 3;
+				});
 			{
 				const std::filesystem::path diagnostic_dir =
 					"C:\\temp\\Dom3D_Quadrangulation";
@@ -4473,9 +5320,13 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 							best_loop = loop_index;
 						}
 					}
+					const double loop_match_distance =
+						collar.cut_matches_requested_outer
+							? background_step * 0.8 : background_step * 3.0;
 					if (best_loop == boundary_loops.size()
-						|| best_loop_score > background_step * background_step * 0.64
-						|| best_loop_max_distance > background_step * 1.75) {
+						|| best_loop_score
+							> loop_match_distance * loop_match_distance
+						|| best_loop_max_distance > loop_match_distance) {
 						collar_merge_ok = false;
 						break;
 					}
@@ -4492,9 +5343,14 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 
 					// The requested outer ring is represented by the cutter boundary.
 					// Insert only exact and optional intermediate rings here.
-					std::vector<std::vector<size_t>> ring_indices(
-						collar.rings.size() - 1);
-					for (size_t ring = 0; ring + 1 < collar.rings.size(); ++ring) {
+					// TrimByPline already owns the requested outer ring when the
+					// direct cut is clean. The complete-cell fallback has a different
+					// boundary, so include the outer collar ring and add one more
+					// welded transition from it to the retained background cells.
+					const size_t mesh_ring_count = collar.cut_matches_requested_outer
+						? collar.rings.size() - 1 : collar.rings.size();
+					std::vector<std::vector<size_t>> ring_indices(mesh_ring_count);
+					for (size_t ring = 0; ring < mesh_ring_count; ++ring) {
 						ring_indices[ring].reserve(ring_size);
 						for (SurfacePatchPoint point : collar.rings[ring]) {
 							const size_t index = merged_vertices.size();
@@ -4505,13 +5361,72 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 					}
 					for (size_t ring = 0;
 						ring + 1 < ring_indices.size(); ++ring) {
-						for (size_t i = 0; i < ring_size; ++i) {
-							const size_t next = (i + 1) % ring_size;
-							append_face({ring_indices[ring][i],
-								ring_indices[ring + 1][i],
-								ring_indices[ring + 1][next],
-								ring_indices[ring][next]});
+						const std::vector<size_t>& inner_ring = ring_indices[ring];
+						const std::vector<size_t>& outer_ring = ring_indices[ring + 1];
+						if (inner_ring.size() == outer_ring.size()) {
+							for (size_t i = 0; i < inner_ring.size(); ++i) {
+								const size_t next = (i + 1) % inner_ring.size();
+								append_face({inner_ring[i], outer_ring[i],
+									outer_ring[next], inner_ring[next]});
+							}
+							continue;
 						}
+						// A large node-count reduction (for example 20 -> 8) cannot
+						// be tiled safely by collapsing pairs into kite quads: those
+						// quads overlap. Walk both normalized perimeters instead and
+						// emit a quad only at coincident advances, otherwise one short
+						// local triangle. This is the explicit collar topology used by
+						// the old eight-sided transition.
+						const auto cumulative_parameters = [&](const std::vector<size_t>& indices) {
+							std::vector<double> parameters(indices.size() + 1, 0.0);
+							for (size_t i = 0; i < indices.size(); ++i) {
+								const Vec3 delta = merged_vertices[
+									indices[(i + 1) % indices.size()]]
+									- merged_vertices[indices[i]];
+								parameters[i + 1] = parameters[i] + std::sqrt(
+									static_cast<double>(dot(delta, delta)));
+							}
+							if (parameters.back() > 1.0e-12) {
+								for (double& parameter : parameters)
+									parameter /= parameters.back();
+							}
+							return parameters;
+						};
+						const std::vector<double> inner_walk =
+							cumulative_parameters(inner_ring);
+						const std::vector<double> outer_walk =
+							cumulative_parameters(outer_ring);
+						size_t inner_walk_index = 0;
+						size_t outer_walk_index = 0;
+						while (inner_walk_index < inner_ring.size()
+							|| outer_walk_index < outer_ring.size()) {
+							const size_t inner_current = inner_ring[
+								inner_walk_index % inner_ring.size()];
+							const size_t outer_current = outer_ring[
+								outer_walk_index % outer_ring.size()];
+							const double next_inner = inner_walk_index < inner_ring.size()
+								? inner_walk[inner_walk_index + 1]
+								: std::numeric_limits<double>::infinity();
+							const double next_outer = outer_walk_index < outer_ring.size()
+								? outer_walk[outer_walk_index + 1]
+								: std::numeric_limits<double>::infinity();
+							if (std::fabs(next_inner - next_outer) <= 1.0e-8) {
+								append_face({inner_current, outer_current,
+									outer_ring[(outer_walk_index + 1) % outer_ring.size()],
+									inner_ring[(inner_walk_index + 1) % inner_ring.size()]});
+								++inner_walk_index;
+								++outer_walk_index;
+							} else if (next_inner < next_outer) {
+								append_face({inner_current, outer_current,
+									inner_ring[(inner_walk_index + 1) % inner_ring.size()]});
+								++inner_walk_index;
+							} else {
+								append_face({inner_current, outer_current,
+									outer_ring[(outer_walk_index + 1) % outer_ring.size()]});
+								++outer_walk_index;
+							}
+						}
+						continue;
 					}
 
 					std::vector<size_t>& inner_indices = ring_indices.back();
@@ -4535,14 +5450,13 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 					std::rotate(outer_indices.begin(),
 						outer_indices.begin() + outer_start, outer_indices.end());
 					const auto perimeter_parameters = [&](const std::vector<size_t>& indices) {
-						std::vector<double> parameters(indices.size(), 0.0);
+						std::vector<double> parameters(indices.size() + 1, 0.0);
 						double perimeter = 0.0;
 						for (size_t i = 0; i < indices.size(); ++i) {
 							const Vec3 delta = merged_vertices[indices[(i + 1) % indices.size()]]
 								- merged_vertices[indices[i]];
 							perimeter += std::sqrt(static_cast<double>(dot(delta, delta)));
-							if (i + 1 < indices.size())
-								parameters[i + 1] = perimeter;
+							parameters[i + 1] = perimeter;
 						}
 						if (perimeter > 1.0e-12) {
 							for (double& parameter : parameters)
@@ -4554,29 +5468,35 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 						perimeter_parameters(inner_indices);
 					const std::vector<double> outer_parameters =
 						perimeter_parameters(outer_indices);
+					const size_t inner_count = inner_indices.size();
+					const size_t outer_count = outer_indices.size();
+					// Counts are intentionally unrestricted (for example 9 against 14).
+					// Walk both normalized perimeters and keep every surplus advance as
+					// one short local triangle instead of forcing an even node count.
 					size_t inner = 0;
 					size_t outer = 0;
-					while (inner < inner_indices.size()
-						|| outer < outer_indices.size()) {
-						const double next_inner_parameter = inner + 1 >= inner_indices.size()
-							? 1.0 : inner_parameters[inner + 1];
-						const double next_outer_parameter = outer + 1 >= outer_indices.size()
-							? 1.0 : outer_parameters[outer + 1];
-						const size_t inner_current = inner_indices[inner % inner_indices.size()];
-						const size_t outer_current = outer_indices[outer % outer_indices.size()];
-						if (std::fabs(next_inner_parameter - next_outer_parameter) <= 1.0e-5) {
+					while (inner < inner_count || outer < outer_count) {
+						const size_t inner_current = inner_indices[inner % inner_count];
+						const size_t outer_current = outer_indices[outer % outer_count];
+						const double next_inner = inner < inner_count
+							? inner_parameters[inner + 1]
+							: std::numeric_limits<double>::infinity();
+						const double next_outer = outer < outer_count
+							? outer_parameters[outer + 1]
+							: std::numeric_limits<double>::infinity();
+						if (std::fabs(next_inner - next_outer) <= 1.0e-8) {
 							append_face({inner_current, outer_current,
-								outer_indices[(outer + 1) % outer_indices.size()],
-								inner_indices[(inner + 1) % inner_indices.size()]});
+								outer_indices[(outer + 1) % outer_count],
+								inner_indices[(inner + 1) % inner_count]});
 							++inner;
 							++outer;
-						} else if (next_inner_parameter < next_outer_parameter) {
+						} else if (next_inner < next_outer) {
 							append_face({inner_current, outer_current,
-								inner_indices[(inner + 1) % inner_indices.size()]});
+								inner_indices[(inner + 1) % inner_count]});
 							++inner;
 						} else {
 							append_face({inner_current, outer_current,
-								outer_indices[(outer + 1) % outer_indices.size()]});
+								outer_indices[(outer + 1) % outer_count]});
 							++outer;
 						}
 					}
@@ -4587,7 +5507,11 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 				}
 				return collar_merge_ok;
 			};
-			bool collar_merge_ok = stitch_slx_collars(slx_mesh);
+			// The outer collar contour owns the cut. Add the prebuilt collar to the
+			// retained SLX mesh and weld on that exact boundary; triangle pairs made
+			// by TrimByPline are restored to quads after the merge below.
+			bool collar_merge_ok = !trim_created_triangles
+				&& stitch_slx_collars(slx_mesh);
 			if (!collar_merge_ok) {
 				slx_mesh.Clear();
 				if (MakeFilledContour(outer_contour, {0.0f, 0.0f, 1.0f},
@@ -4628,10 +5552,11 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 								continue;
 							cell_center.x /= static_cast<double>(cell.verts.size());
 							cell_center.y /= static_cast<double>(cell.verts.size());
-							if (ClassifyPointInFace2(cell,
+							const bool remove_cell = ClassifyPointInFace2(cell,
 									cVec2(center.u, center.v), EPS2D) != PFP_OUTSIDE
 								|| ClassifyPointInFace2(removal_polygon,
-									cell_center, EPS2D) != PFP_OUTSIDE) {
+									cell_center, EPS2D) != PFP_OUTSIDE;
+							if (remove_cell) {
 								face.deleted = true;
 							}
 						}
@@ -4712,6 +5637,13 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 				}
 			}
 
+			// Trimming can leave a disconnected remnant on the rejected side of a
+			// periodic cut. Keep only the component containing the previously
+			// classified surface point before pairing the split cells.
+			slx_mesh.KeepConnectedComponentAt(keep_point);
+			// Restore source cells which TrimByPline split into adjacent triangle
+			// pairs before handling the rarer N-gon remainder.
+			merge_trim_triangle_pairs_to_quads(slx_mesh);
 			// A dense circular contour can cut several times through one coarse
 			// background cell, leaving a simple N-gon. Ear-clip only those N-gons;
 			// keep every trim vertex and leave triangles/quads untouched.
@@ -4736,6 +5668,16 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 					if (pMesh3D->SetGeometry(slx_mesh.GetVertices(),
 							slx_mesh.GetFaces())
 						&& pMesh3D->RestoreTo3DFromUVSurface(this)) {
+						// The two sides of a periodic UV development represent the same
+						// 3D seam. Weld after restoration so the SLX result remains one
+						// connected surface mesh rather than two coincident components.
+						std::unique_ptr<CMesh3D> welded = CMesh3D::CreateWelded(
+							std::vector<const CMesh3D*>{pMesh3D});
+						if (welded) {
+							pMesh3D->SetGeometry(welded->GetVertices(),
+								welded->GetFaces(), welded->GetUVs(),
+								welded->GetNormals());
+						}
 						m_LastIslandBoundariesUV.clear();
 						for (const auto& contour : uv_contours) {
 							std::vector<CPoint3d> boundary;
@@ -5044,32 +5986,72 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 
 	std::vector<Vec3> merged_vertices;
 	std::vector<CMesh3D::Face> merged_faces;
+	// Every island is quadrangulated independently, but the result belongs to
+	// one OCCT face.  Reuse UV vertices on shared patch/collar boundaries while
+	// assembling the result; merely appending each patch with an offset leaves
+	// coincident vertices disconnected and turns every patch into a mesh island.
+	double uv_coordinate_scale = 1.0;
+	for (const auto& contour : uv_contours) {
+		for (SurfacePatchPoint point : contour) {
+			uv_coordinate_scale = std::max(uv_coordinate_scale,
+				std::max(std::fabs(point.u), std::fabs(point.v)));
+		}
+	}
+	const double patch_weld_tolerance = std::max(1.0e-7,
+		uv_coordinate_scale * std::numeric_limits<float>::epsilon() * 8.0);
+	std::multimap<float, size_t> merged_vertices_by_u;
+	const auto welded_patch_vertex = [&](Vec3 requested) {
+		const float min_u = static_cast<float>(
+			static_cast<double>(requested.x) - patch_weld_tolerance);
+		const float max_u = static_cast<float>(
+			static_cast<double>(requested.x) + patch_weld_tolerance);
+		for (auto candidate = merged_vertices_by_u.lower_bound(min_u);
+			candidate != merged_vertices_by_u.end()
+				&& candidate->first <= max_u; ++candidate) {
+			const Vec3 delta = merged_vertices[candidate->second] - requested;
+			if (static_cast<double>(dot(delta, delta))
+				<= patch_weld_tolerance * patch_weld_tolerance) {
+				return candidate->second;
+			}
+		}
+		const size_t index = merged_vertices.size();
+		merged_vertices.push_back(requested);
+		merged_vertices_by_u.emplace(requested.x, index);
+		return index;
+	};
 	for (const HoleCollar& collar : hole_collars) {
 		if (collar.rings.size() < 2)
 			continue;
-		const size_t collar_offset = merged_vertices.size();
 		const size_t ring_size = collar.rings.front().size();
+		std::vector<std::vector<size_t>> ring_indices;
+		ring_indices.reserve(collar.rings.size());
 		for (const auto& ring : collar.rings) {
+			std::vector<size_t> indices;
+			indices.reserve(ring.size());
 			for (SurfacePatchPoint point : ring) {
-				merged_vertices.push_back({static_cast<float>(point.u),
-					static_cast<float>(point.v), 0.0f});
+				indices.push_back(welded_patch_vertex({
+					static_cast<float>(point.u),
+					static_cast<float>(point.v), 0.0f}));
 			}
+			ring_indices.push_back(std::move(indices));
 		}
 		for (size_t ring = 0; ring + 1 < collar.rings.size(); ++ring) {
 			for (size_t i = 0; i < ring_size; ++i) {
 				const size_t next = (i + 1) % ring_size;
-				const size_t inner = collar_offset + ring * ring_size;
-				const size_t outer_ring = inner + ring_size;
 				CMesh3D::Face face;
 				face.corners = {
-					{inner + i, inner + i, inner + i},
-					{outer_ring + i, outer_ring + i, outer_ring + i},
-					{outer_ring + next, outer_ring + next, outer_ring + next},
-					{inner + next, inner + next, inner + next}};
+					{ring_indices[ring][i], 0, 0},
+					{ring_indices[ring + 1][i], 0, 0},
+					{ring_indices[ring + 1][next], 0, 0},
+					{ring_indices[ring][next], 0, 0}};
 				merged_faces.push_back(std::move(face));
 			}
 		}
 	}
+	const bool guard_cylinder_patch_spacing = patches.size() > 1
+		&& !use_mesh_quadro_hole_slx
+		&& BRepAdaptor_Surface(TopoDS::Face(m_Face)).GetType()
+			== GeomAbs_Cylinder;
 	for (size_t patch_index = 0; patch_index < patches.size(); ++patch_index) {
 		const std::vector<SurfacePatchPoint>& patch = patches[patch_index];
 		std::vector<Vec3> contour;
@@ -5084,7 +6066,7 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 		std::string fill_error;
 		std::string quadrangulator_rejection;
 		if (!MakeFilledContour(contour, {0.0f, 0.0f, 1.0f}, &patch_mesh,
-			Deflection >= 1.5f, &fill_error, &contour_to_fill_mesh,
+			guard_cylinder_patch_spacing, &fill_error, &contour_to_fill_mesh,
 			&quadrangulator_rejection)) {
 			m_LastIslandFillError = "Surface " + std::to_string(m_ID)
 				+ ", island " + std::to_string(patch_index + 1) + "/"
@@ -5095,6 +6077,14 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 				+ "\n").c_str());
 #endif
 			return false;
+		}
+		if (guard_cylinder_patch_spacing
+			&& quadrangulator_rejection
+				== "ContourQuadrangulator collapsed the internal patch spacing.") {
+			// The independent island fronts have bunched into visually doubled
+			// rows. Rebuild this cylinder through the single-background SLX path;
+			// all other faces and all well-spaced cylinder patches stay unchanged.
+			return BuildFilledMeshWhithHoles(Deflection, true);
 		}
 
 		// Preserve the exact input whenever the ported ContourQuadrangulator is
@@ -5160,18 +6150,39 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 			}
 		}
 
-		const size_t vertex_offset = merged_vertices.size();
-		merged_vertices.insert(merged_vertices.end(),
-			patch_mesh.GetVertices().begin(), patch_mesh.GetVertices().end());
+		std::vector<size_t> patch_vertex_indices(
+			patch_mesh.GetVertices().size());
+		for (size_t index = 0; index < patch_mesh.GetVertices().size(); ++index) {
+			patch_vertex_indices[index] = welded_patch_vertex(
+				patch_mesh.GetVertices()[index]);
+		}
 		for (const CMesh3D::Face& source_face : patch_mesh.GetFaces()) {
 			if (source_face.deleted || source_face.corners.size() < 3)
 				continue;
 			CMesh3D::Face face = source_face;
 			for (MeshCorner& corner : face.corners) {
-				corner.v += vertex_offset;
+				if (corner.v >= patch_vertex_indices.size()) {
+					face.corners.clear();
+					break;
+				}
+				corner.v = patch_vertex_indices[corner.v];
 				corner.n = corner.v;
 				corner.uv = corner.v;
 			}
+			if (face.corners.size() < 3)
+				continue;
+			// A tolerance weld can collapse a very short boundary edge.  Remove
+			// duplicate adjacent corners instead of keeping a zero-area polygon.
+			face.corners.erase(std::unique(face.corners.begin(), face.corners.end(),
+				[](const MeshCorner& first, const MeshCorner& second) {
+					return first.v == second.v;
+				}), face.corners.end());
+			if (face.corners.size() > 1
+				&& face.corners.front().v == face.corners.back().v) {
+				face.corners.pop_back();
+			}
+			if (face.corners.size() < 3)
+				continue;
 			merged_faces.push_back(std::move(face));
 		}
 	}
@@ -5232,6 +6243,24 @@ bool CSurfaceFace::CreateLastIslandBoundaryPolylines(
 			}
 			line->AddPoint(CPoint3d(point.x, point.y, point.z));
 		}
+		line->SetClosed(true);
+		boundaries.push_back(std::move(line));
+	}
+	return !boundaries.empty();
+}
+
+bool CSurfaceFace::CreateLastQuadrangulationBoundaryPolylines(
+	std::vector<std::unique_ptr<CPolyline>>& boundaries) const
+{
+	boundaries.clear();
+	boundaries.reserve(m_LastQuadrangulationBoundariesXY.size());
+	for (const std::vector<CPoint3d>& xy_boundary
+		: m_LastQuadrangulationBoundariesXY) {
+		if (xy_boundary.size() < 3)
+			continue;
+		auto line = std::make_unique<CPolyline>();
+		for (const CPoint3d& point : xy_boundary)
+			line->AddPoint(point);
 		line->SetClosed(true);
 		boundaries.push_back(std::move(line));
 	}

@@ -192,7 +192,8 @@ enum class MeshDisplayMode {
     SurfaceGray,
     SurfaceColored,
     Wire,
-    SurfaceMaterial
+    SurfaceMaterial,
+    SurfaceMaterialWithMesh
 };
 
 enum class OrbitMode {

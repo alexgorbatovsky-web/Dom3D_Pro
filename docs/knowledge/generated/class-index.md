@@ -1,6 +1,6 @@
 # Class and struct index
 
-Generated from project headers: 2026-08-27.
+Generated from project headers: 2026-08-30.
 
 > This is a syntax-oriented index, not a complete C++ parser.
 > Nested or conditionally compiled types can require manual review.
@@ -179,7 +179,7 @@ Generated from project headers: 2026-08-27.
 | `CellCutHit` | `struct` | - | [src/Line2D.h:46](../../../src/Line2D.h#46) |
 | `CellCutInfo` | `struct` | - | [src/Line2D.h:55](../../../src/Line2D.h#55) |
 | `CFacadeFurniture` | `class` | `CAssembled` | [src/CFacadeFurniture.h:34](../../../src/CFacadeFurniture.h#34) |
-| `CFace3Pr` | `struct` | - | [src/Point3d.h:458](../../../src/Point3d.h#458) |
+| `CFace3Pr` | `struct` | - | [src/Point3d.h:460](../../../src/Point3d.h#460) |
 | `CFillet` | `class` | - | [src/Fillet.h:20](../../../src/Fillet.h#20) |
 | `CFurnitureDrawer` | `class` | - | [src/CFurnitureDrawer.h:56](../../../src/CFurnitureDrawer.h#56) |
 | `CGroup` | `class` | `CAlfaObject` | [src/CGroup.h:7](../../../src/CGroup.h#7) |
@@ -202,14 +202,14 @@ Generated from project headers: 2026-08-27.
 | `COutLine` | `class` | - | [src/OutLine.h:12](../../../src/OutLine.h#12) |
 | `CPart` | `class` | `CGroup` | [src/CPart.h:10](../../../src/CPart.h#10) |
 | `CPlane` | `class` | - | [src/Plane.h:10](../../../src/Plane.h#10) |
-| `CPoint14d` | `class` | - | [src/Point3d.h:416](../../../src/Point3d.h#416) |
-| `CPoint3d` | `class` | - | [src/Point3d.h:27](../../../src/Point3d.h#27) |
-| `CPoint4d` | `class` | - | [src/Point3d.h:328](../../../src/Point3d.h#328) |
+| `CPoint14d` | `class` | - | [src/Point3d.h:418](../../../src/Point3d.h#418) |
+| `CPoint3d` | `class` | - | [src/Point3d.h:28](../../../src/Point3d.h#28) |
+| `CPoint4d` | `class` | - | [src/Point3d.h:330](../../../src/Point3d.h#330) |
 | `CPoint5d` | `struct` | - | [src/Point5d.h:13](../../../src/Point5d.h#13) |
-| `CPoint6d` | `struct` | - | [src/Point3d.h:21](../../../src/Point3d.h#21) |
-| `CPoint7d` | `class` | - | [src/Point3d.h:372](../../../src/Point3d.h#372) |
-| `CPoint8d` | `class` | - | [src/Point3d.h:241](../../../src/Point3d.h#241) |
-| `CPoint8f` | `class` | - | [src/Point3d.h:285](../../../src/Point3d.h#285) |
+| `CPoint6d` | `struct` | - | [src/Point3d.h:22](../../../src/Point3d.h#22) |
+| `CPoint7d` | `class` | - | [src/Point3d.h:374](../../../src/Point3d.h#374) |
+| `CPoint8d` | `class` | - | [src/Point3d.h:243](../../../src/Point3d.h#243) |
+| `CPoint8f` | `class` | - | [src/Point3d.h:287](../../../src/Point3d.h#287) |
 | `CPolyline` | `class` | `CAlfaObject` | [src/CPolyline.h:37](../../../src/CPolyline.h#37) |
 | `CPolylineFilletGeometry` | `struct` | - | [src/CPolyline.h:29](../../../src/CPolyline.h#29) |
 | `CReferenceImage` | `class` | `CMesh3D` | [src/ReferenceImage.h:10](../../../src/ReferenceImage.h#10) |
@@ -224,9 +224,9 @@ Generated from project headers: 2026-08-27.
 | `CurvePoint` | `struct` | - | [src/Common.h:55](../../../src/Common.h#55) |
 | `cVec2` | `struct` | - | [src/Line2D.h:7](../../../src/Line2D.h#7) |
 | `CVector` | `class` | - | [src/Vector.h:11](../../../src/Vector.h#11) |
-| `CVector3f` | `struct` | - | [src/Point3d.h:527](../../../src/Point3d.h#527) |
+| `CVector3f` | `struct` | - | [src/Point3d.h:529](../../../src/Point3d.h#529) |
 | `CVertex` | `class` | - | [src/Triangle.h:46](../../../src/Triangle.h#46) |
-| `CVertex5f` | `struct` | - | [src/Point3d.h:469](../../../src/Point3d.h#469) |
+| `CVertex5f` | `struct` | - | [src/Point3d.h:471](../../../src/Point3d.h#471) |
 | `CView2d` | `class` | - | [src/CView2d.h:5](../../../src/CView2d.h#5) |
 | `CView3d` | `class` | - | [src/CView3d.h:7](../../../src/CView3d.h#7) |
 | `DataToMoveVerts` | `struct` | - | [src/CMesh3D.h:98](../../../src/CMesh3D.h#98) |
@@ -247,7 +247,7 @@ Generated from project headers: 2026-08-27.
 | `FilletGeometry` | `struct` | - | [src/Fillet.h:10](../../../src/Fillet.h#10) |
 | `FurnitureDrawerDefinition` | `struct` | - | [src/CFurnitureDrawer.h:17](../../../src/CFurnitureDrawer.h#17) |
 | `FurnitureMaterialFactory` | `class` | - | [src/FurnitureMaterialFactory.h:9](../../../src/FurnitureMaterialFactory.h#9) |
-| `GpuVertex` | `struct` | - | [src/CMesh3D.h:207](../../../src/CMesh3D.h#207) |
+| `GpuVertex` | `struct` | - | [src/CMesh3D.h:211](../../../src/CMesh3D.h#211) |
 | `Hit` | `struct` | - | [src/Triangle.h:59](../../../src/Triangle.h#59) |
 | `HpglIO` | `class` | - | [src/ExchangeIO.h:31](../../../src/ExchangeIO.h#31) |
 | `IgesIO` | `class` | - | [src/IgesIO.h:11](../../../src/IgesIO.h#11) |
@@ -463,19 +463,19 @@ Generated from project headers: 2026-08-27.
 | `HotkeyManagerDialog` | `class` | `QDialog` | [src/ui/HotkeyManagerDialog.h:14](../../../src/ui/HotkeyManagerDialog.h#14) |
 | `LanguageManager` | `class` | `QObject` | [src/ui/LanguageManager.h:14](../../../src/ui/LanguageManager.h#14) |
 | `LightingDialog` | `class` | `QDialog` | [src/ui/LightingDialog.h:9](../../../src/ui/LightingDialog.h#9) |
-| `MainWindow` | `class` | `QMainWindow` | [src/ui/MainWindow.h:55](../../../src/ui/MainWindow.h#55) |
+| `MainWindow` | `class` | `QMainWindow` | [src/ui/MainWindow.h:57](../../../src/ui/MainWindow.h#57) |
 | `MaterialEditorDialog` | `class` | `QDialog` | [src/ui/MaterialEditorDialog.h:22](../../../src/ui/MaterialEditorDialog.h#22) |
 | `MaterialSphereBrowser` | `class` | `QWidget` | [src/ui/MaterialSphereBrowser.h:16](../../../src/ui/MaterialSphereBrowser.h#16) |
 | `MaterialSphereItem` | `struct` | - | [src/ui/MaterialSphereBrowser.h:9](../../../src/ui/MaterialSphereBrowser.h#9) |
 | `NativeRaytraceDialog` | `class` | `QDialog` | [src/ui/NativeRaytraceDialog.h:19](../../../src/ui/NativeRaytraceDialog.h#19) |
 | `OpenGLViewport` | `class` | `QOpenGLWidget` | [src/ui/OpenGLViewport.h:22](../../../src/ui/OpenGLViewport.h#22) |
-| `PreferencesDialog` | `class` | `QDialog` | [src/ui/PreferencesDialog.h:11](../../../src/ui/PreferencesDialog.h#11) |
+| `PreferencesDialog` | `class` | `QDialog` | [src/ui/PreferencesDialog.h:12](../../../src/ui/PreferencesDialog.h#12) |
 | `PropertyPanel` | `class` | `QWidget` | [src/ui/PropertyPanel.h:10](../../../src/ui/PropertyPanel.h#10) |
 | `QtSceneRenderer` | `class` | - | [src/ui/QtSceneRenderer.h:7](../../../src/ui/QtSceneRenderer.h#7) |
 | `RenderLightEditorDialog` | `class` | `QDialog` | [src/ui/RenderLightEditorDialog.h:11](../../../src/ui/RenderLightEditorDialog.h#11) |
-| `SolidDimensionHit` | `struct` | - | [src/ui/OpenGLViewport.h:482](../../../src/ui/OpenGLViewport.h#482) |
+| `SolidDimensionHit` | `struct` | - | [src/ui/OpenGLViewport.h:496](../../../src/ui/OpenGLViewport.h#496) |
 | `TextTemplate` | `struct` | - | [src/ui/LanguageManager.h:37](../../../src/ui/LanguageManager.h#37) |
 | `ToolDefinition` | `struct` | - | [src/ui/ToolRegistry.h:41](../../../src/ui/ToolRegistry.h#41) |
 | `ToolParameter` | `struct` | - | [src/ui/ToolRegistry.h:28](../../../src/ui/ToolRegistry.h#28) |
 | `ToolRegistry` | `class` | - | [src/ui/ToolRegistry.h:57](../../../src/ui/ToolRegistry.h#57) |
-| `WalkRoomFootprint` | `struct` | - | [src/ui/OpenGLViewport.h:297](../../../src/ui/OpenGLViewport.h#297) |
+| `WalkRoomFootprint` | `struct` | - | [src/ui/OpenGLViewport.h:306](../../../src/ui/OpenGLViewport.h#306) |

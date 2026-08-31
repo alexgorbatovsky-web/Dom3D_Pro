@@ -866,6 +866,29 @@ bool build3DCoatQuadrangulationCandidate(
     std::vector<QuadFace> output_faces;
     std::vector<std::set<int>> adjacency(contour.size());
     double crease = 50.0;
+	std::vector<double> boundary_lengths;
+	boundary_lengths.reserve(contour.size());
+	for (const QuadPoint& point : contour) {
+		if (point.next >= 0 && point.next < static_cast<int>(contour.size())) {
+			const double edge_length = distance(
+				point.position, contour[point.next].position);
+			if (std::isfinite(edge_length) && edge_length > kEpsilon)
+				boundary_lengths.push_back(edge_length);
+		}
+	}
+	std::sort(boundary_lengths.begin(), boundary_lengths.end());
+	const double representative_step = boundary_lengths.empty()
+		? 1.0 : boundary_lengths[boundary_lengths.size() / 2];
+	const double estimated_cells = initial_area /
+		std::max(representative_step * representative_step, kEpsilon);
+	// A malformed advancing front can keep creating ever smaller rings instead
+	// of closing (the Fusion cylinder grew from 10 boundary nodes to thousands).
+	// Keep ample room above the area/step estimate, but reject runaway candidates
+	// so the independent candidate or the triangle fallback can take over.
+	const size_t face_budget = std::max<size_t>(256,
+		static_cast<size_t>(std::ceil(estimated_cells * 48.0))
+			+ contour.size() * 4);
+	const size_t point_budget = face_budget * 2 + contour.size();
     initial_area *= 1.1;
 
     for (int pass = 0; pass < 5000; ++pass) {
@@ -916,6 +939,10 @@ bool build3DCoatQuadrangulationCandidate(
             addAdjacency(best.faces, adjacency);
             updateDistanceField(contour, adjacency);
             crease = 50.0;
+			if (contour.size() > point_budget
+				|| output_faces.size() > face_budget) {
+				return false;
+			}
         } else {
             crease *= 0.9;
             updateDirections(contour, false, crease);

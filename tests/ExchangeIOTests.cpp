@@ -147,6 +147,40 @@ int main(int argc, char** argv)
                     < 1.0e-5f,
             "OBJ unit metadata did not restore millimeter coordinates.");
 
+    const std::string grouped_solids_obj = base + "_grouped_solids.obj";
+    {
+        std::ofstream stream(grouped_solids_obj);
+        stream << "v 0 0 0\n"
+               << "v 1 0 0\n"
+               << "v 0 1 0\n"
+               << "v 1 1 0\n"
+               << "v 2 0 0\n"
+               << "v 2 1 0\n"
+               << "o Solid_A\n"
+               << "g Solid_A_Surface_1\n"
+               << "usemtl Shared\n"
+               << "f 1 2 3\n"
+               << "g Solid_A_Surface_2\n"
+               << "usemtl Shared\n"
+               << "f 2 4 3\n"
+               << "o Solid_B\n"
+               << "g Solid_B_Surface_1\n"
+               << "usemtl Shared\n"
+               << "f 2 5 4\n"
+               << "g Solid_B_Surface_2\n"
+               << "usemtl Shared\n"
+               << "f 5 6 4\n";
+    }
+    std::vector<std::unique_ptr<CMesh3D>> grouped_solid_meshes;
+    require(obj.Import(grouped_solids_obj, grouped_solid_meshes, error),
+            "Grouped Solid OBJ import failed: " + error);
+    require(grouped_solid_meshes.size() == 2
+                && grouped_solid_meshes[0]->GetName() == "Solid_A"
+                && grouped_solid_meshes[0]->GetFaces().size() == 2
+                && grouped_solid_meshes[1]->GetName() == "Solid_B"
+                && grouped_solid_meshes[1]->GetFaces().size() == 2,
+            "OBJ import did not preserve one Mesh object per source Solid.");
+
     CAlfaDoc weld_document;
     auto weld_mesh = std::make_unique<CMesh3D>("Weld export mesh");
     require(weld_mesh->SetGeometry(
