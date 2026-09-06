@@ -120,8 +120,29 @@ bool normal_from_near_points(const Handle(Geom_Surface)& surface,
         }
     }
 
-    if (best_square <= 1.0e-20 || !is_finite_vec(best_normal))
+    if (best_square <= 1.0e-20 || !is_finite_vec(best_normal)) {
+        // At a collapsed spline boundary the point exists, but one tangent
+        // is zero. Tiny displacement chords can lose their cross product.
+        // Use nearby analytic derivatives only when the existing estimate
+        // fails; preserve the exact requested point and UV orientation.
+        for (const auto& offset : offsets) {
+            const double sample_u = clamp_parameter(u + offset.first, u_min, u_max);
+            const double sample_v = clamp_parameter(v + offset.second, v_min, v_max);
+            try {
+                gp_Pnt sample;
+                gp_Vec tangent_u, tangent_v;
+                surface->D1(sample_u, sample_v, sample, tangent_u, tangent_v);
+                gp_Vec candidate = tangent_u.Crossed(tangent_v);
+                if (is_finite_vec(candidate) && candidate.SquareMagnitude() > 1.0e-20) {
+                    candidate.Normalize();
+                    normal = candidate;
+                    return true;
+                }
+            } catch (const Standard_Failure&) {
+            }
+        }
         return false;
+    }
 
     best_normal.Normalize();
     normal = best_normal;

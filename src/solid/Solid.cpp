@@ -1,5 +1,7 @@
 #include "../OpenGLCompat.h"
 #include "Solid.h"
+#include "QuadroBoundary.h"
+#include "QuadroBodyMesher.h"
 #include "SolidTool.h"
 #include "../SurfaceUVMapping.h"
 #include "../Plane.h"
@@ -41,13 +43,18 @@
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
+#include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepClass_FaceClassifier.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <Geom_BezierCurve.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
 #include <BRepBuilderAPI_GTransform.hxx>
 #include <Bnd_Box.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <ElSLib.hxx>
 #include <gp_Ax1.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Dir.hxx>
@@ -83,7 +90,7 @@ void Step(const char* text);
 namespace {
 bool material_uses_render_texture(const Material& material)
 {
-	return !material.color_texture_path.empty()
+    return (material.fabric.enabled && material.fabric.useUV) || !material.color_texture_path.empty()
 		|| !material.light_texture_path.empty()
 		|| !material.bump_texture_path.empty()
 		|| !material.normal_texture_path.empty()
@@ -101,8 +108,352 @@ bool same_render_batch_uv_material(
 		&& first.texture_scale_v == second.texture_scale_v
 		&& first.texture_rotation_degrees == second.texture_rotation_degrees
 		&& first.texture_fit_to_surface == second.texture_fit_to_surface
+        && first.texture_wrap_object == second.texture_wrap_object
 		&& material_uses_render_texture(first)
 			== material_uses_render_texture(second);
+}
+
+bool build_sphere_cube_quad_mesh(
+	CSurfaceFace* surface, float deflection, bool require_full_sphere)
+{
+	if (!surface || surface->m_Face.IsNull()
+		|| !std::isfinite(deflection) || deflection <= 0.0f) {
+		return false;
+	}
+
+	BRepAdaptor_Surface adaptor(TopoDS::Face(surface->m_Face));
+	if (adaptor.GetType() != GeomAbs_Sphere)
+		return false;
+	double u_min = 0.0;
+	double u_max = 0.0;
+	double v_min = 0.0;
+	double v_max = 0.0;
+	BRepTools::UVBounds(
+		TopoDS::Face(surface->m_Face), u_min, u_max, v_min, v_max);
+	constexpr double pi = 3.14159265358979323846;
+	// A trimmed spherical patch must continue through the boundary-aware
+	// quadrangulator. The cube topology is valid only for the complete sphere.
+	if (require_full_sphere
+		&& (u_max - u_min < 2.0 * pi - 1.0e-5
+			|| v_max - v_min < pi - 1.0e-5)) {
+		return false;
+	}
+
+	const gp_Sphere sphere = adaptor.Sphere();
+	const double radius = sphere.Radius();
+	if (!std::isfinite(radius) || radius <= 1.0e-9)
+		return false;
+	const gp_Ax3 axes = sphere.Position();
+	const gp_Pnt location = axes.Location();
+	const gp_Dir x_direction = axes.XDirection();
+	const gp_Dir y_direction = axes.YDirection();
+	const gp_Dir z_direction = axes.Direction();
+	const Vec3 center{
+		static_cast<float>(location.X()),
+		static_cast<float>(location.Y()),
+		static_cast<float>(location.Z())};
+	const Vec3 basis[3]{
+		{static_cast<float>(x_direction.X()),
+		 static_cast<float>(x_direction.Y()),
+		 static_cast<float>(x_direction.Z())},
+		{static_cast<float>(y_direction.X()),
+		 static_cast<float>(y_direction.Y()),
+		 static_cast<float>(y_direction.Z())},
+		{static_cast<float>(z_direction.X()),
+		 static_cast<float>(z_direction.Y()),
+		 static_cast<float>(z_direction.Z())}};
+
+	const int requested_segments = std::clamp(
+		static_cast<int>(std::lround(20.0 / deflection)), 4, 128);
+	int lower_power = 4;
+	while (lower_power * 2 <= requested_segments)
+		lower_power *= 2;
+	const int upper_power = std::min(lower_power * 2, 128);
+	const int segments = requested_segments - lower_power
+		<= upper_power - requested_segments ? lower_power : upper_power;
+	const int lattice_size = segments * 2 + 1;
+
+	struct CubeFace {
+		int normal_axis;
+		int normal_sign;
+		int u_axis;
+		int u_sign;
+		int v_axis;
+		int v_sign;
+	};
+	// u x v points outwards on every patch.
+	const CubeFace cube_faces[6]{
+		{0,  1, 1,  1, 2,  1},
+		{0, -1, 1,  1, 2, -1},
+		{1,  1, 0, -1, 2,  1},
+		{1, -1, 0,  1, 2,  1},
+		{2,  1, 0,  1, 1,  1},
+		{2, -1, 0, -1, 1,  1}};
+
+	std::vector<Vec3> vertices;
+	std::vector<Vec3> normals;
+	std::vector<CMesh3D::Face> faces;
+	vertices.reserve(static_cast<size_t>(6 * segments * segments + 2));
+	normals.reserve(vertices.capacity());
+	faces.reserve(static_cast<size_t>(6 * segments * segments));
+	std::unordered_map<unsigned long long, size_t> lattice_vertices;
+	const auto vertex_at = [&](const CubeFace& face, int column, int row) {
+		int lattice[3]{0, 0, 0};
+		lattice[face.normal_axis] = face.normal_sign * segments;
+		lattice[face.u_axis] = face.u_sign * (-segments + 2 * column);
+		lattice[face.v_axis] = face.v_sign * (-segments + 2 * row);
+		const unsigned long long key =
+			(static_cast<unsigned long long>(lattice[0] + segments)
+				* lattice_size
+			 + static_cast<unsigned long long>(lattice[1] + segments))
+				* lattice_size
+			 + static_cast<unsigned long long>(lattice[2] + segments);
+		const auto existing = lattice_vertices.find(key);
+		if (existing != lattice_vertices.end())
+			return existing->second;
+
+		const double cube_x = static_cast<double>(lattice[0]) / segments;
+		const double cube_y = static_cast<double>(lattice[1]) / segments;
+		const double cube_z = static_cast<double>(lattice[2]) / segments;
+		const double x2 = cube_x * cube_x;
+		const double y2 = cube_y * cube_y;
+		const double z2 = cube_z * cube_z;
+		// Equal-area cube-to-sphere projection. It retains the Catmull-Clark
+		// cube connectivity while avoiding a visible concentration at face edges.
+		const Vec3 local_normal = normalize({
+			static_cast<float>(cube_x * std::sqrt(std::max(
+				0.0, 1.0 - y2 * 0.5 - z2 * 0.5 + y2 * z2 / 3.0))),
+			static_cast<float>(cube_y * std::sqrt(std::max(
+				0.0, 1.0 - z2 * 0.5 - x2 * 0.5 + z2 * x2 / 3.0))),
+			static_cast<float>(cube_z * std::sqrt(std::max(
+				0.0, 1.0 - x2 * 0.5 - y2 * 0.5 + x2 * y2 / 3.0)))});
+		const Vec3 world_normal = normalize(
+			basis[0] * local_normal.x
+			+ basis[1] * local_normal.y
+			+ basis[2] * local_normal.z);
+		const size_t index = vertices.size();
+		vertices.push_back(center + world_normal * static_cast<float>(radius));
+		normals.push_back(world_normal);
+		lattice_vertices.emplace(key, index);
+		return index;
+	};
+
+	for (int patch = 0; patch < 6; ++patch) {
+		const CubeFace& cube_face = cube_faces[patch];
+		for (int row = 0; row < segments; ++row) {
+			for (int column = 0; column < segments; ++column) {
+				CMesh3D::Face quad{
+					vertex_at(cube_face, column, row),
+					vertex_at(cube_face, column + 1, row),
+					vertex_at(cube_face, column + 1, row + 1),
+					vertex_at(cube_face, column, row + 1)};
+				quad.sourceFaceId = patch;
+				faces.push_back(std::move(quad));
+			}
+		}
+	}
+
+	if (!surface->pMesh3D)
+		surface->pMesh3D = new CMesh3D;
+	surface->pMesh3D->SetName("Sphere Cube Quadro");
+	if (!surface->pMesh3D->SetGeometry(
+			std::move(vertices), std::move(faces), {}, std::move(normals))) {
+		return false;
+	}
+	surface->IsTrimmed = false;
+	surface->IsInitMesh = true;
+	surface->m_TypeMesh = REGULAR_MESH;
+	return true;
+}
+
+bool trim_sphere_cube_quad_mesh(CSurfaceFace* surface)
+{
+	if (!surface || !surface->pMesh3D || surface->m_Face.IsNull())
+		return false;
+	const TopoDS_Face face = TopoDS::Face(surface->m_Face);
+	BRepAdaptor_Surface adaptor(face);
+	if (adaptor.GetType() != GeomAbs_Sphere)
+		return false;
+	SurfaceUVMapping mapping(surface);
+	if (!mapping.IsValid())
+		return false;
+	const gp_Sphere sphere = adaptor.Sphere();
+	const gp_Pnt sphere_center = sphere.Location();
+	const Vec3 center{static_cast<float>(sphere_center.X()),
+		static_cast<float>(sphere_center.Y()),
+		static_cast<float>(sphere_center.Z())};
+	const float radius = static_cast<float>(sphere.Radius());
+	BRep_Builder boundary_builder;
+	TopoDS_Compound boundary_shape;
+	boundary_builder.MakeCompound(boundary_shape);
+	bool has_boundary = false;
+	for (TopExp_Explorer edge(face, TopAbs_EDGE); edge.More(); edge.Next()) {
+		const TopoDS_Edge boundary_edge = TopoDS::Edge(edge.Current());
+		if (boundary_edge.IsNull() || BRep_Tool::Degenerated(boundary_edge))
+			continue;
+		boundary_builder.Add(boundary_shape, boundary_edge);
+		has_boundary = true;
+	}
+	double u_min = 0.0;
+	double u_max = 0.0;
+	double v_min = 0.0;
+	double v_max = 0.0;
+	BRepTools::UVBounds(face, u_min, u_max, v_min, v_max);
+	const double u_period = adaptor.IsUPeriodic() ? adaptor.UPeriod() : 0.0;
+	const double uv_epsilon = std::max({
+		std::abs(u_max - u_min), std::abs(v_max - v_min), 1.0}) * 1.0e-8;
+	const auto wrap_u = [u_min, u_period](double value) {
+		if (!(u_period > 0.0)) return value;
+		double wrapped = u_min + std::fmod(value - u_min, u_period);
+		if (wrapped < u_min) wrapped += u_period;
+		return wrapped;
+	};
+	const auto classify = [&](Vec3 point, SurfaceUVPoint* result_uv = nullptr) {
+		SurfaceUVPoint uv{};
+		if (!mapping.Project(point, uv))
+			return false;
+		uv.u = wrap_u(uv.u);
+		if (std::abs(uv.u - u_min) <= uv_epsilon) uv.u = u_min;
+		if (std::abs(uv.u - u_max) <= uv_epsilon) uv.u = u_max;
+		if (std::abs(uv.v - v_min) <= uv_epsilon) uv.v = v_min;
+		if (std::abs(uv.v - v_max) <= uv_epsilon) uv.v = v_max;
+		if (result_uv) *result_uv = uv;
+		try {
+			BRepClass_FaceClassifier classifier(
+				face, gp_Pnt2d(uv.u, uv.v), 1.0e-7, Standard_False);
+			if (classifier.State() != TopAbs_OUT) return true;
+			if (!has_boundary) return false;
+			BRepExtrema_DistShapeShape distance(
+				BRepBuilderAPI_MakeVertex(
+					gp_Pnt(point.x, point.y, point.z)).Vertex(),
+				boundary_shape);
+			distance.Perform();
+			return distance.IsDone()
+				&& distance.Value() <= std::max(1.0e-7, radius * 1.0e-6);
+		} catch (const Standard_Failure&) {
+			return false;
+		}
+	};
+	const auto on_sphere = [center, radius](Vec3 value) {
+		return center + normalize(value - center) * radius;
+	};
+
+	std::vector<Vec3> vertices = surface->pMesh3D->GetVertices();
+	const std::vector<CMesh3D::Face> source_faces =
+		surface->pMesh3D->GetFaces();
+	std::vector<CMesh3D::Face> clipped_faces;
+	clipped_faces.reserve(source_faces.size());
+	std::map<std::pair<size_t, size_t>, size_t> crossing_vertices;
+	const auto crossing_vertex = [&](size_t first, size_t second,
+		bool first_inside) {
+		const auto key = std::minmax(first, second);
+		const auto existing = crossing_vertices.find(key);
+		if (existing != crossing_vertices.end())
+			return existing->second;
+		Vec3 inside = vertices[first_inside ? first : second];
+		Vec3 outside = vertices[first_inside ? second : first];
+		for (int iteration = 0; iteration < 48; ++iteration) {
+			const Vec3 middle = on_sphere((inside + outside) * 0.5f);
+			if (classify(middle)) inside = middle;
+			else outside = middle;
+		}
+		const double endpoint_tolerance_squared =
+			static_cast<double>(radius) * radius * 1.0e-14;
+		if (static_cast<double>(dot(inside - vertices[first],
+				inside - vertices[first])) <= endpoint_tolerance_squared)
+			return first;
+		if (static_cast<double>(dot(inside - vertices[second],
+				inside - vertices[second])) <= endpoint_tolerance_squared)
+			return second;
+		const size_t index = vertices.size();
+		vertices.push_back(on_sphere((inside + outside) * 0.5f));
+		crossing_vertices.emplace(key, index);
+		return index;
+	};
+
+	for (const CMesh3D::Face& source_face : source_faces) {
+		if (source_face.deleted || source_face.corners.size() < 3)
+			continue;
+		std::vector<size_t> indices;
+		std::vector<bool> inside;
+		indices.reserve(source_face.corners.size());
+		inside.reserve(source_face.corners.size());
+		Vec3 face_center{};
+		for (const MeshCorner& corner : source_face.corners) {
+			if (corner.v >= vertices.size()) return false;
+			indices.push_back(corner.v);
+			inside.push_back(classify(vertices[corner.v]));
+			face_center = face_center + vertices[corner.v];
+		}
+		face_center = on_sphere(face_center
+			* (1.0f / static_cast<float>(indices.size())));
+		const bool center_inside = classify(face_center);
+		const bool all_inside = std::all_of(
+			inside.begin(), inside.end(), [](bool value) { return value; });
+		const bool all_outside = std::none_of(
+			inside.begin(), inside.end(), [](bool value) { return value; });
+		// A trim loop smaller than one background cell needs a denser cube grid;
+		// silently keeping or deleting that cell would choose the wrong side.
+		if ((all_inside && !center_inside)
+			|| (all_outside && center_inside)) return false;
+		if (all_outside) continue;
+		if (all_inside) {
+			clipped_faces.push_back(source_face);
+			continue;
+		}
+		std::vector<size_t> polygon;
+		for (size_t index = 0; index < indices.size(); ++index) {
+			const size_t next = (index + 1) % indices.size();
+			if (inside[index]) polygon.push_back(indices[index]);
+			if (inside[index] != inside[next]) {
+				polygon.push_back(crossing_vertex(
+					indices[index], indices[next], inside[index]));
+			}
+		}
+		if (polygon.size() < 3) continue;
+		CMesh3D::Face clipped;
+		clipped.sourceFaceId = source_face.sourceFaceId;
+		for (size_t vertex : polygon)
+			clipped.corners.push_back({vertex, vertex, 0});
+		clipped_faces.push_back(std::move(clipped));
+	}
+	if (clipped_faces.empty()) return false;
+	std::vector<Vec3> normals;
+	normals.reserve(vertices.size());
+	for (Vec3 vertex : vertices)
+		normals.push_back(normalize(vertex - center));
+	std::vector<UV> uvs;
+	for (CMesh3D::Face& clipped_face : clipped_faces) {
+		double previous_u = 0.0;
+		bool have_previous = false;
+		for (MeshCorner& corner : clipped_face.corners) {
+			SurfaceUVPoint uv{};
+			if (!mapping.Project(vertices[corner.v], uv)) return false;
+			uv.u = wrap_u(uv.u);
+			if (std::abs(uv.u - u_min) <= uv_epsilon) uv.u = u_min;
+			if (std::abs(uv.u - u_max) <= uv_epsilon) uv.u = u_max;
+			if (std::abs(uv.v - v_min) <= uv_epsilon) uv.v = v_min;
+			if (std::abs(uv.v - v_max) <= uv_epsilon) uv.v = v_max;
+			if (have_previous && u_period > 0.0)
+				uv.u += std::round((previous_u - uv.u) / u_period) * u_period;
+			previous_u = uv.u;
+			have_previous = true;
+			corner.uv = uvs.size();
+			corner.n = corner.v;
+			uvs.push_back({static_cast<float>(uv.u),
+				static_cast<float>(uv.v)});
+		}
+	}
+	if (!surface->pMesh3D->SetGeometry(
+			std::move(vertices), std::move(clipped_faces),
+			std::move(uvs), std::move(normals))) return false;
+	surface->IsTrimmed = true;
+	surface->IsInitMesh = true;
+	// The cut is already expressed in the cube mesh itself. Do not send its
+	// n-gon boundary through the legacy UV seam synchronizer, which assumes a
+	// rectangular CNet and can split only one owner of a shared cube edge.
+	surface->m_TypeMesh = REGULAR_MESH;
+	return true;
 }
 
 UV bake_render_batch_uv(UV uv, UV minimum, UV maximum,
@@ -140,6 +491,7 @@ struct PreparedEdgeRef {
 	int edge_index = -1;
 	int point_count = 0;
 	Vec3 start{};
+	Vec3 middle{};
 	Vec3 end{};
 	TopoDS_Edge topo_edge;
 	bool has_topo_edge = false;
@@ -404,6 +756,121 @@ float prepared_edge_tolerance(const std::vector<CSurfaceFace*>& surfaces)
 	return std::max(diagonal_length * 1.0e-5f, 1.0e-4f);
 }
 
+// Boolean operations may split one end contour of a cylinder into several
+// arcs while leaving the opposite contour as one closed edge.  Rounding the
+// requested step independently for every arc can then produce, for example,
+// 20 segments on the split ring and 22 on the complete ring.  Give both rings
+// one common segment budget before shared edges are synchronized.
+void sync_split_cylinder_ring_counts(const std::vector<CSurfaceFace*>& surfaces)
+{
+	for (CSurfaceFace* surface : surfaces) {
+		if (!surface || surface->m_Face.IsNull()
+			|| surface->GetPreparedPolylineCount() != 6) continue;
+		const TopoDS_Face face = TopoDS::Face(surface->m_Face);
+		BRepAdaptor_Surface adaptor(face);
+		if (adaptor.GetType() != GeomAbs_Cylinder || !adaptor.IsUPeriodic())
+			continue;
+		const double period = adaptor.UPeriod();
+		if (!(period > 0.0) || !std::isfinite(period)) continue;
+		const gp_Cylinder cylinder = adaptor.Cylinder();
+		struct RingEdge {
+			int edge_index = -1;
+			double mean_v = 0.0;
+			double angular_span = 0.0;
+			int segments = 0;
+		};
+		std::vector<RingEdge> edges;
+		for (int edge_index = 0;
+			edge_index < surface->GetPreparedPolylineCount(); ++edge_index) {
+			std::vector<CPoint3d> points;
+			if (!surface->GetPreparedPolylinePoints(edge_index, points)
+				|| points.size() < 2) continue;
+			double previous_u = 0.0;
+			double minimum_u = 0.0;
+			double maximum_u = 0.0;
+			double mean_v = 0.0;
+			for (size_t index = 0; index < points.size(); ++index) {
+				double u = 0.0, v = 0.0;
+				ElSLib::Parameters(cylinder,
+					gp_Pnt(points[index].x, points[index].y, points[index].z), u, v);
+				if (index > 0)
+					u += std::round((previous_u - u) / period) * period;
+				if (index == 0) minimum_u = maximum_u = u;
+				else {
+					minimum_u = std::min(minimum_u, u);
+					maximum_u = std::max(maximum_u, u);
+				}
+				previous_u = u;
+				mean_v += v;
+			}
+			const double angular_span = maximum_u - minimum_u;
+			if (angular_span < period * 0.10) continue;
+			edges.push_back({edge_index, mean_v / points.size(), angular_span,
+				static_cast<int>(points.size()) - 1});
+		}
+		// This correction is for the six-edge topology: two generators, one
+		// complete end ring, and the opposite ring split into three arcs.
+		// Cylinders with windows or fillets have different loop constraints.
+		if (edges.size() != 4) continue;
+		std::sort(edges.begin(), edges.end(),
+			[](const RingEdge& first, const RingEdge& second) {
+				return first.mean_v < second.mean_v;
+			});
+		size_t split = 1;
+		double largest_gap = -1.0;
+		for (size_t index = 1; index < edges.size(); ++index) {
+			const double gap = edges[index].mean_v - edges[index - 1].mean_v;
+			if (gap > largest_gap) {
+				largest_gap = gap;
+				split = index;
+			}
+		}
+		if (split == 0 || split >= edges.size()) continue;
+		if (split != 1 && split != edges.size() - 1) continue;
+		const auto segment_sum = [&](size_t first, size_t last) {
+			int total = 0;
+			for (size_t index = first; index < last; ++index)
+				total += edges[index].segments;
+			return total;
+		};
+		const int target_segments = std::max(
+			segment_sum(0, split), segment_sum(split, edges.size()));
+		if (target_segments < 4) continue;
+		const auto assign_group = [&](size_t first, size_t last) {
+			double total_span = 0.0;
+			for (size_t index = first; index < last; ++index)
+				total_span += edges[index].angular_span;
+			if (!(total_span > 0.0)) return;
+			struct Remainder { size_t index; double value; };
+			std::vector<Remainder> remainders;
+			int assigned = 0;
+			for (size_t index = first; index < last; ++index) {
+				const double exact = target_segments
+					* edges[index].angular_span / total_span;
+				edges[index].segments = std::max(1, static_cast<int>(std::floor(exact)));
+				assigned += edges[index].segments;
+				remainders.push_back({index, exact - std::floor(exact)});
+			}
+			std::sort(remainders.begin(), remainders.end(),
+				[](const Remainder& first, const Remainder& second) {
+					return first.value > second.value;
+				});
+			for (size_t cursor = 0; assigned < target_segments; ++assigned, ++cursor)
+				++edges[remainders[cursor % remainders.size()].index].segments;
+			for (size_t cursor = remainders.size(); assigned > target_segments
+				&& cursor > 0; --cursor) {
+				RingEdge& edge = edges[remainders[cursor - 1].index];
+				if (edge.segments > 1) { --edge.segments; --assigned; }
+			}
+			for (size_t index = first; index < last; ++index)
+				surface->SetPreparedPolylinePointCount(
+					edges[index].edge_index, edges[index].segments + 1);
+		};
+		assign_group(0, split);
+		assign_group(split, edges.size());
+	}
+}
+
 void sync_surface_edge_polyline_counts(const std::vector<CSurfaceFace*>& surfaces)
 {
 	const float tolerance = prepared_edge_tolerance(surfaces);
@@ -428,9 +895,57 @@ void sync_surface_edge_polyline_counts(const std::vector<CSurfaceFace*>& surface
 			ref.edge_index = edge_index;
 			ref.point_count = point_count;
 			ref.start = { static_cast<float>(first.x), static_cast<float>(first.y), static_cast<float>(first.z) };
+			const CPoint3d& middle = points[points.size() / 2];
+			ref.middle = { static_cast<float>(middle.x), static_cast<float>(middle.y), static_cast<float>(middle.z) };
 			ref.end = { static_cast<float>(last.x), static_cast<float>(last.y), static_cast<float>(last.z) };
 			ref.has_topo_edge = surface->GetPreparedTopoEdge(edge_index, ref.topo_edge);
 			edges.push_back(ref);
+		}
+	}
+
+	// A minimum three-point sampling is useful for curved and medium-size
+	// edges, but it needlessly splits tiny straight Boolean edges. Estimate the
+	// surrounding grid step from the well-resolved straight edges, then reduce
+	// only two-segment lines shorter than that step. Do this before shared-edge
+	// synchronization so both adjacent faces receive the same two endpoints.
+	const auto geometrically_straight = [tolerance](const PreparedEdgeRef& ref) {
+		const Vec3 chord = ref.end - ref.start;
+		const double length_sq = static_cast<double>(dot(chord, chord));
+		if (length_sq <= 0.0)
+			return false;
+		const double t = std::clamp(static_cast<double>(
+			dot(ref.middle - ref.start, chord)) / length_sq, 0.0, 1.0);
+		const Vec3 nearest = ref.start + chord * static_cast<float>(t);
+		const Vec3 offset = ref.middle - nearest;
+		const double straight_tolerance = std::max(
+			static_cast<double>(tolerance) * 2.0, std::sqrt(length_sq) * 1.0e-5);
+		return static_cast<double>(dot(offset, offset))
+			<= straight_tolerance * straight_tolerance;
+	};
+	std::vector<double> resolved_straight_steps;
+	for (const PreparedEdgeRef& ref : edges) {
+		if (ref.point_count < 5 || !geometrically_straight(ref))
+			continue;
+		const double length = std::sqrt(static_cast<double>(
+			dot(ref.end - ref.start, ref.end - ref.start)));
+		if (length > 0.0)
+			resolved_straight_steps.push_back(
+				length / static_cast<double>(ref.point_count - 1));
+	}
+	if (!resolved_straight_steps.empty()) {
+		std::sort(resolved_straight_steps.begin(), resolved_straight_steps.end());
+		const double reference_step = resolved_straight_steps[
+			resolved_straight_steps.size() / 2];
+		for (PreparedEdgeRef& ref : edges) {
+			if (ref.point_count != 3 || !geometrically_straight(ref))
+				continue;
+			const double length = std::sqrt(static_cast<double>(
+				dot(ref.end - ref.start, ref.end - ref.start)));
+			if (length < reference_step * 0.9
+				&& ref.surface->SetPreparedPolylinePointCount(
+					ref.edge_index, 2)) {
+				ref.point_count = 2;
+			}
 		}
 	}
 
@@ -456,7 +971,13 @@ void sync_surface_edge_polyline_counts(const std::vector<CSurfaceFace*>& surface
 		const bool opposite_direction =
 			endpoint_distance_sq(first.start, second.end) <= tolerance_sq
 			&& endpoint_distance_sq(first.end, second.start) <= tolerance_sq;
-		return same_direction || opposite_direction;
+		if (!same_direction && !opposite_direction)
+			return false;
+		// Different OCCT edges may share both endpoints (the two arcs of a
+		// cylinder/cylinder intersection). Endpoint-only matching used to copy
+		// one complete arc over the other and collapse the trim loop to zero area.
+		// A genuine duplicate geometric edge also shares its arc-length midpoint.
+		return endpoint_distance_sq(first.middle, second.middle) <= tolerance_sq;
 	};
 
 	std::vector<bool> used(edges.size(), false);
@@ -532,6 +1053,8 @@ void sync_surface_edge_polyline_counts(const std::vector<CSurfaceFace*>& surface
 			ref.edge_index = edge_index;
 			ref.point_count = point_count;
 			ref.start = { static_cast<float>(first.x), static_cast<float>(first.y), static_cast<float>(first.z) };
+			const CPoint3d& middle = points[points.size() / 2];
+			ref.middle = { static_cast<float>(middle.x), static_cast<float>(middle.y), static_cast<float>(middle.z) };
 			ref.end = { static_cast<float>(last.x), static_cast<float>(last.y), static_cast<float>(last.z) };
 			ref.has_topo_edge = surface->GetPreparedTopoEdge(edge_index, ref.topo_edge);
 			edges.push_back(ref);
@@ -593,6 +1116,72 @@ bool sync_four_sided_opposite_edge_counts(
 	for (CSurfaceFace* surface : surfaces) {
 		if (!surface || surface->GetPreparedPolylineCount() != 4)
 			continue;
+
+		// TopExp_Explorer does not guarantee that the four edges of a periodic
+		// face arrive as U-, V-, U-, V-boundaries.  In particular, imported
+		// cylinders can arrive as U-, V-, V-, U-.  Pairing indices 0/2 and 1/3
+		// then copies the dense circular count onto the short axial edges and
+		// produces many thin horizontal strips.  Identify the two parameter
+		// directions from the prepared edges themselves; this also handles a
+		// cylinder whose seam starts at a different edge.
+		std::vector<int> u_direction_edges;
+		std::vector<int> v_direction_edges;
+		for (int edge_index = 0; edge_index < 4; ++edge_index) {
+			std::vector<CPoint3d> points;
+			if (!surface->GetPreparedPolylinePoints(edge_index, points)
+				|| points.size() < 2) {
+				continue;
+			}
+			CPolyline uv_edge;
+			for (const CPoint3d& point : points)
+				uv_edge.AddPoint(point);
+			if (!uv_edge.PutOnSurface(surface) || uv_edge.GetPointCount() < 2)
+				continue;
+
+			double u_min = uv_edge.GetPoints().front().x;
+			double u_max = u_min;
+			double v_min = uv_edge.GetPoints().front().y;
+			double v_max = v_min;
+			for (const CPoint3d& point : uv_edge.GetPoints()) {
+				u_min = std::min(u_min, point.x);
+				u_max = std::max(u_max, point.x);
+				v_min = std::min(v_min, point.y);
+				v_max = std::max(v_max, point.y);
+			}
+			const double u_span = u_max - u_min;
+			const double v_span = v_max - v_min;
+			if (u_span > v_span * 2.0)
+				u_direction_edges.push_back(edge_index);
+			else if (v_span > u_span * 2.0)
+				v_direction_edges.push_back(edge_index);
+		}
+
+		const auto synchronize_pair = [surface, &changed](
+			const std::vector<int>& edge_indices) {
+			if (edge_indices.size() != 2)
+				return;
+			const int common_count = std::max(
+				surface->GetPreparedPolylinePointCount(edge_indices[0]),
+				surface->GetPreparedPolylinePointCount(edge_indices[1]));
+			if (common_count < 2)
+				return;
+			for (int edge_index : edge_indices) {
+				if (surface->GetPreparedPolylinePointCount(edge_index)
+					!= common_count) {
+					changed = surface->SetPreparedPolylinePointCount(
+						edge_index, common_count) || changed;
+				}
+			}
+		};
+		if (u_direction_edges.size() == 2
+			&& v_direction_edges.size() == 2) {
+			synchronize_pair(u_direction_edges);
+			synchronize_pair(v_direction_edges);
+			continue;
+		}
+
+		// Non-isoparametric four-sided patches keep the established boundary
+		// ordering fallback.
 		for (int first = 0; first < 2; ++first) {
 			const int opposite = first + 2;
 			const int first_count =
@@ -637,6 +1226,77 @@ void sync_regular_surface_mesh_steps(const std::vector<CSurfaceFace*>& surfaces)
 		sync_surface_edge_polyline_counts(surfaces);
 }
 
+bool is_four_sided_bspline_compatibility_surface(const CSurfaceFace* surface)
+{
+	if (!surface || surface->m_Face.IsNull()
+		|| surface->GetPreparedPolylineCount() != 4) {
+		return false;
+	}
+	try {
+		size_t edge_count = 0;
+		for (TopExp_Explorer edge(surface->m_Face, TopAbs_EDGE);
+			edge.More(); edge.Next()) {
+			++edge_count;
+		}
+		return edge_count == 4
+			&& BRepAdaptor_Surface(TopoDS::Face(surface->m_Face)).GetType()
+				== GeomAbs_BSplineSurface;
+	} catch (const Standard_Failure&) {
+		return false;
+	}
+}
+
+bool snap_structured_mesh_to_prepared_edges(CSurfaceFace* surface)
+{
+	if (!is_four_sided_bspline_compatibility_surface(surface)
+		|| !surface->pMesh3D) {
+		return false;
+	}
+
+	std::vector<Vec3>& vertices = surface->pMesh3D->GetVertices();
+	bool snapped = false;
+	for (int edge_index = 0; edge_index < 4; ++edge_index) {
+		std::vector<CPoint3d> mesh_boundary;
+		std::vector<CPoint3d> prepared_boundary;
+		if (!surface->GetRegularMeshBoundaryPoints(
+				edge_index, mesh_boundary)
+			|| !surface->GetPreparedPolylinePoints(
+				edge_index, prepared_boundary)
+			|| mesh_boundary.size() != prepared_boundary.size()
+			|| mesh_boundary.size() < 2) {
+			continue;
+		}
+
+		for (size_t point_index = 0;
+			point_index < mesh_boundary.size(); ++point_index) {
+			const Vec3 source{
+				static_cast<float>(mesh_boundary[point_index].x),
+				static_cast<float>(mesh_boundary[point_index].y),
+				static_cast<float>(mesh_boundary[point_index].z)};
+			size_t nearest_index = vertices.size();
+			float nearest_distance_sq = std::numeric_limits<float>::max();
+			for (size_t vertex_index = 0;
+				vertex_index < vertices.size(); ++vertex_index) {
+				const Vec3 delta = vertices[vertex_index] - source;
+				const float distance_sq = dot(delta, delta);
+				if (distance_sq < nearest_distance_sq) {
+					nearest_distance_sq = distance_sq;
+					nearest_index = vertex_index;
+				}
+			}
+			if (nearest_index >= vertices.size())
+				continue;
+			const CPoint3d& target = prepared_boundary[point_index];
+			vertices[nearest_index] = {
+				static_cast<float>(target.x),
+				static_cast<float>(target.y),
+				static_cast<float>(target.z)};
+			snapped = true;
+		}
+	}
+	return snapped;
+}
+
 void sync_trim_lines_from_regular_mesh(const std::vector<CSurfaceFace*>& surfaces)
 {
 	const auto distance_sq = [](Vec3 first, Vec3 second) {
@@ -650,10 +1310,23 @@ void sync_trim_lines_from_regular_mesh(const std::vector<CSurfaceFace*>& surface
 			: 0.0f;
 		return distance_sq(point, first + edge * alpha);
 	};
+	const auto is_structured_boundary_donor = [](const CSurfaceFace* surface) {
+		if (!surface || !surface->IsInitMesh || !surface->pMesh3D)
+			return false;
+		if (surface->m_TypeMesh == REGULAR_MESH)
+			return true;
+		if (surface->m_QtyU < 2 || surface->m_QtyV < 2
+			|| !is_four_sided_bspline_compatibility_surface(surface)) {
+			return false;
+		}
+		return true;
+	};
 
 	for (CSurfaceFace* donor : surfaces) {
-		if (!donor || donor->m_TypeMesh != REGULAR_MESH || !donor->IsInitMesh)
+		if (!is_structured_boundary_donor(donor))
 			continue;
+		const bool compatibility_donor =
+			donor->m_TypeMesh != REGULAR_MESH;
 
 		for (int donor_edge_index = 0;
 		     donor_edge_index < donor->GetPreparedPolylineCount();
@@ -716,9 +1389,10 @@ void sync_trim_lines_from_regular_mesh(const std::vector<CSurfaceFace*>& surface
 					const bool has_receiver_topo_edge =
 						receiver->GetPreparedTopoEdge(
 							receiver_edge_index, receiver_topo_edge);
-					if (has_donor_topo_edge && receiver_has_shared_topo_edge) {
-						if (!has_receiver_topo_edge
-							|| !receiver_topo_edge.IsSame(donor_topo_edge)) {
+					if (has_donor_topo_edge) {
+						if ((has_receiver_topo_edge
+							&& !receiver_topo_edge.IsSame(donor_topo_edge))
+							|| (!has_receiver_topo_edge && receiver_has_shared_topo_edge)) {
 							continue;
 						}
 					}
@@ -792,6 +1466,11 @@ void sync_trim_lines_from_regular_mesh(const std::vector<CSurfaceFace*>& surface
 				}
 				receiver->SetPreparedPolylinePoints(best_receiver_edge, receiver_points);
 				if (receiver->IsInitMesh && receiver->pMesh3D) {
+					// A compatibility BSpline donor is built before its trimmed
+					// neighbours, so their meshes already use this exact prepared
+					// edge. Do not insert a second strip into the finished mesh.
+					if (compatibility_donor)
+						continue;
 					bool structured_four_sided_bspline = false;
 					try {
 						if (BRepAdaptor_Surface(
@@ -823,6 +1502,243 @@ void sync_trim_lines_from_regular_mesh(const std::vector<CSurfaceFace*>& surface
 					receiver->pMesh3D->SynchronizeBoundaryVertices(
 						master_vertices,
 						static_cast<float>(match_tolerance));
+				}
+			}
+		}
+	}
+}
+
+std::vector<std::vector<CPoint3d>> mesh_boundary_loops(const CMesh3D* mesh)
+{
+	std::vector<std::vector<CPoint3d>> loops;
+	if (!mesh)
+		return loops;
+	const auto& vertices = mesh->GetVertices();
+	const auto& faces = mesh->GetFaces();
+	std::map<std::pair<size_t, size_t>, int> edge_use;
+	for (const CMesh3D::Face& face : faces) {
+		if (face.deleted || face.corners.size() < 3)
+			continue;
+		for (size_t corner = 0; corner < face.corners.size(); ++corner) {
+			const size_t first = face.corners[corner].v;
+			const size_t second = face.corners[(corner + 1) % face.corners.size()].v;
+			if (first < vertices.size() && second < vertices.size() && first != second)
+				++edge_use[std::minmax(first, second)];
+		}
+	}
+	std::map<size_t, std::vector<size_t>> adjacency;
+	std::set<std::pair<size_t, size_t>> unused_edges;
+	for (const auto& item : edge_use) {
+		if (item.second != 1)
+			continue;
+		adjacency[item.first.first].push_back(item.first.second);
+		adjacency[item.first.second].push_back(item.first.first);
+		unused_edges.insert(item.first);
+	}
+	while (!unused_edges.empty()) {
+		const size_t start = unused_edges.begin()->first;
+		size_t previous = std::numeric_limits<size_t>::max();
+		size_t current = start;
+		std::vector<size_t> indices;
+		for (size_t guard = 0; guard <= unused_edges.size() + adjacency.size(); ++guard) {
+			indices.push_back(current);
+			const auto neighbors = adjacency.find(current);
+			if (neighbors == adjacency.end() || neighbors->second.empty())
+				break;
+			size_t next = std::numeric_limits<size_t>::max();
+			for (size_t candidate : neighbors->second) {
+				const auto key = std::minmax(current, candidate);
+				if (unused_edges.count(key) && candidate != previous) {
+					next = candidate;
+					break;
+				}
+			}
+			if (next == std::numeric_limits<size_t>::max()) {
+				for (size_t candidate : neighbors->second) {
+					if (unused_edges.count(std::minmax(current, candidate))) {
+						next = candidate;
+						break;
+					}
+				}
+			}
+			if (next == std::numeric_limits<size_t>::max())
+				break;
+			unused_edges.erase(std::minmax(current, next));
+			previous = current;
+			current = next;
+			if (current == start)
+				break;
+		}
+		if (indices.size() < 3)
+			continue;
+		std::vector<CPoint3d> loop;
+		loop.reserve(indices.size() + 1);
+		for (size_t index : indices) {
+			if (index < vertices.size()) {
+				const Vec3 point = vertices[index];
+				loop.emplace_back(point.x, point.y, point.z);
+			}
+		}
+		if (loop.size() >= 3) {
+			loop.push_back(loop.front());
+			loops.push_back(std::move(loop));
+		}
+	}
+	return loops;
+}
+
+void sync_circular_caps_from_curved_mesh(const std::vector<CSurfaceFace*>& surfaces)
+{
+	const auto point_segment_distance_sq = [](const CPoint3d& point,
+		const CPoint3d& first, const CPoint3d& second) {
+		const double dx = second.x - first.x;
+		const double dy = second.y - first.y;
+		const double dz = second.z - first.z;
+		const double length_sq = dx * dx + dy * dy + dz * dz;
+		const double alpha = length_sq > 1.0e-20
+			? std::clamp(((point.x - first.x) * dx + (point.y - first.y) * dy
+				+ (point.z - first.z) * dz) / length_sq, 0.0, 1.0)
+			: 0.0;
+		const double ex = point.x - (first.x + dx * alpha);
+		const double ey = point.y - (first.y + dy * alpha);
+		const double ez = point.z - (first.z + dz * alpha);
+		return ex * ex + ey * ey + ez * ez;
+	};
+	for (CSurfaceFace* donor : surfaces) {
+		if (!donor || !donor->IsInitMesh || !donor->IsTrimmed
+			|| !donor->pMesh3D || donor->m_Face.IsNull())
+			continue;
+		GeomAbs_SurfaceType donor_type = GeomAbs_OtherSurface;
+		try {
+			donor_type = BRepAdaptor_Surface(
+				TopoDS::Face(donor->m_Face)).GetType();
+			if (donor_type != GeomAbs_Sphere
+				&& donor_type != GeomAbs_Cylinder) continue;
+		} catch (const Standard_Failure&) {
+			continue;
+		}
+		const auto loops = mesh_boundary_loops(donor->pMesh3D);
+		if (loops.empty())
+			continue;
+		for (int donor_edge_index = 0;
+			donor_edge_index < donor->GetPreparedPolylineCount(); ++donor_edge_index) {
+			TopoDS_Edge donor_edge;
+			std::vector<CPoint3d> prepared;
+			if (!donor->GetPreparedTopoEdge(donor_edge_index, donor_edge)
+				|| !donor->GetPreparedPolylinePoints(donor_edge_index, prepared)
+				|| prepared.size() < 2) continue;
+			// Only a complete circular edge can own a planar CapRetopo boundary.
+			// A trimmed cylinder also has line/fillet window edges; replacing any
+			// of those with an entire mesh boundary loop would corrupt the cut.
+			try {
+				BRepAdaptor_Curve donor_curve(donor_edge);
+				if (donor_curve.GetType() != GeomAbs_Circle
+					&& donor_curve.GetType() != GeomAbs_Ellipse)
+					continue;
+				constexpr double full_circle_period =
+					6.28318530717958647692;
+				const double parameter_span = std::fabs(
+					donor_curve.LastParameter() - donor_curve.FirstParameter());
+				const double prepared_step = prepared.size() > 1
+					? prepared.front().DistTo(&prepared[1]) : 0.0;
+				const bool geometrically_closed = prepared.front().DistTo(
+					&prepared.back()) <= std::max(1.0e-6, prepared_step * 0.25);
+				if (parameter_span < full_circle_period - 1.0e-5
+					&& !geometrically_closed) continue;
+			} catch (const Standard_Failure&) {
+				continue;
+			}
+			const std::vector<CPoint3d>* best_loop = nullptr;
+			double best_score = std::numeric_limits<double>::max();
+			for (const auto& loop : loops) {
+				double score = 0.0;
+				for (const CPoint3d& point : loop) {
+					double nearest = std::numeric_limits<double>::max();
+					for (size_t segment = 1; segment < prepared.size(); ++segment) {
+						nearest = std::min(nearest, point_segment_distance_sq(
+							point, prepared[segment - 1], prepared[segment]));
+					}
+					score += nearest;
+				}
+				score /= static_cast<double>(loop.size());
+				if (score < best_score) {
+					best_score = score;
+					best_loop = &loop;
+				}
+			}
+			if (!best_loop)
+				continue;
+			double prepared_length = 0.0;
+			for (size_t segment = 1; segment < prepared.size(); ++segment)
+				prepared_length += prepared[segment].DistTo(&prepared[segment - 1]);
+			const double loop_match_tolerance = std::max(
+				prepared_length * 0.02, 1.0e-5);
+			// The curved face can contain several disconnected open loops. If the
+			// requested end circle was removed by clipping, the numerically nearest
+			// loop may actually be the rectangular window. Never copy that loop into
+			// a planar cap merely because the OCCT edge identity is shared.
+			if (best_score > loop_match_tolerance * loop_match_tolerance)
+				continue;
+			donor->SetPreparedPolylinePoints(donor_edge_index, *best_loop);
+			for (CSurfaceFace* receiver : surfaces) {
+				if (!receiver || receiver == donor)
+					continue;
+				try {
+					if (receiver->m_Face.IsNull()
+						|| BRepAdaptor_Surface(TopoDS::Face(receiver->m_Face)).GetType()
+							!= GeomAbs_Plane) {
+						continue;
+					}
+				} catch (const Standard_Failure&) {
+					continue;
+				}
+				for (int receiver_edge_index = 0;
+					receiver_edge_index < receiver->GetPreparedPolylineCount();
+					++receiver_edge_index) {
+					TopoDS_Edge receiver_edge;
+					std::vector<CPoint3d> receiver_prepared;
+					if (!receiver->GetPreparedTopoEdge(receiver_edge_index, receiver_edge)
+						|| !receiver->GetPreparedPolylinePoints(
+							receiver_edge_index, receiver_prepared)
+						|| receiver_prepared.size() < 2) continue;
+					try {
+						const GeomAbs_CurveType receiver_curve_type =
+							BRepAdaptor_Curve(receiver_edge).GetType();
+						if (receiver_curve_type != GeomAbs_Circle
+							&& receiver_curve_type != GeomAbs_Ellipse) continue;
+					} catch (const Standard_Failure&) {
+						continue;
+					}
+					double receiver_length = 0.0;
+					for (size_t segment = 1;
+						segment < receiver_prepared.size(); ++segment) {
+						receiver_length += std::sqrt(point_segment_distance_sq(
+							receiver_prepared[segment],
+							receiver_prepared[segment - 1],
+							receiver_prepared[segment - 1]));
+					}
+					double receiver_score = 0.0;
+					for (const CPoint3d& point : *best_loop) {
+						double nearest = std::numeric_limits<double>::max();
+						for (size_t segment = 1;
+							segment < receiver_prepared.size(); ++segment) {
+							nearest = std::min(nearest, point_segment_distance_sq(
+								point, receiver_prepared[segment - 1],
+								receiver_prepared[segment]));
+						}
+						receiver_score += nearest;
+					}
+					receiver_score /= static_cast<double>(best_loop->size());
+					const double geometric_tolerance = std::max(
+						receiver_length * 0.02, 1.0e-5);
+					if (!receiver_edge.IsSame(donor_edge)
+						&& receiver_score > geometric_tolerance * geometric_tolerance) {
+						continue;
+					}
+					receiver->SetPreparedPolylinePoints(
+						receiver_edge_index, *best_loop);
+					receiver->SetCircularCapMasterBoundary(*best_loop);
+					break;
 				}
 			}
 		}
@@ -1141,6 +2057,19 @@ std::unique_ptr<CSolid> load_solid_step(const QByteArray& step_data, QString& er
 		return {};
 	}
 }
+}
+
+bool BuildSphereCubeQuadMesh(
+	CSurfaceFace* surface, float deflection, bool trim_to_face)
+{
+	try {
+		if (!build_sphere_cube_quad_mesh(
+				surface, deflection, !trim_to_face)) return false;
+		const bool result = !trim_to_face || trim_sphere_cube_quad_mesh(surface);
+		return result;
+	} catch (const Standard_Failure&) {
+		return false;
+	}
 }
 
 bool IsEqual(double val1, double val2, float delta)
@@ -1470,6 +2399,28 @@ void CSolid::Alloc()
 	ptchDensity = 0.5;
 }
 
+
+std::shared_ptr<const quadro::BoundarySnapshot> CSolid::GetQuadroTopologySnapshot() const
+{
+	if (!m_QuadroBoundaryCache) m_QuadroBoundaryCache = std::make_unique<quadro::BoundaryCache>();
+	return m_QuadroBoundaryCache->topology(m_Shape);
+}
+
+std::shared_ptr<const quadro::BoundarySnapshot> CSolid::PrepareQuadroBoundary(const quadro::SamplingOptions& options) const
+{
+	if (!m_QuadroBoundaryCache) m_QuadroBoundaryCache = std::make_unique<quadro::BoundaryCache>();
+	return m_QuadroBoundaryCache->prepare(m_Shape, options);
+}
+
+void CSolid::InvalidateQuadroBoundary()
+{
+	if (m_QuadroBoundaryCache) m_QuadroBoundaryCache->invalidate();
+}
+
+std::uint64_t CSolid::GetQuadroBoundaryCaptureCount() const
+{
+	return m_QuadroBoundaryCache ? m_QuadroBoundaryCache->captureCount() : 0;
+}
 
 CSurfaceFace* CSolid::GetSurfaceFace(int indx)
 {
@@ -2148,8 +3099,8 @@ bool CSolid::BuldMesh(float Deflection)
 
 	// Keep the fast display tessellation and the Low Poly quadrangulation as
 	// two independent algorithms.  The hybrid renderer is allowed to hand
-	// trimmed faces to OCCT; Low Poly must run the legacy quad/trimming pass on
-	// every face.
+	// trimmed faces to OCCT; Low Poly uses CAD boundary patches for supported
+	// closed rounded bodies and the quad/trimming pipeline for other topology.
 	return MeshQuadro
 		? BuildQuadroMesh(Deflection)
 		: BuildHybridRenderMesh(Deflection);
@@ -2284,6 +3235,17 @@ bool CSolid::BuildQuadroMesh(float Deflection)
 {
 	if (!std::isfinite(Deflection) || Deflection <= 0.0f)
 		return false;
+	const auto cad_body = quadro::BuildStructuredCadBody(*this, Deflection);
+	if (cad_body != quadro::BodyMeshAttempt::NotApplicable)
+		return cad_body == quadro::BodyMeshAttempt::Built;
+	// A complete analytic sphere has two unavoidable singular poles in its
+	// native latitude/longitude UV domain. Use a six-patch subdivided cube for
+	// that one topology; trimmed spherical faces still need their exact BRep
+	// boundaries and continue through the general quadrangulator below.
+	if (m_Surfaces.size() == 1
+		&& BuildSphereCubeQuadMesh(m_Surfaces.front(), Deflection, false)) {
+		return true;
+	}
 
 	for (int i = 0; i < m_Surfaces.size(); i++)
 		m_Surfaces[i]->TypeGeom = m_TypeGeom;
@@ -2292,6 +3254,7 @@ bool CSolid::BuildQuadroMesh(float Deflection)
 	for (CSurfaceFace* surface : m_Surfaces) {
 		if (!surface)
 			continue;
+		surface->SetCircularCapMasterBoundary({});
 		surface->InitEdges();
 		// Legacy UV boundary splines are required only by the quad-mesh builder.
 		// Keeping them out of CSolid::InitEdges avoids running the old spline
@@ -2306,9 +3269,44 @@ bool CSolid::BuildQuadroMesh(float Deflection)
 		}
 	}
 
-	// Prepare edges of Surfaces
+	// Use the requested density for every surface, regardless of body size.
 	for (int i = 0; i < m_Surfaces.size(); i++)
 		m_Surfaces[i]->PrepareEdges(Deflection, true);
+	// A four-sided planar face with an inner wire needs at least eight cells
+	// in each boundary direction, even at the lowest Low Poly density. Apply
+	// the floor before synchronizing shared edges so adjacent faces agree.
+	for (CSurfaceFace* surface : m_Surfaces) {
+		if (!surface || surface->m_Face.IsNull())
+			continue;
+		const TopoDS_Face face = TopoDS::Face(surface->m_Face);
+		if (BRepAdaptor_Surface(face).GetType() != GeomAbs_Plane)
+			continue;
+		int wires = 0;
+		for (TopExp_Explorer wire(face, TopAbs_WIRE); wire.More(); wire.Next())
+			++wires;
+		if (wires < 2)
+			continue;
+		const TopoDS_Wire outer = BRepTools::OuterWire(face);
+		std::vector<TopoDS_Edge> outer_edges;
+		for (TopExp_Explorer edge(outer, TopAbs_EDGE); edge.More(); edge.Next())
+			outer_edges.push_back(TopoDS::Edge(edge.Current()));
+		if (outer_edges.size() != 4
+			|| !std::all_of(outer_edges.begin(), outer_edges.end(),
+				[](const TopoDS_Edge& edge) {
+					return BRepAdaptor_Curve(edge).GetType() == GeomAbs_Line;
+				}))
+			continue;
+		for (int index = 0; index < surface->GetPreparedPolylineCount(); ++index) {
+			TopoDS_Edge edge;
+			if (surface->GetPreparedPolylinePointCount(index) < 9
+				&& surface->GetPreparedTopoEdge(index, edge)
+				&& std::any_of(outer_edges.begin(), outer_edges.end(),
+					[&](const TopoDS_Edge& outer_edge) { return edge.IsSame(outer_edge); })) {
+				surface->SetPreparedPolylinePointCount(index, 9);
+			}
+		}
+	}
+	sync_split_cylinder_ring_counts(m_Surfaces);
 	sync_surface_edge_polyline_counts(m_Surfaces);
 	// A structured four-sided patch has one node dimension for each pair of
 	// opposite sides. If those sides request different counts, CNet necessarily
@@ -2330,29 +3328,81 @@ bool CSolid::BuildQuadroMesh(float Deflection)
 	}
 	bool ok = true;
 	for (CSurfaceFace* surface : m_Surfaces) {
-		if (surface && surface->m_TypeMesh == REGULAR_MESH
-			&& !surface->BuildTrimmingMesh(this, Deflection)) {
-			ok = false;
+		if (!surface
+			|| (surface->m_TypeMesh != REGULAR_MESH
+				&& !is_four_sided_bspline_compatibility_surface(surface))) {
+			continue;
 		}
+		if (!surface->BuildTrimmingMesh(this, Deflection)) {
+			ok = false;
+			continue;
+		}
+		if (is_four_sided_bspline_compatibility_surface(surface))
+			snap_structured_mesh_to_prepared_edges(surface);
 	}
 
 	// Different analytic surface types can choose different base UV steps even
 	// along the same topological edge. Capture the actual boundary counts,
 	// propagate the densest one, and rebuild regular meshes with a common step.
 	sync_regular_surface_mesh_steps(m_Surfaces);
-	for (CSurfaceFace* surface : m_Surfaces) {
-		if (surface && surface->m_TypeMesh == REGULAR_MESH
-			&& !surface->BuildTrimmingMesh(this, Deflection)) {
-			ok = false;
+	// Actual regular boundaries can raise one side after the initial count
+	// pass (notably at sphere/BSpline fillets). Propagate opposite-side and
+	// shared-edge constraints to a fixed point before rebuilding the nets.
+	// Counts only take maxima from a finite set, so this cannot refine forever.
+	// Imported STEP assemblies can contain incompatible four-side pairings.
+	// Their shared-edge counts then oscillate instead of reaching the assumed
+	// fixed point. A small bound is sufficient to propagate a legitimate local
+	// count increase while preventing the Low Poly dialog from hanging forever.
+	constexpr size_t opposite_edge_iteration_limit = 16;
+	size_t opposite_edge_iterations = 0;
+	while (sync_four_sided_opposite_edge_counts(m_Surfaces)) {
+		sync_surface_edge_polyline_counts(m_Surfaces);
+		++opposite_edge_iterations;
+		if (opposite_edge_iterations >= opposite_edge_iteration_limit) {
+			break;
 		}
+	}
+	for (CSurfaceFace* surface : m_Surfaces) {
+		if (!surface
+			|| (surface->m_TypeMesh != REGULAR_MESH
+				&& !is_four_sided_bspline_compatibility_surface(surface))) {
+			continue;
+		}
+		if (!surface->BuildTrimmingMesh(this, Deflection)) {
+			ok = false;
+			continue;
+		}
+		if (is_four_sided_bspline_compatibility_surface(surface))
+			snap_structured_mesh_to_prepared_edges(surface);
 	}
 
 	// A trimmed face must use the exact boundary row of an already built
 	// regular neighbour (for example a cylinder cap uses the side-wall ring).
 	sync_trim_lines_from_regular_mesh(m_Surfaces);
 
+	// Curved trimming creates its final boundary only after the surface mesh is
+	// clipped. Build spherical and cylindrical donors before their planar Caps,
+	// then make the actual open circular mesh loop the shared OCCT edge. This is
+	// essential for a cylinder: recomputing an equal-count circle on the Cap can
+	// choose a different angular phase and leaves an unwelded end ring.
 	for (CSurfaceFace* surface : m_Surfaces) {
-		if (surface && surface->m_TypeMesh != REGULAR_MESH
+		if (!surface || surface->IsInitMesh || surface->m_Face.IsNull())
+			continue;
+		try {
+			const GeomAbs_SurfaceType type = BRepAdaptor_Surface(
+				TopoDS::Face(surface->m_Face)).GetType();
+			if ((type == GeomAbs_Sphere || type == GeomAbs_Cylinder)
+				&& !surface->BuildTrimmingMesh(this, Deflection)) {
+				ok = false;
+			}
+		} catch (const Standard_Failure&) {
+		}
+	}
+	sync_circular_caps_from_curved_mesh(m_Surfaces);
+
+	for (CSurfaceFace* surface : m_Surfaces) {
+		if (surface && !surface->IsInitMesh
+			&& surface->m_TypeMesh != REGULAR_MESH
 			&& !surface->BuildTrimmingMesh(this, Deflection)) {
 			ok = false;
 		}
@@ -2398,6 +3448,7 @@ bool CSolid::BuildQuadroMesh(float Deflection)
 
 void CSolid::Clear()
 {
+	InvalidateQuadroBoundary();
 //	for (int i = 0; i < m_Edges.Count(); i++)
 //		delete m_Edges[i];
 //	m_Edges.Clear();
@@ -2412,6 +3463,7 @@ void CSolid::Render3d(bool selected) const
 {
 	if (!EnsureRenderMesh())
 		return;
+	Vec3 material_min{},material_max{};GetBounds(material_min,material_max);
 	const bool DrawIndexSurf = false;
 	const bool has_selected_subobject = !m_SelectedEdges.empty()
 		|| !m_SelectedFaceIndices.empty();
@@ -2530,6 +3582,7 @@ void CSolid::Render3d(bool selected) const
 			material.light_texture_path.clear();
 			material.bump_texture_path.clear();
 		}
+		if(material.texture_wrap_object)return material;
 		material.texture_offset_u += surface.TextureTransform.offset_u;
 		material.texture_offset_v += surface.TextureTransform.offset_v;
 		material.texture_scale_u *= surface.TextureTransform.scale_u;
@@ -2564,12 +3617,14 @@ void CSolid::Render3d(bool selected) const
 	// Surface-specific fit/scale/rotation/offset are already baked into the
 	// combined UV array. Keep the draw material neutral so they are not applied
 	// a second time by CMesh3D.
+	if(!batch_material.texture_wrap_object) {
 	batch_material.texture_offset_u = 0.0f;
 	batch_material.texture_offset_v = 0.0f;
 	batch_material.texture_scale_u = 1.0f;
 	batch_material.texture_scale_v = 1.0f;
 	batch_material.texture_rotation_degrees = 0.0f;
 	batch_material.texture_fit_to_surface = false;
+	}
 	const auto draw_surface_indices = [this, DrawIndexSurf]() {
 		if (!DrawIndexSurf)
 			return;
@@ -2657,7 +3712,7 @@ void CSolid::Render3d(bool selected) const
 						offset_base_faces,
 						&face_material,
 						rgb_selected_body || mesh_mode == MeshDisplayMode::SurfaceColored,
-						mode == SolidDisplayMode::HiddenLine && !rgb_selected_body);
+						mode == SolidDisplayMode::HiddenLine && !rgb_selected_body, &material_min, &material_max);
 				}
 			}
 		}

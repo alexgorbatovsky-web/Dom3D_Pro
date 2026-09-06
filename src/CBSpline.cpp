@@ -1,6 +1,7 @@
 #include "CBSpline.h"
 
 #include "OpenGLCompat.h"
+#include "CurveDirectionMarker.h"
 
 #include <algorithm>
 #include <cmath>
@@ -467,6 +468,41 @@ bool CBSpline::RemovePoint(size_t index) {
     return true;
 }
 
+bool CBSpline::RemoveNode(size_t index) {
+    if (!IsBezierChain()) {
+        return RemovePoint(index);
+    }
+    if (index >= points_.size() || index % 3 != 0) {
+        return false;
+    }
+
+    std::vector<CPoint3d> anchors;
+    anchors.reserve((points_.size() - 1) / 3 + 1);
+    for (size_t anchor = 0; anchor < points_.size(); anchor += 3) {
+        anchors.push_back(points_[anchor]);
+    }
+
+    const bool was_closed = IsClosed();
+    if (was_closed && anchors.size() > 1) {
+        // A closed Bezier chain stores the seam anchor at both ends.
+        anchors.pop_back();
+        if (index + 1 == points_.size()) index = 0;
+    }
+    const size_t anchor_index = index / 3;
+    const size_t minimum_count = was_closed ? 4 : 3;
+    if (anchors.size() < minimum_count || anchor_index >= anchors.size()) {
+        return false;
+    }
+    anchors.erase(anchors.begin()
+        + static_cast<std::vector<CPoint3d>::difference_type>(anchor_index));
+    if (was_closed) {
+        SetClosedBezierInterpolationPoints(anchors);
+    } else {
+        SetBezierInterpolationPoints(anchors);
+    }
+    return true;
+}
+
 void CBSpline::Reverse() {
     std::reverse(points_.begin(), points_.end());
     std::reverse(weights_.begin(), weights_.end());
@@ -865,6 +901,25 @@ void CBSpline::Render3d(bool selected, bool has_selected_point, size_t selected_
         glVertex3f(static_cast<float>(point.x), static_cast<float>(point.y), static_cast<float>(point.z));
     }
     glEnd();
+
+    if (selected && points_.size() >= 2) {
+        CPoint3d minimum = points_.front();
+        CPoint3d maximum = points_.front();
+        for (const CPoint3d& point : points_) {
+            minimum.x = std::min(minimum.x, point.x);
+            minimum.y = std::min(minimum.y, point.y);
+            minimum.z = std::min(minimum.z, point.z);
+            maximum.x = std::max(maximum.x, point.x);
+            maximum.y = std::max(maximum.y, point.y);
+            maximum.z = std::max(maximum.z, point.z);
+        }
+        const double dx = maximum.x - minimum.x;
+        const double dy = maximum.y - minimum.y;
+        const double dz = maximum.z - minimum.z;
+        DrawCurveStartArrow(
+            Evaluate(0.0f), Evaluate(0.02f),
+            std::sqrt(dx * dx + dy * dy + dz * dz));
+    }
 
     if (selected && has_selected_point) {
         glLineWidth(1.0f);

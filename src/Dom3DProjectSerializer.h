@@ -8,6 +8,8 @@
 
 #include <functional>
 
+class QIODevice;
+
 struct ProjectViewState {
     Camera camera{};
     bool has_camera = false;
@@ -26,6 +28,10 @@ struct ProjectViewState {
 class Dom3DProjectSerializer {
 public:
     using ProgressCallback = std::function<void(int, const QString&)>;
+
+    // Persistent scene content only; excludes camera, UI state and selection.
+    // An empty result means serialization failed and must never imply clean.
+    QByteArray DocumentFingerprint(const CAlfaDoc& document) const;
 
     bool Save(const QString& path,
               const CAlfaDoc& document,
@@ -55,4 +61,9 @@ public:
                        const ProjectViewState& view_state,
                        const QImage& thumbnail,
                        QString& error) const;
+private:
+    bool Write(QIODevice& device, const CAlfaDoc& document,
+               const QString& active_room, const ProjectViewState& view_state,
+               const QImage& thumbnail, QString& error,
+               bool include_render_mesh = true) const;
 };

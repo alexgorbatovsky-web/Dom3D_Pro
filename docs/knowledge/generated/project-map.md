@@ -1,13 +1,13 @@
 # Generated project map
 
-Generated from project files: 2026-08-30.  
+Generated from project files: 2026-09-01.  
 Generator: [`tools/Generate-CodeWiki.ps1`](../../../tools/Generate-CodeWiki.ps1)
 
 > This page is generated. Manual edits are replaced by the next `CodeWiki` run.
 
 ## Summary
 
-- C/C++ source files: **372**
+- C/C++ source files: **373**
 - Class and struct definitions found: **435**
 - CMake targets: **25**
 - `*Tests.cpp` files: **20**
@@ -18,7 +18,7 @@ Generator: [`tools/Generate-CodeWiki.ps1`](../../../tools/Generate-CodeWiki.ps1)
 |---|---:|---:|---:|---|
 | `3DCoat` | 1 | 1 | 2 | Integrated 3DCoat contour-filling algorithms. |
 | `comms` | 36 | 31 | 67 | Low-level 3DCoat graphics and utility components. |
-| `core` | 74 | 72 | 146 | Document, scene objects, curves, meshes, materials, and common geometry. |
+| `core` | 75 | 72 | 147 | Document, scene objects, curves, meshes, materials, and common geometry. |
 | `excomms` | 34 | 20 | 54 | Experimental mesh containers, codecs, and mesh operations. |
 | `iges` | 3 | 10 | 13 | IGES geometry and spline support. |
 | `render` | 4 | 3 | 7 | Scene preparation and external/native renderers. |

@@ -114,6 +114,10 @@ public:
     std::vector<Face>& GetFaces();
     const std::vector<UV>& GetUVs() const;
     const std::vector<Vec3>& GetNormals() const;
+    const std::vector<Edge>& GetSharpEdges() const;
+    void SetSharpEdges(std::vector<Edge> edges);
+    bool AddSharpEdge(size_t first_vertex, size_t second_vertex);
+    void ClearSharpEdges();
     int SynchronizeBoundaryVertices(const std::vector<Vec3>& master_points, float tolerance);
     static size_t GetFaceVertexIndex(const Face& face, size_t i);
     static void SetFaceVertexIndex(Face& face, size_t i, size_t v);
@@ -142,7 +146,9 @@ public:
                      bool offset_fill = false,
                      const Material* material_override = nullptr,
                      bool diagnostic_rgb = false,
-                     bool flat_color = false) const;
+                     bool flat_color = false,
+                     const Vec3* object_min = nullptr,
+                     const Vec3* object_max = nullptr) const;
     void RenderWire(bool selected,
                     bool draw_on_top = false,
                     const Color* color_override = nullptr,
@@ -226,6 +232,7 @@ private:
     std::vector<UV> uvs_;
     std::vector<Vec3> normals_;
     std::vector<Face> faces_;
+    std::vector<Edge> sharp_edges_;
     mutable unsigned int gpu_triangle_buffer_ = 0;
     mutable unsigned int gpu_wire_buffer_ = 0;
     mutable size_t gpu_triangle_vertex_count_ = 0;

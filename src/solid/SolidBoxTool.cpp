@@ -66,10 +66,11 @@ bool SolidBoxTool::DoParamOperation(CAlfaDoc& document, size_t object_index, con
 }
 
 bool SolidBoxTool::RebuildShape(CSolid& solid, const std::vector<ToolParameter>& parameters) const {
-	constexpr double kFaceBooleanOverlap = 0.01;
+	// Fixed model-space overlap; obsolete screen-based values in history are ignored.
+    constexpr double overlap = 0.001;
     const float width = static_cast<float>(std::max(GetParameter(parameters, "width", Width), 0.001));
     const float height = static_cast<float>(std::max(GetParameter(parameters, "height", Height), 0.001));
-    const float depth = static_cast<float>(GetParameter(parameters, "depth", Depth));
+    float depth = static_cast<float>(GetParameter(parameters, "depth", Depth));
     if (std::fabs(depth) <= 0.001f) {
         return false;
     }
@@ -99,7 +100,9 @@ bool SolidBoxTool::RebuildShape(CSolid& solid, const std::vector<ToolParameter>&
 		if (depth < 0.0f)
 			extrusion_direction.Reverse();
 		origin.Translate(gp_Vec(extrusion_direction)
-			* -kFaceBooleanOverlap);
+			* -overlap);
+            // Keep the far end at the requested distance from the original face.
+            depth += static_cast<float>(std::copysign(overlap, depth));
 	}
 
     return CreateBox(solid, width, height, depth, origin, normal, u_direction, v_direction);

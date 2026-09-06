@@ -1,3 +1,5 @@
+#include "IgesIO.h"
+#include "ThreeDSIO.h"
 #include "CAlfaDoc.h"
 #include "CAssembled.h"
 #include "CFacadeFurniture.h"
@@ -12,6 +14,7 @@
 #include "SurfaceUVMapping.h"
 #include "CPart.h"
 #include "CPolyline.h"
+#include "CBSpline.h"
 #include "Conic.h"
 #include "Dom3DProjectSerializer.h"
 #include "LinkLine.h"
@@ -28,6 +31,9 @@
 #include "Vector.h"
 #include "ui/MaterialDrag.h"
 #include "ui/ToolRegistry.h"
+#include "ui/OpenGLViewport.h"
+#include <QApplication>
+#include <QSurfaceFormat>
 #include "solid/Solid.h"
 #include "solid/SheetBendShapeBuilder.h"
 #include "solid/SurfaceSet.h"
@@ -38,8 +44,11 @@
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepGProp.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
+#include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepClass_FaceClassifier.hxx>
+#include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepFilletAPI_MakeChamfer.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
@@ -51,6 +60,7 @@
 #include <BRepBndLib.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRep_Tool.hxx>
+#include <BRepTools.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <Bnd_Box.hxx>
 #include <GProp_GProps.hxx>
@@ -58,6 +68,7 @@
 #include <TopoDS.hxx>
 #include <TopoDS_Iterator.hxx>
 #include <Standard_Failure.hxx>
+#include <gp_Elips.hxx>
 
 #include <QCoreApplication>
 #include <QDir>
@@ -75,6 +86,14 @@
 #include <sstream>
 #include <set>
 #include <chrono>
+
+#include "QuadroPipelineDiagnostics.h"
+#include "QuadroBoundaryReport.h"
+
+void TestHolePlacement();
+void TestPillowCadQuadro(const char* path, const char* outputPrefix);
+void TestHairdryerCadBoundary(const char* path);
+void DiagnoseHairdryerChartFill(const char* path,const char* output);
 
 namespace {
 void require(bool condition, const char* message) {
@@ -237,8 +256,60 @@ void TestDenseNotchBoundaryQuadrangulation() {
 void TestFusionCylinderFrontGuard() {
     // UV boundary captured from Extrude-Fusion at Density 0.40. The reference
     // advancing front used to grow from these 10 nodes to thousands of points
-    // and never closed. A rejected candidate must return promptly and the
-    // deterministic triangle pairing must recover the four strip quads.
+    // and never closed. Rejecting collapsed residual rings now lets the
+    // advancing front complete both strips without the old triangle fallback.
+    const auto validate_strip = [](const CMesh3D& mesh,
+                                   const std::vector<Vec3>& boundary) {
+        bool manifold = false;
+        require(ClosedMeshBoundaryLoopCount(mesh, manifold) == 1 && manifold
+                    && ActiveFaceEdgeComponentCount(mesh) == 1,
+                "Cylinder front retained an internal open seam.");
+        double expected_area = 0.0;
+        for (size_t i = 0; i < boundary.size(); ++i) {
+            const Vec3 a = boundary[i];
+            const Vec3 b = boundary[(i + 1) % boundary.size()];
+            expected_area += static_cast<double>(a.x) * b.y
+                - static_cast<double>(b.x) * a.y;
+        }
+        double actual_area = 0.0;
+        std::map<std::pair<size_t, size_t>, size_t> edges;
+        for (const auto& face : mesh.GetFaces()) {
+            if (face.deleted) continue;
+            double area = 0.0;
+            for (size_t i = 0; i < face.corners.size(); ++i) {
+                const size_t first = face.corners[i].v;
+                const size_t second = face.corners[(i + 1) % face.corners.size()].v;
+                require(first < mesh.GetVertices().size() && second < mesh.GetVertices().size(),
+                        "Cylinder front has an invalid mesh index.");
+                const Vec3 a = mesh.GetVertices()[first];
+                const Vec3 b = mesh.GetVertices()[second];
+                area += static_cast<double>(a.x) * b.y - static_cast<double>(b.x) * a.y;
+                ++edges[std::minmax(first, second)];
+            }
+            require(area > 1.0e-8, "Cylinder front has an inverted or collapsed quad.");
+            actual_area += area;
+        }
+        require(std::fabs(actual_area - std::fabs(expected_area)) < 1.0e-4,
+                "Cylinder front did not cover the complete input contour.");
+        size_t boundary_edges = 0;
+        for (const auto& edge : edges) {
+            if (edge.second != 1) continue;
+            ++boundary_edges;
+            const Vec3 a = mesh.GetVertices()[edge.first.first];
+            const Vec3 b = mesh.GetVertices()[edge.first.second];
+            const auto same = [](Vec3 a, Vec3 b) {
+                const Vec3 delta = a - b;
+                return dot(delta, delta) < 1.0e-10f;
+            };
+            bool found = false;
+            for (size_t i = 0; i < boundary.size(); ++i) {
+                const Vec3 c = boundary[i], d = boundary[(i + 1) % boundary.size()];
+                found = found || (same(a, c) && same(b, d)) || (same(a, d) && same(b, c));
+            }
+            require(found, "Cylinder front changed a source boundary edge.");
+        }
+        require(boundary_edges == boundary.size(), "Cylinder front lost boundary samples.");
+    };
     const std::vector<Vec3> contour{
         {0.000000594f, 0.000002228f, 0.0f},
         {-0.000000666f, 3.749998842f, 0.0f},
@@ -268,8 +339,9 @@ void TestFusionCylinderFrontGuard() {
         else
             ++other_faces;
     }
-    require(!rejection.empty() && quads == 4 && other_faces == 0,
-            "Fusion cylinder fallback did not recover four local quads.");
+    require(rejection.empty() && quads == 7 && other_faces == 0,
+            "Fusion cylinder front did not complete seven bounded quads.");
+    validate_strip(result, contour);
 
     const std::vector<Vec3> double_fillet_contour{
         {0.0f, 0.000000514f, 0.0f},
@@ -307,16 +379,13 @@ void TestFusionCylinderFrontGuard() {
                     "Double-fillet quadrangulation escaped its UV contour.");
         }
     }
-    require(!rejection.empty() && quads == 4 && result_triangles == 2,
-            "Double-fillet fallback did not recover its bounded local mesh.");
+    require(rejection.empty() && quads == 8 && result_triangles == 0,
+            "Double-fillet front did not complete eight bounded quads.");
+    validate_strip(result, double_fillet_contour);
     std::vector<std::unique_ptr<CPolyline>> saved_boundaries;
-    require(fill_surface.CreateLastQuadrangulationBoundaryPolylines(
-                saved_boundaries)
-                && saved_boundaries.size() == 2
-                && saved_boundaries.back()->IsClosed()
-                && saved_boundaries.back()->GetPointCount()
-                    == double_fillet_contour.size(),
-            "Rejected quadrangulator input was not retained as an XY boundary line.");
+    require(!fill_surface.CreateLastQuadrangulationBoundaryPolylines(saved_boundaries)
+                && saved_boundaries.empty(),
+            "Successful cylinder fronts left rejected-input diagnostics.");
 
     // The same UV contour belongs to a radius-12 cylindrical fillet. Its U
     // coordinate is angular, so the quadrangulator must see the exact metric
@@ -430,6 +499,416 @@ void TestSpherePoleQuadroProjection() {
             "Sphere-pole projection split the mesh into islands.");
     require(maximum_edge < 5.0,
             "Sphere-pole projection retained an angular seam chord.");
+
+    TopoDS_Shape full_sphere_shape = BRepPrimAPI_MakeSphere(10.0).Shape();
+    CSolid full_sphere(full_sphere_shape);
+    full_sphere.MeshQuadro = true;
+    require(full_sphere.InitSurfaces() && full_sphere.InitEdges()
+                && full_sphere.ReBuldMesh(1.0f / 0.45f),
+            "Could not build the full-sphere cube Quadro mesh.");
+    require(full_sphere.GetNumSurfaces() == 1,
+            "The full-sphere regression shape has unexpected BRep faces.");
+    const CSurfaceFace* full_surface = full_sphere.GetSurfaceFace(0);
+    require(full_surface && full_surface->pMesh3D,
+            "The full sphere has no cube Quadro mesh.");
+    const auto& cube_vertices = full_surface->pMesh3D->GetVertices();
+    const auto& cube_faces = full_surface->pMesh3D->GetFaces();
+    require(cube_vertices.size() == 386 && cube_faces.size() == 384,
+            "Density 0.45 did not produce six 8x8 sphere patches.");
+    std::map<std::pair<size_t, size_t>, int> cube_edge_use;
+    std::vector<std::set<size_t>> cube_neighbors(cube_vertices.size());
+    size_t cube_quads = 0;
+    double maximum_radius_error = 0.0;
+    for (const CMesh3D::Face& face : cube_faces) {
+        if (face.deleted) continue;
+        cube_quads += face.corners.size() == 4;
+        for (size_t corner = 0; corner < face.corners.size(); ++corner) {
+            const size_t first = face.corners[corner].v;
+            const size_t second = face.corners[
+                (corner + 1) % face.corners.size()].v;
+            require(first < cube_vertices.size()
+                        && second < cube_vertices.size(),
+                    "Cube sphere contains an invalid vertex index.");
+            ++cube_edge_use[std::minmax(first, second)];
+            cube_neighbors[first].insert(second);
+            cube_neighbors[second].insert(first);
+        }
+    }
+    for (const Vec3& vertex : cube_vertices) {
+        maximum_radius_error = std::max(maximum_radius_error,
+            std::abs(std::sqrt(static_cast<double>(dot(vertex, vertex)))
+                     - 10.0));
+    }
+    const size_t extraordinary_vertices = static_cast<size_t>(std::count_if(
+        cube_neighbors.begin(), cube_neighbors.end(),
+        [](const std::set<size_t>& neighbors) {
+            return neighbors.size() == 3;
+        }));
+    require(cube_quads == cube_faces.size()
+                && std::all_of(cube_edge_use.begin(), cube_edge_use.end(),
+                    [](const auto& edge) { return edge.second == 2; })
+                && extraordinary_vertices == 8
+                && std::all_of(cube_neighbors.begin(), cube_neighbors.end(),
+                    [](const std::set<size_t>& neighbors) {
+                        return neighbors.size() == 3 || neighbors.size() == 4;
+                    })
+                && maximum_radius_error < 1.0e-4,
+            "Cube sphere lost its closed Catmull-Clark quad topology.");
+
+    constexpr float trim_height = -2.3f;
+    TopoDS_Shape union_box = BRepPrimAPI_MakeBox(
+        gp_Pnt(-15.0, -15.0, -12.3), 30.0, 30.0, 10.0).Shape();
+    TopoDS_Shape union_ball = BRepPrimAPI_MakeSphere(10.0).Shape();
+    TopoDS_Shape union_shape = BRepAlgoAPI_Fuse(
+        union_box, union_ball).Shape();
+    CSolid trimmed_sphere(union_shape);
+    trimmed_sphere.MeshQuadro = true;
+    require(trimmed_sphere.InitSurfaces() && trimmed_sphere.InitEdges()
+                && trimmed_sphere.ReBuldMesh(2.0f),
+            "Could not cut a full cube sphere by the Boolean Union face.");
+    bool found_trimmed_sphere = false;
+    for (int surface_index = 0;
+         surface_index < trimmed_sphere.GetNumSurfaces(); ++surface_index) {
+        const CSurfaceFace* surface =
+            trimmed_sphere.GetSurfaceFace(surface_index);
+        if (!surface || !surface->pMesh3D
+            || BRepAdaptor_Surface(TopoDS::Face(surface->m_Face)).GetType()
+                != GeomAbs_Sphere) continue;
+        found_trimmed_sphere = true;
+        const auto& trimmed_vertices = surface->pMesh3D->GetVertices();
+        const auto& trimmed_faces = surface->pMesh3D->GetFaces();
+        const auto& trimmed_uvs = surface->pMesh3D->GetUVs();
+        std::map<std::pair<size_t, size_t>, int> edge_use;
+        std::set<size_t> used_vertices;
+        for (const CMesh3D::Face& face : trimmed_faces) {
+            if (face.deleted) continue;
+            require(face.corners.size() >= 3,
+                    "Trimmed cube sphere produced a collapsed polygon.");
+            double previous_u = 0.0;
+            bool have_previous_u = false;
+            for (size_t corner = 0; corner < face.corners.size(); ++corner) {
+                const MeshCorner& current = face.corners[corner];
+                const MeshCorner& next = face.corners[
+                    (corner + 1) % face.corners.size()];
+                require(current.v < trimmed_vertices.size()
+                            && current.uv < trimmed_uvs.size(),
+                        "Trimmed cube sphere has an invalid corner index.");
+                used_vertices.insert(current.v);
+                ++edge_use[std::minmax(current.v, next.v)];
+                if (have_previous_u) {
+                    require(std::abs(trimmed_uvs[current.uv].u - previous_u)
+                                <= M_PI + 1.0e-4,
+                            "Sphere boundary UV jumped across the periodic seam.");
+                }
+                previous_u = trimmed_uvs[current.uv].u;
+                have_previous_u = true;
+            }
+        }
+        size_t open_edges = 0;
+        for (const auto& edge : edge_use) {
+            require(edge.second <= 2,
+                    "Trimmed cube sphere produced a non-manifold edge.");
+            if (edge.second != 1) continue;
+            ++open_edges;
+            const Vec3& first = trimmed_vertices[edge.first.first];
+            const Vec3& second = trimmed_vertices[edge.first.second];
+            if (!(std::abs(first.z - trim_height) < 1.0e-3f
+                    && std::abs(second.z - trim_height) < 1.0e-3f)) {
+                std::cerr << "Unexpected open cube-sphere edge: ("
+                          << first.x << "," << first.y << "," << first.z
+                          << ")-(" << second.x << "," << second.y << ","
+                          << second.z << ") uses=" << edge.second << '\n';
+            }
+            require(std::abs(first.z - trim_height) < 1.0e-3f
+                        && std::abs(second.z - trim_height) < 1.0e-3f,
+                    "Cube-sphere cut left an open edge away from the BRep trim.");
+        }
+        for (size_t vertex_index : used_vertices) {
+            const Vec3& vertex = trimmed_vertices[vertex_index];
+            const double vertex_radius = std::sqrt(static_cast<double>(
+                dot(vertex, vertex)));
+            if (!(vertex.z >= trim_height - 1.0e-3f
+                    && std::abs(vertex_radius - 10.0) < 1.0e-3)) {
+                std::cerr << "Wrong retained sphere vertex: (" << vertex.x
+                          << "," << vertex.y << "," << vertex.z
+                          << ") radius=" << vertex_radius << '\n';
+            }
+            require(vertex.z >= trim_height - 1.0e-3f
+                        && std::abs(vertex_radius - 10.0) < 1.0e-3,
+                    "Cube-sphere classification retained the wrong side.");
+        }
+        require(open_edges > 0,
+                "Trimmed cube sphere has no Boolean boundary.");
+    }
+    require(found_trimmed_sphere,
+            "Boolean Union regression has no spherical face.");
+
+    // CapRetopo::DoCap2 regression: an exact circular planar face must use
+    // concentric quad rings and the three-boundary-nodes-plus-centre closure,
+    // rather than the generic strip-like advancing-front result.
+    TopoDS_Shape circular_cap_shape =
+        BRepPrimAPI_MakeCylinder(9.0, 4.0).Shape();
+    CSolid circular_cap_solid(circular_cap_shape);
+    circular_cap_solid.MeshQuadro = true;
+    require(circular_cap_solid.InitSurfaces()
+                && circular_cap_solid.InitEdges()
+                && circular_cap_solid.ReBuldMesh(1.0f / 0.45f),
+            "Could not build the circular CapRetopo regression solid.");
+    size_t circular_cap_count = 0;
+    for (int surface_index = 0;
+         surface_index < circular_cap_solid.GetNumSurfaces(); ++surface_index) {
+        const CSurfaceFace* surface =
+            circular_cap_solid.GetSurfaceFace(surface_index);
+        if (!surface || !surface->pMesh3D
+            || BRepAdaptor_Surface(TopoDS::Face(surface->m_Face)).GetType()
+                != GeomAbs_Plane) {
+            continue;
+        }
+        size_t wire_count = 0;
+        size_t circle_count = 0;
+        for (TopExp_Explorer wire(surface->m_Face, TopAbs_WIRE);
+             wire.More(); wire.Next()) ++wire_count;
+        for (TopExp_Explorer edge(surface->m_Face, TopAbs_EDGE);
+             edge.More(); edge.Next()) {
+            if (BRepAdaptor_Curve(TopoDS::Edge(edge.Current())).GetType()
+                == GeomAbs_Circle) ++circle_count;
+        }
+        if (wire_count != 1 || circle_count != 1)
+            continue;
+
+        const CMesh3D& cap_mesh = *surface->pMesh3D;
+        const auto& cap_vertices = cap_mesh.GetVertices();
+        size_t active_faces = 0;
+        std::map<std::pair<size_t, size_t>, int> cap_edge_use;
+        std::vector<std::set<size_t>> cap_neighbors(cap_vertices.size());
+        for (const CMesh3D::Face& face : cap_mesh.GetFaces()) {
+            if (face.deleted) continue;
+            ++active_faces;
+            require(face.corners.size() == 4,
+                    "Circular CapRetopo produced a non-quad face.");
+            for (size_t corner = 0; corner < face.corners.size(); ++corner) {
+                const size_t first = face.corners[corner].v;
+                const size_t second = face.corners[
+                    (corner + 1) % face.corners.size()].v;
+                require(first < cap_vertices.size() && second < cap_vertices.size(),
+                        "Circular CapRetopo contains an invalid vertex index.");
+                ++cap_edge_use[std::minmax(first, second)];
+                cap_neighbors[first].insert(second);
+                cap_neighbors[second].insert(first);
+            }
+        }
+        bool manifold = false;
+        require(active_faces > 0
+                    && ClosedMeshBoundaryLoopCount(cap_mesh, manifold) == 1
+                    && manifold,
+                "Circular CapRetopo is disconnected or non-manifold.");
+        const size_t boundary_edge_count = static_cast<size_t>(std::count_if(
+            cap_edge_use.begin(), cap_edge_use.end(),
+            [](const auto& edge) { return edge.second == 1; }));
+        const auto centre = std::max_element(cap_neighbors.begin(),
+            cap_neighbors.end(), [](const auto& first, const auto& second) {
+                return first.size() < second.size();
+            });
+        require(boundary_edge_count >= 6
+                    && (boundary_edge_count & 1U) == 0
+                    && centre != cap_neighbors.end()
+                    && centre->size() == boundary_edge_count / 2,
+                "Circular CapRetopo lost its paired central quad closure.");
+        ++circular_cap_count;
+    }
+    require(circular_cap_count == 2,
+            "The cylinder did not expose both circular CapRetopo faces.");
+
+    // An oblique cylinder section is an ellipse on its planar Cap. It must use
+    // the same concentric-ring topology instead of falling back to long strips.
+    const gp_Elips ellipse(gp_Ax2(gp_Pnt(0.0, 0.0, 0.0),
+        gp_Dir(0.0, 0.0, 1.0)), 9.0, 6.0);
+    const TopoDS_Edge ellipse_edge = BRepBuilderAPI_MakeEdge(ellipse).Edge();
+    const TopoDS_Wire ellipse_wire = BRepBuilderAPI_MakeWire(ellipse_edge).Wire();
+    TopoDS_Shape ellipse_face = BRepBuilderAPI_MakeFace(ellipse_wire).Face();
+    CSolid elliptical_cap_solid(ellipse_face);
+    elliptical_cap_solid.MeshQuadro = true;
+    require(elliptical_cap_solid.InitSurfaces()
+                && elliptical_cap_solid.InitEdges()
+                && elliptical_cap_solid.ReBuldMesh(1.0f / 0.65f),
+            "Could not build the elliptical CapRetopo regression face.");
+    require(elliptical_cap_solid.GetNumSurfaces() == 1,
+            "Elliptical CapRetopo regression has unexpected surfaces.");
+    const CSurfaceFace* elliptical_cap =
+        elliptical_cap_solid.GetSurfaceFace(0);
+    require(elliptical_cap && elliptical_cap->pMesh3D,
+            "Elliptical CapRetopo produced no mesh.");
+    size_t elliptical_quads = 0;
+    for (const CMesh3D::Face& face : elliptical_cap->pMesh3D->GetFaces()) {
+        if (face.deleted) continue;
+        require(face.corners.size() == 4,
+                "Elliptical CapRetopo produced a non-quad face.");
+        ++elliptical_quads;
+    }
+    bool elliptical_manifold = false;
+    require(elliptical_quads > 20
+                && ClosedMeshBoundaryLoopCount(
+                    *elliptical_cap->pMesh3D, elliptical_manifold) == 1
+                && elliptical_manifold,
+            "Elliptical CapRetopo is disconnected or non-manifold.");
+
+    // The planar Cap must not resample a Boolean circle independently. Its
+    // outer ring is the exact open boundary created by clipping the cube-sphere.
+    TopoDS_Shape sphere_for_cap = BRepPrimAPI_MakeSphere(10.0).Shape();
+    TopoDS_Shape cap_cutter = BRepPrimAPI_MakeBox(
+        gp_Pnt(2.0, -20.0, -20.0), 20.0, 40.0, 40.0).Shape();
+    TopoDS_Shape capped_shape = BRepAlgoAPI_Cut(
+        sphere_for_cap, cap_cutter).Shape();
+    CSolid capped_sphere(capped_shape);
+    capped_sphere.MeshQuadro = true;
+    require(capped_sphere.InitSurfaces() && capped_sphere.InitEdges()
+                && capped_sphere.ReBuldMesh(1.0f / 0.45f),
+            "Could not build the sphere-to-Cap boundary regression solid.");
+    const CMesh3D* spherical_mesh = nullptr;
+    const CMesh3D* planar_cap_mesh = nullptr;
+    for (int surface_index = 0;
+         surface_index < capped_sphere.GetNumSurfaces(); ++surface_index) {
+        const CSurfaceFace* surface = capped_sphere.GetSurfaceFace(surface_index);
+        if (!surface || !surface->pMesh3D)
+            continue;
+        const GeomAbs_SurfaceType type = BRepAdaptor_Surface(
+            TopoDS::Face(surface->m_Face)).GetType();
+        if (type == GeomAbs_Sphere)
+            spherical_mesh = surface->pMesh3D;
+        if (type == GeomAbs_Plane)
+            planar_cap_mesh = surface->pMesh3D;
+    }
+    require(spherical_mesh && planar_cap_mesh,
+            "The boundary regression did not expose both sphere and Cap meshes.");
+    const auto open_boundary_vertices = [](const CMesh3D& mesh) {
+        std::map<std::pair<size_t, size_t>, int> edge_use;
+        for (const CMesh3D::Face& face : mesh.GetFaces()) {
+            if (face.deleted || face.corners.size() < 3) continue;
+            for (size_t corner = 0; corner < face.corners.size(); ++corner) {
+                const size_t first = face.corners[corner].v;
+                const size_t second = face.corners[
+                    (corner + 1) % face.corners.size()].v;
+                ++edge_use[std::minmax(first, second)];
+            }
+        }
+        std::set<size_t> boundary_indices;
+        for (const auto& edge : edge_use) {
+            if (edge.second == 1) {
+                boundary_indices.insert(edge.first.first);
+                boundary_indices.insert(edge.first.second);
+            }
+        }
+        std::vector<Vec3> result;
+        for (size_t index : boundary_indices)
+            result.push_back(mesh.GetVertices()[index]);
+        return result;
+    };
+    const std::vector<Vec3> sphere_boundary =
+        open_boundary_vertices(*spherical_mesh);
+    const std::vector<Vec3> cap_boundary =
+        open_boundary_vertices(*planar_cap_mesh);
+    require(sphere_boundary.size() >= 6
+                && sphere_boundary.size() == cap_boundary.size(),
+            "Sphere and Cap use different boundary node counts.");
+    for (Vec3 sphere_point : sphere_boundary) {
+        double nearest = std::numeric_limits<double>::max();
+        for (Vec3 cap_point : cap_boundary) {
+            const Vec3 delta = sphere_point - cap_point;
+            nearest = std::min(nearest, static_cast<double>(dot(delta, delta)));
+        }
+        require(nearest <= 1.0e-8,
+                "The Cap did not reuse an exact sphere boundary vertex.");
+    }
+}
+
+void TestCylinderMultipleWindows(const QString& path, bool box_windows = false) {
+    CAlfaDoc document;
+    Dom3DProjectSerializer serializer;
+    QString room, error;
+    ProjectViewState view;
+    require(serializer.Load(path, document, room, view, error),
+            error.toLocal8Bit().constData());
+    CSolid* solid = nullptr;
+    for (const auto& object : document.GetObjects()) {
+        if (auto* candidate = dynamic_cast<CSolid*>(object.get())) {
+            require(!solid, "Cylinder fixture must contain one solid body.");
+            solid = candidate;
+        }
+    }
+    require(solid && solid->GetNumSurfaces() == (box_windows ? 9 : 5),
+            "Two-window cylinder fixture topology changed.");
+    solid->MeshQuadro = true;
+    for (bool slx : {false, true}) {
+        solid->MeshQuadroHoleSLX = slx;
+        const std::vector<float> densities = box_windows
+            ? std::vector<float>{0.35f, 0.40f, 0.45f, 0.50f, 0.55f, 0.60f,
+                                 0.65f, 0.70f, 0.75f, 0.80f, 0.90f, 1.0f, 0.40f}
+            : std::vector<float>{0.35f, 0.50f, 0.65f, 0.80f, 1.0f, 0.50f};
+        for (float density : densities) {
+            require(solid->ReBuldMesh(1.0f / density), "Cylinder windows rebuild failed.");
+            std::vector<const CMesh3D*> meshes;
+            for (int index = 0; index < solid->GetNumSurfaces(); ++index) {
+                const auto* surface = solid->GetSurfaceFace(index);
+                require(surface && surface->pMesh3D, "Cylinder lost a surface mesh.");
+                const auto& mesh = *surface->pMesh3D;
+                SurfaceUVMapping mapping(surface);
+                std::vector<double> edge_lengths;
+                require(ActiveFaceEdgeComponentCount(mesh) == 1,
+                        "Cylinder surface is empty or disconnected.");
+                for (const auto& cell : mesh.GetFaces()) {
+                    if (cell.deleted) continue;
+                    require(cell.corners.size() == 3 || cell.corners.size() == 4,
+                            "Cylinder trimming left an unsupported polygon.");
+                    Vec3 area{};
+                    Vec3 center{};
+                    for (size_t i = 0; i < cell.corners.size(); ++i) {
+                        const size_t a = cell.corners[i].v;
+                        const size_t b = cell.corners[(i + 1) % cell.corners.size()].v;
+                        require(a < mesh.GetVertices().size() && b < mesh.GetVertices().size(),
+                                "Cylinder mesh contains an invalid index.");
+                        const Vec3 first = mesh.GetVertices()[a];
+                        const Vec3 second = mesh.GetVertices()[b];
+                        require(std::isfinite(first.x) && std::isfinite(first.y)
+                                    && std::isfinite(first.z),
+                                "Cylinder mesh contains a nonfinite vertex.");
+                        area = area + cross(first, second);
+                        center = center + first;
+                        const Vec3 edge = second - first;
+                        edge_lengths.push_back(std::sqrt(double(dot(edge, edge))));
+                    }
+                    require(dot(area, area) > 1.0e-10f, "Cylinder mesh contains a collapsed cell.");
+                    if (box_windows) {
+                        center = center * (1.0f / cell.corners.size());
+                        SurfaceUVPoint uv;
+                        require(mapping.Project(center, uv), "Cannot project cell onto CAD face.");
+                        BRepClass_FaceClassifier classifier(TopoDS::Face(surface->m_Face),
+                            gp_Pnt2d(uv.u, uv.v), 1.0e-7, Standard_False);
+                        require(classifier.State() != TopAbs_OUT,
+                                "Cylinder cell crosses onto the discarded side of a window.");
+                    }
+                }
+                if (index == 0) {
+                    bool manifold = false;
+                    require(surface->GetPreparedPolylineCount() == (box_windows ? 20 : 12),
+                            "Outer cylinder must retain all CAD boundary edges.");
+                    require(ClosedMeshBoundaryLoopCount(mesh, manifold) == 4 && manifold,
+                            "Outer cylinder must have two end rings and both window boundaries.");
+                    if (box_windows) {
+                        std::sort(edge_lengths.begin(), edge_lengths.end());
+                        require(edge_lengths.back() < 3.0 * edge_lengths[edge_lengths.size() / 2],
+                                "Cylinder trimming stretched a cell across several mesh rows.");
+                    }
+                }
+                meshes.push_back(&mesh);
+            }
+            auto welded = CMesh3D::CreateWelded(meshes);
+            bool manifold = false;
+            require(welded && ClosedMeshBoundaryLoopCount(*welded, manifold) == 0 && manifold,
+                    "Cylinder windows retained an open or nonmanifold seam.");
+            std::cout << "Cylinder two windows density=" << density << " slx=" << slx
+                      << " weldedVertices=" << welded->GetVertices().size() << '\n';
+        }
+    }
 }
 
 void TestCylinderSeamTrimDirection() {
@@ -502,6 +981,80 @@ void TestCylinderSeamTrimDirection() {
     }
     require(verified_cylinder,
             "The seam-trim regression did not inspect its cylinder face.");
+
+    const auto require_clean_cylinders = [](TopoDS_Shape shape,
+                                             const char* fixture_name) {
+        CSolid fixture(shape);
+        fixture.MeshQuadro = true;
+        require(fixture.InitSurfaces() && fixture.InitEdges()
+                    && fixture.ReBuldMesh(1.0f / 0.50f),
+                fixture_name);
+        size_t cylinder_count = 0;
+        for (int surface_index = 0;
+             surface_index < fixture.GetNumSurfaces(); ++surface_index) {
+            const CSurfaceFace* surface = fixture.GetSurfaceFace(surface_index);
+            if (!surface || !surface->pMesh3D
+                || BRepAdaptor_Surface(TopoDS::Face(surface->m_Face)).GetType()
+                    != GeomAbs_Cylinder) {
+                continue;
+            }
+            ++cylinder_count;
+            size_t active_faces = 0;
+            double maximum_edge = 0.0;
+            std::vector<double> lengths;
+            const auto& vertices = surface->pMesh3D->GetVertices();
+            for (const CMesh3D::Face& face : surface->pMesh3D->GetFaces()) {
+                if (face.deleted) continue;
+                require(face.corners.size() >= 3,
+                        "Cylinder end-cut produced a degenerate face.");
+                ++active_faces;
+                for (size_t corner = 0; corner < face.corners.size(); ++corner) {
+                    const size_t first = face.corners[corner].v;
+                    const size_t second = face.corners[
+                        (corner + 1) % face.corners.size()].v;
+                    require(first < vertices.size() && second < vertices.size(),
+                            "Cylinder end-cut produced an invalid mesh index.");
+                    const Vec3 edge = vertices[second] - vertices[first];
+                    const double length = std::sqrt(
+                        static_cast<double>(dot(edge, edge)));
+                    if (length > 1.0e-7) {
+                        lengths.push_back(length);
+                        maximum_edge = std::max(maximum_edge, length);
+                    }
+                }
+            }
+            require(active_faces > 0,
+                    "Cylinder end-cut produced no active mesh faces.");
+            Bnd_Box face_bounds;
+            BRepBndLib::Add(surface->m_Face, face_bounds);
+            double x_min = 0.0;
+            double y_min = 0.0;
+            double z_min = 0.0;
+            double x_max = 0.0;
+            double y_max = 0.0;
+            double z_max = 0.0;
+            face_bounds.Get(x_min, y_min, z_min, x_max, y_max, z_max);
+            const double face_diagonal = std::hypot(
+                std::hypot(x_max - x_min, y_max - y_min), z_max - z_min);
+            require(!lengths.empty() && maximum_edge < face_diagonal * 0.75,
+                    "Cylinder end-cut retained a periodic long-edge fan.");
+        }
+        require(cylinder_count > 0,
+                "Cylinder end-cut fixture contained no cylindrical mesh.");
+    };
+
+    const TopoDS_Shape end_notch = BRepAlgoAPI_Cut(
+        cylinder,
+        BRepPrimAPI_MakeBox(gp_Pnt(cut_x, -6.0, -1.0),
+                            gp_Pnt(6.0, 6.0, 4.25)).Shape()).Shape();
+    require_clean_cylinders(end_notch,
+        "Could not build the cylinder end-notch regression solid.");
+
+    const TopoDS_Shape radial_cutter = BRepPrimAPI_MakeCylinder(
+        gp_Ax2(gp_Pnt(0.0, 0.0, height * 0.5), gp_Dir(1.0, 0.0, 0.0)),
+        2.25, radius + 2.0).Shape();
+    require_clean_cylinders(BRepAlgoAPI_Cut(cylinder, radial_cutter).Shape(),
+        "Could not build the cylinder-minus-cylinder regression solid.");
 }
 
 double PatchSignedArea(const std::vector<SurfacePatchPoint>& polygon) {
@@ -2608,7 +3161,7 @@ void TestBossPocketRegression() {
 void TestFaceBasedPrimitiveBooleanOverlap() {
 	ToolRegistry registry;
 	const auto verify = [&](const char* tool_id,
-		const char* extrusion_parameter, double extrusion) {
+		const char* extrusion_parameter, double extrusion, double overlap = 0.001) {
 		const ToolDefinition* definition = registry.Find(tool_id);
 		require(definition != nullptr,
 			"Face-overlap primitive tool is not registered.");
@@ -2620,11 +3173,12 @@ void TestFaceBasedPrimitiveBooleanOverlap() {
 		parameters.push_back({
 			"boolean.body_id", "Boolean Body", 1.0, 0.0,
 			static_cast<double>(std::numeric_limits<unsigned long>::max()), 1.0});
+		parameters.push_back({"boolean.overlap", "Boolean Overlap", overlap, 0.0, 1000000.0, 0.01});
 		CAlfaDoc document;
 		ActiveParametricObject object = registry.CreateParametricObject(
 			tool_id, document, parameters);
-		const CSolid* solid = object.object_index < document.GetObjects().size()
-			? dynamic_cast<const CSolid*>(
+		CSolid* solid = object.object_index < document.GetObjects().size()
+			? dynamic_cast<CSolid*>(
 				document.GetObjects()[object.object_index].get())
 			: nullptr;
 		require(solid != nullptr,
@@ -2633,21 +3187,46 @@ void TestFaceBasedPrimitiveBooleanOverlap() {
 		Vec3 maximum{};
 		require(solid->GetBounds(minimum, maximum),
 			"Face-overlap primitive has no bounds.");
-		constexpr double delta = 0.01;
+		constexpr double delta = 0.001;
 		constexpr double tolerance = 2.0e-4;
 		const double expected_minimum = extrusion > 0.0
-			? -delta : extrusion + delta;
+			? -delta : extrusion;
 		const double expected_maximum = extrusion > 0.0
-			? extrusion - delta : delta;
+			? extrusion : delta;
 		require(std::fabs(minimum.z - expected_minimum) <= tolerance
 				&& std::fabs(maximum.z - expected_maximum) <= tolerance,
-			"Face-based primitive does not overlap the base plane by Delta 0.01.");
+			"Face-based primitive must extend the start and preserve the requested far end.");
+        if (extrusion > 0) {
+            const auto host = BRepPrimAPI_MakeBox(gp_Pnt(-1000,-1000,-1000),2000,2000,1000).Shape();
+            BRepAlgoAPI_Common common(host, solid->m_Shape);
+            GProp_GProps volume;
+            require(common.IsDone(), "Cannot check primitive penetration");
+            BRepGProp::VolumeProperties(common.Shape(), volume);
+            require(volume.Mass() > 1e-6, "Union tool only touches the host; positive penetration required");
+            BRepAlgoAPI_Fuse fused(host, solid->m_Shape);
+            unsigned count=0;
+            require(fused.IsDone(), "Penetrating primitive union failed");
+            for(TopExp_Explorer e(fused.Shape(),TopAbs_SOLID);e.More();e.Next())++count;
+            require(count==1, "Union must produce one solid");
+        }
+        auto reopened=registry.ActiveObjectFromDocument(object.object_index,*solid,0,&document);
+        const auto margin=std::find_if(reopened.parameters.begin(),reopened.parameters.end(),[](const auto& p){return p.id=="boolean.overlap";});
+        require(margin!=reopened.parameters.end() && margin->value==overlap,"History lost face overlap");
+        registry.Rebuild(reopened,document);
+        solid=dynamic_cast<CSolid*>(document.GetObjects()[object.object_index].get());
+        require(solid && solid->GetBounds(minimum,maximum)
+            && std::fabs(minimum.z-expected_minimum)<=tolerance
+            && std::fabs(maximum.z-expected_maximum)<=tolerance,"Rebuild lost penetration or moved far end");
 	};
 
 	verify("SolidBox", "depth", 5.0);
 	verify("SolidBox", "depth", -5.0);
 	verify("SolidCylinder", "height", 5.0);
 	verify("SolidCylinder", "height", -5.0);
+	verify("SolidBox", "depth", 5.0, 0.588);
+	verify("SolidCylinder", "height", 5.0, 0.588);
+	verify("SolidBox", "depth", -5.0, 0.588);
+	verify("SolidCylinder", "height", -5.0, 0.588);
 
 	// A Box created on a Solid face is committed into the host as a second
 	// editable parametric operation, rather than remaining a separate body.
@@ -2676,7 +3255,7 @@ void TestFaceBasedPrimitiveBooleanOverlap() {
 		else if (parameter.id == "depth")
 			parameter.value = -5.0;
 		else if (parameter.id == "origin.z")
-			parameter.value = 10.0;
+			parameter.value = 10.0 - 1.90734863e-6;
 	}
 	cutter_parameters.push_back({
 		"boolean.body_id", "Boolean Body", static_cast<double>(host_id),
@@ -2694,6 +3273,9 @@ void TestFaceBasedPrimitiveBooleanOverlap() {
 			&& result->GetOperation(1)
 			&& result->GetOperation(1)->ToolId == "boolean",
 		"Face-based Box did not add the second parametric operation.");
+
+	BRepClass3d_SolidClassifier roof(result->m_Shape, gp_Pnt(2.5, 2.5, 10.0 - 0.5e-6), 1e-8);
+	require(roof.State() == TopAbs_OUT, "Face cutter left a thin roof at the rounded placement plane");
 
 	GProp_GProps deep_cut_properties;
 	BRepGProp::VolumeProperties(result->m_Shape, deep_cut_properties);
@@ -2892,6 +3474,71 @@ void TestMeshVar7Regression() {
     require_case(0, {{{0, 2, 3}, {2, 4, 5}, {1, 4, 0}, {4, 2, 0}}});
 }
 
+void TestMeshVar11Regression() {
+    for (bool adjacent : {false, true}) {
+        for (bool reverse_face : {false, true}) {
+            for (bool reverse_line : {false, true}) {
+                for (int shift : {0, 2}) {
+                    const std::vector<Vec3> vertices{{0,0,0},{4,0,0},{4,4,0},{0,4,0}};
+                    CMesh3D::Face source{0,1,2,3};
+                    if (reverse_face) std::reverse(source.corners.begin(), source.corners.end());
+                    std::vector<CPoint3d> points = adjacent
+                        ? std::vector<CPoint3d>{{0,0,0},{1,1,0},{3,1,0},{4,0,0},{6,-3,0},{-2,-3,0}}
+                        : std::vector<CPoint3d>{{0,0,0},{1,1.5,0},{2.5,2,0},{4,4,0},{6,6,0},{6,-2,0},{-2,-2,0}};
+                    if (reverse_line) std::reverse(points.begin(), points.end());
+                    std::rotate(points.begin(), points.begin() + shift, points.end());
+                    CPolyline line;
+                    std::vector<int> interior;
+                    for (size_t i = 0; i < points.size(); ++i) {
+                        line.AddPoint(points[i]);
+                        if (points[i].x > 0 && points[i].x < 4 && points[i].y > 0 && points[i].y < 4)
+                            interior.push_back(static_cast<int>(i));
+                    }
+                    line.SetClosed(true);
+                    if (!interior.empty() && interior.front() == 0)
+                        interior.push_back(static_cast<int>(points.size())); // Classifier's repeated seam node.
+                    std::reverse(interior.begin(), interior.end());
+                    int first = -1, last = -1;
+                    for (int i = 0; i < 4; ++i) {
+                        if (source.corners[i].v == 0) first = i;
+                        if (source.corners[i].v == (adjacent ? 1 : 2)) last = i;
+                    }
+                    CMesh3D mesh;
+                    require(mesh.SetGeometry(vertices, {source}), "Cannot build Var-11 fixture.");
+                    require(mesh.SplitFaceByVar11(0, first, last, interior, &line),
+                            "Var-11 rejected an adjacent/opposite or cyclic interior chain.");
+                    require(mesh.GetFaces().size() == 2 && mesh.GetVertices().size() == 6,
+                            "Var-11 lost or duplicated an interior node.");
+                    double total_area = 0;
+                    std::map<std::pair<size_t,size_t>, int> edges;
+                    for (const auto& face : mesh.GetFaces()) {
+                        double area = 0;
+                        for (size_t j = 0; j < face.corners.size(); ++j) {
+                            const size_t a = face.corners[j].v, b = face.corners[(j+1)%face.corners.size()].v;
+                            const Vec3 p = mesh.GetVertices()[a], q = mesh.GetVertices()[b];
+                            area += p.x*q.y - p.y*q.x;
+                            ++edges[std::minmax(a,b)];
+                        }
+                        require(reverse_face ? area < 0 : area > 0, "Var-11 reversed a polygon.");
+                        total_area += std::fabs(area) * 0.5;
+                    }
+                    require(std::fabs(total_area - 16.0) < 1.e-6, "Var-11 changed the source area.");
+                    size_t boundary_edges = 0, internal_edges = 0;
+                    for (const auto& [edge, uses] : edges) {
+                        require(uses == 1 || uses == 2, "Var-11 created a non-manifold edge.");
+                        if (uses == 1) {
+                            ++boundary_edges;
+                            require(edge.first < 4 && edge.second < 4, "Var-11 tore the interior chain.");
+                        } else ++internal_edges;
+                    }
+                    require(boundary_edges == 4 && internal_edges == 3,
+                            "Var-11 changed the perimeter or lost a contour segment.");
+                }
+            }
+        }
+    }
+}
+
 void TestTrimClassificationDiagnostics() {
     CAlfaDoc document;
     const int originalWorkLayer = document.GetWorkLayerID();
@@ -2987,6 +3634,121 @@ void TestCreateSurfaceFromSketch() {
             "Create Surface lost the sketch trimming boundary.");
     require(document.GetSelectedObject() == surface,
             "Create Surface did not select the new surface.");
+}
+
+void TestLoftSplineOrdering() {
+    CAlfaDoc document;
+    const auto add_profile = [&](const char* name, CPoint3d first,
+                                 CPoint3d second) {
+        auto spline = std::make_unique<CBSpline>(name);
+        spline->SetDegree(1);
+        spline->AddPoint(first);
+        spline->AddPoint(second);
+        document.AddObject(std::move(spline));
+        return document.GetObjects().back()->m_id;
+    };
+    const unsigned long left_id = add_profile("Loft left",
+        {-114.0, 373.0, 0.0}, {-127.0, -232.0, 0.0});
+    const unsigned long right_id = add_profile("Loft right",
+        {506.0, 357.0, 0.0}, {532.0, -204.0, 0.0});
+    const unsigned long middle_id = add_profile("Loft middle",
+        {180.0, 386.0, 115.0}, {197.0, -200.0, 115.0});
+
+    require(document.SelectObjectById(left_id, SelectionAction::Replace)
+                && document.SelectObjectById(right_id, SelectionAction::Add)
+                && document.SelectObjectById(middle_id, SelectionAction::Add),
+            "Could not prepare the deliberately unsorted Loft selection.");
+    require(document.CreateLoftSurfaceFromSelectedBSplines(),
+            "Geometrically sorted Loft construction failed.");
+    const CAlfaObject* loft = document.GetObjects().back().get();
+    require(loft && loft->GetParametricToolId() == "SurfaceLoft",
+            "Loft ordering regression produced no parametric surface.");
+    unsigned long stored_middle_id = 0;
+    for (const ParametricParameterValue& parameter :
+         loft->GetParametricParameters()) {
+        if (parameter.id == "curve2.id") {
+            stored_middle_id = static_cast<unsigned long>(
+                std::llround(parameter.value));
+        }
+    }
+    require(stored_middle_id == middle_id,
+            "Loft preserved selection order instead of geometric profile order.");
+
+    const auto* loft_surface = dynamic_cast<const CSurfaceSet*>(loft);
+    const CSurfaceFace* loft_face = loft_surface
+        ? loft_surface->GetSurfaceFace(0) : nullptr;
+    require(loft_face && loft_face->pMesh3D
+                && loft_face->pMesh3D->GetFaces().size() >= 100,
+            "Loft started with the coarse bounding-box display mesh.");
+}
+
+void TestTangentCapFromClosedSpline() {
+    TopoDS_Face cylindrical_face;
+    const TopoDS_Shape cylinder =
+        BRepPrimAPI_MakeCylinder(20.0, 60.0).Shape();
+    for (TopExp_Explorer faces(cylinder, TopAbs_FACE);
+         faces.More(); faces.Next()) {
+        const TopoDS_Face candidate = TopoDS::Face(faces.Current());
+        if (BRepAdaptor_Surface(candidate).GetType() == GeomAbs_Cylinder) {
+            cylindrical_face = candidate;
+            break;
+        }
+    }
+    require(!cylindrical_face.IsNull(),
+            "Tangent Cap fixture has no cylindrical support face.");
+
+    CAlfaDoc document;
+    TopoDS_Shape support_shape = cylindrical_face;
+    auto support = std::make_unique<CSurfaceSet>(support_shape);
+    support->SetName("Open fuselage surface");
+    require(support->ReBuldMesh(2.0f),
+            "Tangent Cap support surface could not be initialized.");
+    document.AddObject(std::move(support));
+    const unsigned long surface_id = document.GetSelectedObject()->m_id;
+
+    auto boundary = std::make_unique<CBSpline>("Nose boundary");
+    constexpr int point_count = 24;
+    for (int point = 0; point < point_count; ++point) {
+        const double angle = 2.0 * 3.14159265358979323846
+            * static_cast<double>(point) / point_count;
+        boundary->AddPoint({20.0 * std::cos(angle),
+                            20.0 * std::sin(angle), 0.0});
+    }
+    boundary->SetClosed(true);
+    document.AddObject(std::move(boundary));
+    const unsigned long curve_id = document.GetSelectedObject()->m_id;
+    require(document.SelectObjectById(surface_id, SelectionAction::Replace)
+                && document.SelectObjectById(curve_id, SelectionAction::Add),
+            "Tangent Cap fixture selection failed.");
+    std::string error;
+    const bool cap_created = document.CreateTangentCapFromSelection(&error);
+    require(cap_created,
+            error.empty() ? "Tangent Cap construction failed." : error.c_str());
+    const auto* cap = dynamic_cast<const CSurfaceSet*>(
+        document.GetObjects().back().get());
+    require(cap && cap->GetName() == "Tangent Cap"
+                && cap->GetParametricToolId() == "SurfaceTangentCap"
+                && cap->GetNumSurfaces() == 1
+                && BRepCheck_Analyzer(cap->m_Shape).IsValid(),
+            "Tangent Cap did not create a valid parametric G1 patch.");
+
+    const auto minimum_z = [](const TopoDS_Shape& shape) {
+        Bnd_Box bounds;
+        BRepBndLib::Add(shape, bounds);
+        Standard_Real xmin = 0.0, ymin = 0.0, zmin = 0.0;
+        Standard_Real xmax = 0.0, ymax = 0.0, zmax = 0.0;
+        bounds.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+        return zmin;
+    };
+    const double short_nose_minimum = minimum_z(cap->m_Shape);
+    const size_t cap_index = document.GetObjects().size() - 1;
+    require(document.RebuildTangentCap(
+                cap_index, curve_id, surface_id, 1.10, &error),
+            error.empty() ? "Tangent Cap factor rebuild failed."
+                          : error.c_str());
+    cap = dynamic_cast<const CSurfaceSet*>(document.GetObjects().back().get());
+    require(cap && minimum_z(cap->m_Shape) < short_nose_minimum - 5.0,
+            "Nose Length Factor did not lengthen the tangent cap.");
 }
 
 void TestCurveToPolylineByLength() {
@@ -3124,6 +3886,979 @@ void TestSurfacePatchWelding() {
     require(tested, "The patch-welding regression found no two-hole surface.");
 }
 
+void TestExtrudeSlQuadro(const QString& path) {
+    CAlfaDoc document;
+    Dom3DProjectSerializer serializer;
+    QString room, error;
+    ProjectViewState view;
+    require(serializer.Load(path, document, room, view, error),
+            error.toLocal8Bit().constData());
+    size_t solids = 0;
+    for (const auto& object : document.GetObjects()) {
+        auto* solid = dynamic_cast<CSolid*>(object.get());
+        if (!solid) continue;
+        ++solids;
+        solid->MeshQuadro = true;
+        solid->MeshQuadroHoleSLX = false;
+        // Exercise the previously capped 18-face body above Density 0.50,
+        // then return to low density to catch stale boundary caches.
+        const std::vector<float> densities = solid->GetNumSurfaces() == 18
+            ? std::vector<float>{0.20f, 0.25f, 0.30f, 0.35f, 0.50f, 0.65f, 0.80f, 1.0f, 0.25f}
+            : std::vector<float>{0.20f, 0.25f, 0.30f, 0.35f, 0.50f, 0.25f};
+        size_t previous_boundary_points = 0;
+        size_t previous_vertices = 0;
+        for (float density : densities) {
+            const auto begin = std::chrono::steady_clock::now();
+            require(solid->ReBuldMesh(1.0f / density),
+                    "Extrude_SL Quadro rebuild failed.");
+            const double seconds = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - begin).count();
+            std::vector<const CMesh3D*> meshes;
+            size_t boundary_points = 0;
+            for (int i = 0; i < solid->GetNumSurfaces(); ++i) {
+                const CSurfaceFace* surface = solid->GetSurfaceFace(i);
+                require(surface && surface->pMesh3D,
+                        "Extrude_SL lost a surface mesh.");
+                require(surface->GetLastQuadrangulationDiagnostic().empty(),
+                        "Extrude_SL fell back from the advancing-front mesh.");
+                const CMesh3D& mesh = *surface->pMesh3D;
+                for (int edge = 0; edge < surface->GetPreparedPolylineCount(); ++edge)
+                    boundary_points += surface->GetPreparedPolylinePointCount(edge);
+                require(ActiveFaceEdgeComponentCount(mesh) == 1,
+                        "Extrude_SL surface has disconnected mesh fragments.");
+                for (const CMesh3D::Face& face : mesh.GetFaces()) {
+                    if (face.deleted) continue;
+                    require(face.corners.size() == 4,
+                            "Extrude_SL retained a triangle.");
+                    for (const MeshCorner& corner : face.corners) {
+                        require(corner.v < mesh.GetVertices().size(),
+                                "Extrude_SL has an invalid vertex index.");
+                        const Vec3 p = mesh.GetVertices()[corner.v];
+                        require(std::isfinite(p.x) && std::isfinite(p.y)
+                                    && std::isfinite(p.z),
+                                "Extrude_SL has a non-finite vertex.");
+                    }
+                }
+                meshes.push_back(&mesh);
+            }
+            auto welded = CMesh3D::CreateWelded(meshes);
+            require(static_cast<bool>(welded), "Extrude_SL could not be welded.");
+            bool manifold = false;
+            require(ClosedMeshBoundaryLoopCount(*welded, manifold) == 0 && manifold,
+                    "Extrude_SL retained open or non-manifold mesh seams.");
+            const size_t vertex_count = welded->GetVertices().size();
+            if (density > 0.50f) {
+                require(boundary_points > previous_boundary_points,
+                        "Extrude_SL boundary density is still capped.");
+                require(vertex_count > previous_vertices,
+                        "Extrude_SL mesh does not get denser above 0.50.");
+            }
+            previous_boundary_points = boundary_points;
+            previous_vertices = vertex_count;
+            std::cout << "Extrude_SL surfaces=" << solid->GetNumSurfaces()
+                      << " density=" << density << " rebuildSeconds=" << seconds
+                      << " boundaryPoints=" << boundary_points
+                      << " weldedVertices=" << vertex_count << '\n';
+        }
+    }
+    require(solids == 2, "Extrude_SL regression must inspect both source solids.");
+}
+
+void TestBoxMinBoxFilledQuadro(const QString& path) {
+    CAlfaDoc document;
+    Dom3DProjectSerializer serializer;
+    QString room, error;
+    ProjectViewState view;
+    require(serializer.Load(path, document, room, view, error),
+            error.toLocal8Bit().constData());
+    size_t tested = 0;
+    for (const auto& object : document.GetObjects()) {
+        auto* solid = dynamic_cast<CSolid*>(object.get());
+        if (!solid) continue;
+        ++tested;
+        require(solid->GetNumSurfaces() == 14, "Box fixture topology changed.");
+        solid->MeshQuadro = true;
+        solid->MeshQuadroHoleSLX = false;
+        for (float density : {0.20f, 0.25f, 0.35f, 0.50f, 0.65f, 0.80f, 1.0f, 0.50f}) {
+            const auto begin = std::chrono::steady_clock::now();
+            require(solid->ReBuldMesh(1.0f / density), "Box Quadro rebuild failed.");
+            std::vector<const CMesh3D*> meshes;
+            for (int i = 0; i < solid->GetNumSurfaces(); ++i) {
+                CSurfaceFace* surface = solid->GetSurfaceFace(i);
+                require(surface && surface->pMesh3D, "Box lost a surface mesh.");
+                require(surface->GetLastQuadrangulationDiagnostic().empty()
+                            && surface->GetLastIslandFillError().empty(),
+                        "Box used an emergency mesh fallback.");
+                const CMesh3D& mesh = *surface->pMesh3D;
+                require(ActiveFaceEdgeComponentCount(mesh) == 1,
+                        "Box surface contains disconnected patches.");
+                for (const auto& face : mesh.GetFaces()) {
+                    if (face.deleted) continue;
+                    require(face.corners.size() == 4, "Box retained a non-quad cell.");
+                    std::set<size_t> indices;
+                    Vec3 area{};
+                    for (size_t j = 0; j < 4; ++j) {
+                        const size_t a = face.corners[j].v;
+                        const size_t b = face.corners[(j + 1) % 4].v;
+                        require(a < mesh.GetVertices().size() && b < mesh.GetVertices().size(),
+                                "Box has an invalid vertex index.");
+                        indices.insert(a);
+                        const Vec3 p = mesh.GetVertices()[a];
+                        require(std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z),
+                                "Box has a non-finite vertex.");
+                        const Vec3 origin = mesh.GetVertices()[face.corners[0].v];
+                        area = area + cross(p - origin, mesh.GetVertices()[b] - origin);
+                    }
+                    require(indices.size() == 4 && dot(area, area) > 1.0e-14f,
+                            "Box has a collapsed quad.");
+                }
+                if (i == 2 || i == 4) {
+                    bool manifold = false;
+                    require(ClosedMeshBoundaryLoopCount(mesh, manifold) == 2 && manifold,
+                            "Box planar face lost its hole or has an open patch seam.");
+                    std::vector<std::unique_ptr<CPolyline>> patches;
+                    require(surface->CreateLastIslandBoundaryPolylines(patches) && patches.size() == 4,
+                            "Box hole was skipped while creating island contours.");
+                }
+                if (i == 12) {
+                    require(surface->m_TypeMesh != REGULAR_MESH
+                                && surface->GetPreparedPolylineCount() == 6,
+                            "Split cylinder edges must not donate complete net rows.");
+                    std::vector<CPoint3d> fragment;
+                    require(surface->GetPreparedPolylinePoints(1, fragment) && fragment.size() >= 2,
+                            "Box lost the short CAD arc.");
+                    double length = 0;
+                    for (size_t j = 1; j < fragment.size(); ++j)
+                        length += fragment[j].DistTo(&fragment[j - 1]);
+                    require(length < 0.50 && length > 0.45,
+                            "Short CAD arc was replaced by the whole quarter-circle.");
+                }
+                meshes.push_back(&mesh);
+            }
+            auto welded = CMesh3D::CreateWelded(meshes);
+            bool manifold = false;
+            require(welded && ClosedMeshBoundaryLoopCount(*welded, manifold) == 0 && manifold,
+                    "Box retained open or non-manifold boundary seams.");
+            std::cout << "Box_Min_Box_Filled density=" << density
+                      << " vertices=" << welded->GetVertices().size()
+                      << " seconds=" << std::chrono::duration<double>(
+                          std::chrono::steady_clock::now() - begin).count() << '\n';
+        }
+    }
+    require(tested == 1, "Box regression must inspect one source solid.");
+}
+
+void TestBoxDoubleCutSlx(const QString& path) {
+    CAlfaDoc document;
+    Dom3DProjectSerializer serializer;
+    QString room, error;
+    ProjectViewState view;
+    require(serializer.Load(path, document, room, view, error),
+            error.toLocal8Bit().constData());
+    size_t tested = 0;
+    for (const auto& object : document.GetObjects()) {
+        auto* solid = dynamic_cast<CSolid*>(object.get());
+        if (!solid) continue;
+        ++tested;
+        require(solid->GetNumSurfaces() == 14, "Double-cut Box topology changed.");
+        solid->MeshQuadro = true;
+        const std::vector<std::pair<float, bool>> cases{
+            {0.20f, true}, {0.24f, true}, {0.25f, true}, {0.26f, true},
+            {0.30f, true}, {0.50f, true}, {0.80f, true}, {1.00f, true},
+            {0.25f, false}, {0.25f, true}};
+        for (const auto& [density, slx] : cases) {
+            solid->MeshQuadroHoleSLX = slx;
+            require(solid->ReBuldMesh(1.0f / density), "Double-cut Box rebuild failed.");
+            std::vector<const CMesh3D*> meshes;
+            for (int i = 0; i < solid->GetNumSurfaces(); ++i) {
+                const auto* surface = solid->GetSurfaceFace(i);
+                require(surface && surface->pMesh3D, "Double-cut Box lost a surface.");
+                const auto& mesh = *surface->pMesh3D;
+                require(ActiveFaceEdgeComponentCount(mesh) == 1,
+                        "Double-cut Box has disconnected surface patches.");
+                double twice_area = 0;
+                for (const auto& face : mesh.GetFaces()) {
+                    if (face.deleted) continue;
+                    require(face.corners.size() == 3 || face.corners.size() == 4,
+                            "Double-cut Box retained an unsupported polygon.");
+                    Vec3 area{};
+                    for (size_t j = 0; j < face.corners.size(); ++j) {
+                        const size_t a = face.corners[j].v;
+                        const size_t b = face.corners[(j + 1) % face.corners.size()].v;
+                        require(a < mesh.GetVertices().size() && b < mesh.GetVertices().size(),
+                                "Double-cut Box has an invalid vertex index.");
+                        const Vec3 p = mesh.GetVertices()[a], q = mesh.GetVertices()[b];
+                        require(std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z),
+                                "Double-cut Box has a non-finite vertex.");
+                        const Vec3 origin = mesh.GetVertices()[face.corners[0].v];
+                        area = area + cross(p - origin, q - origin);
+                    }
+                    require(dot(area, area) > 1.0e-14f, "Double-cut Box has a collapsed cell.");
+                    if (i == 3) twice_area += std::fabs(area.z);
+                }
+                if (i == 3) {
+                    bool manifold = false;
+                    require(ClosedMeshBoundaryLoopCount(mesh, manifold) == 2 && manifold,
+                            "Double-cut Box top face lost its pocket boundary.");
+                    require(std::fabs(twice_area * 0.5 - 19690.6922698) < 0.1,
+                            "Double-cut Box top face has missing or excess area.");
+                }
+                meshes.push_back(&mesh);
+            }
+            auto welded = CMesh3D::CreateWelded(meshes);
+            bool manifold = false;
+            require(welded && ClosedMeshBoundaryLoopCount(*welded, manifold) == 0 && manifold,
+                    "Double-cut Box has an open or non-manifold welded seam.");
+            std::cout << "Box double cut density=" << density << " slx=" << slx
+                      << " vertices=" << welded->GetVertices().size() << '\n';
+        }
+    }
+    require(tested == 1, "Double-cut Box fixture must contain one solid.");
+}
+
+void TestMeshPointSplitReallocation() {
+    for (const auto& [first, second] : std::vector<std::pair<int, int>>{
+            {0,2}, {1,3}, {0,1}, {1,2}, {2,3}, {3,0}}) {
+        CMesh3D mesh;
+        require(mesh.SetGeometry({{0,0,0}, {1,0,0}, {1,1,0}, {0,1,0}},
+            {CMesh3D::Face{0,1,2,3}}), "Point-split setup failed.");
+        mesh.GetFaces().shrink_to_fit();
+        require(mesh.SplitFaceByPoint(0, first, second, cVec2(0.35, 0.55)),
+                "Point split failed after forced reallocation.");
+        double area = 0;
+        for (const auto& face : mesh.GetFaces()) {
+            require(face.corners.size() >= 3 && face.corners.size() <= 4,
+                    "Point split retained an invalid face.");
+            double twice_area = 0;
+            for (size_t j = 0; j < face.corners.size(); ++j) {
+                const Vec3 p = mesh.GetVertices().at(face.corners[j].v);
+                const Vec3 q = mesh.GetVertices().at(face.corners[(j + 1) % face.corners.size()].v);
+                twice_area += p.x * q.y - p.y * q.x;
+            }
+            require(twice_area > 0, "Point split inverted or collapsed a face.");
+            area += twice_area * 0.5;
+        }
+        bool manifold = false;
+        require(std::fabs(area - 1.0) < 1.e-6 && ActiveFaceEdgeComponentCount(mesh) == 1
+            && ClosedMeshBoundaryLoopCount(mesh, manifold) == 1 && manifold,
+            "Point split changed its source area or boundary after reallocation.");
+    }
+}
+
+void TestMeshVar5Reallocation() {
+    CMesh3D mesh;
+    require(mesh.SetGeometry({{0,0,0}, {1,0,0}, {2,0,0}, {0,1,0}, {1,1,0}, {2,1,0}},
+        {CMesh3D::Face{0,1,4,3}, CMesh3D::Face{1,2,5,4}}), "Var-5 setup failed.");
+    mesh.GetFaces().shrink_to_fit(); // The first appended face must relocate the array.
+    mesh.GetFaces()[1].pm = CPoint3d(1.5, 0.5, 0.0);
+    mesh.GetFaces()[1].edgeIndex = 3;
+    cVec2 center(0.5, 0.5);
+    require(mesh.SplitFaceByVar5(0, 0, 1, center), "Var-5 pair split failed.");
+    require(mesh.GetFaces().size() == 8 && mesh.GetVertices().size() == 8,
+            "Var-5 pair split changed its expected topology.");
+    double area = 0.0;
+    for (const auto& face : mesh.GetFaces()) {
+        require(face.corners.size() == 3, "Var-5 retained a non-triangle.");
+        const Vec3 a = mesh.GetVertices().at(face.corners[0].v);
+        const Vec3 b = mesh.GetVertices().at(face.corners[1].v);
+        const Vec3 c = mesh.GetVertices().at(face.corners[2].v);
+        const double twice_area = cross(b - a, c - a).z;
+        require(twice_area > 0, "Var-5 inverted or collapsed a triangle.");
+        area += twice_area * 0.5;
+    }
+    bool manifold = false;
+    require(std::fabs(area - 2.0) < 1.e-8
+        && ActiveFaceEdgeComponentCount(mesh) == 1
+        && ClosedMeshBoundaryLoopCount(mesh, manifold) == 1 && manifold,
+        "Var-5 changed the area or boundary of its source pair.");
+}
+
+void TestBooleanThreeSlx(const QString& path) {
+    CAlfaDoc document;
+    Dom3DProjectSerializer serializer;
+    QString room, error;
+    ProjectViewState view;
+    require(serializer.Load(path, document, room, view, error), error.toLocal8Bit().constData());
+    size_t tested = 0;
+    for (const auto& object : document.GetObjects()) {
+        auto* solid = dynamic_cast<CSolid*>(object.get());
+        if (!solid) continue;
+        ++tested;
+        require(solid->GetNumSurfaces() == 24, "Boolean-3 topology changed.");
+        solid->MeshQuadro = true;
+        for (const auto& [density, slx] : std::vector<std::pair<float, bool>>{
+                {0.20f, true}, {0.25f, true}, {0.30f, true}, {0.34f, true},
+                {0.35f, true}, {0.36f, true}, {0.40f, true}, {0.50f, true},
+                {0.70f, true}, {0.85f, true}, {1.00f, true},
+                {0.35f, false}, {0.35f, true}}) {
+            const auto begin = std::chrono::steady_clock::now();
+            solid->MeshQuadroHoleSLX = slx;
+            require(solid->ReBuldMesh(1.0f / density), "Boolean-3 rebuild failed.");
+            std::vector<const CMesh3D*> meshes;
+            for (int i = 0; i < solid->GetNumSurfaces(); ++i) {
+                const auto* surface = solid->GetSurfaceFace(i);
+                require(surface && surface->pMesh3D, "Boolean-3 lost a surface.");
+                const auto& mesh = *surface->pMesh3D;
+                require(ActiveFaceEdgeComponentCount(mesh) == 1,
+                        "Boolean-3 has disconnected surface patches.");
+                double area = 0;
+                for (const auto& face : mesh.GetFaces()) {
+                    if (face.deleted) continue;
+                    require(face.corners.size() == 3 || face.corners.size() == 4,
+                            "Boolean-3 retained an unsupported polygon.");
+                    Vec3 normal{};
+                    const Vec3 origin = mesh.GetVertices().at(face.corners[0].v);
+                    for (size_t j = 0; j < face.corners.size(); ++j) {
+                        const Vec3 p = mesh.GetVertices().at(face.corners[j].v);
+                        const Vec3 q = mesh.GetVertices().at(face.corners[(j + 1) % face.corners.size()].v);
+                        require(std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z),
+                                "Boolean-3 has a non-finite vertex.");
+                        normal = normal + cross(p - origin, q - origin);
+                    }
+                    require(dot(normal, normal) > 1.e-14f, "Boolean-3 has a collapsed cell.");
+                    area += std::fabs(normal.y) * 0.5;
+                }
+                if (i == 1 || i == 3) {
+                    bool manifold = false;
+                    require(ClosedMeshBoundaryLoopCount(mesh, manifold) == 4 && manifold,
+                            "Boolean-3 plane lost its outer boundary or a hexagonal hole.");
+                    const double expected = 19.0 * 15.5 - 1.5 * std::sqrt(3.0) * (8.0 + 2.3 * 2.3);
+                    require(std::fabs(area - expected) < 1.e-3,
+                            "Boolean-3 plane has missing or excess area around its holes.");
+                    for (int edge = 0; edge < surface->GetPreparedPolylineCount(); ++edge) {
+                        std::vector<CPoint3d> points;
+                        require(surface->GetPreparedPolylinePoints(edge, points),
+                                "Boolean-3 lost a prepared edge.");
+                        for (const auto& point : points) {
+                            require(std::any_of(mesh.GetVertices().begin(), mesh.GetVertices().end(),
+                                [&](const Vec3& vertex) {
+                                    const double dx = vertex.x - point.x, dy = vertex.y - point.y;
+                                    const double dz = vertex.z - point.z;
+                                    return dx * dx + dy * dy + dz * dz < 1.e-8;
+                                }), "Boolean-3 omitted an original CAD boundary node.");
+                        }
+                    }
+                }
+                meshes.push_back(&mesh);
+            }
+            auto welded = CMesh3D::CreateWelded(meshes);
+            bool manifold = false;
+            require(welded && ClosedMeshBoundaryLoopCount(*welded, manifold) == 0 && manifold,
+                    "Boolean-3 has an open or non-manifold welded seam.");
+            std::cout << "Boolean-3 density=" << density << " slx=" << slx
+                      << " vertices=" << welded->GetVertices().size() << " seconds="
+                      << std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count()
+                      << std::endl;
+        }
+    }
+    require(tested == 1, "Boolean-3 fixture must contain one solid.");
+}
+
+void TestBooleanFourFillQuadro(const QString& path) {
+    CAlfaDoc document;
+    Dom3DProjectSerializer serializer;
+    QString room, error;
+    ProjectViewState view;
+    require(serializer.Load(path, document, room, view, error),
+            error.toLocal8Bit().constData());
+    size_t tested = 0;
+    for (const auto& object : document.GetObjects()) {
+        auto* solid = dynamic_cast<CSolid*>(object.get());
+        if (!solid) continue;
+        ++tested;
+        require(solid->GetNumSurfaces() == 148, "Boolean-4 topology changed.");
+        solid->MeshQuadro = true;
+        // Reported densities/modes, plus neighbouring successful cases and a
+        // repeat after a dense build. Other known defects are listed in the Wiki.
+        for (const auto& [density, slx] : std::vector<std::pair<float, bool>>{
+                {0.30f, true}, {0.35f, true}, {0.70f, true},
+                {0.30f, false}, {0.35f, false}, {0.70f, false}, {0.30f, true}}) {
+            const auto begin = std::chrono::steady_clock::now();
+            solid->MeshQuadroHoleSLX = slx;
+            require(solid->ReBuldMesh(1.0f / density), "Boolean-4 rebuild failed.");
+            std::vector<const CMesh3D*> meshes;
+            for (int i = 0; i < solid->GetNumSurfaces(); ++i) {
+                const auto* surface = solid->GetSurfaceFace(i);
+                require(surface && surface->pMesh3D, "Boolean-4 lost a surface.");
+                const auto& mesh = *surface->pMesh3D;
+                require(ActiveFaceEdgeComponentCount(mesh) == 1,
+                        "Boolean-4 has disconnected surface patches.");
+                if (i == 12 || i == 120) {
+                    bool manifold = false;
+                    require(ClosedMeshBoundaryLoopCount(mesh, manifold) == 5 && manifold,
+                            "Boolean-4 plane lost its outer boundary or one of its four holes.");
+                    SurfaceUVMapping mapping(const_cast<CSurfaceFace*>(surface));
+                    double area = 0.0;
+                    for (const auto& face : mesh.GetFaces()) {
+                        if (face.deleted) continue;
+                        require(face.corners.size() == 3 || face.corners.size() == 4,
+                                "Boolean-4 has an unsupported polygon.");
+                        Vec3 center{}, normal{};
+                        const Vec3 origin = mesh.GetVertices().at(face.corners[0].v);
+                        for (size_t j = 0; j < face.corners.size(); ++j) {
+                            const Vec3 p = mesh.GetVertices().at(face.corners[j].v);
+                            const Vec3 q = mesh.GetVertices().at(
+                                face.corners[(j + 1) % face.corners.size()].v);
+                            require(std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z)
+                                && std::fabs(p.y - (i == 12 ? 0.0 : 2.0)) < 1.e-5,
+                                "Boolean-4 plane was displaced onto an adjacent fillet edge.");
+                            center = center + p;
+                            normal = normal + cross(p - origin, q - origin);
+                        }
+                        area += std::fabs(normal.y) * 0.5;
+                        center = center * (1.0f / face.corners.size());
+                        SurfaceUVPoint uv;
+                        require(mapping.Project(center, uv), "Boolean-4 UV projection failed.");
+                        BRepClass_FaceClassifier classifier(TopoDS::Face(surface->m_Face),
+                            gp_Pnt2d(uv.u, uv.v), 1.e-6, Standard_False);
+                        require(classifier.State() != TopAbs_OUT,
+                                "Boolean-4 filled a through hole or escaped its CAD face.");
+                    }
+                    require(area > 523.0 && area < 525.0,
+                            "Boolean-4 has missing or excess planar area.");
+                }
+                meshes.push_back(&mesh);
+            }
+            auto welded = CMesh3D::CreateWelded(meshes);
+            bool manifold = false;
+            require(welded && ClosedMeshBoundaryLoopCount(*welded, manifold) == 0 && manifold,
+                    "Boolean-4 has an open or non-manifold welded seam.");
+            std::cout << "Boolean-4 density=" << density << " slx=" << slx
+                      << " vertices=" << welded->GetVertices().size() << " seconds="
+                      << std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count()
+                      << std::endl;
+        }
+    }
+    require(tested == 1, "Boolean-4 fixture must contain one solid.");
+    for (const auto& object : document.GetObjects()) {
+        auto* solid = dynamic_cast<CSolid*>(object.get());
+        if (!solid) continue;
+        auto* surface = solid->GetSurfaceFace(12);
+        std::vector<CPoint3d> original;
+        require(surface->GetPreparedPolylinePoints(17, original),
+                "Boolean-4 lost the outer edge used by the broken-contour regression.");
+        auto displaced = original;
+        for (auto& point : displaced) { point.x += 0.2; point.y += 0.2; }
+        require(surface->SetPreparedPolylinePoints(17, displaced),
+                "Could not set up the broken-contour regression.");
+        for (bool slx : {false, true}) {
+            require(!surface->BuildFilledMeshWhithHoles(1.0f / 0.30f, slx)
+                        && surface->pMesh3D->GetVertices().empty()
+                        && surface->m_LastIslandFillError.find("Incomplete planar boundary") != std::string::npos,
+                    "A missing outer contour must not fill the largest through hole.");
+        }
+        surface->SetPreparedPolylinePoints(17, original);
+    }
+}
+
+void TestPrismFilletedSlx(const QString& path) {
+    CAlfaDoc document;
+    Dom3DProjectSerializer serializer;
+    QString room, error;
+    ProjectViewState view;
+    require(serializer.Load(path, document, room, view, error),
+            error.toLocal8Bit().constData());
+    size_t tested = 0;
+    for (const auto& object : document.GetObjects()) {
+        auto* solid = dynamic_cast<CSolid*>(object.get());
+        if (!solid) continue;
+        ++tested;
+        require(solid->GetNumSurfaces() == 62, "Filleted prism topology changed.");
+        solid->MeshQuadro = true;
+        const std::vector<std::pair<float, bool>> cases{
+            {0.20f, true}, {0.24f, true}, {0.25f, true}, {0.26f, true},
+            {0.35f, true}, {0.50f, true}, {0.80f, true}, {1.00f, true},
+            {0.25f, false}, {0.25f, true}};
+        for (const auto& [density, slx] : cases) {
+            solid->MeshQuadroHoleSLX = slx;
+            require(solid->ReBuldMesh(1.0f / density), "Filleted prism rebuild failed.");
+            std::vector<const CMesh3D*> meshes;
+            for (int i = 0; i < solid->GetNumSurfaces(); ++i) {
+                const auto* surface = solid->GetSurfaceFace(i);
+                require(surface && surface->pMesh3D, "Filleted prism lost a surface.");
+                const auto& mesh = *surface->pMesh3D;
+                require(ActiveFaceEdgeComponentCount(mesh) == 1,
+                        "Filleted prism has disconnected surface patches.");
+                double twice_area = 0;
+                for (const auto& face : mesh.GetFaces()) {
+                    if (face.deleted) continue;
+                    require(face.corners.size() == 3 || face.corners.size() == 4,
+                            "Filleted prism retained an unsupported polygon.");
+                    Vec3 area{};
+                    for (size_t j = 0; j < face.corners.size(); ++j) {
+                        const size_t a = face.corners[j].v;
+                        const size_t b = face.corners[(j + 1) % face.corners.size()].v;
+                        require(a < mesh.GetVertices().size() && b < mesh.GetVertices().size(),
+                                "Filleted prism has an invalid vertex index.");
+                        const Vec3 p = mesh.GetVertices()[a], q = mesh.GetVertices()[b];
+                        require(std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z),
+                                "Filleted prism has a non-finite vertex.");
+                        const Vec3 origin = mesh.GetVertices()[face.corners[0].v];
+                        area = area + cross(p - origin, q - origin);
+                    }
+                    if (i != 8 && i != 49) // The two OCCT spherical poles have a collapsed row.
+                        require(dot(area, area) > 1.0e-14f, "Filleted prism has a collapsed cell.");
+                    if (i == 9 || i == 10) twice_area += std::fabs(area.z);
+                }
+                if (i == 9 || i == 10) {
+                    bool manifold = false;
+                    require(ClosedMeshBoundaryLoopCount(mesh, manifold) == 2 && manifold,
+                            "Filleted prism top face lost its pocket boundary.");
+                    require(twice_area > 0, "Filleted prism top face is empty.");
+                    for (int edge = 0; edge < surface->GetPreparedPolylineCount(); ++edge) {
+                        std::vector<CPoint3d> points;
+                        require(surface->GetPreparedPolylinePoints(edge, points),
+                                "Filleted prism lost its prepared boundary.");
+                        for (const auto& point : points) {
+                            bool found = false;
+                            for (const Vec3& vertex : mesh.GetVertices()) {
+                                const double dx = vertex.x - point.x, dy = vertex.y - point.y;
+                                const double dz = vertex.z - point.z;
+                                if (dx * dx + dy * dy + dz * dz < 1.e-8) { found = true; break; }
+                            }
+                            require(found, "Filleted prism omitted a prepared CAD boundary node.");
+                        }
+                    }
+                }
+                meshes.push_back(&mesh);
+            }
+            auto welded = CMesh3D::CreateWelded(meshes);
+            bool manifold = false;
+            require(welded && ClosedMeshBoundaryLoopCount(*welded, manifold) == 0 && manifold,
+                    "Filleted prism has an open or non-manifold welded seam.");
+            std::cout << "Filleted prism density=" << density << " slx=" << slx
+                      << " vertices=" << welded->GetVertices().size() << '\n';
+        }
+    }
+    require(tested == 1, "Filleted prism fixture must contain one solid.");
+}
+
+void TestChamferAndFilletsQuadro(const QString& path) {
+    CAlfaDoc document;
+    Dom3DProjectSerializer serializer;
+    QString room, error;
+    ProjectViewState view;
+    require(serializer.Load(path, document, room, view, error),
+            error.toLocal8Bit().constData());
+    size_t tested = 0;
+    for (const auto& object : document.GetObjects()) {
+        auto* solid = dynamic_cast<CSolid*>(object.get());
+        if (!solid) continue;
+        ++tested;
+        require(solid->GetNumSurfaces() == 42, "Chamfer fixture topology changed.");
+        solid->MeshQuadro = true;
+        solid->MeshQuadroHoleSLX = false;
+        for (float density : {0.20f, 0.35f, 0.50f, 0.65f, 0.80f, 1.0f, 0.50f}) {
+            require(solid->ReBuldMesh(1.0f / density), "Chamfer Quadro rebuild failed.");
+            std::vector<const CMesh3D*> meshes;
+            for (int i = 0; i < solid->GetNumSurfaces(); ++i) {
+                const CSurfaceFace* surface = solid->GetSurfaceFace(i);
+                require(surface && surface->pMesh3D, "Chamfer lost a surface mesh.");
+                const CMesh3D& mesh = *surface->pMesh3D;
+                require(ActiveFaceEdgeComponentCount(mesh) == 1,
+                        "Chamfer has disconnected surface fragments.");
+                const bool pole_corner = i == 26 || i == 30 || i == 40 || i == 41;
+                size_t active_faces = 0;
+                for (const auto& face : mesh.GetFaces()) {
+                    if (face.deleted) continue;
+                    ++active_faces;
+                    require(face.corners.size() == 4, "Chamfer retained a non-quad cell.");
+                    if (!pole_corner) continue;
+                    Vec3 area{};
+                    for (size_t j = 0; j < 4; ++j) {
+                        const Vec3 a = mesh.GetVertices().at(face.corners[j].v);
+                        const Vec3 b = mesh.GetVertices().at(face.corners[(j + 1) % 4].v);
+                        const Vec3 origin = mesh.GetVertices().at(face.corners[0].v);
+                        require(std::isfinite(a.x) && std::isfinite(a.y) && std::isfinite(a.z)
+                                    && dot(b - a, b - a) > 1.0e-12f,
+                                "Chamfer pole quad has invalid or collapsed edges.");
+                        area = area + cross(a - origin, b - origin);
+                    }
+                    require(dot(area, area) > 1.0e-12f, "Chamfer pole quad has zero area.");
+                }
+                if (pole_corner) {
+                    require(surface->GetLastQuadrangulationDiagnostic().empty()
+                                && surface->GetLastIslandFillError().empty(),
+                            "Chamfer pole corner used an emergency fallback.");
+                    if (density == 0.5f)
+                        require(active_faces == 4, "UV classifier removed a valid pole quad.");
+                }
+                meshes.push_back(&mesh);
+            }
+            auto welded = CMesh3D::CreateWelded(meshes);
+            bool manifold = false;
+            require(welded && ClosedMeshBoundaryLoopCount(*welded, manifold) == 0 && manifold,
+                    "Chamfer retained a hole at a spherical pole.");
+            std::cout << "ChamferAndFillets density=" << density
+                      << " weldedVertices=" << welded->GetVertices().size() << '\n';
+        }
+    }
+    require(tested == 1, "Chamfer regression must inspect one source solid.");
+}
+
+void TestPrismTwoFilletsQuadro(const QString& path) {
+    CAlfaDoc document;
+    Dom3DProjectSerializer serializer;
+    QString room, error;
+    ProjectViewState view;
+    require(serializer.Load(path, document, room, view, error),
+            error.toLocal8Bit().constData());
+    size_t tested = 0;
+    for (const auto& object : document.GetObjects()) {
+        auto* solid = dynamic_cast<CSolid*>(object.get());
+        if (!solid || solid->GetName() != "Prism") continue;
+        ++tested;
+        require(solid->GetNumSurfaces() == 10, "Prism fixture topology changed.");
+        solid->MeshQuadro = true;
+        solid->MeshQuadroHoleSLX = false;
+        CSurfaceFace* corner = solid->GetSurfaceFace(5);
+        const TopoDS_Face face = TopoDS::Face(corner->m_Face);
+        BRepAdaptor_Surface adaptor(face);
+        require(adaptor.GetType() == GeomAbs_BSplineSurface,
+                "Prism singular corner is no longer a B-Spline surface.");
+        double u0, u1, v0, v1;
+        BRepTools::UVBounds(face, u0, u1, v0, v1);
+        for (double a : {0.0, 0.5, 1.0}) {
+            for (double b : {0.0, 0.5, 1.0}) {
+                const double u = u0 + (u1 - u0) * a;
+                const double v = v0 + (v1 - v0) * b;
+                CPoint8d point;
+                require(corner->GetPoint(u, v, &point),
+                        "Prism singular boundary has no point/normal.");
+                const gp_Pnt exact = adaptor.Value(u, v);
+                require(exact.Distance(gp_Pnt(point.x, point.y, point.z)) < 1.0e-7,
+                        "Normal recovery moved the original surface point.");
+                const double length2 = point.l * point.l + point.m * point.m + point.n * point.n;
+                require(std::isfinite(length2) && std::abs(length2 - 1.0) < 1.0e-8,
+                        "Prism recovered normal is not finite and unit length.");
+            }
+        }
+        for (float density : {0.20f, 0.40f, 0.50f, 0.65f, 0.80f, 1.0f, 0.40f}) {
+            require(solid->ReBuldMesh(1.0f / density), "Prism Quadro rebuild failed.");
+            std::vector<const CMesh3D*> meshes;
+            for (int i = 0; i < solid->GetNumSurfaces(); ++i) {
+                const auto* surface = solid->GetSurfaceFace(i);
+                require(surface && surface->pMesh3D, "Prism lost a surface mesh.");
+                require(surface->GetLastQuadrangulationDiagnostic().empty(),
+                        "Prism used a quadrangulation fallback.");
+                const auto& mesh = *surface->pMesh3D;
+                require(ActiveFaceEdgeComponentCount(mesh) == 1,
+                        "Prism surface is empty or disconnected.");
+                for (const auto& cell : mesh.GetFaces())
+                    if (!cell.deleted)
+                        require(cell.corners.size() == 4, "Prism source net contains a non-quad.");
+                meshes.push_back(&mesh);
+            }
+            // ReBuldMesh replaces the CSurfaceFace instances.
+            corner = solid->GetSurfaceFace(5);
+            require(corner->IsInitMesh && corner->m_QtyU >= 3 && corner->m_QtyV >= 3,
+                    "Prism corner net was not initialized.");
+            auto welded = CMesh3D::CreateWelded(meshes);
+            bool manifold = false;
+            require(welded && ClosedMeshBoundaryLoopCount(*welded, manifold) == 0 && manifold,
+                    "Prism has an open seam around its singular corner.");
+            const QByteArray dump_prefix = qgetenv("DOM3D_WELD_DUMP");
+            if (density == 0.40f && !dump_prefix.isEmpty())
+                require(welded->ExportToObj(dump_prefix.toStdString() + "-prism.obj"),
+                        "Could not export the Prism diagnostic mesh.");
+            std::cout << "Prism_And_2_Fill_Var-2 density=" << density
+                      << " weldedVertices=" << welded->GetVertices().size() << '\n';
+        }
+    }
+    require(tested == 1, "Expected one named Prism body in the five-solid fixture.");
+}
+
+void TestBezierCollarWelding(const QString& path) {
+    CAlfaDoc document;
+    Dom3DProjectSerializer serializer;
+    QString room;
+    ProjectViewState view;
+    QString error;
+    require(serializer.Load(path, document, room, view, error),
+            error.toLocal8Bit().constData());
+    size_t tested_solids = 0;
+    for (const auto& object : document.GetObjects()) {
+        auto* solid = dynamic_cast<CSolid*>(object.get());
+        if (!solid)
+            continue;
+        solid->MeshQuadro = true;
+        solid->MeshQuadroHoleSLX = true;
+        require(solid->ReBuldMesh(2.0f), "Bezier-4 SLX Density 0.5 rebuild failed.");
+        std::vector<const CMesh3D*> meshes;
+        size_t source_faces = 0;
+        for (int index = 0; index < solid->GetNumSurfaces(); ++index) {
+            const CSurfaceFace* surface = solid->GetSurfaceFace(index);
+            require(surface && surface->pMesh3D, "Bezier-4 lost a surface mesh.");
+            meshes.push_back(surface->pMesh3D);
+            for (const CMesh3D::Face& face : surface->pMesh3D->GetFaces())
+                source_faces += !face.deleted;
+        }
+        float tolerance = 0.0f;
+        auto welded = CMesh3D::CreateWelded(meshes, nullptr, &tolerance);
+        // Full-density sampling, with the shared Var-7 region cut atomically:
+        // one former quad is represented by two triangles (3055 -> 3056).
+        // A/B OBJ comparison preserves every vertex, perimeter edge and area.
+        require(welded && welded->GetFaces().size() == source_faces
+                    && source_faces == 3056,
+                "Bezier-4 welding changed or lost mesh cells.");
+        require(std::abs(tolerance - 0.0224838f) < 1.0e-6f,
+                "Bezier-4 welding no longer uses the minimum edge / 5.");
+        bool manifold = false;
+        require(ClosedMeshBoundaryLoopCount(*welded, manifold) == 0 && manifold,
+                "Bezier-4 collar retained open seams after welding.");
+        for (const CMesh3D::Face& face : welded->GetFaces()) {
+            std::set<size_t> corners;
+            for (const MeshCorner& corner : face.corners)
+                corners.insert(corner.v);
+            require(corners.size() == face.corners.size(),
+                    "Bezier-4 welding collapsed a mesh cell.");
+        }
+        ++tested_solids;
+    }
+    require(tested_solids == 1, "Bezier-4 regression did not test its solid.");
+}
+
+void TestFourHoleCollars(const QString& path) {
+    CAlfaDoc document;
+    Dom3DProjectSerializer serializer;
+    QString room, error;
+    ProjectViewState view;
+    require(serializer.Load(path, document, room, view, error), error.toLocal8Bit().constData());
+    CSolid* solid = nullptr;
+    for (const auto& object : document.GetObjects())
+        if (auto* body = dynamic_cast<CSolid*>(object.get())) {
+            require(!solid, "Four-hole fixture must contain one solid.");
+            solid = body;
+        }
+    require(solid && solid->GetNumSurfaces() == 14, "Four-hole fixture topology changed.");
+    solid->MeshQuadro = true;
+    solid->MeshQuadroHoleSLX = true;
+    for (float density : {0.20f, 0.25f, 0.30f, 0.35f, 0.40f, 0.50f, 0.25f, 0.20f}) {
+        require(solid->ReBuldMesh(1.0f / density), "Four-hole SLX rebuild failed.");
+        const CSurfaceFace* surface = solid->GetSurfaceFace(4);
+        require(surface && surface->pMesh3D, "Four-hole plate is missing.");
+        const auto& mesh = *surface->pMesh3D;
+        bool manifold = false;
+        require(ClosedMeshBoundaryLoopCount(mesh, manifold) == 5 && manifold
+                    && ActiveFaceEdgeComponentCount(mesh) == 1,
+                "Four collars must keep four distinct holes in one connected plate.");
+        double mesh_area = 0.0;
+        for (const auto& cell : mesh.GetFaces()) {
+            if (cell.deleted) continue;
+            require(cell.corners.size() == 3 || cell.corners.size() == 4,
+                    "Four-hole plate contains an unsupported polygon.");
+            const Vec3 a = mesh.GetVertices()[cell.corners[0].v];
+            for (size_t j = 1; j + 1 < cell.corners.size(); ++j) {
+                const Vec3 b = mesh.GetVertices()[cell.corners[j].v];
+                const Vec3 c = mesh.GetVertices()[cell.corners[j + 1].v];
+                const double area = (double(b.x) - a.x) * (c.y - a.y)
+                    - (double(b.y) - a.y) * (c.x - a.x);
+                require(area > 1.0e-7, "Four-hole collar has a folded display triangle.");
+                mesh_area += area * 0.5;
+            }
+        }
+        size_t circles = 0;
+        GProp_GProps properties;
+        BRepGProp::SurfaceProperties(surface->m_Face, properties);
+        double expected_area = properties.Mass();
+        for (int edge = 0; edge < surface->GetPreparedPolylineCount(); ++edge) {
+            TopoDS_Edge topology;
+            require(surface->GetPreparedTopoEdge(edge, topology), "Missing hole boundary.");
+            BRepAdaptor_Curve curve(topology);
+            if (curve.GetType() != GeomAbs_Circle) continue;
+            ++circles;
+            const auto circle = curve.Circle();
+            const auto center = circle.Location();
+            const double radius = circle.Radius();
+            const size_t sectors = surface->GetPreparedPolylinePointCount(edge) - 1;
+            constexpr double pi = 3.14159265358979323846;
+            // The sampled polygon removes slightly less area than a CAD circle.
+            expected_area += radius * radius * (pi - 0.5 * sectors * std::sin(2 * pi / sectors));
+            require(sectors == size_t(std::lround(40 * density)),
+                    "Hole sampling is pinned instead of following Density.");
+            size_t radial_quads = 0;
+            for (const auto& cell : mesh.GetFaces()) {
+                if (cell.deleted || cell.corners.size() != 4) continue;
+                std::array<double, 4> radii{};
+                for (size_t j = 0; j < 4; ++j) {
+                    const auto p = mesh.GetVertices()[cell.corners[j].v];
+                    radii[j] = std::hypot(p.x - center.X(), p.y - center.Y());
+                }
+                std::sort(radii.begin(), radii.end());
+                if (std::fabs(radii[0] - radii[1]) < 1.0e-3
+                    && std::fabs(radii[2] - radii[3]) < 1.0e-3
+                    && radii[2] - radii[1] > 0.1
+                    && radii[0] >= radius - 1.0e-3) ++radial_quads;
+            }
+            require(radial_quads >= sectors * (density <= 0.35f ? 2 : 1),
+                    "An individual hole lost its concentric quad collar.");
+        }
+        require(circles == 4, "Four-hole plate must retain four circular boundaries.");
+        require(expected_area > 0.0 && std::fabs(mesh_area - expected_area) < expected_area * 1.0e-5,
+                "Four-hole collar overlaps or leaves uncovered area.");
+        std::vector<const CMesh3D*> meshes;
+        for (int i = 0; i < solid->GetNumSurfaces(); ++i)
+            meshes.push_back(solid->GetSurfaceFace(i)->pMesh3D);
+        auto welded = CMesh3D::CreateWelded(meshes);
+        require(welded && ClosedMeshBoundaryLoopCount(*welded, manifold) == 0 && manifold,
+                "Four-hole body retained an open or nonmanifold seam.");
+        std::cout << "Four hole collars density=" << density << " vertices="
+                  << welded->GetVertices().size() << std::endl;
+    }
+}
+
+void TestSixHoleSharedZone(const QString& path) {
+    CAlfaDoc document;
+    Dom3DProjectSerializer serializer;
+    QString room, error;
+    ProjectViewState view;
+    require(serializer.Load(path, document, room, view, error),
+            error.toLocal8Bit().constData());
+    CSolid* solid = nullptr;
+    for (const auto& object : document.GetObjects()) {
+        if (auto* body = dynamic_cast<CSolid*>(object.get())) {
+            require(!solid, "Six-hole fixture must contain one solid.");
+            solid = body;
+        }
+    }
+    require(solid && solid->GetNumSurfaces() == 36,
+            "Six-hole fixture topology changed.");
+    solid->MeshQuadro = true;
+    for (bool slx : {false, true}) {
+        solid->MeshQuadroHoleSLX = slx;
+        for (float density : {0.25f, 0.35f, 0.40f, 0.50f}) {
+            require(solid->ReBuldMesh(1.0f / density),
+                    "Six-hole shared-zone rebuild failed.");
+            const CSurfaceFace* surface = solid->GetSurfaceFace(4);
+            require(surface && surface->pMesh3D,
+                    "Six-hole top plate is missing.");
+            const CMesh3D& mesh = *surface->pMesh3D;
+            bool manifold = false;
+            require(ClosedMeshBoundaryLoopCount(mesh, manifold) == 7
+                        && manifold && ActiveFaceEdgeComponentCount(mesh) == 1,
+                    "Shared zone must retain six separate holes in one plate.");
+            double maximum_edge = 0.0;
+            for (const CMesh3D::Face& face : mesh.GetFaces()) {
+                if (face.deleted) continue;
+                require(face.corners.size() == 3 || face.corners.size() == 4,
+                        "Shared zone contains an unsupported polygon.");
+                for (size_t j = 0; j < face.corners.size(); ++j) {
+                    const Vec3 delta = mesh.GetVertices()[face.corners[j].v]
+                        - mesh.GetVertices()[face.corners[(j + 1) % face.corners.size()].v];
+                    maximum_edge = std::max(maximum_edge,
+                        std::sqrt(static_cast<double>(dot(delta, delta))));
+                }
+            }
+            require(maximum_edge < 20.0,
+                    "Shared zone allowed a coarse spike across the plate.");
+            std::vector<const CMesh3D*> meshes;
+            for (int i = 0; i < solid->GetNumSurfaces(); ++i)
+                meshes.push_back(solid->GetSurfaceFace(i)->pMesh3D);
+            auto welded = CMesh3D::CreateWelded(meshes);
+            require(welded && ClosedMeshBoundaryLoopCount(*welded, manifold) == 0
+                        && manifold,
+                    "Six-hole body retained an open or nonmanifold seam.");
+        }
+    }
+}
+
+void TestHoleLowDensityCollar(const QString& path) {
+    CAlfaDoc document;
+    Dom3DProjectSerializer serializer;
+    QString room, error;
+    ProjectViewState view;
+    require(serializer.Load(path, document, room, view, error),
+            error.toLocal8Bit().constData());
+    size_t tested = 0;
+    for (const auto& object : document.GetObjects()) {
+        auto* solid = dynamic_cast<CSolid*>(object.get());
+        if (!solid) continue;
+        solid->MeshQuadro = true;
+        solid->MeshQuadroHoleSLX = true;
+        for (float density : {0.10f, 0.15f, 0.20f, 0.15f, 0.35f, 0.40f, 0.45f, 0.50f}) {
+            // Exercise the dialog sequence too: islands, then SLX at the
+            // same density. Cached geometry must not change the result.
+            solid->MeshQuadroHoleSLX = false;
+            require(solid->ReBuldMesh(1.0f / density), "Hole island preview failed.");
+            solid->MeshQuadroHoleSLX = true;
+            require(solid->ReBuldMesh(1.0f / density),
+                    "Hole low-density SLX rebuild failed.");
+            std::vector<const CMesh3D*> meshes;
+            size_t holed_planes = 0;
+            for (int i = 0; i < solid->GetNumSurfaces(); ++i) {
+                const CSurfaceFace* surface = solid->GetSurfaceFace(i);
+                require(surface && surface->pMesh3D, "Hole lost a surface mesh.");
+                meshes.push_back(surface->pMesh3D);
+                if (BRepAdaptor_Surface(TopoDS::Face(surface->m_Face)).GetType()
+                    != GeomAbs_Plane) continue;
+                size_t wires = 0;
+                for (TopExp_Explorer wire(surface->m_Face, TopAbs_WIRE);
+                     wire.More(); wire.Next()) ++wires;
+                if (wires != 2) continue;
+                ++holed_planes;
+                gp_Pnt center;
+                double radius = 0.0;
+                size_t angular_sectors = 0;
+                for (int edge = 0; edge < surface->GetPreparedPolylineCount(); ++edge) {
+                    TopoDS_Edge topology;
+                    require(surface->GetPreparedTopoEdge(edge, topology),
+                            "Hole lost its prepared edge topology.");
+                    BRepAdaptor_Curve curve(topology);
+                    if (curve.GetType() == GeomAbs_Line)
+                        require(surface->GetPreparedPolylinePointCount(edge) >= 9,
+                                "A holed plate must have at least eight boundary intervals.");
+                    if (curve.GetType() == GeomAbs_Circle) {
+                        center = curve.Circle().Location();
+                        radius = curve.Circle().Radius();
+                        angular_sectors = surface->GetPreparedPolylinePointCount(edge) - 1;
+                    }
+                }
+                require(radius > 0.0, "Hole circular boundary was not found.");
+                bool manifold = false;
+                require(ClosedMeshBoundaryLoopCount(*surface->pMesh3D, manifold) == 2
+                            && manifold && ActiveFaceEdgeComponentCount(*surface->pMesh3D) == 1,
+                        "Hole collar must be connected with exactly two boundary loops.");
+                size_t radial_quads = 0;
+                for (const auto& face : surface->pMesh3D->GetFaces()) {
+                    if (face.deleted) continue;
+                    require(face.corners.size() == 3 || face.corners.size() == 4,
+                            "Hole collar contains an unprocessed polygon.");
+                    const auto& vertices = surface->pMesh3D->GetVertices();
+                    const Vec3 a = vertices[face.corners[0].v];
+                    for (size_t j = 1; j + 1 < face.corners.size(); ++j) {
+                        const Vec3 b = vertices[face.corners[j].v];
+                        const Vec3 c = vertices[face.corners[j + 1].v];
+                        const double area = (static_cast<double>(b.x) - a.x) * (c.y - a.y)
+                            - (static_cast<double>(b.y) - a.y) * (c.x - a.x);
+                        require(area > 1.0e-7,
+                                "Hole collar contains a reversed or folded display triangle.");
+                    }
+                    if (face.corners.size() != 4) continue;
+                    std::array<double, 4> radii{};
+                    for (size_t j = 0; j < 4; ++j) {
+                        const Vec3 v = surface->pMesh3D->GetVertices()[face.corners[j].v];
+                        radii[j] = std::hypot(v.x - center.X(), v.y - center.Y());
+                    }
+                    std::sort(radii.begin(), radii.end());
+                    if (std::fabs(radii[0] - radii[1]) < 1.0e-3
+                        && std::fabs(radii[2] - radii[3]) < 1.0e-3
+                        && radii[2] - radii[1] > 1.0
+                        && radii[0] >= radius - 1.0e-3) ++radial_quads;
+                }
+                require(radial_quads >= 2 * angular_sectors,
+                        "Hole collar lost its two concentric rows of radial quads.");
+            }
+            require(holed_planes == 1, "Hole regression did not find the top plate.");
+            auto welded = CMesh3D::CreateWelded(meshes);
+            bool manifold = false;
+            require(welded && ClosedMeshBoundaryLoopCount(*welded, manifold) == 0 && manifold,
+                    "Hole low-density mesh retained open seams after welding.");
+            ++tested;
+        }
+    }
+    require(tested == 8, "Hole regression did not check all density/mode transitions.");
+}
+
 void TestSmallHoleSlxCollar() {
     const std::array<gp_Pnt, 3> centers{{
         gp_Pnt(50.0, 50.0, -1.0),
@@ -3198,12 +4933,900 @@ void TestSmallHoleSlxCollar() {
         }
         require(tested, "The small-hole regression found no trimmed planar face.");
     }
-	}
+}
 }
 }
 
+void TestParametricCurveOffset() {
+    const auto count_self_intersections = [](
+            const std::vector<CPoint3d>& points, bool closed) {
+        size_t count = 0;
+        const size_t segment_count = closed
+            ? points.size() : points.size() > 1 ? points.size() - 1 : 0;
+        for (size_t first = 0; first < segment_count; ++first) {
+            const size_t first_next = (first + 1) % points.size();
+            const double first_dx = points[first_next].x - points[first].x;
+            const double first_dy = points[first_next].y - points[first].y;
+            for (size_t second = first + 1; second < segment_count; ++second) {
+                const size_t second_next = (second + 1) % points.size();
+                if (first_next == second || second_next == first) continue;
+                const double second_dx = points[second_next].x - points[second].x;
+                const double second_dy = points[second_next].y - points[second].y;
+                const double denominator = first_dx * second_dy
+                    - first_dy * second_dx;
+                if (std::abs(denominator) <= 1.0e-10) continue;
+                const double between_x = points[second].x - points[first].x;
+                const double between_y = points[second].y - points[first].y;
+                const double first_parameter =
+                    (between_x * second_dy - between_y * second_dx)
+                    / denominator;
+                const double second_parameter =
+                    (between_x * first_dy - between_y * first_dx)
+                    / denominator;
+                if (first_parameter > 1.0e-8 && first_parameter < 1.0 - 1.0e-8
+                    && second_parameter > 1.0e-8
+                    && second_parameter < 1.0 - 1.0e-8) {
+                    ++count;
+                }
+            }
+        }
+        return count;
+    };
+
+    CAlfaDoc document;
+    document.GetObjects().clear();
+    auto source = std::make_unique<CPolyline>("Tilted planar rectangle");
+    source->AddPoint({0.0, 0.0, 0.0});
+    source->AddPoint({100.0, 0.0, 0.0});
+    source->AddPoint({100.0, 70.0, 70.0});
+    source->AddPoint({0.0, 70.0, 70.0});
+    source->SetClosed(true);
+    document.AddObject(std::move(source));
+    CAlfaObject* source_object = document.GetSelectedObject();
+    require(source_object != nullptr, "Curve Offset source was not created.");
+    const unsigned long source_id = source_object->m_id;
+
+    ToolRegistry tools;
+    const std::vector<ToolParameter> parameters = {
+        {"distance", "Distance", 10.0, -1000000.0, 1000000.0, 0.1},
+        {"profile.id", "Source Curve ID", static_cast<double>(source_id),
+            0.0, 4294967295.0, 1.0}
+    };
+    const ActiveParametricObject active = tools.CreateParametricObject(
+        "CurveOffset", document, parameters);
+    require(!active.tool_id.empty() && document.GetObjects().size() == 2,
+            "Parametric Curve Offset was not created.");
+    auto* offset = dynamic_cast<CPolyline*>(
+        document.GetObjects()[active.object_index].get());
+    require(offset && offset->IsClosed() && offset->GetPointCount() == 4,
+            "Closed Curve Offset did not preserve its contour topology.");
+    for (const CPoint3d& point : offset->GetPoints()) {
+        require(std::abs(point.y - point.z) < 1.0e-6,
+                "Curve Offset left the source plane.");
+    }
+    Vec3 before_min{};
+    Vec3 before_max{};
+    require(offset->GetBounds(before_min, before_max)
+                && std::abs(before_min.x + 10.0) < 1.0e-5
+                && std::abs(before_max.x - 110.0) < 1.0e-5,
+            "Positive closed Curve Offset was not built outside.");
+
+    auto* editable_source = dynamic_cast<CPolyline*>(
+        document.FindObjectById(source_id));
+    require(editable_source
+                && editable_source->SetPoint(1, {150.0, 0.0, 0.0})
+                && editable_source->SetPoint(2, {150.0, 70.0, 70.0}),
+            "Curve Offset source could not be edited.");
+    require(tools.ReplayProfileDependents(source_id, document),
+            "Curve Offset did not replay after editing its source.");
+    offset = dynamic_cast<CPolyline*>(
+        document.GetObjects()[active.object_index].get());
+    Vec3 after_min{};
+    Vec3 after_max{};
+    require(offset && offset->GetBounds(after_min, after_max)
+                && std::abs(after_max.x - 160.0) < 1.0e-5,
+            "Curve Offset did not rebuild from the edited source.");
+
+    ActiveParametricObject edited_offset = active;
+    for (ToolParameter& parameter : edited_offset.parameters) {
+        if (parameter.id == "distance") parameter.value = -10.0;
+    }
+    tools.Rebuild(edited_offset, document);
+    offset = dynamic_cast<CPolyline*>(
+        document.GetObjects()[active.object_index].get());
+    require(offset && offset->GetBounds(after_min, after_max)
+                && std::abs(after_min.x - 10.0) < 1.0e-5
+                && std::abs(after_max.x - 140.0) < 1.0e-5,
+            "Negative closed Curve Offset was not built inside.");
+
+    auto spline = std::make_unique<CBSpline>("Tilted open spline");
+    spline->AddPoint({0.0, 0.0, 0.0});
+    spline->AddPoint({35.0, 20.0, 20.0});
+    spline->AddPoint({70.0, -10.0, -10.0});
+    spline->AddPoint({110.0, 25.0, 25.0});
+    document.AddObject(std::move(spline));
+    const unsigned long spline_id = document.GetSelectedObject()->m_id;
+    const ActiveParametricObject spline_offset = tools.CreateParametricObject(
+        "CurveOffset", document,
+        {{"distance", "Distance", 5.0, -1000000.0, 1000000.0, 0.1},
+         {"profile.id", "Source Curve ID", static_cast<double>(spline_id),
+             0.0, 4294967295.0, 1.0}});
+    const auto* spline_result = spline_offset.object_index
+            < document.GetObjects().size()
+        ? dynamic_cast<const CBSpline*>(
+              document.GetObjects()[spline_offset.object_index].get())
+        : nullptr;
+    require(spline_result && !spline_result->IsClosed()
+                && spline_result->GetPointCount() >= 4
+                && spline_result->GetPointCount() < 32,
+            "Open B-Spline Offset was not fitted to a compact smooth curve.");
+    for (const CPoint3d& point : spline_result->GetPoints()) {
+        require(std::abs(point.y - point.z) < 1.0e-5,
+                "Open B-Spline Offset left the source plane.");
+    }
+
+    auto closed_spline = std::make_unique<CBSpline>("Closed smooth spline");
+    for (const CPoint3d& point : std::vector<CPoint3d>{
+             {60.0, 0.0, 0.0}, {42.0, 35.0, 0.0},
+             {0.0, 50.0, 0.0}, {-42.0, 35.0, 0.0},
+             {-60.0, 0.0, 0.0}, {-42.0, -35.0, 0.0},
+             {0.0, -50.0, 0.0}, {42.0, -35.0, 0.0}}) {
+        closed_spline->AddPoint(point);
+    }
+    closed_spline->SetClosed(true);
+    document.AddObject(std::move(closed_spline));
+    const unsigned long closed_spline_id = document.GetSelectedObject()->m_id;
+    const ActiveParametricObject closed_spline_offset =
+        tools.CreateParametricObject(
+            "CurveOffset", document,
+            {{"distance", "Distance", 7.5, -1000000.0, 1000000.0, 0.1},
+             {"delete_loops", "Delete Loops", 1.0, 0.0, 1.0, 1.0,
+                 ToolParameterType::Checkbox},
+             {"profile.id", "Source Curve ID",
+                 static_cast<double>(closed_spline_id),
+                 0.0, 4294967295.0, 1.0}});
+    const auto* closed_spline_result = dynamic_cast<const CBSpline*>(
+        document.GetObjects()[closed_spline_offset.object_index].get());
+    const CPoint3d closed_start = closed_spline_result
+        ? closed_spline_result->Evaluate(0.0f) : CPoint3d{};
+    const CPoint3d closed_end = closed_spline_result
+        ? closed_spline_result->Evaluate(1.0f) : CPoint3d{};
+    require(closed_spline_result && closed_spline_result->IsClosed()
+                && closed_spline_result->GetPointCount() <= 16
+                && (closed_start - closed_end).Length() < 0.05f,
+            "Closed smooth Curve Offset has too many poles or an open seam.");
+
+    auto concave = std::make_unique<CPolyline>("Concave loop test");
+    for (const CPoint3d& point : std::vector<CPoint3d>{
+             {0.0, 0.0, 0.0}, {100.0, 0.0, 0.0},
+             {100.0, 40.0, 0.0}, {40.0, 40.0, 0.0},
+             {80.0, 50.0, 0.0}, {40.0, 60.0, 0.0},
+             {100.0, 60.0, 0.0}, {100.0, 100.0, 0.0},
+             {0.0, 100.0, 0.0}}) {
+        concave->AddPoint(point);
+    }
+    concave->SetClosed(true);
+    document.AddObject(std::move(concave));
+    const unsigned long concave_id = document.GetSelectedObject()->m_id;
+    const ActiveParametricObject raw_loop_offset = tools.CreateParametricObject(
+        "CurveOffset", document,
+        {{"distance", "Distance", -5.0, -1000000.0, 1000000.0, 0.1},
+         {"delete_loops", "Delete Loops", 0.0, 0.0, 1.0, 1.0,
+             ToolParameterType::Checkbox},
+         {"profile.id", "Source Curve ID", static_cast<double>(concave_id),
+             0.0, 4294967295.0, 1.0}});
+    const auto* raw_loop = dynamic_cast<const CPolyline*>(
+        document.GetObjects()[raw_loop_offset.object_index].get());
+    require(raw_loop
+                && count_self_intersections(
+                       raw_loop->GetPoints(), raw_loop->IsClosed()) > 0,
+            "Curve Offset loop regression contour did not produce a loop.");
+    const ActiveParametricObject clean_loop_offset = tools.CreateParametricObject(
+        "CurveOffset", document,
+        {{"distance", "Distance", -5.0, -1000000.0, 1000000.0, 0.1},
+         {"delete_loops", "Delete Loops", 1.0, 0.0, 1.0, 1.0,
+             ToolParameterType::Checkbox},
+         {"profile.id", "Source Curve ID", static_cast<double>(concave_id),
+             0.0, 4294967295.0, 1.0}});
+    const auto* clean_loop = dynamic_cast<const CPolyline*>(
+        document.GetObjects()[clean_loop_offset.object_index].get());
+    require(clean_loop && clean_loop->GetPointCount() >= 3
+                && count_self_intersections(
+                       clean_loop->GetPoints(), clean_loop->IsClosed()) == 0,
+            "Curve Offset did not remove a self-intersection loop.");
+}
+
+void TestParametricCurveMirrorCopy() {
+    CAlfaDoc document;
+    document.GetObjects().clear();
+
+    auto source = std::make_unique<CBSpline>("Frame guide");
+    source->SetCurveType(SplineCurveType::Nurbs);
+    source->AddPoint({2.0, 3.0, 4.0});
+    source->AddPoint({5.0, 7.0, 8.0});
+    source->AddPoint({9.0, 11.0, 12.0});
+    source->SetDegree(2);
+    source->SetWeights({1.0, 2.0, 1.5});
+    require(source->SetKnots({0.0, 0.0, 0.0, 1.0, 1.0, 1.0}),
+            "Mirror Copy source NURBS knots are invalid.");
+    document.AddObject(std::move(source));
+    auto* editable_source = dynamic_cast<CBSpline*>(document.GetSelectedObject());
+    require(editable_source != nullptr,
+            "Mirror Copy source was not created.");
+    const unsigned long source_id = editable_source->m_id;
+
+    ToolRegistry tools;
+    const ActiveParametricObject first = tools.CreateParametricObject(
+        "CurveMirrorCopy", document,
+        {{"plane", "Mirror Plane", 0.0, 0.0, 2.0, 1.0,
+             ToolParameterType::Combo, {"YZ", "XZ", "XY"}},
+         {"offset", "Plane Offset", 10.0, -1000000.0, 1000000.0, 0.1},
+         {"profile.id", "Source Curve ID", static_cast<double>(source_id),
+             0.0, 4294967295.0, 1.0}});
+    auto* mirrored = first.object_index < document.GetObjects().size()
+        ? dynamic_cast<CBSpline*>(document.GetObjects()[first.object_index].get())
+        : nullptr;
+    require(mirrored && mirrored->GetCurveType() == SplineCurveType::Nurbs
+                && mirrored->GetDegree() == 2
+                && mirrored->GetWeights() == editable_source->GetWeights()
+                && mirrored->GetKnots() == editable_source->GetKnots(),
+            "Mirror Copy did not preserve the exact NURBS definition.");
+    require(std::abs(mirrored->GetPoints()[0].x - 18.0) < 1.0e-6
+                && std::abs(mirrored->GetPoints()[0].y - 3.0) < 1.0e-6
+                && std::abs(mirrored->GetPoints()[0].z - 4.0) < 1.0e-6,
+            "Mirror Copy did not reflect across the offset YZ plane.");
+    const unsigned long first_id = mirrored->m_id;
+
+    const ActiveParametricObject second = tools.CreateParametricObject(
+        "CurveMirrorCopy", document,
+        {{"plane", "Mirror Plane", 1.0, 0.0, 2.0, 1.0,
+             ToolParameterType::Combo, {"YZ", "XZ", "XY"}},
+         {"offset", "Plane Offset", 0.0, -1000000.0, 1000000.0, 0.1},
+         {"profile.id", "Source Curve ID", static_cast<double>(first_id),
+             0.0, 4294967295.0, 1.0}});
+    require(second.object_index < document.GetObjects().size(),
+            "Chained Mirror Copy was not created.");
+
+    require(editable_source->SetPoint(0, {4.0, 6.0, 9.0}),
+            "Mirror Copy source could not be edited.");
+    require(tools.ReplayProfileDependents(source_id, document),
+            "Mirror Copy dependency chain did not replay.");
+    mirrored = dynamic_cast<CBSpline*>(document.FindObjectById(first_id));
+    const auto* chained = dynamic_cast<const CBSpline*>(
+        document.GetObjects()[second.object_index].get());
+    require(mirrored && chained
+                && std::abs(mirrored->GetPoints()[0].x - 16.0) < 1.0e-6
+                && std::abs(mirrored->GetPoints()[0].y - 6.0) < 1.0e-6
+                && std::abs(chained->GetPoints()[0].x - 16.0) < 1.0e-6
+                && std::abs(chained->GetPoints()[0].y + 6.0) < 1.0e-6
+                && std::abs(chained->GetPoints()[0].z - 9.0) < 1.0e-6,
+            "Mirror Copy did not rebuild its chained dependent geometry.");
+}
+
+void TestParametricCurveLink() {
+    CAlfaDoc document;
+    document.GetObjects().clear();
+
+    auto first = std::make_unique<CPolyline>("First rail");
+    first->AddPoint({0.0, 0.0, 0.0});
+    first->AddPoint({10.0, 0.0, 0.0});
+    document.AddObject(std::move(first));
+    const unsigned long first_id = document.GetSelectedObject()->m_id;
+
+    auto second = std::make_unique<CBSpline>("Second rail");
+    second->AddPoint({30.0, 10.0, 0.0});
+    second->AddPoint({40.0, 10.0, 0.0});
+    second->AddPoint({50.0, 15.0, 0.0});
+    document.AddObject(std::move(second));
+    const unsigned long second_id = document.GetSelectedObject()->m_id;
+
+    ToolRegistry tools;
+    ActiveParametricObject link = tools.CreateParametricObject(
+        "CurveLinkedBridge", document,
+        {{"mode", "Connection", 1.0, 0.0, 1.0, 1.0,
+             ToolParameterType::Combo, {"Straight", "Smooth"}},
+         {"handle_percent", "Handle Length", 25.0, 0.0, 200.0, 1.0},
+         {"curve1.id", "Curve 1 ID", static_cast<double>(first_id),
+             0.0, 4294967295.0, 1.0},
+         {"curve1.end", "Curve 1 End", 1.0, 0.0, 1.0, 1.0,
+             ToolParameterType::Combo, {"Start", "End"}},
+         {"curve2.id", "Curve 2 ID", static_cast<double>(second_id),
+             0.0, 4294967295.0, 1.0},
+         {"curve2.end", "Curve 2 End", 0.0, 0.0, 1.0, 1.0,
+             ToolParameterType::Combo, {"Start", "End"}}});
+    auto* connector = link.object_index < document.GetObjects().size()
+        ? dynamic_cast<CBSpline*>(document.GetObjects()[link.object_index].get())
+        : nullptr;
+    require(connector && connector->GetCurveType() == SplineCurveType::Bezier
+                && connector->GetPointCount() == 4
+                && (connector->GetPoints().front() - CPoint3d(10.0, 0.0, 0.0)).Length()
+                    < 1.0e-6f
+                && (connector->GetPoints().back() - CPoint3d(30.0, 10.0, 0.0)).Length()
+                    < 1.0e-6f,
+            "Linked Curve did not connect the requested endpoints.");
+    require(connector->GetPoints()[1].x > connector->GetPoints()[0].x
+                && connector->GetPoints()[2].x < connector->GetPoints()[3].x,
+            "Smooth Linked Curve did not follow the endpoint tangents.");
+
+    auto* editable_first = dynamic_cast<CPolyline*>(
+        document.FindObjectById(first_id));
+    auto* editable_second = dynamic_cast<CBSpline*>(
+        document.FindObjectById(second_id));
+    require(editable_first && editable_second
+                && editable_first->SetPoint(1, {14.0, 3.0, 2.0})
+                && editable_second->SetPoint(0, {34.0, 13.0, 5.0}),
+            "Linked Curve sources could not be edited.");
+    require(tools.ReplayProfileDependents(first_id, document)
+                && tools.ReplayProfileDependents(second_id, document),
+            "Linked Curve did not replay from both source curves.");
+    connector = dynamic_cast<CBSpline*>(
+        document.GetObjects()[link.object_index].get());
+    require(connector
+                && (connector->GetPoints().front() - CPoint3d(14.0, 3.0, 2.0)).Length()
+                    < 1.0e-6f
+                && (connector->GetPoints().back() - CPoint3d(34.0, 13.0, 5.0)).Length()
+                    < 1.0e-6f,
+            "Linked Curve endpoints did not follow their sources.");
+
+    for (ToolParameter& parameter : link.parameters) {
+        if (parameter.id == "mode") parameter.value = 0.0;
+    }
+    tools.Rebuild(link, document);
+    connector = dynamic_cast<CBSpline*>(
+        document.GetObjects()[link.object_index].get());
+    const CPoint3d chord_third = connector
+        ? connector->GetPoints().front()
+            + (connector->GetPoints().back() - connector->GetPoints().front())
+                * (1.0f / 3.0f)
+        : CPoint3d{};
+    require(connector
+                && (connector->GetPoints()[1] - chord_third).Length() < 1.0e-6f,
+            "Straight Linked Curve mode is not linear.");
+
+    const ActiveParametricObject opposite = tools.CreateParametricObject(
+        "CurveLinkedBridge", document,
+        {{"mode", "Connection", 0.0, 0.0, 1.0, 1.0,
+             ToolParameterType::Combo, {"Straight", "Smooth"}},
+         {"handle_percent", "Handle Length", 33.0, 0.0, 200.0, 1.0},
+         {"curve1.id", "Curve 1 ID", static_cast<double>(first_id),
+             0.0, 4294967295.0, 1.0},
+         {"curve1.end", "Curve 1 End", 0.0, 0.0, 1.0, 1.0,
+             ToolParameterType::Combo, {"Start", "End"}},
+         {"curve2.id", "Curve 2 ID", static_cast<double>(second_id),
+             0.0, 4294967295.0, 1.0},
+         {"curve2.end", "Curve 2 End", 1.0, 0.0, 1.0, 1.0,
+             ToolParameterType::Combo, {"Start", "End"}}});
+    const auto* opposite_connector = dynamic_cast<const CBSpline*>(
+        document.GetObjects()[opposite.object_index].get());
+    require(opposite_connector
+                && (opposite_connector->GetPoints().front()
+                    - editable_first->GetPoints().front()).Length() < 1.0e-6f
+                && (opposite_connector->GetPoints().back()
+                    - editable_second->GetPoints().back()).Length() < 1.0e-6f,
+            "Linked Curve did not honor explicitly selected opposite ends.");
+}
+
+void TestParametricSmartHybrid() {
+    CAlfaDoc document;
+    document.GetObjects().clear();
+    const std::array<CPoint3d, 8> vertices{
+        CPoint3d{0.0, 0.0, 0.0}, CPoint3d{100.0, 0.0, 0.0},
+        CPoint3d{100.0, 80.0, 0.0}, CPoint3d{0.0, 80.0, 0.0},
+        CPoint3d{0.0, 0.0, 60.0}, CPoint3d{100.0, 0.0, 60.0},
+        CPoint3d{100.0, 80.0, 60.0}, CPoint3d{0.0, 80.0, 60.0}};
+    const std::array<std::array<int, 2>, 12> edge_vertices{{
+        {{0, 1}}, {{1, 2}}, {{2, 3}}, {{3, 0}},
+        {{4, 5}}, {{5, 6}}, {{6, 7}}, {{7, 4}},
+        {{0, 4}}, {{1, 5}}, {{2, 6}}, {{3, 7}}}};
+    std::vector<unsigned long> curve_ids;
+    for (size_t index = 0; index < edge_vertices.size(); ++index) {
+        auto curve = std::make_unique<CPolyline>(
+            "Frame edge " + std::to_string(index + 1));
+        curve->AddPoint(vertices[static_cast<size_t>(edge_vertices[index][0])]);
+        curve->AddPoint(vertices[static_cast<size_t>(edge_vertices[index][1])]);
+        document.AddObject(std::move(curve));
+        curve_ids.push_back(document.GetSelectedObject()->m_id);
+    }
+
+    ToolRegistry tools;
+    const ToolDefinition* definition = tools.Find("SurfaceSmartHybrid");
+    require(definition != nullptr, "Smart Hybrid tool is not registered.");
+    std::vector<ToolParameter> parameters = definition->defaults;
+    const auto set_value = [&parameters](const std::string& id, double value) {
+        const auto found = std::find_if(
+            parameters.begin(), parameters.end(), [&id](const ToolParameter& parameter) {
+                return parameter.id == id;
+            });
+        require(found != parameters.end(), "Smart Hybrid parameter is missing.");
+        found->value = value;
+    };
+    set_value("curve.count", static_cast<double>(curve_ids.size()));
+    for (size_t index = 0; index < curve_ids.size(); ++index) {
+        set_value("curve" + std::to_string(index + 1) + ".id",
+                  static_cast<double>(curve_ids[index]));
+    }
+    const ActiveParametricObject hybrid = tools.CreateParametricObject(
+        "SurfaceSmartHybrid", document, parameters);
+    const auto* solid = hybrid.object_index < document.GetObjects().size()
+        ? dynamic_cast<const CSolid*>(document.GetObjects()[hybrid.object_index].get())
+        : nullptr;
+    require(solid && !dynamic_cast<const CSurfaceSet*>(solid)
+                && !solid->m_Shape.IsNull()
+                && solid->m_Shape.ShapeType() == TopAbs_SOLID
+                && BRepCheck_Analyzer(solid->m_Shape).IsValid(),
+            "Smart Hybrid did not convert a closed curve frame into a valid Solid.");
+    require(tools.ReplayProfileDependents(curve_ids.front(), document),
+            "Smart Hybrid did not participate in the parametric dependency graph.");
+    solid = dynamic_cast<const CSolid*>(
+        document.GetObjects()[hybrid.object_index].get());
+    require(solid && solid->m_Shape.ShapeType() == TopAbs_SOLID,
+            "Smart Hybrid lost its Solid after a parametric replay.");
+}
+
+void TestLiveFilletValidation() {
+    const TopoDS_Shape box = BRepPrimAPI_MakeBox(20.0, 20.0, 20.0).Shape();
+    TopExp_Explorer edge_explorer(box, TopAbs_EDGE);
+    require(edge_explorer.More(), "Fillet validation fixture has no edge.");
+
+    CAlfaDoc::LiveFilletBuildRequest request;
+    request.source_shape = box;
+    request.base_shape = box;
+    request.edges.push_back(TopoDS::Edge(edge_explorer.Current()));
+
+    TopoDS_Shape result;
+    std::vector<int> generated_faces;
+    require(CAlfaDoc::BuildLiveFilletShape(
+                request, {2.0}, result, generated_faces)
+                && !result.IsNull() && BRepCheck_Analyzer(result).IsValid(),
+            "A safe constant fillet radius was rejected.");
+
+    result.Nullify();
+    generated_faces.clear();
+    require(!CAlfaDoc::BuildLiveFilletShape(
+                request, {30.0}, result, generated_faces),
+            "An oversized fillet radius produced an accepted preview.");
+
+    CAlfaDoc live_document;
+    TopoDS_Shape live_box = box;
+    auto live_solid = std::make_unique<CSolid>(live_box);
+    require(live_solid->ReBuldMesh(),
+            "The live fillet fixture could not initialize its solid.");
+    live_document.AddObject(std::move(live_solid));
+    auto* selected_solid = live_document.GetSelectedSolid();
+    require(selected_solid != nullptr && selected_solid->GetNumSurfaces() > 0,
+            "The live fillet fixture has no selectable surface.");
+    selected_solid->SetSelectedEdge(0, 0);
+    require(live_document.BeginLiveFilletSelectedEdges(false)
+                && live_document.UpdateLiveFillet(2.0)
+                && live_document.IsLiveFilletPreviewValid(),
+            "A valid constant-radius live preview was rejected.");
+    live_document.CancelLiveFillet();
+}
+
+void DiagnoseProjectFillets(const QString& path, double radius) {
+    CAlfaDoc document;
+    Dom3DProjectSerializer serializer;
+    QString room;
+    ProjectViewState view;
+    QString error;
+    require(serializer.Load(path, document, room, view, error),
+            error.toLocal8Bit().constData());
+
+    for (size_t object_index = 0;
+         object_index < document.GetObjects().size(); ++object_index) {
+        const auto* solid = dynamic_cast<const CSolid*>(
+            document.GetObjects()[object_index].get());
+        if (!solid || solid->m_Shape.IsNull()) continue;
+        int edge_index = 0;
+        int built = 0;
+        int valid = 0;
+        int guarded = 0;
+        double maximum_tolerance = 0.0;
+        for (TopExp_Explorer explorer(solid->m_Shape, TopAbs_EDGE);
+             explorer.More(); explorer.Next(), ++edge_index) {
+            const TopoDS_Edge edge = TopoDS::Edge(explorer.Current());
+            maximum_tolerance = std::max(
+                maximum_tolerance, BRep_Tool::Tolerance(edge));
+            try {
+                BRepFilletAPI_MakeFillet fillet(solid->m_Shape);
+                fillet.Add(radius, edge);
+                fillet.Build();
+                if (fillet.IsDone() && !fillet.Shape().IsNull()) {
+                    ++built;
+                    if (BRepCheck_Analyzer(fillet.Shape()).IsValid()) ++valid;
+                }
+                CAlfaDoc::LiveFilletBuildRequest request;
+                request.source_shape = solid->m_Shape;
+                request.base_shape = solid->m_Shape;
+                request.edges = {edge};
+                TopoDS_Shape guarded_result;
+                std::vector<int> guarded_faces;
+                if (CAlfaDoc::BuildLiveFilletShape(
+                        request, {radius}, guarded_result, guarded_faces)) {
+                    ++guarded;
+                }
+            } catch (const Standard_Failure&) {
+            }
+        }
+        std::cout << "Object " << object_index << " '" << solid->GetName()
+                  << "': shapeValid="
+                  << BRepCheck_Analyzer(solid->m_Shape).IsValid()
+                  << ", edges=" << edge_index << ", filletBuilt=" << built
+                  << ", filletValid=" << valid
+                  << ", guardedFillet=" << guarded
+                  << ", maxEdgeTolerance=" << maximum_tolerance << "\n";
+    }
+}
+
+void TestToolsMesh3D(const char* boundary_path, const char* diagnostic_directory);
+int TestRepeatCommand(int argc, char** argv);
+int TestScenePersistence(int argc, char** argv);
+int TestProjectOpenDialog(int argc, char** argv);
+int TestBooleanTool(int argc, char** argv);
+int TestSolidPrimitiveTool(int argc, char** argv);
+int TestTile(int argc, char** argv);
+int TestProceduralMaterial(int argc, char** argv);
+int TestFacePrimitiveCut(int argc, char** argv);
+
+void TestVisibleStepExportAndSelectAll() {
+    QTemporaryDir directory;
+    require(directory.isValid(), "Temporary STEP export directory was not created.");
+    const auto make_box = [](gp_Pnt origin, double x, double y, double z) {
+        TopoDS_Shape shape = BRepPrimAPI_MakeBox(origin, x, y, z).Shape();
+        return std::make_unique<CSolid>(shape);
+    };
+
+    CAlfaDoc export_document;
+    const int default_layer = export_document.GetWorkLayerID();
+    auto visible = make_box(gp_Pnt(0.0, 0.0, 0.0), 10.0, 10.0, 10.0);
+    export_document.AddObject(std::move(visible), false);
+
+    auto hidden = make_box(gp_Pnt(30.0, 0.0, 0.0), 20.0, 10.0, 10.0);
+    hidden->SetVisible(false);
+    export_document.AddObject(std::move(hidden), false);
+
+    CLayer* hidden_layer = export_document.AddLayer("Hidden STEP layer");
+    require(hidden_layer != nullptr, "Hidden STEP layer was not created.");
+    hidden_layer->Visible = false;
+    require(export_document.SetWorkLayer(hidden_layer->ID()),
+            "Hidden STEP layer could not be activated.");
+    auto layer_hidden = make_box(
+        gp_Pnt(60.0, 0.0, 0.0), 30.0, 10.0, 10.0);
+    export_document.AddObject(std::move(layer_hidden), false);
+    require(export_document.SetWorkLayer(default_layer),
+            "Default layer could not be restored.");
+
+    const QString step_path = directory.filePath("visible-only.step");
+    StepIO step_io;
+    std::string error;
+    require(step_io.Export(step_path.toStdString(), export_document, error),
+            error.c_str());
+    std::vector<std::unique_ptr<CSolid>> imported;
+    require(step_io.Import(step_path.toStdString(), imported, error), error.c_str());
+    double exported_volume = 0.0;
+    for (const auto& solid : imported) {
+        GProp_GProps properties;
+        BRepGProp::VolumeProperties(solid->m_Shape, properties);
+        exported_volume += properties.Mass();
+    }
+    require(std::abs(exported_volume - 1000.0) < 1.0e-4,
+            "STEP export included an object hidden directly or by its layer.");
+
+    CAlfaDoc selection_document;
+    auto selected_visible = make_box(
+        gp_Pnt(0.0, 0.0, 0.0), 10.0, 10.0, 10.0);
+    selection_document.AddObject(std::move(selected_visible), false);
+    const unsigned long visible_id = selection_document.GetObjects().back()->m_id;
+    auto protected_hidden = make_box(
+        gp_Pnt(20.0, 0.0, 0.0), 10.0, 10.0, 10.0);
+    protected_hidden->SetVisible(false);
+    selection_document.AddObject(std::move(protected_hidden), false);
+    const unsigned long hidden_id = selection_document.GetObjects().back()->m_id;
+    auto mixed_group = std::make_unique<CGroup>(
+        "Visible and hidden", std::vector<unsigned long>{visible_id, hidden_id});
+    selection_document.AddObject(std::move(mixed_group), false);
+    const unsigned long group_id = selection_document.GetObjects().back()->m_id;
+
+    require(selection_document.SelectAllVisibleObjects() > 0,
+            "Select All Visible selected nothing.");
+    require(selection_document.IsObjectSelected(
+                selection_document.FindObjectIndexById(visible_id))
+            && !selection_document.IsObjectSelected(
+                selection_document.FindObjectIndexById(hidden_id))
+            && !selection_document.IsObjectSelected(
+                selection_document.FindObjectIndexById(group_id)),
+            "Select All Visible selected a hidden object through its group.");
+    require(selection_document.DeleteSelectedObject(),
+            "Visible selection could not be deleted.");
+    require(selection_document.FindObjectById(visible_id) == nullptr
+                && selection_document.FindObjectById(hidden_id) != nullptr,
+            "Deleting all visible objects also deleted a hidden group member.");
+    const auto* surviving_group = dynamic_cast<const CGroup*>(
+        selection_document.FindObjectById(group_id));
+    require(surviving_group && surviving_group->GetElementIds()
+                == std::vector<unsigned long>{hidden_id},
+            "The surviving group retained references to deleted visible members.");
+}
+
+void TestCushionStageOneMesh() {
+    CAlfaDoc document;
+    ToolRegistry registry;
+    const ToolDefinition* definition = registry.Find("MeshCushion");
+    require(definition != nullptr, "Cushion mesh tool is not registered.");
+    ActiveParametricObject active = registry.CreateParametricObject(
+        "MeshCushion", document, definition->defaults);
+    require(!active.tool_id.empty()
+                && active.object_index < document.GetObjects().size(),
+            "Cushion mesh tool did not create an object.");
+    const auto* mesh = dynamic_cast<const CMesh3D*>(
+        document.GetObjects()[active.object_index].get());
+    require(mesh && !mesh->GetVertices().empty()
+                && mesh->GetFaces().size() == 96,
+            "Cushion stage-one mesh has an unexpected topology.");
+    require(std::all_of(mesh->GetFaces().begin(), mesh->GetFaces().end(),
+                [](const CMesh3D::Face& face) {
+                    return !face.deleted && face.corners.size() == 4;
+                }),
+            "Cushion stage-one mesh is not all quads.");
+    std::map<std::pair<size_t, size_t>, int> edge_owners;
+    for (const CMesh3D::Face& face : mesh->GetFaces()) {
+        for (size_t corner = 0; corner < face.corners.size(); ++corner) {
+            const size_t first = face.corners[corner].v;
+            const size_t second = face.corners[
+                (corner + 1) % face.corners.size()].v;
+            ++edge_owners[std::minmax(first, second)];
+        }
+    }
+    require(std::all_of(edge_owners.begin(), edge_owners.end(),
+                [](const auto& edge) { return edge.second == 2; }),
+            "Cushion stage-one mesh is not closed and manifold.");
+    Vec3 minimum{};
+    Vec3 maximum{};
+    require(mesh->GetBounds(minimum, maximum)
+                && std::abs((maximum.x - minimum.x) - 73.0f) < 1.0e-3f
+                && std::abs((maximum.y - minimum.y) - 56.78f) < 1.0e-3f
+                && maximum.z > 20.61f && std::abs(minimum.z) < 1.0e-6f,
+            "Cushion parameters did not produce the requested bounds and crown.");
+
+    const float original_crown = maximum.z;
+    for (ToolParameter& parameter : active.parameters) {
+        if (parameter.id == "sphere_radius")
+            parameter.value = 120.0;
+    }
+    registry.Rebuild(active, document);
+    mesh = dynamic_cast<const CMesh3D*>(
+        document.GetObjects()[active.object_index].get());
+    require(mesh && mesh->GetBounds(minimum, maximum)
+                && maximum.z < original_crown,
+            "Cushion sphere radius did not rebuild the crown.");
+
+    for (ToolParameter& parameter : active.parameters) {
+        if (parameter.id == "hybrid") parameter.value = 1.0;
+    }
+    registry.Rebuild(active, document);
+    const auto* hybrid = dynamic_cast<const CSolid*>(
+        document.GetObjects()[active.object_index].get());
+    require(hybrid && !dynamic_cast<const CMesh3D*>(hybrid)
+                && hybrid->GetNumSurfaces() == 96,
+            "Cushion Hybrid did not create one Catmull-Clark surface per control face.");
+    require(!hybrid->m_Shape.IsNull()
+                && BRepCheck_Analyzer(hybrid->m_Shape).IsValid(),
+            "Cushion Hybrid produced an invalid sewn shape.");
+    require(hybrid->m_Shape.ShapeType() == TopAbs_SOLID,
+            "Cushion Hybrid patches were not sewn into a solid.");
+}
+
 int main(int argc, char** argv) {
+    if(argc==5 && std::string(argv[1])=="--check-3ds-normals") {
+        QApplication application(argc,argv); ThreeDSIO io; std::string error;
+        std::vector<std::unique_ptr<CMesh3D>> meshes;
+        require(io.Import(argv[2],meshes,error),error.c_str());
+        size_t smooth=0,flat=0;
+        CAlfaDoc document;
+        for(auto& mesh:meshes) {
+            for(const auto& face:mesh->GetFaces()) {
+                const auto& a=mesh->GetVertices()[face.corners[0].v];
+                const auto& b=mesh->GetVertices()[face.corners[1].v];
+                const auto& c=mesh->GetVertices()[face.corners[2].v];
+                const Vec3 n=normalize(cross(b-a,c-a));
+                for(const auto& corner:face.corners) {
+                    if(dot(n,mesh->GetNormals()[corner.n])<0.99999f)++smooth;else ++flat;
+                }
+            }
+            document.AddMesh(std::move(mesh));
+        }
+        std::cout<<"Smoothed corners: "<<smooth<<", flat corners: "<<flat<<std::endl;
+        const std::string expected=argv[3];
+        if(expected=="flat")require(smooth==0,"Sharp crease was smoothed");
+        if(expected=="smooth")require(smooth>0,"Gentle crease remains faceted");
+        Dom3DProjectSerializer serializer;QString save_error;ProjectViewState view;
+        require(serializer.Save(QString::fromLocal8Bit(argv[4]),document,"Mesh",view,{},save_error),save_error.toStdString().c_str());
+        return EXIT_SUCCESS;
+    }
+    if(argc==4 && std::string(argv[1])=="--render-iges") {
+        QApplication application(argc,argv);IgesIO io;std::string error;
+        std::vector<std::unique_ptr<CAlfaObject>> objects;
+        require(io.Import(argv[2],objects,error),error.c_str());CAlfaDoc document;
+        for(auto& object:objects)document.AddObject(std::move(object),false);
+        document.ClearSelection();OpenGLViewport viewport;viewport.resize(1000,800);viewport.move(-20000,-20000);
+        viewport.SetDocument(&document);viewport.SetOrthographicProjection(true);
+        viewport.SetFloorGridVisible(false);viewport.SetCoordinateAxesVisible(false);viewport.FitToDocument();
+        CSolid::SetDisplayMode(SolidDisplayMode::SurfacesAndEdges);CMesh3D::SetDisplayMode(MeshDisplayMode::SurfaceMaterial);
+        viewport.show();application.processEvents();
+        require(viewport.CaptureSceneImage({1000,800}).save(QString::fromLocal8Bit(argv[3])),"IGES render failed");
+        viewport.SetDocument(nullptr);return EXIT_SUCCESS;
+    }
+    if(argc>=2 && std::string(argv[1])=="--test-procedural-material")return TestProceduralMaterial(argc,argv);
+    if(argc>=2 && std::string(argv[1])=="--test-tile")return TestTile(argc,argv);
+    if (argc >= 2 && std::string(argv[1]) == "--test-project-open-dialog")
+        return TestProjectOpenDialog(argc, argv);
+    if (argc >= 2 && std::string(argv[1]) == "--test-face-primitive-cut")
+        return TestFacePrimitiveCut(argc, argv);
+    if (argc >= 2 && std::string(argv[1]) == "--test-solid-primitive-tool")
+        return TestSolidPrimitiveTool(argc, argv);
+    if (argc >= 2 && std::string(argv[1]) == "--test-boolean-tool")
+        return TestBooleanTool(argc, argv);
+    // Manual visual regression through the real viewport, including batched
+    // shading and mesh edges. Keep it opt-in because it needs a native GL driver.
+    if ((argc == 4 || argc == 5) && (std::string(argv[1]) == "--render-project-quadro" || std::string(argv[1]) == "--render-project-native")) {
+        QSurfaceFormat format;
+        format.setRenderableType(QSurfaceFormat::OpenGL);
+        format.setVersion(2, 1);
+        format.setProfile(QSurfaceFormat::CompatibilityProfile);
+        format.setDepthBufferSize(24);
+        format.setSamples(8);
+        QSurfaceFormat::setDefaultFormat(format);
+        QApplication application(argc, argv);
+        CAlfaDoc document;
+        Dom3DProjectSerializer serializer;
+        QString room, error;
+        ProjectViewState view;
+        require(serializer.Load(QString::fromLocal8Bit(argv[2]), document, room, view, error),
+                error.toLocal8Bit().constData());
+        for (const auto& object : document.GetObjects())
+            if (std::string(argv[1]) != "--render-project-native"
+                && !dynamic_cast<CSolid*>(object.get())) object->SetVisible(false);
+        OpenGLViewport viewport;
+        viewport.resize(900, 1000);
+        viewport.move(-20000, -20000);
+        viewport.SetDocument(&document);
+        viewport.SetCamera(view.camera);
+        viewport.SetOrthographicProjection(true);
+        viewport.SetFloorGridVisible(false);
+        viewport.SetCoordinateAxesVisible(false);
+        viewport.FitToDocument();
+        viewport.show();
+        application.processEvents();
+        CSolid::SetDisplayMode(std::string(argv[1]) == "--render-project-native" ? SolidDisplayMode::SurfacesAndEdges : SolidDisplayMode::SurfacesAndRaisedMesh);
+        CMesh3D::SetDisplayMode(std::string(argv[1]) == "--render-project-native" ? MeshDisplayMode::SurfaceMaterial : MeshDisplayMode::SurfaceColored);
+        const auto densities = argc == 5 ? std::vector<float>{std::stof(argv[4])}
+            : std::vector<float>{0.35f, 0.40f, 0.45f, 0.50f, 0.80f};
+        for (float density : densities) {
+            for (const auto& object : document.GetObjects()) {
+                if (auto* solid = dynamic_cast<CSolid*>(object.get())) {
+                    if(std::string(argv[1]) == "--render-project-native")continue;
+                    solid->MeshQuadro = true;
+                    solid->MeshQuadroHoleSLX = true;
+                    require(solid->ReBuldMesh(1.0f / density), "Rebuild failed");
+                }
+            }
+            const Camera original = viewport.GetCamera();
+            for (int angle = 0; angle < 4; ++angle) {
+                Camera camera = original;
+                camera.orientation = quaternion_from_axis_angle({0, 0, 1}, angle * kPi / 2)
+                    * original.orientation;
+                viewport.SetCamera(camera);
+                const auto frame = viewport.CaptureSceneImage(QSize(900, 1000));
+                require(!frame.isNull() && frame.save(QString::fromLocal8Bit(argv[3])
+                        + QString::number(density, 'f', 2) + "-" + QString::number(angle)
+                        + ".png"), "Could not save viewport frame");
+            }
+            viewport.SetCamera(original);
+        }
+        return 0;
+    }
+    if (argc >= 2 && std::string(argv[1]) == "--test-repeat-command") {
+        return TestRepeatCommand(argc, argv);
+    }
+    if (argc >= 2 && std::string(argv[1]) == "--test-scene-persistence") {
+        // UI regressions own their QApplication, just like RepeatCommand.
+        return TestScenePersistence(argc, argv);
+    }
     QCoreApplication application(argc, argv);
+    if (argc == 2 && std::string(argv[1]) == "--test-visible-step-and-selection") {
+        TestVisibleStepExportAndSelectAll();
+        std::cout << "Visible STEP export and selection tests passed.\n";
+        return 0;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--test-cushion-stage-one") {
+        TestCushionStageOneMesh();
+        std::cout << "Cushion stage-one mesh tests passed.\n";
+        return 0;
+    }
+    if (argc == 3 && std::string(argv[1]) == "--test-four-hole-collars") {
+        TestFourHoleCollars(QString::fromLocal8Bit(argv[2]));
+        return 0;
+    }
+    if (argc == 3 && std::string(argv[1]) == "--test-six-hole-shared-zone") {
+        TestSixHoleSharedZone(QString::fromLocal8Bit(argv[2]));
+        return 0;
+    }
+    if (argc == 3 && std::string(argv[1]) == "--test-cylinder-box-windows") {
+        TestCylinderMultipleWindows(QString::fromLocal8Bit(argv[2]), true);
+        return 0;
+    }
+    if (argc == 3 && std::string(argv[1]) == "--test-cylinder-multiple-windows") {
+        TestCylinderMultipleWindows(QString::fromLocal8Bit(argv[2]));
+        return 0;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--test-mesh-var5-reallocation") {
+        TestMeshVar5Reallocation();
+        std::cout << "Mesh Var-5 reallocation tests passed.\n";
+        return 0;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--test-hole-placement") {
+        TestHolePlacement();
+        return 0;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--test-mesh-point-split-reallocation") {
+        TestMeshPointSplitReallocation();
+        std::cout << "Mesh point-split reallocation tests passed.\n";
+        return 0;
+    }
+    if (argc == 3 && std::string(argv[1]) == "--test-boolean-three-slx") {
+        TestBooleanThreeSlx(QString::fromLocal8Bit(argv[2]));
+        std::cout << "Boolean-3 SLX tests passed.\n";
+        return 0;
+    }
+    if (argc == 3 && std::string(argv[1]) == "--test-boolean-four-fill") {
+        TestBooleanFourFillQuadro(QString::fromLocal8Bit(argv[2]));
+        std::cout << "Boolean-4 Quadro tests passed.\n";
+        return 0;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--test-mesh-var11") {
+        TestMeshVar11Regression();
+        std::cout << "Mesh Var-11 tests passed.\n";
+        return 0;
+    }
+    if (argc == 3 && std::string(argv[1]) == "--test-prism-filleted-slx") {
+        TestPrismFilletedSlx(QString::fromLocal8Bit(argv[2]));
+        std::cout << "Filleted prism SLX tests passed.\n";
+        return 0;
+    }
+    if (argc == 3 && std::string(argv[1]) == "--test-box-double-cut-slx") {
+        TestBoxDoubleCutSlx(QString::fromLocal8Bit(argv[2]));
+        std::cout << "Double-cut Box SLX tests passed.\n";
+        return 0;
+    }
+    if (argc == 3 && std::string(argv[1]) == "--test-prism-two-fillets") {
+        TestPrismTwoFilletsQuadro(QString::fromLocal8Bit(argv[2]));
+        std::cout << "Prism two-fillet Quadro tests passed.\n";
+        return 0;
+    }
+    if (argc == 3 && std::string(argv[1]) == "--test-chamfer-and-fillets") {
+        TestChamferAndFilletsQuadro(QString::fromLocal8Bit(argv[2]));
+        std::cout << "ChamferAndFillets Quadro tests passed.\n";
+        return 0;
+    }
+    if (argc == 3 && std::string(argv[1]) == "--test-box-min-box-filled") {
+        TestBoxMinBoxFilledQuadro(QString::fromLocal8Bit(argv[2]));
+        std::cout << "Box_Min_Box_Filled Quadro tests passed.\n";
+        return 0;
+    }
+    if ((argc == 3 || argc == 4) && std::string(argv[1]) == "--test-tools-mesh3d") {
+        TestToolsMesh3D(argv[2], argc == 4 ? argv[3] : nullptr);
+        return 0;
+    }
+    if (argc == 3 && std::string(argv[1]) == "--test-extrude-sl-quadro") {
+        TestExtrudeSlQuadro(QString::fromLocal8Bit(argv[2]));
+        std::cout << "Extrude_SL Quadro tests passed.\n";
+        return 0;
+    }
+    if (argc == 3 && std::string(argv[1]) == "--test-bezier-collar-welding") {
+        TestBezierCollarWelding(QString::fromLocal8Bit(argv[2]));
+        std::cout << "Bezier collar welding tests passed.\n";
+        return 0;
+    }
     if (argc == 2 && std::string(argv[1]) == "--test-low-poly-quadro") {
         TestLowPolyQuadroBranch();
         std::cout << "Low Poly Quadro tests passed.\n";
@@ -3212,6 +5835,11 @@ int main(int argc, char** argv) {
     if (argc == 2 && std::string(argv[1]) == "--test-surface-patch-welding") {
         TestSurfacePatchWelding();
         std::cout << "Surface patch welding tests passed.\n";
+        return 0;
+    }
+    if (argc == 3 && std::string(argv[1]) == "--test-hole-low-density-collar") {
+        TestHoleLowDensityCollar(QString::fromLocal8Bit(argv[2]));
+        std::cout << "Hole low-density collar tests passed.\n";
         return 0;
     }
     if (argc == 2 && std::string(argv[1]) == "--test-small-hole-slx-collar") {
@@ -3256,6 +5884,8 @@ int main(int argc, char** argv) {
     if (argc == 2
         && std::string(argv[1]) == "--test-create-sketch-surface") {
         TestCreateSurfaceFromSketch();
+        TestLoftSplineOrdering();
+        TestTangentCapFromClosedSpline();
         std::cout << "Create Surface from sketch tests passed.\n";
         return 0;
     }
@@ -3270,13 +5900,212 @@ int main(int argc, char** argv) {
         std::cout << "Mesh wire color tests passed.\n";
         return 0;
     }
+    if (argc == 2 && std::string(argv[1]) == "--test-curve-offset") {
+        TestParametricCurveOffset();
+        std::cout << "Parametric Curve Offset tests passed.\n";
+        return 0;
+    }
+    if (argc == 2
+        && std::string(argv[1]) == "--test-curve-mirror-copy") {
+        TestParametricCurveMirrorCopy();
+        std::cout << "Parametric Curve Mirror Copy tests passed.\n";
+        return 0;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--test-curve-link") {
+        TestParametricCurveLink();
+        std::cout << "Parametric Curve Link tests passed.\n";
+        return 0;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--test-smart-hybrid") {
+        TestParametricSmartHybrid();
+        std::cout << "Parametric Smart Hybrid tests passed.\n";
+        return 0;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--test-live-fillet-validation") {
+        TestLiveFilletValidation();
+        std::cout << "Live fillet validation tests passed.\n";
+        return 0;
+    }
+    if (argc == 4 && std::string(argv[1]) == "--diagnose-project-fillets") {
+        DiagnoseProjectFillets(QString::fromLocal8Bit(argv[2]), std::stod(argv[3]));
+        return 0;
+    }
     if (argc == 2
         && std::string(argv[1]) == "--test-low-poly-density-calibration") {
         TestLowPolyDensityCalibration();
         std::cout << "Low Poly density calibration tests passed.\n";
         return 0;
     }
-    if ((argc == 4 || argc == 5)
+    if (argc == 7 && std::string(argv[1]) == "--export-quadro-boundaries-uv") {
+        const QString source = QString::fromLocal8Bit(argv[2]);
+        const size_t requested_solid = std::stoul(argv[4]);
+        const int requested_surface = std::stoi(argv[5]);
+        const QString destination = QString::fromLocal8Bit(argv[6]);
+        require(requested_solid > 0 && requested_surface > 0,
+                "Solid and surface indices are one-based.");
+        require(QFileInfo(source).absoluteFilePath() != QFileInfo(destination).absoluteFilePath()
+                    && !QFileInfo::exists(destination),
+                "Boundary export requires a new destination project.");
+        const float density = std::stof(argv[3]);
+        require(std::isfinite(density) && density > 0.0f, "Density must be positive.");
+        CAlfaDoc document;
+        Dom3DProjectSerializer serializer;
+        QString room, error;
+        ProjectViewState view;
+        require(serializer.Load(source, document, room, view, error),
+                error.toLocal8Bit().constData());
+        QImage thumbnail;
+        serializer.LoadThumbnail(source, thumbnail, error);
+        std::vector<std::unique_ptr<CPolyline>> boundaries;
+        size_t solid_index = 0;
+        for (const auto& object : document.GetObjects()) {
+            auto* solid = dynamic_cast<CSolid*>(object.get());
+            if (!solid) continue;
+            ++solid_index;
+            if (solid_index != requested_solid) continue;
+            solid->MeshQuadro = true;
+            solid->MeshQuadroHoleSLX = false;
+            solid->ptchDensity = density;
+            require(solid->ReBuldMesh(1.0f / density), "Boundary export rebuild failed.");
+            for (int i = 0; i < solid->GetNumSurfaces(); ++i) {
+                if (i + 1 != requested_surface) continue;
+                const CSurfaceFace* surface = solid->GetSurfaceFace(i);
+                std::vector<std::unique_ptr<CPolyline>> lines;
+                require(surface && !surface->m_Face.IsNull(), "Missing export surface.");
+                // Use the cached island passed to MakeFilledContour, not an
+                // OCCT re-tessellation and not only rejected-input diagnostics.
+                // Boundary Line must remain in native UV: no radius scaling,
+                // restoration to 3D, translation, or resampling.
+                for (const auto& patch : surface->m_LastIslandBoundariesUV) {
+                    auto line = std::make_unique<CPolyline>();
+                    for (const CPoint3d& uv : patch) {
+                        const float u = static_cast<float>(uv.x);
+                        const float v = static_cast<float>(uv.y);
+                        line->AddPoint({u, v, 0.0});
+                    }
+                    line->SetClosed(true);
+                    lines.push_back(std::move(line));
+                }
+                for (size_t j = 0; j < lines.size(); ++j) {
+                    lines[j]->SetName("Boundary Line UV - Solid " + std::to_string(solid_index)
+                        + " - Surface " + std::to_string(i + 1)
+                        + " - Loop " + std::to_string(j + 1)
+                        + " - Density " + QString::number(density, 'f', 2).toStdString());
+                    lines[j]->SetColor({0.0f, 1.0f, 1.0f});
+                    lines[j]->SetLineWidth(2.0);
+                    std::cout << lines[j]->GetName() << " nodes="
+                              << lines[j]->GetPointCount() << '\n';
+                    boundaries.push_back(std::move(lines[j]));
+                }
+            }
+        }
+        require(!boundaries.empty(), "No cached quadrangulation input boundaries were captured.");
+        const size_t original_count = document.GetObjects().size();
+        int boundary_layer = document.GetWorkLayerID();
+        for (const CLayer* layer : document.m_Layers) {
+            if (layer && layer->Name == "Default") {
+                boundary_layer = layer->ID();
+                break;
+            }
+        }
+        std::vector<std::vector<CPoint3d>> expected_points;
+        for (auto& boundary : boundaries) {
+            expected_points.push_back(boundary->GetPoints());
+            CPolyline* added = boundary.get();
+            document.AddObject(std::move(boundary), false);
+            added->m_LayerID = boundary_layer;
+        }
+        require(serializer.Save(destination, document, room, view, thumbnail, error),
+                error.toLocal8Bit().constData());
+        CAlfaDoc round_trip;
+        require(serializer.Load(destination, round_trip, room, view, error),
+                error.toLocal8Bit().constData());
+        require(round_trip.GetObjects().size() == original_count + expected_points.size(),
+                "Boundary export changed the document object count.");
+        for (size_t i = 0; i < expected_points.size(); ++i) {
+            const auto* boundary = dynamic_cast<const CPolyline*>(
+                round_trip.GetObjects()[original_count + i].get());
+            require(boundary && boundary->IsClosed()
+                        && boundary->GetPointCount() == expected_points[i].size(),
+                    "Boundary export lost the closed polyline or its nodes.");
+            for (size_t j = 0; j < expected_points[i].size(); ++j) {
+                const CPoint3d actual = boundary->GetPoints()[j];
+                const CPoint3d expected = expected_points[i][j];
+                // The mesh pipeline consumes Vec3 floats; nine significant
+                // digits in the project must round-trip that input exactly.
+                require(static_cast<float>(actual.x) == static_cast<float>(expected.x)
+                            && static_cast<float>(actual.y) == static_cast<float>(expected.y)
+                            && static_cast<float>(actual.z) == static_cast<float>(expected.z),
+                        "Boundary export changed the quadrangulator input coordinates.");
+            }
+        }
+        std::cout << "Saved and verified " << expected_points.size()
+                  << " exact boundary polyline(s).\n";
+        return 0;
+    }
+    if (argc == 3 && std::string(argv[1]) == "--test-hairdryer-cad-boundary") {
+        try {TestHairdryerCadBoundary(argv[2]);return 0;}
+        catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
+    if (argc == 4 && std::string(argv[1]) == "--diagnose-hairdryer-chart-fill") {
+        try {DiagnoseHairdryerChartFill(argv[2],argv[3]);return 0;}
+        catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
+    if ((argc == 3 || argc == 4) && std::string(argv[1]) == "--test-pillow-cad-quadro") {
+        TestPillowCadQuadro(argv[2], argc == 4 ? argv[3] : nullptr);
+        return 0;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--test-quadro-body-cache") {
+        auto shape = BRepPrimAPI_MakeBox(10,20,30).Shape();
+        CSolid solid(shape);
+        const auto first = solid.GetQuadroTopologySnapshot();
+        require(first->topologyValid(), "Body snapshot invalid");
+        solid.MeshQuadro = true;
+        require(solid.ReBuldMesh(2.f), "Initial box mesh failed");
+        require(solid.GetQuadroTopologySnapshot() == first, "Remeshing recreated CAD snapshot");
+        require(solid.ReBuldMesh(1.f), "Changed-density box mesh failed");
+        require(solid.GetQuadroTopologySnapshot() == first, "Density invalidated CAD snapshot");
+        quadro::SamplingOptions options;
+        auto prepared = solid.PrepareQuadroBoundary(options);
+        require(prepared == solid.PrepareQuadroBoundary(options), "Identical sampling not cached");
+        options.maxSegmentLength /= 2;
+        require(prepared != solid.PrepareQuadroBoundary(options), "Sampling change not detected");
+        require(solid.GetQuadroBoundaryCaptureCount() == 1, "Density recaptured topology");
+        solid.m_Shape = BRepPrimAPI_MakeCylinder(5,15).Shape();
+        const auto replaced = solid.GetQuadroTopologySnapshot();
+        require(replaced != first && replaced->bodyRevision() > first->bodyRevision(), "Shape replacement not detected");
+        solid.InvalidateQuadroBoundary();
+        require(solid.GetQuadroTopologySnapshot() != replaced, "Explicit CAD invalidation ignored");
+        solid.Clear();
+        require(first->topologyValid() && first->faces().size() == 6, "Retained immutable snapshot damaged");
+        std::cout << "Body boundary cache: remeshing, density, replacement and invalidation passed.\n";
+        return 0;
+    }
+    if ((argc == 5 || argc == 6) && std::string(argv[1]) == "--snapshot-project-boundary") {
+        CAlfaDoc document;
+        Dom3DProjectSerializer serializer;
+        QString room, error;
+        ProjectViewState view;
+        require(serializer.Load(QString::fromLocal8Bit(argv[2]), document, room, view, error), error.toLocal8Bit().constData());
+        for (const auto& object : document.GetObjects()) {
+            auto* solid = dynamic_cast<CSolid*>(object.get());
+            if (!solid || solid->GetName() != argv[3]) continue;
+            const auto topology = solid->GetQuadroTopologySnapshot();
+            quadro::SamplingOptions sampling;
+            if(argc==6){require(std::string(argv[5])=="--cad-tolerance","Unknown boundary preparation option");sampling.allowCadToleranceReconciliation=true;sampling.maximumChartRefinementPasses=8;}
+            const auto boundary = solid->PrepareQuadroBoundary(sampling);
+            require(topology == solid->GetQuadroTopologySnapshot() && solid->GetQuadroBoundaryCaptureCount() == 1,
+                "Preparation recaptured body topology");
+            WriteQuadroBoundaryReport(boundary, QString::fromLocal8Bit(argv[4]));
+            std::cout << "topologyValid=" << boundary->topologyValid() << " discretizationReady=" << boundary->discretizationReady()
+                << " faces=" << boundary->faces().size() << " edges=" << boundary->edges().size()
+                << " vertices=" << boundary->vertices().size() << " occurrences=" << boundary->occurrences().size()
+                << " issues=" << boundary->issues().size() << '\n';
+            return boundary->discretizationReady() ? 0 : 2;
+        }
+        throw std::runtime_error("Requested solid was not found");
+    }
+    if (argc >= 4 && argc <= 6
         && std::string(argv[1]) == "--diagnose-project-quadro") {
         CAlfaDoc document;
         Dom3DProjectSerializer serializer;
@@ -3288,14 +6117,34 @@ int main(int argc, char** argv) {
                 error.toLocal8Bit().constData());
         const float density = std::stof(argv[3]);
         require(density > 0.0f, "Density must be positive.");
-        const bool useSlx = argc == 5 && std::string(argv[4]) == "slx";
+        bool useSlx = false;
+        std::string requested_solid;
+        for (int argument = 4; argument < argc; ++argument) {
+            const std::string value = argv[argument];
+            if (value == "slx")
+                useSlx = true;
+            else
+                requested_solid = value;
+        }
+        bool found_requested_solid = requested_solid.empty();
         for (const auto& object : document.GetObjects()) {
             auto* solid = dynamic_cast<CSolid*>(object.get());
             if (!solid)
                 continue;
+            if (!requested_solid.empty()
+                && solid->GetName() != requested_solid) {
+                continue;
+            }
+            found_requested_solid = true;
+            std::cout << "rebuilding solid=\"" << solid->GetName()
+                      << "\" surfaces=" << solid->GetNumSurfaces()
+                      << " density=" << density
+                      << " slx=" << useSlx << std::endl;
             solid->MeshQuadro = true;
             solid->MeshQuadroHoleSLX = useSlx;
+            ExportQuadroPipelineDiagnostics(*solid, "before", density);
             const bool rebuilt = solid->ReBuldMesh(1.0f / density);
+            ExportQuadroPipelineDiagnostics(*solid, "after", density);
             std::cout << "solid=\"" << solid->GetName() << "\" rebuilt="
                       << rebuilt << " surfaces=" << solid->GetNumSurfaces()
                       << '\n';
@@ -3527,6 +6376,13 @@ int main(int argc, char** argv) {
 				std::unique_ptr<CMesh3D> welded = CMesh3D::CreateWelded(
 					{&combined}, &welded_vertices, &weld_tolerance);
 				if (welded) {
+					const QByteArray dump_prefix = qgetenv("DOM3D_WELD_DUMP");
+					if (!dump_prefix.isEmpty()) {
+						require(combined.ExportToObj(dump_prefix.toStdString() + "-before.obj"),
+							"Could not export the source welding diagnostic mesh.");
+						require(welded->ExportToObj(dump_prefix.toStdString() + "-after.obj"),
+							"Could not export the welded diagnostic mesh.");
+					}
 					bool manifold = true;
 					const size_t boundary_loops = ClosedMeshBoundaryLoopCount(
 						*welded, manifold);
@@ -3613,6 +6469,7 @@ int main(int argc, char** argv) {
 				}
 			}
         }
+        require(found_requested_solid, "Requested solid was not found.");
         return EXIT_SUCCESS;
     }
     if (argc == 3
@@ -3690,6 +6547,26 @@ int main(int argc, char** argv) {
                     && sphere.GetOperation(1)->ToolId == "SolidTransform"
                     && sphere.GetOperation(1)->Name == "Move",
                 "Translated sphere did not retain its Move operation.");
+        return EXIT_SUCCESS;
+    }
+    if (argc == 3 && std::string(argv[1]) == "--benchmark-iges") {
+        IgesIO io;std::vector<std::unique_ptr<CAlfaObject>> objects;std::string error;
+        const auto begin=std::chrono::steady_clock::now();
+        require(io.Import(argv[2],objects,error),error.c_str());
+        size_t surfaces=0,faces=0;
+        for(const auto& object:objects)if(const auto* solid=dynamic_cast<const CSolid*>(object.get())) {
+            surfaces+=solid->GetNumSurfaces();
+            require(!solid->MeshQuadro,"IGES import enabled expensive normalized Quadro meshing");
+            for(int i=0;i<solid->GetNumSurfaces();++i) {
+                const auto* surface=solid->GetSurfaceFace(i);
+                require(surface && surface->pMesh3D && !surface->pMesh3D->GetFaces().empty(),"Imported surface has no display mesh");
+                faces+=surface->pMesh3D->GetFaces().size();
+                for(const Vec3& point:surface->pMesh3D->GetVertices())
+                    require(std::isfinite(point.x)&&std::isfinite(point.y)&&std::isfinite(point.z),"Non-finite IGES mesh vertex");
+            }
+        }
+        std::cout<<"IGES benchmark: "<<std::chrono::duration<double>(std::chrono::steady_clock::now()-begin).count()
+            <<" s, "<<objects.size()<<" objects, "<<surfaces<<" surfaces, "<<faces<<" mesh faces\n";
         return EXIT_SUCCESS;
     }
     if (argc == 3 && std::string(argv[1]) == "--benchmark-step") {

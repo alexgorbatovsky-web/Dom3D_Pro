@@ -1,3 +1,5 @@
+#include "materials/ProceduralPlasterShader.h"
+#include "materials/ProceduralFabricShader.h"
 #include "CMesh3D.h"
 
 #include "CPolyline.h"
@@ -59,15 +61,17 @@ QOpenGLFunctions_2_1* current_gl21() {
 }
 
 QOpenGLShaderProgram* mesh_shader_program() {
-    static QOpenGLContext* shader_context = nullptr;
-    static std::unique_ptr<QOpenGLShaderProgram> shader;
+    static std::map<QOpenGLContext*, std::unique_ptr<QOpenGLShaderProgram>> shaders;
     QOpenGLContext* context = QOpenGLContext::currentContext();
     if (!context) return nullptr;
-    if (shader && shader_context == context) return shader.get();
+    auto found = shaders.find(context);
+    if (found != shaders.end()) return found->second.get();
 
     auto candidate = std::make_unique<QOpenGLShaderProgram>();
     static const char* vertex_source = R"(
         #version 120
+        varying vec3 materialPosition;
+        varying mat3 materialNormalToEye;
         varying vec3 eyePosition;
         varying vec3 eyeNormal;
         varying vec2 textureUV;
@@ -76,6 +80,8 @@ QOpenGLShaderProgram* mesh_shader_program() {
         uniform float uvRotation;
         uniform bool fitTexture;
         void main() {
+            materialPosition=gl_Vertex.xyz;
+            materialNormalToEye=gl_NormalMatrix;
             vec4 eye = gl_ModelViewMatrix * gl_Vertex;
             eyePosition = eye.xyz;
             eyeNormal = normalize(gl_NormalMatrix * gl_Normal);
@@ -172,8 +178,8 @@ QOpenGLShaderProgram* mesh_shader_program() {
             // on curved surfaces.
             if (!gl_FrontFacing) n = -n;
             vec3 coatNormal = n;
-            mat3 tangentFrame = cotangentFrame(n, eyePosition, textureUV);
-            vec2 uv = textureUV;
+            mat3 tangentFrame = cotangentFrame(n, eyePosition, MaterialMappedUV(textureUV));
+            vec2 uv = MaterialMappedUV(textureUV);
             if (useDisplacementTexture) {
                 float height = texture2D(displacementTexture, uv).r - 0.5;
                 vec3 tangentView = vec3(dot(viewDirection, tangentFrame[0]),
@@ -200,6 +206,14 @@ QOpenGLShaderProgram* mesh_shader_program() {
             float metallic = clamp(useMetallicTexture
                 ? texture2D(metallicTexture, uv).r : materialMetallic,
                 0.0, 1.0);
+            float proceduralAO=1.0;
+            if(proceduralPlaster || proceduralFabric) {
+                MaterialSample sampled;
+                if(proceduralFabric)sampled=EvaluateFabric(n,source.rgb);
+                else sampled=EvaluatePlaster(n,baseColor.rgb);
+                source.rgb=sampled.baseColor;n=sampled.normal;coatNormal=n;
+                roughness=sampled.roughness;metallic=sampled.metallic;proceduralAO=sampled.ao;
+            }
             vec3 light = normalize(lightDirection);
             float incidence = dot(n, light);
             float wrapped = clamp((incidence + lightingA.y)
@@ -278,7 +292,7 @@ QOpenGLShaderProgram* mesh_shader_program() {
             float boost = selectedObject ? 1.08 : 1.0;
             vec3 diffuseWeight = (vec3(1.0) - fresnel) * (1.0 - metallic);
             vec3 diffuseLighting = vec3(shade)
-                + environmentDiffuse * 0.28;
+                + environmentDiffuse * 0.28 * proceduralAO;
             vec3 lit = max(source.rgb * diffuseWeight * diffuseLighting * boost
                            + highlight,
                            vec3(0.0));
@@ -331,20 +345,24 @@ QOpenGLShaderProgram* mesh_shader_program() {
             gl_FragColor = vec4(lit, source.a);
         }
     )";
+    std::string procedural_fragment(fragment_source);
+    procedural_fragment.insert(procedural_fragment.find("        void main()"),PlasterShaderSource());
+    procedural_fragment.insert(procedural_fragment.find("        void main()"),FabricShaderSource());
     if (!candidate->addShaderFromSourceCode(
             QOpenGLShader::Vertex, vertex_source)
         || !candidate->addShaderFromSourceCode(
-            QOpenGLShader::Fragment, fragment_source)
+            QOpenGLShader::Fragment, procedural_fragment.c_str())
         || !candidate->link()) {
         qWarning().noquote() << "Dom3D mesh shader compilation failed:"
                              << candidate->log();
         return nullptr;
     }
-    shader_context = context;
-    shader = std::move(candidate);
-    return shader.get();
+    auto* result = candidate.get();
+    shaders.emplace(context, std::move(candidate));
+    QObject::connect(context, &QObject::destroyed, [context]() { shaders.erase(context); });
+    return result;
 }
-QString resolve_texture_path(const std::string& texture_path) {
+QString resolve_texture_path(const std::string& texture_path, const std::string& material_file) {
     const QString path = QString::fromStdString(texture_path).trimmed();
     if (path.isEmpty()) {
         return {};
@@ -353,6 +371,12 @@ QString resolve_texture_path(const std::string& texture_path) {
     const QFileInfo info(path);
     if (info.isAbsolute() && info.exists()) {
         return info.absoluteFilePath();
+    }
+
+    if (!info.isAbsolute() && !material_file.empty()) {
+        const QString sibling = QFileInfo(QString::fromStdString(material_file))
+            .absoluteDir().filePath(path);
+        if (QFileInfo::exists(sibling)) return QFileInfo(sibling).absoluteFilePath();
     }
 
     const QDir app_dir(QCoreApplication::applicationDirPath());
@@ -381,7 +405,7 @@ QString resolve_texture_path(const std::string& texture_path) {
     return {};
 }
 
-GLuint texture_id_for_path(const std::string& texture_path) {
+GLuint texture_id_for_path(const std::string& texture_path, const std::string& material_file) {
     if (texture_path.empty()) {
         return 0;
     }
@@ -392,11 +416,12 @@ GLuint texture_id_for_path(const std::string& texture_path) {
     // actual triangles.  Material paths are stable for the lifetime of the
     // application; resolve each source string only once.
     static std::unordered_map<std::string, QString> resolved_path_cache;
-    const auto resolved_found = resolved_path_cache.find(texture_path);
+    const std::string source_key = material_file + "\n" + texture_path;
+    const auto resolved_found = resolved_path_cache.find(source_key);
     const QString resolved = resolved_found != resolved_path_cache.end()
         ? resolved_found->second
         : resolved_path_cache.emplace(
-              texture_path, resolve_texture_path(texture_path)).first->second;
+              source_key, resolve_texture_path(texture_path, material_file)).first->second;
     if (resolved.isEmpty()) {
         return 0;
     }
@@ -1725,6 +1750,119 @@ std::vector<int> find_cut_touched_positions(const CMesh3D::Face& face,
     return touched_positions;
 }
 
+// Paired Var-7/Var-5 operations cannot both consume the same quad.
+// Join their small shared region first, then cut its boundary along the actual
+// segments. Keeping the original contour nodes avoids T-junctions against the
+// neighbouring CAD face. An interior chain is handled by the Var-11 splitter.
+// Work transactionally so an unsupported arrangement leaves the old path intact.
+bool split_conflicting_trim_cells(std::vector<CMesh3D::Face>& faces,
+                                 std::vector<Vec3>& vertices,
+                                 const std::set<size_t>& region,
+                                 const std::vector<cVec2>& cut)
+{
+    using Key = std::pair<size_t, size_t>;
+    std::map<Key, std::vector<std::pair<MeshCorner, MeshCorner>>> edges;
+    for (size_t index : region) {
+        const auto& face = faces[index];
+        for (size_t i = 0; i < face.corners.size(); ++i) {
+            const auto a = face.corners[i];
+            const auto b = face.corners[(i + 1) % face.corners.size()];
+            edges[std::minmax(a.v, b.v)].push_back({a, b});
+        }
+    }
+    std::map<size_t, std::pair<MeshCorner, MeshCorner>> boundary;
+    for (const auto& entry : edges) {
+        const auto& uses = entry.second;
+        if (uses.size() == 2) {
+            if (uses[0].first.v != uses[1].second.v
+                || uses[0].second.v != uses[1].first.v) return false;
+        } else if (uses.size() != 1
+            || !boundary.emplace(uses[0].first.v, uses[0]).second) return false;
+    }
+    if (boundary.size() < 3) return false;
+    CMesh3D::Face source = faces[*region.begin()];
+    source.corners.clear();
+    size_t current = boundary.begin()->first;
+    const size_t start = current;
+    for (size_t i = 0; i < boundary.size(); ++i) {
+        const auto found = boundary.find(current);
+        if (found == boundary.end() || (i && current == start)) return false;
+        source.corners.push_back(found->second.first);
+        current = found->second.second.v;
+    }
+    if (current != start) return false;
+    {
+        const Face2D source_xy = make_face_2d(source, vertices);
+        CellCutInfo region_info;
+        if (!AnalyzeFaceCut(source_xy, cut, region_info, EPS2D)) return false;
+        ClassifyFaceCut(source_xy, cut, region_info, EPS2D);
+        if (!region_info.PntInFace.empty()) {
+            // A Var-5/Var-7 pair has an original contour node inside the
+            // combined region. Split its full chain once, before either cell
+            // can invalidate the other's classification or local indices.
+            if (region_info.touchedFaceVertices.size() != 2) return false;
+            CPolyline line;
+            for (const auto& node : cut) line.AddPoint({node.x, node.y, 0});
+            CMesh3D candidate;
+            if (!candidate.SetGeometry(vertices, {source})
+                || !candidate.SplitFaceByVar11(0,
+                    region_info.touchedFaceVertices[0], region_info.touchedFaceVertices[1],
+                    region_info.PntInFace, &line)) return false;
+            vertices = std::move(candidate.GetVertices());
+            for (size_t index : region) faces[index].deleted = true;
+            auto& pieces = candidate.GetFaces();
+            faces[*region.begin()] = std::move(pieces.front());
+            for (size_t i = 1; i < pieces.size(); ++i)
+                faces.push_back(std::move(pieces[i]));
+            return true;
+        }
+        std::vector<CMesh3D::Face> pieces{source};
+        for (size_t segment = 0; segment + 1 < cut.size(); ++segment) {
+            const std::vector<cVec2> line{cut[segment], cut[segment + 1]};
+            const size_t count = pieces.size();
+            for (size_t piece = 0; piece < count; ++piece) {
+                const Face2D polygon = make_face_2d(pieces[piece], vertices);
+                CellCutInfo info;
+                if (!AnalyzeFaceCut(polygon, line, info, EPS2D))
+                    continue;
+                std::vector<cVec2> hits;
+                for (const auto& hit : info.hits) {
+                    if (std::none_of(hits.begin(), hits.end(), [&](const cVec2& point) {
+                            return EqualPoint2(point, hit.pt, EPS2D);
+                        })) hits.push_back(hit.pt);
+                }
+                if (hits.size() < 2) continue;
+                if (hits.size() != 2) return false;
+                const cVec2 middle = (hits[0] + hits[1]) * 0.5;
+                if (ClassifyPointInFace2(polygon, middle, EPS2D) != PFP_INSIDE)
+                    continue;
+                const auto& corners = pieces[piece].corners;
+                // Never insert a new boundary node: the adjacent CAD face
+                // already uses the prepared contour's discretization.
+                int endpoints[2]{-1, -1};
+                for (size_t corner = 0; corner < corners.size(); ++corner)
+                    for (int endpoint = 0; endpoint < 2; ++endpoint)
+                        if (EqualPoint2(mesh_vertex_2d(vertices,
+                                corners[corner].v), hits[endpoint], EPS2D))
+                            endpoints[endpoint] = static_cast<int>(corner);
+                if (endpoints[0] < 0 || endpoints[1] < 0) return false;
+                std::vector<CMesh3D::Face> split{pieces[piece]};
+                if (!SplitFaceByLine(split, 0, endpoints[0], endpoints[1]))
+                    return false;
+                pieces[piece] = std::move(split[0]);
+                pieces.push_back(std::move(split[1]));
+            }
+        }
+        if (pieces.size() < 2) return false;
+        for (size_t index : region) faces[index].deleted = true;
+        for (auto& piece : pieces) piece.m_Trimmed = true;
+        faces[*region.begin()] = std::move(pieces.front());
+        for (size_t i = 1; i < pieces.size(); ++i)
+            faces.push_back(std::move(pieces[i]));
+    }
+    return true;
+}
+
 }
 
 bool CMesh3D::SplitFaceByPoint(int face_index, int ind1, int ind2, const cVec2& pm)
@@ -1790,7 +1928,8 @@ bool CMesh3D::SplitFaceByPoint(int face_index, int ind1, int ind2, const cVec2& 
     face1.normal = FaceNormal(face1);
     faces_.push_back(std::move(face1));
 
-    MeshFace face2 = face;
+    // push_back above may have reallocated faces_; reacquire the source.
+    MeshFace face2 = faces_[face_index];
     face2.corners = std::move(seq2);
     face2.normal = FaceNormal(face2);
     faces_.push_back(std::move(face2));
@@ -1866,13 +2005,13 @@ bool CMesh3D::SplitFaceByPointVar4(int face_index, int ind1, int ind2, const cVe
     face1.normal = FaceNormal(face1);
     faces_.push_back(std::move(face1));
 
-    MeshFace face2 = face;
+    MeshFace face2 = faces_[face_index];
     face2.corners = std::move(seq2);
     face2.normal = FaceNormal(face2);
     faces_.push_back(std::move(face2));
 
 
-    MeshFace face3 = face;
+    MeshFace face3 = faces_[face_index];
     face3.corners = std::move(seq3);
     face3.normal = FaceNormal(face3);
     faces_.push_back(std::move(face3));
@@ -1946,7 +2085,7 @@ bool CMesh3D::SplitFaceByPointVar3(int face_index, int ind1, int ind2, const cVe
     face1.normal = FaceNormal(face1);
     faces_.push_back(std::move(face1));
 
-    MeshFace face2 = face;
+    MeshFace face2 = faces_[face_index];
     face2.corners = std::move(seq2);
     face2.normal = FaceNormal(face2);
     faces_.push_back(std::move(face2));
@@ -1956,17 +2095,19 @@ bool CMesh3D::SplitFaceByPointVar3(int face_index, int ind1, int ind2, const cVe
 
 bool CMesh3D::SplitFaceByVar5(int f1, int v1i, int edgeIndex, cVec2& pm)
 {
-    if(f1 == -1)
-		return false;
-    if (edgeIndex == -1)
+    if (f1 < 0 || static_cast<size_t>(f1) >= faces_.size()
+        || edgeIndex < 0 || edgeIndex >= 4)
         return false;
 //	 Step("SplitFaceByVar5");
 	 char str[100];
 //	 sprintf(str, "f1=%d, v1i=%d, edgeIndex=%d", f1, v1i, edgeIndex);
  //    Step(str);
-    MeshFace& face = faces_[f1];
+    // This routine appends several faces. Keep a value copy: vector growth
+    // invalidates references before the second source-face copy is made.
+    const MeshFace face = faces_[f1];
     if (face.m_Trimmed)
         return true;
+    if (face.deleted || face.corners.size() != 4) return false;
   /*  CAlfaDoc* pDoc = GetAlfaDoc();
     pDoc->AddLayer("Faces");
     auto pLine01 = std::make_unique<CPolyline>();
@@ -1986,6 +2127,7 @@ bool CMesh3D::SplitFaceByVar5(int f1, int v1i, int edgeIndex, cVec2& pm)
     if (f2 == -1)
         return true;
     MeshFace& face2 = faces_[f2];
+    if (face2.deleted || face2.corners.size() != 4) return false;
  /*   auto pLine02 = std::make_unique<CPolyline>();
     MakePolyline(f2, *pLine02);
     pLine02->printToFile("Face_f2.txt");
@@ -2427,138 +2569,90 @@ bool CMesh3D::SplitFaceByVar8(int face_index, int vertexToMove, cVec2 moveTarget
 
 bool CMesh3D::SplitFaceByVar11(int f, int vi1, int vi2, std::vector<int> Pnt, CPolyline* pTrimLine)
 {
-  /* char bufer[120];
-    sprintf(bufer, "SplitFaceByVar11  vi1= %d,  vi2= %d", vi1, vi2);
-    Step(bufer);
-    for (int i = 0; i < Pnt.size(); i++) {
-        sprintf(bufer, "  p= %d,  ", Pnt[i]);
-        Step(bufer);
-    }*/ 
-    
-    if (Pnt.size() < 2)
+    if (!pTrimLine || f < 0 || static_cast<size_t>(f) >= faces_.size())
         return false;
-    CPolyline* pLine = new CPolyline;
-    for (int j = 0; j < Pnt.size(); j++) {
-        CPoint3d* p3d = pTrimLine->P(Pnt[j]);
-        bool NeedAdd = true;
-        for (int i = 0; i < pLine->np(); i++) {
-            double dist = p3d->DistTo(pLine->P(i));
-            if (dist < 0.00001) {
-                NeedAdd = false;
-                break;
-            }
-        }
-        if (NeedAdd)
-            pLine->AddPoint(p3d);
-    }
+    const Face source = faces_[f];
+    const int count = static_cast<int>(source.corners.size());
+    if (source.deleted || count < 3 || vi1 < 0 || vi2 < 0
+        || vi1 >= count || vi2 >= count || vi1 == vi2 || Pnt.empty())
+        return false;
 
-    MeshFace& face = faces_[f];
-    std::sort(Pnt.begin(), Pnt.end());
-
-    std::vector<cVec2> P2ds;
-    for (int i = 0; i < pLine->np(); i++) {
-        cVec2 P2d;
-        CPoint3d* p3d = pLine->P(i);
-        if (p3d) {
-            P2d.x = p3d->x;
-            P2d.y = p3d->y;
-            P2ds.push_back(P2d);
+    // The interior chain follows the polyline, including across its cyclic
+    // seam. Sorting coordinates or choosing the nearest end reverses some arcs.
+    std::vector<cVec2> line = make_cut_2d(pTrimLine);
+    const bool duplicate_end = line.size() > 1
+        && EqualPoint2(line.front(), line.back(), EPS2D);
+    const bool closed = pTrimLine->IsClosed() || duplicate_end;
+    if (duplicate_end) line.pop_back();
+    const int n = static_cast<int>(line.size());
+    if (n < 2) return false;
+    std::set<int> interior;
+    for (int index : Pnt) {
+        if (closed && index == n) index = 0;
+        if (index < 0 || index >= n) return false;
+        interior.insert(index);
+    }
+    int start = -1;
+    for (int index : interior) {
+        const int previous = index ? index - 1 : (closed ? n - 1 : -1);
+        if (!interior.count(previous)) {
+            if (start >= 0) return false; // More than one pass through this cell.
+            start = index;
         }
     }
-    if (P2ds.size() < 2) {
-        if (P2ds.size() == 1) {
-            cVec2 pm(P2ds[0].x, P2ds[0].y);
-            return SplitFaceByPoint(f, vi1, vi2, pm);
-        }
+    if (start < 0) return false;
+    std::vector<cVec2> chain;
+    int next = start;
+    while (interior.count(next)) {
+        chain.push_back(line[next]);
+        next = next + 1 < n ? next + 1 : (closed ? 0 : n);
+    }
+    if (chain.size() != interior.size()) return false;
+    const int previous = start ? start - 1 : (closed ? n - 1 : -1);
+    if (previous < 0 || next >= n) return false;
+    const cVec2 a = mesh_vertex_2d(vertices_, source.corners[vi1].v);
+    const cVec2 b = mesh_vertex_2d(vertices_, source.corners[vi2].v);
+    if (point_on_cut_segment(a, line[previous], chain.front(), EPS2D)
+        && point_on_cut_segment(b, chain.back(), line[next], EPS2D)) {
+        // Already ordered from vi1 to vi2.
+    } else if (point_on_cut_segment(b, line[previous], chain.front(), EPS2D)
+        && point_on_cut_segment(a, chain.back(), line[next], EPS2D)) {
+        std::reverse(chain.begin(), chain.end());
+    } else {
         return false;
     }
 
-
-    if (vi1 > vi2)
-        std::swap(vi1, vi2);
-    int vi3 = 0;
-    int vi4 = 0;
-    if (vi1 == 0 && vi2 == 2) {
-        vi3 = 1;
-        vi4 = 3;
+    // Both adjacent and opposite touched vertices split into two boundary
+    // walks closed by the same interior chain, traversed in opposite directions.
+    auto candidate_vertices = vertices_;
+    std::vector<MeshCorner> middle;
+    for (const auto& point : chain)
+        middle.push_back({add_or_find_vertex_2d(candidate_vertices, point, EPS2D), 0, 0});
+    Face first = source, second = source;
+    first.corners.clear();
+    second.corners.clear();
+    for (int i = vi1;; i = (i + 1) % count) {
+        first.corners.push_back(source.corners[i]);
+        if (i == vi2) break;
     }
-    if (vi1 == 1 && vi2 == 3) {
-        vi1 = 3;
-        vi2 = 1;
-        vi3 = 0;
-        vi4 = 2;
+    first.corners.insert(first.corners.end(), middle.rbegin(), middle.rend());
+    for (int i = vi2;; i = (i + 1) % count) {
+        second.corners.push_back(source.corners[i]);
+        if (i == vi1) break;
     }
-    
-    size_t v1 = face.corners[vi1].v;
-    size_t v2 = face.corners[vi2].v;
-    size_t v3 = face.corners[vi3].v;
-    size_t v4 = face.corners[vi4].v;
-
-    CPoint3d* p1l = pLine->P(0);
-    CPoint3d* p2l = pLine->P(1);
-
-
- //   CPoint3d p1f1(vertices_[face.corners[v1].v].x, vertices_[face.corners[v1].v].y, vertices_[face.corners[v1].v].z);
-    CPoint3d p1f(vertices_[face.corners[vi1].v].x, vertices_[face.corners[vi1].v].y, vertices_[face.corners[vi1].v].z);
-
-    double dist1 = p1f.DistTo(p1l);
-    double dist2 = p1f.DistTo(p2l);
-    if (dist1 > dist2)
-        std::reverse(P2ds.begin(), P2ds.end());
-
-
-    std::vector<size_t> vms;
-    for (int i = 0; i < P2ds.size(); i++) {
-        const cVec2 pm(P2ds[i].x, P2ds[i].y);
-        const size_t vm = add_or_find_vertex_2d(vertices_, pm, 0.0001);
-        vms.push_back(vm);
-    }
-
-    if (vi1 == 0 && vi2 == 2)
-        face.corners[vi2].v = vms[0];
-    else {
-        face.corners[vi2].v = vms[0];
-        face.corners[vi4].v = face.corners[vi1].v;
-    }
-
-    int f2 = MakeFace(v3, v2, vms[P2ds.size() - 1]);
-    int f3 = MakeFace(v1, vms[0], v4);
-    int f5 = MakeFace(v4, vms[P2ds.size() - 1], v2);
-
- /*   CAlfaDoc* pDoc = GetAlfaDoc();
-    pDoc->AddLayer("Faces");
-    auto pLine2 = std::make_unique<CPolyline>();
-    MakePolyline(f2, *pLine2);
-    pLine2->SetName("Face_f2");
-    pDoc->AddObject(std::move(pLine2));
-    auto pLine3 = std::make_unique<CPolyline>();
-    MakePolyline(f3, *pLine3);
-    pLine3->SetName("Face_f3");
-    pDoc->AddObject(std::move(pLine3));
-    auto pLine5 = std::make_unique<CPolyline>();
-    MakePolyline(f5, *pLine5);
-    pLine5->SetName("Face_f5");
-    pDoc->AddObject(std::move(pLine5));
-*/
-
-    for (size_t i = 0; i < P2ds.size() - 1; i++) {
-        int f4 = MakeFace(v4, vms[i], vms[i + 1]);
-        int f1 = MakeFace(v3, vms[i + 1], vms[i]);
-
-       /* auto pLine4 = std::make_unique<CPolyline>();
-        MakePolyline(f4, *pLine4);
-        pLine4->SetName("Face_f4");
-        pDoc->AddObject(std::move(pLine4));
-        auto pLine1 = std::make_unique<CPolyline>();
-        MakePolyline(f1, *pLine1);
-        pLine1->SetName("Face_f1");
-        pDoc->AddObject(std::move(pLine1));
-*/
-    }
-
-    faces_[f].corners.resize(3);
-
-    delete pLine;
+    second.corners.insert(second.corners.end(), middle.begin(), middle.end());
+    const double original_area = trim_face_twice_area(source, vertices_);
+    const double first_area = trim_face_twice_area(first, candidate_vertices);
+    const double second_area = trim_face_twice_area(second, candidate_vertices);
+    if (original_area * first_area <= 0 || original_area * second_area <= 0
+        || std::fabs(first_area + second_area - original_area)
+            > std::max(std::fabs(original_area) * 1.e-6, EPS2D * EPS2D))
+        return false;
+    first.m_Trimmed = second.m_Trimmed = true;
+    vertices_ = std::move(candidate_vertices);
+    faces_[f] = std::move(first);
+    faces_.push_back(std::move(second));
+    InvalidateGpuCache();
     return true;
 }
 
@@ -2846,6 +2940,39 @@ const std::vector<UV>& CMesh3D::GetUVs() const {
 
 const std::vector<Vec3>& CMesh3D::GetNormals() const {
     return normals_;
+}
+
+const std::vector<Edge>& CMesh3D::GetSharpEdges() const {
+    return sharp_edges_;
+}
+
+void CMesh3D::SetSharpEdges(std::vector<Edge> edges) {
+    sharp_edges_.clear();
+    for (const Edge& edge : edges) {
+        if (edge.v1 < 0 || edge.v2 < 0) continue;
+        AddSharpEdge(static_cast<size_t>(edge.v1),
+                     static_cast<size_t>(edge.v2));
+    }
+}
+
+bool CMesh3D::AddSharpEdge(size_t first_vertex, size_t second_vertex) {
+    if (first_vertex == second_vertex || first_vertex >= vertices_.size()
+        || second_vertex >= vertices_.size()
+        || first_vertex > static_cast<size_t>(std::numeric_limits<int>::max())
+        || second_vertex > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        return false;
+    }
+    const Edge edge(static_cast<int>(first_vertex),
+                    static_cast<int>(second_vertex));
+    if (std::find(sharp_edges_.begin(), sharp_edges_.end(), edge)
+        == sharp_edges_.end()) {
+        sharp_edges_.push_back(edge);
+    }
+    return true;
+}
+
+void CMesh3D::ClearSharpEdges() {
+    sharp_edges_.clear();
 }
 
 int CMesh3D::SynchronizeBoundaryVertices(const std::vector<Vec3>& master_points, float tolerance) {
@@ -3622,6 +3749,7 @@ bool CMesh3D::SetGeometry(std::vector<Vec3> vertices,
 
     vertices_ = std::move(vertices);
     faces_ = std::move(faces);
+    sharp_edges_.clear();
     uvs_ = std::move(uvs);
     normals_ = std::move(normals);
     if (uvs_.empty()) {
@@ -3648,7 +3776,6 @@ std::unique_ptr<CMesh3D> CMesh3D::CreateWelded(
 
     const CMesh3D* first_mesh = nullptr;
     double len_min = std::numeric_limits<double>::infinity();
-    std::vector<double> source_edge_lengths;
     size_t source_vertex_count = 0;
     for (const CMesh3D* mesh : meshes) {
         if (!mesh || mesh->vertices_.empty() || mesh->faces_.empty())
@@ -3669,7 +3796,6 @@ std::unique_ptr<CMesh3D> CMesh3D::CreateWelded(
                     std::sqrt(static_cast<double>(dot(delta, delta)));
                 if (length > 0.0 && std::isfinite(length)) {
                     len_min = std::min(len_min, length);
-                    source_edge_lengths.push_back(length);
                 }
             }
         }
@@ -3677,102 +3803,100 @@ std::unique_ptr<CMesh3D> CMesh3D::CreateWelded(
     if (!first_mesh || !std::isfinite(len_min))
         return nullptr;
 
-    std::sort(source_edge_lengths.begin(), source_edge_lengths.end());
-    const double tolerance = len_min / 3.0;
-    // A single tiny transition edge must not reduce the tolerance for every
-    // seam in the object. The 10th percentile remains well below the normal
-    // mesh step, while tolerating the small independent approximation error
-    // between two surfaces. It is used only for boundary vertices belonging
-    // to different source surfaces; ordinary intra-surface welding retains
-    // the conservative minimum-edge tolerance above.
-    const double cross_surface_tolerance = std::max(tolerance,
-        source_edge_lengths[source_edge_lengths.size() / 10] / 2.0);
+    const double tolerance = len_min / 5.0;
     if (used_tolerance)
-        *used_tolerance = static_cast<float>(cross_surface_tolerance);
+        *used_tolerance = static_cast<float>(tolerance);
     std::vector<Vec3> vertices;
     std::vector<UV> uvs;
     std::vector<Vec3> normals;
     std::vector<Face> faces;
     vertices.reserve(source_vertex_count);
-    std::multimap<float, size_t> vertices_by_x;
-	std::vector<size_t> welded_mesh_indices;
-	std::vector<int> welded_source_faces;
-	std::vector<bool> welded_boundary_vertices;
+    // Only open-edge vertices enter the lookup. Interior vertices must never
+    // become weld candidates, even when another sheet lies very close to them.
+    std::multimap<float, size_t> boundary_vertices_by_x;
 
-    const auto welded_index = [&](Vec3 vertex, size_t mesh_index,
-        int source_face, bool boundary_vertex) {
+    const auto welded_index = [&](Vec3 vertex, bool boundary_vertex) {
+        if (!boundary_vertex) {
+            const size_t index = vertices.size();
+            vertices.push_back(vertex);
+            return index;
+        }
         const float min_x = static_cast<float>(
-            vertex.x - cross_surface_tolerance);
+            vertex.x - tolerance);
         const float max_x = static_cast<float>(
-            vertex.x + cross_surface_tolerance);
-        for (auto candidate = vertices_by_x.lower_bound(min_x);
-             candidate != vertices_by_x.end() && candidate->first <= max_x;
+            vertex.x + tolerance);
+        size_t nearest_index = std::numeric_limits<size_t>::max();
+        double nearest_distance_squared =
+            std::numeric_limits<double>::infinity();
+        for (auto candidate = boundary_vertices_by_x.lower_bound(min_x);
+             candidate != boundary_vertices_by_x.end() && candidate->first <= max_x;
              ++candidate) {
             const Vec3 delta = vertices[candidate->second] - vertex;
-			const size_t candidate_index = candidate->second;
-			const bool different_source_surface =
-				welded_mesh_indices[candidate_index] != mesh_index
-				|| (source_face >= 0
-					&& welded_source_faces[candidate_index] >= 0
-					&& welded_source_faces[candidate_index] != source_face);
-			const double candidate_tolerance = boundary_vertex
-				&& welded_boundary_vertices[candidate_index]
-				&& different_source_surface
-				? cross_surface_tolerance : tolerance;
-            if (static_cast<double>(dot(delta, delta))
-				<= candidate_tolerance * candidate_tolerance) {
-                return candidate->second;
-			}
+            const double distance_squared =
+                static_cast<double>(dot(delta, delta));
+            if (distance_squared <= tolerance * tolerance
+                && distance_squared < nearest_distance_squared) {
+                nearest_index = candidate->second;
+                nearest_distance_squared = distance_squared;
+            }
         }
+        // The X lookup only narrows the search; use the closest vertex in 3D.
+        if (nearest_index != std::numeric_limits<size_t>::max())
+            return nearest_index;
         const size_t index = vertices.size();
         vertices.push_back(vertex);
-        vertices_by_x.emplace(vertex.x, index);
-		welded_mesh_indices.push_back(mesh_index);
-		welded_source_faces.push_back(source_face);
-		welded_boundary_vertices.push_back(boundary_vertex);
+        boundary_vertices_by_x.emplace(vertex.x, index);
         return index;
     };
 
-    for (size_t mesh_index = 0; mesh_index < meshes.size(); ++mesh_index) {
-		const CMesh3D* mesh = meshes[mesh_index];
+    for (const CMesh3D* mesh : meshes) {
         if (!mesh || mesh->vertices_.empty() || mesh->faces_.empty())
             continue;
-		std::vector<int> vertex_source_face(mesh->vertices_.size(), -1);
-		std::vector<bool> vertex_has_source(mesh->vertices_.size(), false);
-		std::vector<bool> boundary_vertex(mesh->vertices_.size(), false);
-		using SourceEdge = std::tuple<int, size_t, size_t>;
-		std::map<SourceEdge, size_t> source_edge_use;
-		for (const Face& face : mesh->faces_) {
-			if (face.deleted
-				|| !mesh->IsValidFace(face, mesh->vertices_.size())) {
-				continue;
-			}
-			for (size_t corner = 0; corner < face.corners.size(); ++corner) {
-				const size_t first = face.corners[corner].v;
-				const size_t second = face.corners[
-					(corner + 1) % face.corners.size()].v;
-				if (!vertex_has_source[first]) {
-					vertex_source_face[first] = face.sourceFaceId;
-					vertex_has_source[first] = true;
-				} else if (vertex_source_face[first] != face.sourceFaceId) {
-					vertex_source_face[first] = -1;
-				}
-				const auto edge = std::minmax(first, second);
-				++source_edge_use[{face.sourceFaceId,
-					edge.first, edge.second}];
-			}
-		}
-		for (const auto& edge : source_edge_use) {
-			if (edge.second != 1)
-				continue;
-			boundary_vertex[std::get<1>(edge.first)] = true;
-			boundary_vertex[std::get<2>(edge.first)] = true;
-		}
+        std::vector<bool> boundary_vertex(mesh->vertices_.size(), false);
+        std::map<std::pair<size_t, size_t>, size_t> edge_use;
+        for (const Face& face : mesh->faces_) {
+            if (face.deleted
+                || !mesh->IsValidFace(face, mesh->vertices_.size()))
+                continue;
+            for (size_t corner = 0; corner < face.corners.size(); ++corner) {
+                const size_t first = face.corners[corner].v;
+                const size_t second = face.corners[
+                    (corner + 1) % face.corners.size()].v;
+                ++edge_use[std::minmax(first, second)];
+            }
+        }
+        // Open edges belong to exactly one live polygon. Surface IDs are
+        // provenance, not topology, and may be absent after file import.
+        for (const auto& edge : edge_use) {
+            if (edge.second != 1)
+                continue;
+            boundary_vertex[edge.first.first] = true;
+            boundary_vertex[edge.first.second] = true;
+        }
         std::vector<size_t> remapped_vertices(mesh->vertices_.size());
         for (size_t index = 0; index < mesh->vertices_.size(); ++index) {
-			remapped_vertices[index] = welded_index(mesh->vertices_[index],
-				mesh_index, vertex_source_face[index], boundary_vertex[index]);
-		}
+            remapped_vertices[index] = welded_index(mesh->vertices_[index],
+                boundary_vertex[index]);
+        }
+
+        // Materialize the same smooth fallback used to display the source mesh.
+        // Do this before joining positions so separate surfaces retain their
+        // normal seams, while polygons within each surface remain smooth.
+        std::vector<Vec3> vertex_normals(mesh->vertices_.size(), Vec3{});
+        if (mesh->normals_.empty()) {
+            for (const Face& face : mesh->faces_) {
+                if (face.deleted || !mesh->IsValidFace(face, mesh->vertices_.size()))
+                    continue;
+                const Vec3 normal = mesh->FaceNormal(face);
+                for (const MeshCorner& corner : face.corners)
+                    vertex_normals[corner.v] = vertex_normals[corner.v] + normal;
+            }
+            for (Vec3& normal : vertex_normals) {
+                normal = normalize(normal);
+                if (dot(normal, normal) <= 0.000001f)
+                    normal = {0.0f, 1.0f, 0.0f};
+            }
+        }
 
         for (const Face& source_face : mesh->faces_) {
             if (source_face.deleted
@@ -3782,7 +3906,6 @@ std::unique_ptr<CMesh3D> CMesh3D::CreateWelded(
             face.deleted = false;
             face.selected = false;
             face.corners.clear();
-            const Vec3 fallback_normal = mesh->FaceNormal(source_face);
             for (const MeshCorner& source_corner : source_face.corners) {
                 MeshCorner corner;
                 corner.v = remapped_vertices[source_corner.v];
@@ -3791,7 +3914,7 @@ std::unique_ptr<CMesh3D> CMesh3D::CreateWelded(
                     ? mesh->uvs_[source_corner.uv] : UV{});
                 corner.n = normals.size();
                 normals.push_back(source_corner.n < mesh->normals_.size()
-                    ? mesh->normals_[source_corner.n] : fallback_normal);
+                    ? mesh->normals_[source_corner.n] : vertex_normals[source_corner.v]);
                 face.corners.push_back(corner);
             }
             faces.push_back(std::move(face));
@@ -3909,7 +4032,9 @@ void CMesh3D::RenderFaces(bool selected,
                           bool offset_fill,
                           const Material* material_override,
                           bool diagnostic_rgb,
-                          bool flat_color) const {
+                          bool flat_color,
+                          const Vec3* object_min,
+                          const Vec3* object_max) const {
     if (vertices_.empty() || faces_.empty()) {
         return;
     }
@@ -3932,18 +4057,18 @@ void CMesh3D::RenderFaces(bool selected,
     // display modes; Wire and analysis modes keep their own presentation.
     const GLuint color_texture = (zebra || diagnostic_rgb)
         ? 0
-        : texture_id_for_path(material.color_texture_path);
+        : texture_id_for_path(material.color_texture_path, material.source_file_path);
     const bool has_texture = color_texture != 0;
     const bool use_pbr = !zebra && !diagnostic_rgb && !flat_color;
     const GLuint normal_texture = use_pbr
-        ? texture_id_for_path(material.normal_texture_path) : 0;
+        ? texture_id_for_path(material.normal_texture_path, material.source_file_path) : 0;
     const GLuint roughness_texture = use_pbr
-        ? texture_id_for_path(material.roughness_texture_path) : 0;
+        ? texture_id_for_path(material.roughness_texture_path, material.source_file_path) : 0;
     const GLuint metallic_texture = use_pbr
-        ? texture_id_for_path(material.metallic_texture_path) : 0;
+        ? texture_id_for_path(material.metallic_texture_path, material.source_file_path) : 0;
     const GLuint displacement_texture = use_pbr
-        ? texture_id_for_path(material.displacement_texture_path) : 0;
-    const bool pbr_material = normal_texture != 0 || roughness_texture != 0
+        ? texture_id_for_path(material.displacement_texture_path, material.source_file_path) : 0;
+    const bool pbr_material = material.plaster.enabled || material.fabric.enabled || normal_texture != 0 || roughness_texture != 0
         || metallic_texture != 0 || displacement_texture != 0
         || material.coat_weight > 0.0001f
         || std::fabs(material.roughness - 0.5f) > 0.0001f
@@ -4031,7 +4156,7 @@ void CMesh3D::RenderFaces(bool selected,
         const float angle = deg_to_rad(material.texture_rotation_degrees);
         fast_program->setUniformValue(
             "baseColor", QVector4D(color.r, color.g, color.b, alpha));
-        fast_program->setUniformValue("useTexture", has_texture);
+        fast_program->setUniformValue("useTexture", !material.plaster.enabled && has_texture);
         fast_program->setUniformValue(
             "diagnosticColor", diagnostic_rgb && !has_texture);
         fast_program->setUniformValue("selectedObject", selected);
@@ -4044,11 +4169,32 @@ void CMesh3D::RenderFaces(bool selected,
         fast_program->setUniformValue("studioEnvironmentSharp", 5);
         fast_program->setUniformValue("studioEnvironmentMedium", 6);
         fast_program->setUniformValue("studioEnvironmentBlurred", 7);
-        fast_program->setUniformValue("useNormalTexture", normal_texture != 0);
-        fast_program->setUniformValue("useRoughnessTexture", roughness_texture != 0);
-        fast_program->setUniformValue("useMetallicTexture", metallic_texture != 0);
-        fast_program->setUniformValue("useDisplacementTexture", displacement_texture != 0);
+        fast_program->setUniformValue("useNormalTexture", !material.plaster.enabled && !material.fabric.enabled && (normal_texture != 0));
+        fast_program->setUniformValue("useRoughnessTexture", !material.plaster.enabled && !material.fabric.enabled && (roughness_texture != 0));
+        fast_program->setUniformValue("useMetallicTexture", !material.plaster.enabled && !material.fabric.enabled && (metallic_texture != 0));
+        fast_program->setUniformValue("useDisplacementTexture", !material.plaster.enabled && !material.fabric.enabled && (displacement_texture != 0));
         fast_program->setUniformValue("pbrMaterial", pbr_material);
+        fast_program->setUniformValue("proceduralPlaster",material.plaster.enabled);
+        fast_program->setUniformValue("plasterSeed",QVector2D(float(material.plaster.seed&65535),float(material.plaster.seed>>16)));
+        fast_program->setUniformValue("plasterHighQuality",material.plaster.highQuality);
+#define UNIFORM(name,value,lo,hi,label) fast_program->setUniformValue("plaster_" #name,std::clamp(material.plaster.name,lo,hi));
+        DOM_PLASTER_PARAMETERS(UNIFORM)
+#undef UNIFORM
+        fast_program->setUniformValue("proceduralFabric",material.fabric.enabled);
+        fast_program->setUniformValue("fabricUseUV",material.fabric.useUV);
+        Vec3 wrap_min{},wrap_max{};
+        if(material.texture_wrap_object && !(object_min && object_max))GetBounds(wrap_min,wrap_max);
+        if(object_min && object_max){wrap_min=*object_min;wrap_max=*object_max;}
+        const Vec3 wrap_center=(wrap_min+wrap_max)*.5f,wrap_extent=(wrap_max-wrap_min)*.5f;
+        fast_program->setUniformValue("wrapObject",material.texture_wrap_object);
+        fast_program->setUniformValue("wrapCenter",QVector3D(wrap_center.x,wrap_center.y,wrap_center.z));
+        fast_program->setUniformValue("wrapExtent",QVector3D(wrap_extent.x,wrap_extent.y,wrap_extent.z));
+        fast_program->setUniformValue("fabricWeave",std::clamp(material.fabric.weave,0,3));
+        fast_program->setUniformValue("fabricSeed",QVector2D(float(material.fabric.seed&65535),float(material.fabric.seed>>16)));
+#define FABRIC_UNIFORM(name,value,lo,hi,label) fast_program->setUniformValue("fabric_" #name,std::clamp(material.fabric.name,lo,hi));
+        DOM_FABRIC_PARAMETERS(FABRIC_UNIFORM)
+#undef FABRIC_UNIFORM
+
         fast_program->setUniformValue(
             "useStudioEnvironment", use_studio_environment);
         fast_program->setUniformValue(
@@ -4596,6 +4742,7 @@ std::unique_ptr<CAlfaObject> CMesh3D::Clone() const {
     copy->uvs_ = uvs_;
     copy->normals_ = normals_;
     copy->faces_ = faces_;
+    copy->sharp_edges_ = sharp_edges_;
     copy->SetGroupName(GetGroupName());
     copy->SetVisible(IsVisible());
     copy->SetColor(GetColor());
@@ -4984,6 +5131,58 @@ bool CMesh3D::TrimByPline(CPolyline* pLine, CPoint3d pc) {
         data_to_move.push_back(&data_to_move_storage.back());
     }
     PrepareAndMoveVertexToTrimLine(pLine, data_to_move);
+    // A Var-8 edge intersection may lie just beyond a rounded contour node
+    // inside its neighbour. Use that existing node before classifying either
+    // cell: projecting onto the segment would invent a boundary T-junction,
+    // and the neighbour would retain a stale one-vertex/many-node variant.
+    for (size_t face_index : affected_faces) {
+        const Face& face = faces_[face_index];
+        if (face.deleted || face.corners.size() != 4) continue;
+        CellCutInfo info;
+        const Face2D source_xy = make_face_2d(face, vertices_);
+        if (!AnalyzeFaceCut(source_xy, cut, info, EPS2D)) continue;
+        ClassifyFaceCut(source_xy, cut, info, EPS2D);
+        if (info.VariantCut != 8 || info.vertexToMove < 0) continue;
+        const size_t vertex = face.corners[info.vertexToMove].v;
+        cVec2 target;
+        double best = std::numeric_limits<double>::max();
+        for (size_t s = 0; s + 1 < cut.size(); ++s) {
+            if (!point_on_cut_segment(info.moveTarget, cut[s], cut[s + 1], EPS2D)) continue;
+            for (const cVec2& node : {cut[s], cut[s + 1]}) {
+                if (std::any_of(vertices_.begin(), vertices_.end(), [&](const Vec3& point) {
+                        return EqualPoint2(cVec2(point.x, point.y), node, EPS2D);
+                    })) continue;
+                bool neighbour_contains_node = false;
+                bool valid_move = true;
+                for (size_t adjacent = 0; adjacent < faces_.size(); ++adjacent) {
+                    const Face& other = faces_[adjacent];
+                    if (other.deleted || std::none_of(other.corners.begin(), other.corners.end(),
+                            [&](const MeshCorner& corner) { return corner.v == vertex; })) continue;
+                    const Face2D polygon = make_face_2d(other, vertices_);
+                    CellCutInfo neighbour_info;
+                    if (AnalyzeFaceCut(polygon, cut, neighbour_info, EPS2D))
+                        ClassifyFaceCut(polygon, cut, neighbour_info, EPS2D);
+                    if (adjacent != face_index
+                        && ClassifyPointInFace2(polygon, node, EPS2D) == PFP_INSIDE
+                        && !neighbour_info.PntInFace.empty())
+                        neighbour_contains_node = true;
+                    const Vec3 original = vertices_[vertex];
+                    const double before_area = trim_face_twice_area(other, vertices_);
+                    vertices_[vertex] = {static_cast<float>(node.x), static_cast<float>(node.y), 0};
+                    const double after_area = trim_face_twice_area(other, vertices_);
+                    vertices_[vertex] = original;
+                    if (before_area * after_area <= 0) valid_move = false;
+                }
+                const double distance = distance2(node, info.moveTarget);
+                if (neighbour_contains_node && valid_move && distance < best) {
+                    best = distance;
+                    target = node;
+                }
+            }
+        }
+        if (best != std::numeric_limits<double>::max())
+            vertices_[vertex] = {static_cast<float>(target.x), static_cast<float>(target.y), 0};
+    }
     std::vector<TrimFaceData> FacesData;
     for (size_t face_index : affected_faces) {
         if (face_index >= faces_.size())
@@ -5040,6 +5239,44 @@ bool CMesh3D::TrimByPline(CPolyline* pLine, CPoint3d pc) {
         FacesData.push_back(face_data);
     }
 
+    std::vector<std::pair<size_t, size_t>> paired_cuts;
+    std::map<size_t, size_t> claims;
+    for (const auto& data : FacesData) {
+        if (data.VariantCut != 7 || data.edgeIndex < 0 || data.edgeIndex >= 4) continue;
+        const auto& face = faces_[data.FaceID];
+        if (face.corners.size() != 4) continue;
+        const Edge edge(static_cast<int>(face.corners[data.edgeIndex].v),
+            static_cast<int>(face.corners[(data.edgeIndex + 1) % 4].v));
+        const int neighbour = FindSecondCFace3d(data.FaceID, edge);
+        if (neighbour < 0) continue;
+        paired_cuts.emplace_back(data.FaceID, neighbour);
+        ++claims[data.FaceID];
+        ++claims[neighbour];
+    }
+    std::set<size_t> conflicting_cells;
+    for (const auto& claim : claims)
+        if (claim.second > 1) conflicting_cells.insert(claim.first);
+    for (const auto& data : FacesData)
+        if (data.VariantCut == 5 && claims.count(data.FaceID))
+            conflicting_cells.insert(data.FaceID);
+    std::set<size_t> processed_cells;
+    while (!conflicting_cells.empty()) {
+        std::set<size_t> component{*conflicting_cells.begin()};
+        bool grew = true;
+        while (grew) {
+            grew = false;
+            for (const auto& pair : paired_cuts) {
+                if (component.count(pair.first) || component.count(pair.second)) {
+                    grew = component.insert(pair.first).second || grew;
+                    grew = component.insert(pair.second).second || grew;
+                }
+            }
+        }
+
+        if (split_conflicting_trim_cells(faces_, vertices_, component, cut))
+            processed_cells.insert(component.begin(), component.end());
+        for (size_t index : component) conflicting_cells.erase(index);
+    }
 	// Var-7 owns a pair of adjacent quads.  It must run before a local split of
 	// either member (notably Var-6); otherwise its neighbour has already become
 	// a triangle and the paired topology cannot be constructed.  This conflict
@@ -5051,6 +5288,19 @@ bool CMesh3D::TrimByPline(CPolyline* pLine, CPoint3d pc) {
 		});
     for (int j = 0; j < FacesData.size(); j++) {
         TrimFaceData& faceData = FacesData[j];
+        if (processed_cells.count(faceData.FaceID) || faces_[faceData.FaceID].deleted) continue;
+        // Local corner numbers in FacesData are valid only until this cell is
+        // consumed by a paired split. Ownership belongs to this trim call,
+        // not to a persistent m_Trimmed flag from an earlier hole.
+        int paired_neighbour = -1;
+        const Face& source_face = faces_[faceData.FaceID];
+        if ((faceData.VariantCut == 5 || faceData.VariantCut == 7)
+            && source_face.corners.size() == 4 && faceData.edgeIndex >= 0
+            && faceData.edgeIndex < 4) {
+            paired_neighbour = FindSecondCFace3d(faceData.FaceID,
+                Edge(static_cast<int>(source_face.corners[faceData.edgeIndex].v),
+                    static_cast<int>(source_face.corners[(faceData.edgeIndex + 1) % 4].v)));
+        }
     //    char buffer[256];
     //    sprintf(buffer, "Face %d: VariantCut=%d, edgeIndex=%d ", faceData.FaceID, faceData.VariantCut, faceData.edgeIndex);
     //    Step(buffer);
@@ -5078,6 +5328,11 @@ bool CMesh3D::TrimByPline(CPolyline* pLine, CPoint3d pc) {
         case 11:
             SplitFaceByVar11(faceData.FaceID, faceData.v1, faceData.v2, faceData.Pnt, pLine);
             break;
+        }
+        if (paired_neighbour >= 0 && faces_[faceData.FaceID].m_Trimmed
+            && faces_[paired_neighbour].m_Trimmed) {
+            processed_cells.insert(faceData.FaceID);
+            processed_cells.insert(paired_neighbour);
         }
     }
 
@@ -5349,6 +5604,7 @@ void CMesh3D::Clear() {
     uvs_.clear();
     normals_.clear();
     faces_.clear();
+    sharp_edges_.clear();
     InvalidateGpuCache();
 }
 

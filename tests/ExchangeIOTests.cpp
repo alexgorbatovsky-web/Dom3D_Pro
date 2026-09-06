@@ -9,6 +9,8 @@
 #include "SmartLine.h"
 
 #include <QCoreApplication>
+#include <QDir>
+#include <QStringList>
 #include <QTemporaryDir>
 
 #include <cstdlib>
@@ -30,9 +32,36 @@ void require(bool condition, const std::string& message)
 }
 }
 
+void TestThreeMfIO(const QString& directory);
+void TestFbxIO(const QString& directory);
+
 int main(int argc, char** argv)
 {
     QCoreApplication application(argc, argv);
+    // Diagnostic entry point for checking real-world packages with the same
+    // importer as the application, without adding private models to the suite.
+    const auto arguments = application.arguments();
+    if (arguments.size() == 3 && arguments[1] == "--write-fbx-test") {
+        QDir().mkpath(arguments[2]);
+        TestFbxIO(arguments[2]);
+        return EXIT_SUCCESS;
+    }
+    if (arguments.size() == 3 && arguments[1] == "--import-3mf") {
+        ThreeMfIO io;
+        std::string error;
+        std::vector<std::unique_ptr<CMesh3D>> meshes;
+        require(io.Import(arguments[2].toStdString(), meshes, error), error);
+        std::cout << "3MF import succeeded: " << meshes.size() << " mesh(es)\n";
+        for (const auto& mesh : meshes) {
+            Vec3 low, high;
+            require(mesh->GetBounds(low, high), "Imported mesh has no bounds");
+            std::cout << mesh->GetVertices().size() << " vertices, "
+                      << mesh->GetFaces().size() << " faces; bounds (mm): "
+                      << low.x << ',' << low.y << ',' << low.z << " -> "
+                      << high.x << ',' << high.y << ',' << high.z << '\n';
+        }
+        return EXIT_SUCCESS;
+    }
     QTemporaryDir directory;
     require(directory.isValid(), "Could not create the temporary exchange directory.");
 
@@ -246,8 +275,129 @@ int main(int argc, char** argv)
                 && merged_weld_mesh->GetVertices().size() == 4
                 && merged_weld_mesh->GetFaces().size() == 2
                 && welded_vertex_count == 2
-                && std::abs(welding_tolerance - 3.3f) < 0.001f,
-            "Welding Vertex did not merge Mesh3D objects with LenMin / 3.0.");
+                && std::abs(welding_tolerance - 1.98f) < 0.001f,
+            "Welding Vertex did not merge Mesh3D objects with LenMin / 5.0.");
+
+    // A curved strip without stored normals is displayed with averaged vertex
+    // normals. Welding must not replace that shading with polygon normals.
+    CMesh3D smooth_strip("Smooth strip");
+    require(smooth_strip.SetGeometry(
+                {{0, 0, 0}, {10, 0, 0}, {20, 0, 10},
+                 {0, 10, 0}, {10, 10, 0}, {20, 10, 10}},
+                {CMesh3D::Face{0, 1, 4, 3}, CMesh3D::Face{1, 2, 5, 4}}),
+            "Could not create the smooth welding regression.");
+    CMesh3D explicit_strip("Explicit normals");
+    auto explicit_faces = smooth_strip.GetFaces();
+    for (size_t i = 0; i < explicit_faces.size(); ++i)
+        for (MeshCorner& corner : explicit_faces[i].corners)
+            corner.n = i;
+    require(explicit_strip.SetGeometry(smooth_strip.GetVertices(), explicit_faces,
+                {}, {{0, 0, 1}, {-1, 0, 0}}),
+            "Could not create explicit normal seams for welding.");
+    auto smooth_weld = CMesh3D::CreateWelded({&smooth_strip, &explicit_strip});
+    require(smooth_weld && smooth_weld->GetFaces().size() == 4,
+            "Could not weld the smooth and explicit-normal strips.");
+    const auto welded_normal = [&](size_t face, size_t corner) {
+        return smooth_weld->GetNormals()[smooth_weld->GetFaces()[face].corners[corner].n];
+    };
+    const Vec3 expected_smooth = normalize(Vec3{0, 0, 1} + normalize(Vec3{-1, 0, 1}));
+    require(dot(welded_normal(0, 1), expected_smooth) > 0.99999f
+                && dot(welded_normal(1, 0), expected_smooth) > 0.99999f
+                && dot(welded_normal(0, 0), Vec3{0, 0, 1}) > 0.99999f,
+            "Welding flattened the implicit smooth vertex normals.");
+    require(dot(welded_normal(2, 1), Vec3{0, 0, 1}) > 0.99999f
+                && dot(welded_normal(3, 0), Vec3{-1, 0, 0}) > 0.99999f,
+            "Welding changed explicit corner normals at a hard seam.");
+    auto repeated_weld = CMesh3D::CreateWelded({smooth_weld.get()});
+    require(repeated_weld && repeated_weld->GetNormals().size() == smooth_weld->GetNormals().size(),
+            "Repeated welding lost the stored shading normals.");
+    for (size_t i = 0; i < repeated_weld->GetNormals().size(); ++i)
+        require(dot(repeated_weld->GetNormals()[i], smooth_weld->GetNormals()[i]) > 0.99999f,
+                "Repeated welding changed surface shading.");
+
+    // A collar can put vertices from two neighbouring rows inside the
+    // welding tolerance. The weld must use the closest row, regardless
+    // of which candidate appears first in the X lookup.
+    CMesh3D weld_candidates("Weld candidates");
+    CMesh3D weld_target("Weld target");
+    require(weld_candidates.SetGeometry(
+                {{-1.9f, 0.0f, 0.0f}, {-1.9f, 10.0f, 0.0f},
+                 {-11.9f, 0.0f, 0.0f}, {0.2f, 0.0f, 0.0f},
+                 {0.2f, -10.0f, 0.0f}, {10.2f, 0.0f, 0.0f}},
+                {CMesh3D::Face{0, 1, 2}, CMesh3D::Face{3, 4, 5}})
+                && weld_target.SetGeometry(
+                    {{0.0f, 0.0f, 0.0f}, {0.0f, 20.0f, 0.0f},
+                     {10.0f, 20.0f, 0.0f}},
+                    {CMesh3D::Face{0, 1, 2}}),
+            "Could not create the nearest-candidate welding regression.");
+    std::unique_ptr<CMesh3D> nearest_weld = CMesh3D::CreateWelded(
+        {&weld_candidates, &weld_target});
+    require(nearest_weld && nearest_weld->GetFaces().size() == 3,
+            "Nearest-candidate welding produced invalid geometry.");
+    const size_t target_vertex = nearest_weld->GetFaces()[2].corners[0].v;
+    require(target_vertex < nearest_weld->GetVertices().size()
+                && std::abs(nearest_weld->GetVertices()[target_vertex].x
+                            - 0.2f) < 0.001f,
+            "Welding Vertex pulled a seam vertex to a farther mesh row.");
+
+    // Neighbouring rows inside LenMin / 3 but outside LenMin / 5 must
+    // remain separate, including when generated faces retain surface IDs.
+    CMesh3D collar_rows("Collar rows");
+    require(collar_rows.SetGeometry(
+                {{0, 0, 0}, {10, 0, 0}, {0, 10, 0},
+                 {0, 0, 2.5f}, {10, 0, 2.5f}, {0, 10, 2.5f}},
+                {CMesh3D::Face{0, 1, 2}, CMesh3D::Face{3, 4, 5}}),
+            "Could not create collar row welding regression.");
+    for (bool with_surface_ids : {true, false}) {
+        collar_rows.GetFaces()[0].sourceFaceId = with_surface_ids ? 0 : -1;
+        collar_rows.GetFaces()[1].sourceFaceId = with_surface_ids ? 1 : -1;
+        auto preserved_rows = CMesh3D::CreateWelded(
+            {&collar_rows}, &welded_vertex_count, &welding_tolerance);
+        require(preserved_rows && welded_vertex_count == 0
+                    && preserved_rows->GetVertices().size() == 6
+                    && preserved_rows->GetFaces().size() == 2
+                    && std::abs(welding_tolerance - 2.0f) < 0.001f,
+                "Welding collapsed collar rows or depended on surface IDs.");
+    }
+
+    // A tiny real edge must control the tolerance for the whole selection.
+    CMesh3D tiny_edge("Tiny edge");
+    require(tiny_edge.SetGeometry(
+                {{100, 0, 0}, {100.25f, 0, 0}, {100, 10, 0}},
+                {CMesh3D::Face{0, 1, 2}}),
+            "Could not create minimum-edge welding regression.");
+    auto conservative_weld = CMesh3D::CreateWelded(
+        {&weld_part_a, &weld_part_b, &tiny_edge},
+        &welded_vertex_count, &welding_tolerance);
+    require(conservative_weld && welded_vertex_count == 0
+                && std::abs(welding_tolerance - 0.05f) < 0.001f,
+            "Welding expanded the tolerance beyond the minimum edge / 5.");
+
+    // Shared edges stay closed even across source surfaces. An open sheet
+    // close to a closed solid must not weld to the solid, in either order.
+    CMesh3D closed_solid("Closed tetrahedron");
+    CMesh3D open_sheet("Nearby open sheet");
+    require(closed_solid.SetGeometry(
+                {{0, 0, 0}, {10, 0, 0}, {0, 10, 0}, {0, 0, 10}},
+                {CMesh3D::Face{0, 2, 1}, CMesh3D::Face{0, 1, 3},
+                 CMesh3D::Face{0, 3, 2}, CMesh3D::Face{1, 2, 3}})
+                && open_sheet.SetGeometry(
+                    {{0.1f, 0, 0}, {30, 0, 0}, {0.1f, 30, 0}},
+                    {CMesh3D::Face{0, 1, 2}}),
+            "Could not create open-edge-only welding regression.");
+    for (size_t index = 0; index < closed_solid.GetFaces().size(); ++index)
+        closed_solid.GetFaces()[index].sourceFaceId = static_cast<int>(index);
+    for (bool reverse_order : {false, true}) {
+        auto boundary_only = CMesh3D::CreateWelded(
+            reverse_order
+                ? std::vector<const CMesh3D*>{&open_sheet, &closed_solid}
+                : std::vector<const CMesh3D*>{&closed_solid, &open_sheet},
+            &welded_vertex_count);
+        require(boundary_only && welded_vertex_count == 0
+                    && boundary_only->GetVertices().size() == 7
+                    && boundary_only->GetFaces().size() == 5,
+                "Welding merged an open-edge vertex with a closed solid.");
+    }
 
     DxfIO dxf;
     require(dxf.Export(base + ".dxf", document, error), "DXF export failed: " + error);
@@ -471,6 +621,8 @@ int main(int argc, char** argv)
     require(stl_meshes.size() == 1 && stl_meshes.front()->GetFaces().size() == 1,
             "STL round-trip produced an unexpected triangle count.");
 
-    std::cout << "DXF, EPS, HPGL, and STL exchange round-trips passed.\n";
+    TestThreeMfIO(directory.path());
+    TestFbxIO(directory.path());
+    std::cout << "DXF, EPS, HPGL, 3MF, and STL exchange round-trips passed.\n";
     return EXIT_SUCCESS;
 }

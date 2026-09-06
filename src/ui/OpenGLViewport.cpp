@@ -1116,11 +1116,20 @@ void OpenGLViewport::SetThickSolidThickness(double thickness) {
 }
 
 void OpenGLViewport::BeginBooleanTool(BooleanOperation operation) {
-    boolean_operation_ = operation;
     has_boolean_body_ = false;
     boolean_body_index_ = 0;
     SetTool(ToolMode::Boolean);
-    emit StatusTextChanged("Boolean:select the required geometry and continue");
+    SetBooleanOperation(operation);
+}
+
+void OpenGLViewport::SetBooleanOperation(BooleanOperation operation) {
+    // Changing Type must retain the first body while waiting for the second.
+    boolean_operation_ = operation;
+    if (tool_ != ToolMode::Boolean) return;
+    const QString type = operation == BooleanOperation::Cut ? "Subtract"
+        : operation == BooleanOperation::Common ? "Intersect" : "Add";
+    emit StatusTextChanged(QString("Boolean (%1): select %2 body")
+        .arg(type, has_boolean_body_ ? "second" : "first"));
 }
 
 SelectionMode OpenGLViewport::GetSelectionMode() const {
@@ -1459,6 +1468,16 @@ void OpenGLViewport::SetFloorGridVisible(bool visible) {
     update();
 }
 
+bool OpenGLViewport::AreCurvePointsVisible() const {
+    return show_curve_points_;
+}
+
+void OpenGLViewport::SetCurvePointsVisible(bool visible) {
+    if (show_curve_points_ == visible) return;
+    show_curve_points_ = visible;
+    update();
+}
+
 void OpenGLViewport::SetBackgroundColor(const QColor& color) {
     if (!color.isValid()) return;
     const Color background{
@@ -1658,7 +1677,7 @@ bool OpenGLViewport::BeginEditSelectedCurve() {
     EndDirectCurveEdit();
     SetTool(ToolMode::Select);
     editing_polyline_ = true;
-    document_->SelectAllPointsOfSelectedCurve();
+    document_->ClearPointSelection();
     direct_curve_edit_object_id_ = curve->m_id;
     emit SelectionChanged();
     emit StatusTextChanged(
@@ -1883,6 +1902,42 @@ void OpenGLViewport::BeginSolidCylinderFaceSelection() {
     emit StatusTextChanged("CYLINDER: select a planar body face");
 }
 
+void OpenGLViewport::SetSolidPrimitivePlacement(SketchPlane plane, bool on_face) {
+    const bool cylinder = tool_ == ToolMode::SolidCylinderCircle;
+    if (!cylinder && tool_ != ToolMode::SolidBoxRectangle) return;
+    const bool has_anchor = sketch_rectangle_has_first_point_;
+    const CPoint3d anchor = sketch_rectangle_first_point_;
+    if (cylinder) {
+        if (on_face) BeginSolidCylinderFaceSelection();
+        else BeginSolidCylinderCircle(plane);
+    } else {
+        if (on_face) BeginSolidBoxFaceSelection();
+        else BeginSolidBoxRectangle(plane);
+    }
+    if (has_anchor) {
+        sketch_rectangle_has_first_point_ = true;
+        sketch_rectangle_first_point_ = anchor;
+        // For a face, wait for its basis before projecting the existing anchor.
+        if (!on_face) ReprojectSolidPrimitiveAnchor();
+    }
+    update();
+}
+
+void OpenGLViewport::ReprojectSolidPrimitiveAnchor() {
+    if (!sketch_rectangle_has_first_point_) return;
+    const Vec3 point{static_cast<float>(sketch_rectangle_first_point_.x),
+                     static_cast<float>(sketch_rectangle_first_point_.y),
+                     static_cast<float>(sketch_rectangle_first_point_.z)};
+    const Vec3 delta = point - sketch_origin_;
+    const Vec3 projected = sketch_origin_
+        + sketch_u_ * dot(delta, sketch_u_) + sketch_v_ * dot(delta, sketch_v_);
+    sketch_rectangle_first_point_ = CPoint3d(projected.x, projected.y, projected.z);
+    sketch_rectangle_preview_point_ = sketch_rectangle_first_point_;
+    sketch_rectangle_preview_valid_ = true;
+    emit StatusTextChanged(tool_ == ToolMode::SolidCylinderCircle
+        ? "CYLINDER: click circle radius" : "BOX: click opposite rectangle corner");
+}
+
 void OpenGLViewport::SetSolidDimensionEdit(
     const ActiveParametricObject& active_object,
     const QString& primary_parameter) {
@@ -1891,6 +1946,7 @@ void OpenGLViewport::SetSolidDimensionEdit(
         || active_object.tool_id == "SolidCylinder"
         || active_object.tool_id == "SolidPrismTool"
         || active_object.tool_id == "SolidHole"
+        || active_object.tool_id == "ChamferSolid"
         || active_object.tool_id == "fillet_edge"
         || active_object.tool_id == "fillet_all_edges"
         || active_object.tool_id == "cabinet"
@@ -1907,6 +1963,27 @@ void OpenGLViewport::SetSolidDimensionEdit(
     solid_dimensions_.clear();
     solid_dimension_hits_.clear();
     solid_dimension_primary_parameter_ = primary_parameter;
+
+    const auto ensure_edge_anchor = [&]() {
+                    if (fillet_anchor_valid_ || !document_) return;
+                    const auto points=document_->GetLiveEdgeToolPoints(1025);
+                    if (!fillet_anchor_valid_ && !points.empty()) {
+                        fillet_anchor_=points[points.size()/2];
+                        double picked_fraction=0.5;
+                        double closest=std::numeric_limits<double>::max();
+                        if(fillet_pick_valid_) for(size_t i=1;i<points.size();++i) {
+                            DomPoint a{},b{};
+                            if(!renderer_.WorldToScreen(point_to_vec3(points[i-1]),camera_,orthographic_projection_,width(),height(),a)
+                                || !renderer_.WorldToScreen(point_to_vec3(points[i]),camera_,orthographic_projection_,width(),height(),b)) continue;
+                            const double dx=b.x-a.x,dy=b.y-a.y,den=dx*dx+dy*dy;
+                            const double t=den>0?std::clamp(((fillet_pick_screen_.x()-a.x)*dx+(fillet_pick_screen_.y()-a.y)*dy)/den,0.0,1.0):0;
+                            const double dist=std::hypot(a.x+t*dx-fillet_pick_screen_.x(),a.y+t*dy-fillet_pick_screen_.y());
+                            if(dist<closest){closest=dist;picked_fraction=(double(i-1)+t)/double(points.size()-1);fillet_anchor_=CPoint3d(points[i-1].x+t*(points[i].x-points[i-1].x),points[i-1].y+t*(points[i].y-points[i-1].y),points[i-1].z+t*(points[i].z-points[i-1].z));}
+                        }
+                        fillet_anchor_valid_=document_->GetLiveEdgeToolFrame(
+                            picked_fraction,fillet_anchor_,fillet_drag_direction_);
+                    }
+    };
 
     std::vector<const ParametricFunction*> following_transforms;
     if (document_ && solid_dimension_object_.object_index < document_->GetObjects().size()) {
@@ -2049,8 +2126,10 @@ void OpenGLViewport::SetSolidDimensionEdit(
             "Diameter",
             diameter);
         add_dimension(
-            origin,
-            shifted(n, height),
+            shifted(u, radius),
+            CPoint3d(origin.x + u.x * radius + n.x * height,
+                origin.y + u.y * radius + n.y * height,
+                origin.z + u.z * radius + n.z * height),
             u,
             offset,
             "height",
@@ -2340,6 +2419,16 @@ void OpenGLViewport::SetSolidDimensionEdit(
                 }
             }
             if (found) {
+                if (document_->HasLiveFillet()) {
+                    ensure_edge_anchor();
+                    if(fillet_anchor_valid_) {
+                        // The handle follows the CAD tangent at the picked point.
+                        // Keep this frame fixed while the fillet is rebuilt.
+                        const auto inward=fillet_drag_direction_;
+                        best_start=fillet_anchor_;
+                        best_end=CPoint3d(best_start.x+inward.x*radius,best_start.y+inward.y*radius,best_start.z+inward.z*radius);
+                    }
+                }
                 solid_dimensions_.emplace_back(
                     transformed_point(best_start),
                     transformed_point(best_end),
@@ -2351,6 +2440,20 @@ void OpenGLViewport::SetSolidDimensionEdit(
                 solid_dimensions_.back().SetActive(true);
             }
             }
+        }
+    }
+    if (active_object.tool_id == "ChamferSolid" && document_ && document_->HasLiveChamfer()) {
+        ensure_edge_anchor();
+        if (fillet_anchor_valid_) {
+            double distance = 1.0;
+            for (const auto& parameter : active_object.parameters)
+                if (parameter.id == "distance") distance = parameter.value;
+            const CPoint3d end(fillet_anchor_.x + fillet_drag_direction_.x * distance,
+                fillet_anchor_.y + fillet_drag_direction_.y * distance,
+                fillet_anchor_.z + fillet_drag_direction_.z * distance);
+            solid_dimensions_.emplace_back(fillet_anchor_, end,
+                CPoint3d(0, 0, 1), 0.0, "distance", "Distance", distance);
+            solid_dimensions_.back().SetActive(true);
         }
     }
     update();
@@ -2392,6 +2495,7 @@ void OpenGLViewport::SetCabinetPreviewVisible(bool visible) {
 }
 
 void OpenGLViewport::ClearSolidDimensionEdit() {
+    fillet_anchor_valid_ = false;
     solid_dimension_object_ = {};
     solid_dimension_objects_.clear();
     solid_dimensions_.clear();
@@ -2431,6 +2535,35 @@ void OpenGLViewport::BeginPick3DPoint(const QString& prompt) {
         ? "GetPoint3D: pick a point in the scene"
         : prompt);
     setFocus();
+}
+
+void OpenGLViewport::BeginSpatialCurvePreview(
+    SpatialCurvePreviewKind kind) {
+    spatial_curve_preview_kind_ = kind;
+    spatial_curve_preview_object_id_ = 0;
+    spatial_curve_preview_points_.clear();
+    curve_preview_valid_ = false;
+    update();
+}
+
+void OpenGLViewport::SetSpatialCurvePreviewObject(
+    unsigned long object_id) {
+    spatial_curve_preview_object_id_ = object_id;
+    update();
+}
+
+void OpenGLViewport::SetSpatialCurvePreviewPoints(
+    const std::vector<CPoint3d>& points) {
+    spatial_curve_preview_points_ = points;
+    update();
+}
+
+void OpenGLViewport::EndSpatialCurvePreview() {
+    spatial_curve_preview_kind_ = SpatialCurvePreviewKind::None;
+    spatial_curve_preview_object_id_ = 0;
+    spatial_curve_preview_points_.clear();
+    curve_preview_valid_ = false;
+    update();
 }
 
 void OpenGLViewport::BeginPick3DPointOnObject(
@@ -2559,7 +2692,20 @@ void OpenGLViewport::paintGL() {
         return;
     }
    UpdateFPS();
+    // The active curve already contains the confirmed points. While the next
+    // point is previewed, drawing that stored version as well would leave a
+    // second, stale fragment under the live curve. Hide it only for this
+    // render pass; the document and Scene Tree visibility remain unchanged.
+    CAlfaObject* preview_source = curve_preview_valid_
+        && spatial_curve_preview_object_id_ != 0
+        ? document_->FindObjectById(spatial_curve_preview_object_id_)
+        : nullptr;
+    const bool hide_preview_source = preview_source
+        && preview_source->IsVisible()
+        && !spatial_curve_preview_points_.empty();
+    if (hide_preview_source) preview_source->SetVisible(false);
     renderer_.Render(*document_, camera_, orthographic_projection_, show_coordinate_axes_, show_floor_grid_, xy_plane_view_enabled_, grid_size_, grid_step_, grid_subdivisions_, tool_, transform_operation_, highlighted_transform_axis_, transform_dialog_rotation_angle_degrees_, transform_dialog_rotation_axis_, highlighted_draft_face_gizmo_, width(), height());
+    if (hide_preview_source) preview_source->SetVisible(true);
     DrawHoveredSolidEdge();
     DrawRotationAxisPickPreview();
     if (show_coordinate_axes_) {
@@ -2590,19 +2736,28 @@ void OpenGLViewport::paintGL() {
     if (tool_ == ToolMode::SketchBezier && !sketch_bezier_points_.empty()) {
         DrawSketchBezierPreview();
     }
-    if ((tool_ == ToolMode::EditPoint
+    if (show_curve_points_ && document_) {
+        DrawVisibleCurvePoints();
+    }
+    if ((show_curve_points_
+         || tool_ == ToolMode::EditPoint
          || selection_mode_ == SelectionMode::Point
          || (tool_ == ToolMode::Select && editing_polyline_))
         && document_) {
         DrawSelectedCurvePointHandles();
     }
-    if (tool_ == ToolMode::Select && editing_sketch_ && document_) {
+    if (((show_curve_points_ && document_->GetSelectedSketch())
+         || (tool_ == ToolMode::Select && editing_sketch_))
+        && document_) {
         DrawSketchEditHandles();
     }
     if (tool_ == ToolMode::EditPoint && selecting_edit_points_) {
         DrawEditPointSelectionRect();
     }
-    if (tool_ == ToolMode::Select && selecting_with_rect_) {
+    if (selecting_with_rect_
+        && (tool_ == ToolMode::Select
+            || (tool_ == ToolMode::Transform
+                && selection_mode_ == SelectionMode::Point))) {
         DrawSelectRubberBandRect();
     }
     if (tool_ == ToolMode::ZoomRect && zoom_rect_active_) {
@@ -2705,6 +2860,42 @@ QImage OpenGLViewport::CaptureSceneImage(const QSize& requested_size) {
 
 void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
     last_mouse_ = event->pos();
+
+    // Explicit material tools own a plain click before navigation and modeling tools.
+    if (document_ && event->button() == Qt::LeftButton
+        && event->modifiers() == Qt::NoModifier
+        && material_interaction_mode_ != MaterialInteractionMode::None) {
+        CAlfaObject* object = FindObjectForMaterialAt(event->pos());
+        if (!object) {
+            emit StatusTextChanged(material_interaction_mode_ == MaterialInteractionMode::Paint
+                ? "Material brush: click object to paint"
+                : "Material picker: click object");
+            return;
+        }
+
+        if (material_interaction_mode_ == MaterialInteractionMode::Paint) {
+            const Material& document_material = document_->UpsertMaterial(active_paint_material_);
+            object->SetMaterial(document_material);
+            object->SetMaterialId(document_material.id);
+            document_->ClearSelection();
+            emit SelectionChanged();
+            emit DocumentChanged();
+            emit StatusTextChanged(QString("Material applied: %1").arg(QString::fromStdString(document_material.name)));
+            update();
+            return;
+        } else {
+            const Material picked_material = object->GetMaterial();
+            emit MaterialPicked(picked_material);
+            document_->ClearSelection();
+            emit SelectionChanged();
+            emit StatusTextChanged(QString("Material picked: %1").arg(QString::fromStdString(picked_material.name)));
+        }
+
+        material_interaction_mode_ = MaterialInteractionMode::None;
+        RestoreDefaultToolCursor();
+        update();
+        return;
+    }
 
     if (tool_ == ToolMode::Walk
         && event->button() == Qt::LeftButton
@@ -2920,6 +3111,7 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
             if (parameter != dimension_object.parameters.end()
                 && line_length > 0.5) {
                 dragging_solid_dimension_grip_ = true;
+                solid_dimension_drag_move_base_ = best_hit->move_base;
                 active_solid_dimension_grip_ = best_hit->parameter_id;
                 active_solid_dimension_operation_index_ =
                     static_cast<int>(dimension_object.operation_index);
@@ -2937,7 +3129,8 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
                 // A tiny fillet radius can project to only a few pixels. Keep
                 // its real geometry, but give dragging a usable tablet/mouse
                 // sensitivity instead of dividing by that tiny length.
-                solid_dimension_drag_screen_length_ = std::max(line_length, 24.0);
+                solid_dimension_drag_screen_length_ = (best_hit->parameter_id == "radius" || best_hit->parameter_id == "distance")
+                    ? line_length : std::max(line_length, 24.0);
                 setCursor(Qt::ClosedHandCursor);
                 event->accept();
                 return;
@@ -3034,39 +3227,6 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
         }
         emit StatusTextChanged("Pick Pc: point is outside XY plane view");
         event->accept();
-        return;
-    }
-
-    if (material_interaction_mode_ != MaterialInteractionMode::None) {
-        CAlfaObject* object = FindObjectForMaterialAt(event->pos());
-        if (!object) {
-            emit StatusTextChanged(material_interaction_mode_ == MaterialInteractionMode::Paint
-                ? "Material brush: click object to paint"
-                : "Material picker: click object");
-            return;
-        }
-
-        if (material_interaction_mode_ == MaterialInteractionMode::Paint) {
-            const Material& document_material = document_->UpsertMaterial(active_paint_material_);
-            object->SetMaterial(document_material);
-            object->SetMaterialId(document_material.id);
-            document_->ClearSelection();
-            emit SelectionChanged();
-            emit DocumentChanged();
-            emit StatusTextChanged(QString("Material applied: %1").arg(QString::fromStdString(document_material.name)));
-            update();
-            return;
-        } else {
-            const Material picked_material = object->GetMaterial();
-            emit MaterialPicked(picked_material);
-            document_->ClearSelection();
-            emit SelectionChanged();
-            emit StatusTextChanged(QString("Material picked: %1").arg(QString::fromStdString(picked_material.name)));
-        }
-
-        material_interaction_mode_ = MaterialInteractionMode::None;
-        RestoreDefaultToolCursor();
-        update();
         return;
     }
 
@@ -3198,6 +3358,21 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
             orbiting_ = true;
             return;
         }
+        if (selection_mode_ == SelectionMode::Point
+            && HitTestTransformGizmo(event->pos()) == TransformAxis::None) {
+            SelectionAction action = SelectionAction::Replace;
+            if (event->modifiers().testFlag(Qt::ControlModifier)) {
+                action = SelectionAction::Remove;
+            } else if (event->modifiers().testFlag(Qt::ShiftModifier)) {
+                action = SelectionAction::Add;
+            }
+            selecting_with_rect_ = true;
+            rect_selection_action_ = action;
+            rect_selection_start_ = event->pos();
+            rect_selection_current_ = event->pos();
+            update();
+            return;
+        }
         HandleTransformClick(event->pos(), event->modifiers().testFlag(Qt::ControlModifier));
         return;
     }
@@ -3270,6 +3445,7 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
 
 void OpenGLViewport::mouseDoubleClickEvent(QMouseEvent* event) {
     const bool direct_curve_edit_tool = tool_ == ToolMode::Select
+        || tool_ == ToolMode::EditPoint
         || tool_ == ToolMode::Orbit
         || tool_ == ToolMode::DrawSpline;
     if (!document_ || !direct_curve_edit_tool
@@ -3282,6 +3458,8 @@ void OpenGLViewport::mouseDoubleClickEvent(QMouseEvent* event) {
     // Cancel the selection/orbit gesture it may have started, otherwise the
     // following release would replace the point selection we establish here.
     selecting_with_rect_ = false;
+    selecting_edit_points_ = false;
+    dragging_polyline_point_ = false;
     orbiting_ = false;
     alt_orbiting_ = false;
 
@@ -3289,6 +3467,28 @@ void OpenGLViewport::mouseDoubleClickEvent(QMouseEvent* event) {
     auto world_to_screen = [this](Vec3 world, DomPoint& screen) {
         return renderer_.WorldToScreen(world, camera_, orthographic_projection_, width(), height(), screen);
     };
+
+    // A node has priority over the curve segment beneath it: double-clicking
+    // the marker deletes that node, while double-clicking an empty part of the
+    // curve continues to insert a node as before.
+    if (tool_ == ToolMode::Select || tool_ == ToolMode::EditPoint) {
+        size_t point_index = 0;
+        if (HitTestSelectedPolylineHandle(event->pos(), &point_index)) {
+            const auto* spline = document_->GetSelectedBSpline();
+            if (spline && spline->IsBezierChain() && point_index % 3 != 0) {
+                emit StatusTextChanged(
+                    "Curve edit: double-click a green node, not a blue Bezier handle");
+            } else {
+                document_->SelectCurvePoint(
+                    document_->GetSelectedObjectIndex(), point_index);
+                emit SelectionChanged();
+                emit CurveNodeDeleteRequested();
+            }
+            update();
+            event->accept();
+            return;
+        }
+    }
 
     if (tool_ == ToolMode::Select && editing_sketch_) {
         CSmartLine* sketch = document_->GetSelectedSketch();
@@ -3519,7 +3719,7 @@ void OpenGLViewport::mouseDoubleClickEvent(QMouseEvent* event) {
             }
         }
         if (inserted) {
-            document_->SelectAllPointsOfSelectedCurve();
+            document_->ClearPointSelection();
             emit DocumentChanged();
             emit SelectionChanged();
             emit StatusTextChanged(
@@ -3546,7 +3746,7 @@ void OpenGLViewport::mouseDoubleClickEvent(QMouseEvent* event) {
         editing_sketch_ = document_->GetSelectedSketch() != nullptr;
         editing_polyline_ = !editing_sketch_;
         if (editing_polyline_) {
-            document_->SelectAllPointsOfSelectedCurve();
+            document_->ClearPointSelection();
             if (const CAlfaObject* curve = document_->GetSelectedObject()) {
                 direct_curve_edit_object_id_ = curve->m_id;
             }
@@ -3678,7 +3878,8 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
             mouse_delta.x() * solid_dimension_drag_screen_direction_.x()
             + mouse_delta.y() * solid_dimension_drag_screen_direction_.y();
         double value = solid_dimension_drag_start_value_
-            * (1.0 + projected_pixels / solid_dimension_drag_screen_length_);
+            * (1.0 + (solid_dimension_drag_move_base_ ? -1.0 : 1.0)
+                * projected_pixels / solid_dimension_drag_screen_length_);
         value = std::clamp(
             value,
             solid_dimension_drag_minimum_,
@@ -3695,7 +3896,7 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
             solid_dimension_drag_current_value_ = value;
             emit SolidDimensionGripChanged(
                 active_solid_dimension_operation_index_,
-                active_solid_dimension_grip_, value, false);
+                active_solid_dimension_grip_, value, false, solid_dimension_drag_move_base_);
         }
         last_mouse_ = event->pos();
         return;
@@ -3789,12 +3990,17 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
             update();
         }
     } else if (picking_3d_point_ && document_) {
-        CPoint3d snapped_point{};
+        CPoint3d hover_point{};
+        const bool point_found = point_pick_plane_enabled_
+            ? ScreenToWorldPlane(event->pos(), point_pick_plane_origin_,
+                                 point_pick_plane_normal_, hover_point)
+            : PickModelingPoint(event->pos(), hover_point);
         // PickModelingPoint also projects a free point onto the working/view
         // plane.  Only a real snap should show the circular capture cursor;
         // free point placement keeps the crosshair.
-        SetCreationSnapCursor(
-            SnapCreationPoint(event->pos(), snapped_point, false));
+        CPoint3d snapped_point = hover_point;
+        SetCreationSnapCursor(point_found
+            && SnapCreationPoint(event->pos(), snapped_point, false));
     } else if ((tool_ == ToolMode::DrawCurve || tool_ == ToolMode::DrawBSpline)
         && document_) {
         CPoint3d snap_point{};
@@ -3848,10 +4054,14 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
 
     if ((tool_ == ToolMode::DrawCurve || tool_ == ToolMode::DrawBSpline) && document_) {
         CPoint3d preview_point{};
-        const bool preview_valid = ScreenToCurvePlane(event->pos(), preview_point);
-        if (preview_valid) {
-            SnapCreationPoint(event->pos(), preview_point, false);
-        }
+        // Use exactly the same projection as the following click.  The old
+        // ScreenToCurvePlane path depended on a legacy "active" curve, so a
+        // newly created parametric curve often had no live segment until
+        // several points had already been entered.
+        const bool preview_valid = point_pick_plane_enabled_
+            ? ScreenToWorldPlane(event->pos(), point_pick_plane_origin_,
+                                 point_pick_plane_normal_, preview_point)
+            : PickModelingPoint(event->pos(), preview_point);
         if (preview_valid != curve_preview_valid_
             || (preview_valid
                 && (std::fabs(preview_point.x - curve_preview_point_.x) > 0.0001
@@ -3999,7 +4209,10 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
         return;
     }
 
-    if (selecting_with_rect_ && tool_ == ToolMode::Select) {
+    if (selecting_with_rect_
+        && (tool_ == ToolMode::Select
+            || (tool_ == ToolMode::Transform
+                && selection_mode_ == SelectionMode::Point))) {
         rect_selection_current_ = event->pos();
         update();
         last_mouse_ = event->pos();
@@ -4202,7 +4415,7 @@ void OpenGLViewport::mouseReleaseEvent(QMouseEvent* event) {
             active_solid_dimension_operation_index_,
             active_solid_dimension_grip_,
             solid_dimension_drag_current_value_,
-            true);
+            true, solid_dimension_drag_move_base_);
         active_solid_dimension_grip_.clear();
         active_solid_dimension_operation_index_ = -1;
         if (highlighted_solid_dimension_grip_.isEmpty()) {
@@ -4247,7 +4460,9 @@ void OpenGLViewport::mouseReleaseEvent(QMouseEvent* event) {
     bool select_click_completed = false;
     if (event->button() == Qt::LeftButton
         && selecting_with_rect_
-        && tool_ == ToolMode::Select
+        && (tool_ == ToolMode::Select
+            || (tool_ == ToolMode::Transform
+                && selection_mode_ == SelectionMode::Point))
         && document_) {
         rect_selection_current_ = event->pos();
         const QPoint drag = rect_selection_current_ - rect_selection_start_;
@@ -4461,8 +4676,17 @@ void OpenGLViewport::keyPressEvent(QKeyEvent* event) {
         picking_3d_point_ = false;
         point_pick_plane_enabled_ = false;
         RestoreDefaultToolCursor();
-        emit Point3DPickCanceled();
-        emit StatusTextChanged("GetPoint3D canceled");
+        if (spatial_curve_preview_kind_
+            != SpatialCurvePreviewKind::None) {
+            // In the spatial-curve workflow Esc accepts the points already
+            // entered and ends creation, matching the classic Dom3D/3DCoat
+            // interaction. Other 3D point-picking commands still use Esc as
+            // cancellation.
+            emit Point3DPickFinished();
+        } else {
+            emit Point3DPickCanceled();
+            emit StatusTextChanged("GetPoint3D canceled");
+        }
         event->accept();
         return;
     }
@@ -4471,6 +4695,12 @@ void OpenGLViewport::keyPressEvent(QKeyEvent* event) {
         RestoreDefaultToolCursor();
         emit XYPointPickCanceled();
         emit StatusTextChanged("Point pick canceled");
+        event->accept();
+        return;
+    }
+    if (event->key() == Qt::Key_Escape && tool_ == ToolMode::Boolean) {
+        SetTool(ToolMode::Select);
+        emit StatusTextChanged("Boolean operation canceled");
         event->accept();
         return;
     }
@@ -4916,6 +5146,15 @@ void OpenGLViewport::SelectAt(const QPoint& point, SelectionAction action) {
 
     if (selection_mode_ == SelectionMode::Face) {
         if (document_->SelectSolidFaceAtScreen(screen_point, project_world, false, action)) {
+            Vec3 origin{}, x_axis{}, y_axis{}, normal{};
+            unsigned long body_id = 0;
+            int face_index = -1;
+            CPoint3d clicked_point;
+            if (document_->GetSelectedSolidFaceSketchPlane(
+                    origin, x_axis, y_axis, normal, body_id, face_index)
+                && ScreenToWorldPlane(point, origin, normal, clicked_point)) {
+                emit PlanarFaceClicked(clicked_point);
+            }
             emit SelectionChanged();
             update();
             return;
@@ -4928,6 +5167,9 @@ void OpenGLViewport::SelectAt(const QPoint& point, SelectionAction action) {
         if (document_->SelectSolidEdgeAtScreen(
                 screen_point, world_to_screen,
                 static_cast<float>(capture_distance_pixels_), action)) {
+            fillet_pick_screen_ = point;
+            fillet_pick_valid_ = true;
+            fillet_anchor_valid_ = false;
             emit SelectionChanged();
             update();
             return;
@@ -5162,7 +5404,7 @@ void OpenGLViewport::HandleBooleanClick(const QPoint& point) {
     if (!selected_solid) {
         CurvePoint scene_point{};
         if (!renderer_.ScreenToFloor(point.x(), point.y(), width(), height(), camera_, orthographic_projection_, scene_point)) {
-            emit StatusTextChanged(has_boolean_body_ ? "Boolean:select the required geometry and continue" : "Boolean:select the required geometry and continue");
+            SetBooleanOperation(boolean_operation_);
             return;
         }
         selected_solid = document_->SelectObjectAt(scene_point, 0.35f, false) && dynamic_cast<CSolid*>(document_->GetSelectedObject());
@@ -5183,13 +5425,13 @@ void OpenGLViewport::HandleBooleanClick(const QPoint& point) {
     if (!has_boolean_body_) {
         boolean_body_index_ = clicked_index;
         has_boolean_body_ = true;
-        emit StatusTextChanged("Boolean:select the required geometry and continue");
+        SetBooleanOperation(boolean_operation_);
         update();
         return;
     }
 
     if (clicked_index == boolean_body_index_) {
-        emit StatusTextChanged("Boolean:select the required geometry and continue");
+        SetBooleanOperation(boolean_operation_);
         update();
         return;
     }
@@ -6899,6 +7141,7 @@ void OpenGLViewport::HandleSolidBoxRectangleClick(const QPoint& point) {
         solid_box_waiting_for_face_ = false;
         emit SelectionChanged();
         emit StatusTextChanged("BOX: click first rectangle corner on the selected face");
+        ReprojectSolidPrimitiveAnchor();
         update();
         return;
     }
@@ -6969,6 +7212,7 @@ void OpenGLViewport::HandleSolidCylinderCircleClick(const QPoint& point) {
         solid_box_waiting_for_face_ = false;
         emit SelectionChanged();
         emit StatusTextChanged("CYLINDER: click circle center on the selected face");
+        ReprojectSolidPrimitiveAnchor();
         update();
         return;
     }
@@ -7457,6 +7701,23 @@ std::vector<CPoint3d> OpenGLViewport::SketchRectanglePoints(const CPoint3d& firs
     };
 }
 
+static double initial_primitive_height(const Camera& camera, Vec3 origin, Vec3 normal,
+    int viewport_height, bool orthographic) {
+    // Choose the initial height once at creation, targeting a readable
+    // 80-pixel dimension. Bound foreshortening near a top view so the box
+    // does not become arbitrarily tall when its normal points at the camera.
+    Vec3 forward{}, right{}, up{};
+    viewport_camera_basis(camera, forward, right, up);
+    double span = 2.0 * std::max(kMinimumOrthographicHalfHeight, camera.distance * 0.42f);
+    if (!orthographic) {
+        const double depth = std::max(0.001f, dot(origin-camera_position(camera, false),forward));
+        span = 2.0*depth*std::tan(deg_to_rad(camera.vertical_fov_degrees)*0.5);
+    }
+    const double projected_normal = std::hypot(dot(normal,right),dot(normal,up));
+    return std::clamp(80.0*span
+        / (std::max(1,viewport_height)*std::max(0.35,projected_normal)),0.001,900.0);
+}
+
 std::vector<ToolParameter> OpenGLViewport::SolidBoxParametersFromRectangle(const CPoint3d& first, const CPoint3d& second) const {
     const Vec3 a{static_cast<float>(first.x), static_cast<float>(first.y), static_cast<float>(first.z)};
     const Vec3 b{static_cast<float>(second.x), static_cast<float>(second.y), static_cast<float>(second.z)};
@@ -7475,10 +7736,11 @@ std::vector<ToolParameter> OpenGLViewport::SolidBoxParametersFromRectangle(const
     const Vec3 u = sketch_u_;
     const Vec3 v = sketch_v_;
     const Vec3 normal = sketch_normal_;
+    const double initial_height = initial_primitive_height(camera_, origin, normal, height(), orthographic_projection_);
     std::vector<ToolParameter> parameters{
         {"width", "Length", length, 0.001, 900.0, 0.5},
         {"height", "Width", width, 0.001, 900.0, 0.5},
-        {"depth", "Height", 5.0, -900.0, 900.0, 0.5},
+        {"depth", "Height", initial_height, -900.0, 900.0, 0.5},
         {"origin.x", "Origin X", origin.x, -1000000.0, 1000000.0, 0.1},
         {"origin.y", "Origin Y", origin.y, -1000000.0, 1000000.0, 0.1},
         {"origin.z", "Origin Z", origin.z, -1000000.0, 1000000.0, 0.1},
@@ -7493,6 +7755,7 @@ std::vector<ToolParameter> OpenGLViewport::SolidBoxParametersFromRectangle(const
         {"axis.n.z", "Normal Z", normal.z, -1.0, 1.0, 0.01}
     };
     if (solid_box_target_body_id_ != 0) {
+        parameters.push_back({"boolean.overlap", "Boolean Overlap", 0.001, 0.0, 1000000.0, 0.001});
         parameters.push_back({
             "boolean.body_id",
             "Boolean Body",
@@ -7524,7 +7787,7 @@ std::vector<ToolParameter> OpenGLViewport::SolidCylinderParametersFromCircle(
     const Vec3 normal = sketch_normal_;
     std::vector<ToolParameter> parameters{
         {"diameter", "Diameter", radius * 2.0, 0.001, 900.0, 0.1},
-        {"height", "Height", 5.0, -900.0, 900.0, 0.1},
+        {"height", "Height", initial_primitive_height(camera_, c, normal, height(), orthographic_projection_), -900.0, 900.0, 0.1},
         {"origin.x", "Origin X", c.x, -1000000.0, 1000000.0, 0.1},
         {"origin.y", "Origin Y", c.y, -1000000.0, 1000000.0, 0.1},
         {"origin.z", "Origin Z", c.z, -1000000.0, 1000000.0, 0.1},
@@ -7539,6 +7802,7 @@ std::vector<ToolParameter> OpenGLViewport::SolidCylinderParametersFromCircle(
         {"axis.n.z", "Normal Z", normal.z, -1.0, 1.0, 0.01}
     };
     if (solid_box_target_body_id_ != 0) {
+        parameters.push_back({"boolean.overlap", "Boolean Overlap", 0.001, 0.0, 1000000.0, 0.001});
         parameters.push_back({
             "boolean.body_id",
             "Boolean Body",
@@ -7830,35 +8094,76 @@ void OpenGLViewport::DrawHoveredSolidEdge() {
 }
 
 void OpenGLViewport::DrawCurveRubberBand() {
-    if (!document_) {
+    if (!document_ || spatial_curve_preview_kind_
+            == SpatialCurvePreviewKind::None
+        || spatial_curve_preview_points_.empty()) {
         return;
     }
 
-    const std::vector<CPoint3d>& points = tool_ == ToolMode::DrawBSpline
-        ? document_->GetActiveBSpline().GetPoints()
-        : document_->GetActivePolyline().GetPoints();
-    if ((tool_ == ToolMode::DrawCurve && document_->GetActivePolyline().IsClosed()) || points.empty()) {
-        return;
-    }
+    std::vector<CPoint3d> points = spatial_curve_preview_points_;
+    points.push_back(curve_preview_point_);
+    if (points.size() < 2) return;
 
-    const CPoint3d& last = points.back();
-    const Vec3 last_world{static_cast<float>(last.x), static_cast<float>(last.y), static_cast<float>(last.z)};
-    const Vec3 preview_world{
-        static_cast<float>(curve_preview_point_.x),
-        static_cast<float>(curve_preview_point_.y),
-        static_cast<float>(curve_preview_point_.z)
-    };
-
+    const GLboolean depth_enabled = glIsEnabled(GL_DEPTH_TEST);
+    const GLboolean lighting_enabled = glIsEnabled(GL_LIGHTING);
+    const GLboolean blend_enabled = glIsEnabled(GL_BLEND);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_LIGHTING);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glLineWidth(2.5f);
-    glColor4f(1.0f, 0.90f, 0.20f, 0.95f);
-    glBegin(GL_LINES);
-    glVertex3f(last_world.x, last_world.y, last_world.z);
-    glVertex3f(preview_world.x, preview_world.y, preview_world.z);
+    glColor4f(1.0f, 0.12f, 0.35f, 0.96f);
+    glBegin(GL_LINE_STRIP);
+    if (spatial_curve_preview_kind_
+        == SpatialCurvePreviewKind::Polyline) {
+        for (const CPoint3d& point : points) {
+            glVertex3f(static_cast<float>(point.x),
+                       static_cast<float>(point.y),
+                       static_cast<float>(point.z));
+        }
+    } else {
+        CBSpline preview("Curve Preview");
+        if (spatial_curve_preview_kind_
+            == SpatialCurvePreviewKind::Bezier) {
+            preview.SetBezierInterpolationPoints(points);
+        } else {
+            preview.SetCurveType(spatial_curve_preview_kind_
+                    == SpatialCurvePreviewKind::Nurbs
+                ? SplineCurveType::Nurbs
+                : SplineCurveType::BSpline);
+            for (const CPoint3d& point : points) {
+                preview.AddPoint(point);
+            }
+            preview.SetDegree(static_cast<int>(
+                std::min<size_t>(3, points.size() - 1)));
+        }
+
+        const int samples = std::max(
+            32, static_cast<int>(points.size() - 1) * 32);
+        for (int sample = 0; sample <= samples; ++sample) {
+            const CPoint3d point = preview.Evaluate(
+                static_cast<float>(sample)
+                / static_cast<float>(samples));
+            glVertex3f(static_cast<float>(point.x),
+                       static_cast<float>(point.y),
+                       static_cast<float>(point.z));
+        }
+    }
     glEnd();
+
+    // Keep the provisional next node visible on top of the scene.
+    glPointSize(6.0f);
+    glColor4f(1.0f, 0.92f, 0.92f, 1.0f);
+    glBegin(GL_POINTS);
+    glVertex3f(static_cast<float>(curve_preview_point_.x),
+               static_cast<float>(curve_preview_point_.y),
+               static_cast<float>(curve_preview_point_.z));
+    glEnd();
+    glPointSize(1.0f);
     glLineWidth(1.0f);
-    glEnable(GL_DEPTH_TEST);
+    if (!blend_enabled) glDisable(GL_BLEND);
+    if (lighting_enabled) glEnable(GL_LIGHTING);
+    if (depth_enabled) glEnable(GL_DEPTH_TEST);
 }
 
 void OpenGLViewport::DrawSketchRectanglePreview() {
@@ -8111,39 +8416,123 @@ void OpenGLViewport::DrawSketchBezierPreview() {
     glEnable(GL_DEPTH_TEST);
 }
 
-void OpenGLViewport::DrawSelectedCurvePointHandles() {
-    std::vector<std::pair<size_t, size_t>> displayed_points =
-        document_->GetSelectedCurvePoints();
-    if (tool_ == ToolMode::Select && editing_polyline_
-        && document_->HasSelection()) {
-        displayed_points.clear();
-        const size_t object_index = document_->GetSelectedObjectIndex();
-        const CAlfaObject* object = document_->GetSelectedObject();
-        size_t point_count = 0;
-        if (const auto* polyline = dynamic_cast<const CPolyline*>(object)) {
-            point_count = polyline->GetPointCount();
-        } else if (const auto* spline = dynamic_cast<const CBSpline*>(object)) {
-            point_count = spline->GetPointCount();
-        }
-        displayed_points.reserve(point_count);
-        for (size_t point_index = 0; point_index < point_count; ++point_index) {
-            displayed_points.emplace_back(object_index, point_index);
-        }
-    }
-    if (displayed_points.empty()) {
-        return;
-    }
+void OpenGLViewport::DrawVisibleCurvePoints() {
+    if (!document_) return;
 
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_LIGHTING);
-    glPointSize(10.0f);
+    glPointSize(7.0f);
+    glColor3f(0.0f, 0.9f, 0.15f);
     glBegin(GL_POINTS);
+    for (const auto& object : document_->GetObjects()) {
+        if (!object || !document_->IsObjectVisible(*object)) continue;
+        if (const auto* polyline = dynamic_cast<const CPolyline*>(object.get())) {
+            for (const CPoint3d& point : polyline->GetPoints()) {
+                glVertex3d(point.x, point.y, point.z);
+            }
+        } else if (const auto* spline = dynamic_cast<const CBSpline*>(object.get())) {
+            const auto& points = spline->GetPoints();
+            for (size_t index = 0; index < points.size(); ++index) {
+                if (spline->IsBezierChain() && index % 3 != 0) continue;
+                glVertex3d(points[index].x, points[index].y, points[index].z);
+            }
+        } else if (const auto* sketch = dynamic_cast<const CSmartLine*>(object.get())) {
+            for (size_t index = 0; index < sketch->GetNodeCount(); ++index) {
+                const CPoint3d point = sketch->GetNodeWorld(index);
+                glVertex3d(point.x, point.y, point.z);
+            }
+        }
+    }
+    glEnd();
+    glPointSize(1.0f);
+    glEnable(GL_DEPTH_TEST);
+}
+
+void OpenGLViewport::DrawSelectedCurvePointHandles() {
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_LIGHTING);
     const auto& objects = document_->GetObjects();
-    for (const auto& selected : displayed_points) {
-        if (selected.first >= objects.size() || !objects[selected.first]) continue;
+
+    // Bezier handles are much easier to understand when their control arms
+    // remain visible together with the selected curve.
+    glLineWidth(1.0f);
+    glColor3f(0.2f, 0.65f, 0.95f);
+    glBegin(GL_LINES);
+    for (size_t object_index : document_->GetSelectedObjectIndices()) {
+        if (object_index >= objects.size() || !objects[object_index]) continue;
+        const auto* spline = dynamic_cast<const CBSpline*>(
+            objects[object_index].get());
+        if (!spline) continue;
+        const auto& points = spline->GetPoints();
+        if (!spline->IsBezierChain()) {
+            for (size_t index = 1; index < points.size(); ++index) {
+                glVertex3d(points[index - 1].x, points[index - 1].y,
+                           points[index - 1].z);
+                glVertex3d(points[index].x, points[index].y,
+                           points[index].z);
+            }
+            if (spline->IsClosed() && points.size() > 2) {
+                glVertex3d(points.back().x, points.back().y, points.back().z);
+                glVertex3d(points.front().x, points.front().y, points.front().z);
+            }
+            continue;
+        }
+        for (size_t anchor = 0; anchor < points.size(); anchor += 3) {
+            if (anchor > 0) {
+                glVertex3d(points[anchor].x, points[anchor].y, points[anchor].z);
+                glVertex3d(points[anchor - 1].x, points[anchor - 1].y,
+                           points[anchor - 1].z);
+            }
+            if (anchor + 1 < points.size()) {
+                glVertex3d(points[anchor].x, points[anchor].y, points[anchor].z);
+                glVertex3d(points[anchor + 1].x, points[anchor + 1].y,
+                           points[anchor + 1].z);
+            }
+        }
+    }
+    glEnd();
+
+    // Show editable handles for selected curves without marking their nodes as
+    // selected. Green means an ordinary node, blue means a Bezier control.
+    glPointSize(8.0f);
+    glBegin(GL_POINTS);
+    for (size_t object_index : document_->GetSelectedObjectIndices()) {
+        if (object_index >= objects.size() || !objects[object_index]) continue;
+        if (const auto* polyline = dynamic_cast<const CPolyline*>(
+                objects[object_index].get())) {
+            if (!show_curve_points_) {
+                glColor3f(0.0f, 0.9f, 0.15f);
+                for (const CPoint3d& point : polyline->GetPoints()) {
+                    glVertex3d(point.x, point.y, point.z);
+                }
+            }
+        } else if (const auto* spline = dynamic_cast<const CBSpline*>(
+                       objects[object_index].get())) {
+            const auto& points = spline->GetPoints();
+            for (size_t point_index = 0;
+                 point_index < points.size(); ++point_index) {
+                const bool bezier_control = spline->IsBezierChain()
+                    && point_index % 3 != 0;
+                if (!bezier_control && show_curve_points_) continue;
+                if (bezier_control) glColor3f(0.15f, 0.75f, 1.0f);
+                else glColor3f(0.0f, 0.9f, 0.15f);
+                const CPoint3d& point = points[point_index];
+                glVertex3d(point.x, point.y, point.z);
+            }
+        }
+    }
+    glEnd();
+
+    // Only explicitly selected points receive the yellow selection marker.
+    glPointSize(13.0f);
+    glColor3f(1.0f, 0.85f, 0.0f);
+    glBegin(GL_POINTS);
+    for (const auto& selected : document_->GetSelectedCurvePoints()) {
+        if (selected.first >= objects.size() || !objects[selected.first]) {
+            continue;
+        }
         CPoint3d point{};
         bool found = false;
-        bool bezier_control = false;
         if (const auto* polyline = dynamic_cast<const CPolyline*>(
                 objects[selected.first].get())) {
             if (selected.second < polyline->GetPoints().size()) {
@@ -8155,8 +8544,6 @@ void OpenGLViewport::DrawSelectedCurvePointHandles() {
             if (selected.second < spline->GetPoints().size()) {
                 point = spline->GetPoints()[selected.second];
                 found = true;
-                bezier_control = spline->IsBezierChain()
-                    && selected.second % 3 != 0;
             }
         } else if (const auto* sketch = dynamic_cast<const CSmartLine*>(
                        objects[selected.first].get())) {
@@ -8166,9 +8553,7 @@ void OpenGLViewport::DrawSelectedCurvePointHandles() {
             }
         }
         if (!found) continue;
-        if (bezier_control) glColor3f(0.15f, 0.75f, 1.0f);
-        else glColor3f(0.0f, 1.0f, 0.0f);
-        glVertex3f(static_cast<float>(point.x), static_cast<float>(point.y), static_cast<float>(point.z));
+        glVertex3d(point.x, point.y, point.z);
     }
     glEnd();
     glPointSize(1.0f);
@@ -8834,7 +9219,9 @@ void OpenGLViewport::DrawSolidDimensions() {
             continue;
         }
         const bool primary = dimension.IsActive();
-        const bool radial_dimension = dimension.GetParameterId() == "radius";
+        const bool radial_dimension = (dimension.GetParameterId() == "radius" || dimension.GetParameterId() == "distance"
+            || (dimension.GetSourceIndex() < solid_dimension_objects_.size()
+                && solid_dimension_objects_[dimension.GetSourceIndex()].tool_id == "SolidPrismTool"));
         if (primary) {
             glColor3f(0.05f, 0.62f, 1.0f);
             glLineWidth(2.5f);
@@ -8891,6 +9278,9 @@ void OpenGLViewport::DrawSolidDimensions() {
         }
         const double arrow_width = std::abs(arrow_length) * 0.30;
         const auto draw_arrow = [&](const CPoint3d& tip, const CPoint3d& inward) {
+            if (radial_dimension || (dimension.GetSourceIndex() < solid_dimension_objects_.size()
+                && (solid_dimension_objects_[dimension.GetSourceIndex()].tool_id == "SolidBox"
+                || solid_dimension_objects_[dimension.GetSourceIndex()].tool_id == "SolidCylinder"))) return;
             const CPoint3d base = add_point(tip, scale_point(inward, arrow_length));
             line(tip, add_point(base, scale_point(wing, arrow_width)));
             line(tip, add_point(base, scale_point(wing, -arrow_width)));
@@ -8908,6 +9298,49 @@ void OpenGLViewport::DrawSolidDimensions() {
         glBegin(GL_LINES);
         draw_arrow(geometry.dimension_end, scale_point(direction, -1.0));
         glEnd();
+        if (radial_dimension || (dimension.GetSourceIndex() < solid_dimension_objects_.size()
+            && (solid_dimension_objects_[dimension.GetSourceIndex()].tool_id == "SolidBox"
+                || solid_dimension_objects_[dimension.GetSourceIndex()].tool_id == "SolidCylinder"))) {
+            const double dx=arrow_end_screen.x-arrow_start_screen.x,dy=arrow_end_screen.y-arrow_start_screen.y;
+            const double length=std::hypot(dx,dy);
+            if(length>0.5) {
+                // Native filled triangles: QPainter polygons disappear with
+                // some OpenGL paint engines. Use the same pixel coordinates
+                // as the mouse hit areas, independent of zoom and view angle.
+                GLint matrix_mode;glGetIntegerv(GL_MATRIX_MODE,&matrix_mode);
+                const GLboolean culling=glIsEnabled(GL_CULL_FACE);
+                glDisable(GL_CULL_FACE);
+                glMatrixMode(GL_PROJECTION);glPushMatrix();glLoadIdentity();
+                glOrtho(0,width(),height(),0,-1,1);
+                glMatrixMode(GL_MODELVIEW);glPushMatrix();glLoadIdentity();
+                glPolygonMode(GL_FRONT_AND_BACK,GL_FILL);
+                glColor3f(1.0f,0.86f,0.0f);
+                const double radial_length=length;
+                if(radial_dimension) {
+                    glLineWidth(2.0f);glBegin(GL_LINES);
+                    glVertex2d(arrow_start_screen.x,arrow_start_screen.y);
+                    glVertex2d(arrow_start_screen.x+dx/length*radial_length,arrow_start_screen.y+dy/length*radial_length);
+                    glEnd();
+                }
+                glBegin(GL_TRIANGLES);
+                for(int side=radial_dimension?1:0;side<2;++side) {
+                    const double sign=side==0?-1.0:1.0,ux=sign*dx/length,uy=sign*dy/length;
+                    auto anchor=side==0?arrow_start_screen:arrow_end_screen;
+                    if(radial_dimension) anchor={qRound(arrow_start_screen.x+dx/length*radial_length),qRound(arrow_start_screen.y+dy/length*radial_length)};
+                    // Tip at the dimension endpoint; the triangle lies inside
+                    // the measured segment, matching the endpoint being moved.
+                    const double half_head=radial_dimension?7.5:8.0;
+                    const double head_width=5.5;
+                    const double x=anchor.x-ux*half_head,y=anchor.y-uy*half_head;
+                    glVertex2d(anchor.x,anchor.y);
+                    glVertex2d(x-ux*half_head-uy*head_width,y-uy*half_head+ux*head_width);
+                    glVertex2d(x-ux*half_head+uy*head_width,y-uy*half_head-ux*head_width);
+                }
+                glEnd();
+                glPopMatrix();glMatrixMode(GL_PROJECTION);glPopMatrix();glMatrixMode(matrix_mode);
+                if(culling)glEnable(GL_CULL_FACE);
+            }
+        }
     }
     glLineWidth(1.0f);
     if (depth_test_enabled) {
@@ -8938,6 +9371,8 @@ void OpenGLViewport::DrawSolidDimensions() {
         QPointF position;
         QString parameter_id;
         int operation_index = -1;
+        QPointF direction;
+        bool box_arrow = false;
     };
     std::vector<DimensionGripDrawInfo> dimension_grips;
     const auto project = [this](const CPoint3d& point, QPointF& result) {
@@ -8982,6 +9417,17 @@ void OpenGLViewport::DrawSolidDimensions() {
             continue;
         }
 
+        if ((dimension.GetParameterId()=="radius" || dimension.GetParameterId()=="distance")) {
+            const QPointF delta=dimension_end-dimension_start;
+            const double len=std::hypot(delta.x(),delta.y());
+            if(len>0.5) {
+                const QPointF axis=delta/len,side(-axis.y(),axis.x());
+                const double radial_length=len;
+                source_start=dimension_start;source_end=dimension_end;
+                extension_start=dimension_start;extension_end=dimension_end;
+                text_position=dimension_start+axis*(radial_length*0.5)+side*24.0;
+            }
+        }
         QPointF direction = dimension_end - dimension_start;
         const double screen_length = std::hypot(direction.x(), direction.y());
         if (screen_length < 0.5) {
@@ -9037,7 +9483,13 @@ void OpenGLViewport::DrawSolidDimensions() {
                   << tip + inward * 12.0 - perpendicular * 5.0;
             return arrow;
         };
-        const bool radial_dimension = dimension.GetParameterId() == "radius";
+        const bool box_handles = dimension.GetSourceIndex() < solid_dimension_objects_.size()
+            && (solid_dimension_objects_[dimension.GetSourceIndex()].tool_id == "SolidBox"
+                || solid_dimension_objects_[dimension.GetSourceIndex()].tool_id == "SolidCylinder");
+        const bool prism_handle = dimension.GetSourceIndex() < solid_dimension_objects_.size()
+            && solid_dimension_objects_[dimension.GetSourceIndex()].tool_id == "SolidPrismTool";
+        const bool radial_dimension = (dimension.GetParameterId() == "radius" || dimension.GetParameterId() == "distance");
+        if (!box_handles && !prism_handle && !radial_dimension) {
         const QPolygonF first_arrow = arrow_polygon(dimension_start, direction);
         const QPolygonF second_arrow = arrow_polygon(dimension_end, -direction);
         painter.setPen(QPen(outline, 2.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
@@ -9050,6 +9502,7 @@ void OpenGLViewport::DrawSolidDimensions() {
         painter.setBrush(QColor(255, 45, 25));
         painter.drawPolygon(second_arrow);
 
+        }
         const QRect arrow_hit_rect = QRectF(dimension_start, dimension_end)
             .normalized()
             .adjusted(-9.0, -9.0, 9.0, 9.0)
@@ -9071,24 +9524,25 @@ void OpenGLViewport::DrawSolidDimensions() {
                 QString::fromStdString(dimension.GetParameterId());
             const int operation_index = static_cast<int>(
                 solid_dimension_objects_[dimension.GetSourceIndex()].operation_index);
-            dimension_grips.push_back(
-                {dimension_end, parameter_id, operation_index});
-            const QRect grip_hit_rect = QRectF(
-                dimension_end - QPointF(22.0, 22.0),
-                QSizeF(44.0, 44.0)).toAlignedRect();
-            solid_dimension_hits_.push_back(
-                {grip_hit_rect,
-                 parameter_id,
-                 dimension.GetValue(),
-                 false,
-                 true,
-                 {qRound(dimension_start.x()), qRound(dimension_start.y())},
-                 {qRound(dimension_end.x()), qRound(dimension_end.y())},
-                 dimension.GetSourceIndex()});
+            for (int side = 0; side < (box_handles ? 2 : 1); ++side) {
+                const bool move_base = side == 1;
+                const QPointF outward = move_base ? -direction : direction;
+                const QPointF anchor = move_base ? dimension_start : dimension_end;
+                const bool filled_handle=box_handles || prism_handle || (dimension.GetParameterId()=="radius" || dimension.GetParameterId()=="distance");
+                const double half_head=(prism_handle || dimension.GetParameterId()=="radius" || dimension.GetParameterId()=="distance")
+                    ? 7.5:8.0;
+                const QPointF position = filled_handle ? anchor - outward * half_head : anchor;
+                dimension_grips.push_back({position, parameter_id, operation_index, outward, filled_handle});
+                const double radius = box_handles ? 13.0 : 22.0;
+                const QRect hit = QRectF(position-QPointF(radius,radius),QSizeF(2*radius,2*radius)).toAlignedRect();
+                solid_dimension_hits_.push_back({hit, parameter_id, dimension.GetValue(), false, true,
+                    {qRound(dimension_start.x()),qRound(dimension_start.y())},
+                    {qRound(dimension_end.x()),qRound(dimension_end.y())},dimension.GetSourceIndex(),move_base});
+            }
         }
 
         const QString text = QString("%1%2%3")
-            .arg(radial_dimension ? QStringLiteral("R ") : QString())
+            .arg(dimension.GetParameterId() == "radius" ? QStringLiteral("R ") : QString())
             .arg(MillimetersToDisplay(dimension.GetValue(), display_unit), 0, 'f', 1)
             .arg(suffix);
         const QSize text_size = painter.fontMetrics().size(Qt::TextSingleLine, text);
@@ -9118,6 +9572,7 @@ void OpenGLViewport::DrawSolidDimensions() {
     // Grips are a foreground UI element. Draw them only after every dimension
     // line, arrow and label so later dimensions cannot cover the handles.
     for (const DimensionGripDrawInfo& grip : dimension_grips) {
+        if (grip.box_arrow) continue; // Drawn in the native GL pass.
         const QPointF& position = grip.position;
         const bool highlighted =
             (grip.parameter_id == highlighted_solid_dimension_grip_

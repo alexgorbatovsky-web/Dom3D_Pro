@@ -53,6 +53,9 @@ public:
     bool SetPoint(size_t index, CPoint3d point);
     bool SetPointDirect(size_t index, CPoint3d point);
     bool RemovePoint(size_t index);
+    // Removes a user-visible node. For a Bezier chain this removes the anchor
+    // together with its associated controls and rebuilds a valid chain.
+    bool RemoveNode(size_t index);
     void Reverse();
     bool ExtendEndpoint(bool at_start, double distance);
     CPoint3d Evaluate(float t) const;

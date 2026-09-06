@@ -1,6 +1,6 @@
 # Class and struct index
 
-Generated from project headers: 2026-08-30.
+Generated from project headers: 2026-09-01.
 
 > This is a syntax-oriented index, not a complete C++ parser.
 > Nested or conditionally compiled types can require manual review.
@@ -463,7 +463,7 @@ Generated from project headers: 2026-08-30.
 | `HotkeyManagerDialog` | `class` | `QDialog` | [src/ui/HotkeyManagerDialog.h:14](../../../src/ui/HotkeyManagerDialog.h#14) |
 | `LanguageManager` | `class` | `QObject` | [src/ui/LanguageManager.h:14](../../../src/ui/LanguageManager.h#14) |
 | `LightingDialog` | `class` | `QDialog` | [src/ui/LightingDialog.h:9](../../../src/ui/LightingDialog.h#9) |
-| `MainWindow` | `class` | `QMainWindow` | [src/ui/MainWindow.h:57](../../../src/ui/MainWindow.h#57) |
+| `MainWindow` | `class` | `QMainWindow` | [src/ui/MainWindow.h:59](../../../src/ui/MainWindow.h#59) |
 | `MaterialEditorDialog` | `class` | `QDialog` | [src/ui/MaterialEditorDialog.h:22](../../../src/ui/MaterialEditorDialog.h#22) |
 | `MaterialSphereBrowser` | `class` | `QWidget` | [src/ui/MaterialSphereBrowser.h:16](../../../src/ui/MaterialSphereBrowser.h#16) |
 | `MaterialSphereItem` | `struct` | - | [src/ui/MaterialSphereBrowser.h:9](../../../src/ui/MaterialSphereBrowser.h#9) |
@@ -473,9 +473,9 @@ Generated from project headers: 2026-08-30.
 | `PropertyPanel` | `class` | `QWidget` | [src/ui/PropertyPanel.h:10](../../../src/ui/PropertyPanel.h#10) |
 | `QtSceneRenderer` | `class` | - | [src/ui/QtSceneRenderer.h:7](../../../src/ui/QtSceneRenderer.h#7) |
 | `RenderLightEditorDialog` | `class` | `QDialog` | [src/ui/RenderLightEditorDialog.h:11](../../../src/ui/RenderLightEditorDialog.h#11) |
-| `SolidDimensionHit` | `struct` | - | [src/ui/OpenGLViewport.h:496](../../../src/ui/OpenGLViewport.h#496) |
+| `SolidDimensionHit` | `struct` | - | [src/ui/OpenGLViewport.h:522](../../../src/ui/OpenGLViewport.h#522) |
 | `TextTemplate` | `struct` | - | [src/ui/LanguageManager.h:37](../../../src/ui/LanguageManager.h#37) |
 | `ToolDefinition` | `struct` | - | [src/ui/ToolRegistry.h:41](../../../src/ui/ToolRegistry.h#41) |
 | `ToolParameter` | `struct` | - | [src/ui/ToolRegistry.h:28](../../../src/ui/ToolRegistry.h#28) |
 | `ToolRegistry` | `class` | - | [src/ui/ToolRegistry.h:57](../../../src/ui/ToolRegistry.h#57) |
-| `WalkRoomFootprint` | `struct` | - | [src/ui/OpenGLViewport.h:306](../../../src/ui/OpenGLViewport.h#306) |
+| `WalkRoomFootprint` | `struct` | - | [src/ui/OpenGLViewport.h:327](../../../src/ui/OpenGLViewport.h#327) |

@@ -18,6 +18,9 @@ public:
     void SetSelectedOperation(Operation operation);
     Operation SelectedOperation() const;
 
+signals:
+    void SelectedOperationChanged(Operation operation);
+
 private:
     QComboBox* combo_ = nullptr;
 };

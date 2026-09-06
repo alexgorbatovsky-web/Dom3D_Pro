@@ -304,6 +304,10 @@ bool IsInternalPlacementParameter(const ToolParameter& parameter) {
         || parameter.id.rfind("hole.", 0) == 0
         || parameter.id.rfind("width.scale.", 0) == 0
         || parameter.id.rfind("height.scale.", 0) == 0
+        || parameter.id == "curve.count"
+        || (parameter.id.rfind("curve", 0) == 0
+            && parameter.id.size() > 3
+            && parameter.id.compare(parameter.id.size() - 3, 3, ".id") == 0)
         || parameter.id == "profile.id"
         || parameter.id == "section.id"
         || parameter.id == "guide.id"
@@ -315,6 +319,7 @@ bool IsInternalPlacementParameter(const ToolParameter& parameter) {
         || parameter.id == "host.wall.id"
         || parameter.id == "face.index"
         || parameter.id == "boolean.body_id"
+        || parameter.id == "boolean.overlap"
         || parameter.id == "boolean.tool_index";
 }
 

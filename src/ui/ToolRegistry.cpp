@@ -1,19 +1,24 @@
+#include "TileTool.h"
 #include "ToolRegistry.h"
 #include "../ExtrudeShapeBuilder.h"
 
 #include "../CMesh3D.h"
+#include "../CatmullClarkSurfaceBuilder.h"
 #include "../CAssembled.h"
 #include "../CFacadeFurniture.h"
 #include "../CFurnitureDrawer.h"
 #include "../CFurnitureAssemblies.h"
 #include "../CKitchenCabinet.h"
 #include "../FurnitureMaterialFactory.h"
+#include "../FourSplineSurfaceBuilder.h"
 #include "../solid/AssociativeClone.h"
 #include "../CPolyline.h"
+#include "../CBSpline.h"
 #include "../SmartLine.h"
 #include "../SketchProfileBuilder.h"
 #include "../SweptSolidBuilder.h"
 #include "../solid/Solid.h"
+#include "../solid/HolePlacement.h"
 #include "../solid/SolidBeamTool.h"
 #include "../solid/SolidBoxTool.h"
 #include "../solid/SolidCylinderTool.h"
@@ -41,6 +46,8 @@
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_MakeShape.hxx>
+#include <BRepBuilderAPI_MakeSolid.hxx>
+#include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
@@ -56,9 +63,12 @@
 #include <BRepOffsetAPI_ThruSections.hxx>
 #include <BRepOffsetAPI_MakePipeShell.hxx>
 #include <BRepTools.hxx>
+#include <BRepCheck_Analyzer.hxx>
 #include <BRepBndLib.hxx>
 #include <Bnd_Box.hxx>
 #include <GeomAbs_SurfaceType.hxx>
+#include <GeomAPI_PointsToBSpline.hxx>
+#include <Geom_BSplineCurve.hxx>
 #include <GProp_GProps.hxx>
 #include <gp_Ax1.hxx>
 #include <gp_Dir.hxx>
@@ -68,8 +78,10 @@
 #include <gp_Pln.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
+#include <TColgp_Array1OfPnt.hxx>
 #include <TColgp_Array1OfPnt2d.hxx>
 #include <Standard_Failure.hxx>
+#include <ShapeFix_Solid.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
@@ -78,6 +90,7 @@
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Vertex.hxx>
+#include <TopoDS_Shell.hxx>
 
 #include <QApplication>
 #include <QEventLoop>
@@ -117,10 +130,50 @@ bool is_cabinet_tool(const std::string& id) {
 }
 
 bool is_furniture_assembly_tool(const std::string& id) {
-    return id == "chair" || id == "chair_simple" || id == "table"
+    return id == "tile" || id == "chair" || id == "chair_simple" || id == "table"
         || is_cabinet_tool(id) || id == "desk" || id == "drawer_box"
         || id == "single_drawer" || id == "single_facade"
         || id == "kitchen_nika_260" || id == "kitchen_corner";
+}
+
+bool is_geometry_reference_parameter(const std::string& id) {
+    if (id == "profile.id" || id == "section.id" || id == "guide.id"
+        || id == "guide1.id" || id == "guide2.id" || id == "surface.id") {
+        return true;
+    }
+    return id.size() > 8 && id.rfind("curve", 0) == 0
+        && id.compare(id.size() - 3, 3, ".id") == 0;
+}
+
+double param(const std::vector<ToolParameter>& parameters,
+             const char* id,
+             double fallback);
+
+std::vector<ToolParameter> loft_parameter_defaults() {
+    std::vector<ToolParameter> parameters;
+    parameters.push_back({"curve.count", "Curve Count", 0.0, 0.0, 32.0, 1.0});
+    for (int index = 1; index <= 32; ++index) {
+        parameters.push_back({
+            "curve" + std::to_string(index) + ".id",
+            "Curve " + std::to_string(index) + " ID",
+            0.0, 0.0, 4294967295.0, 1.0});
+    }
+    return parameters;
+}
+
+std::vector<unsigned long> loft_curve_ids(
+    const std::vector<ToolParameter>& parameters) {
+    const int count = std::clamp(
+        static_cast<int>(param(parameters, "curve.count", 0.0)), 0, 32);
+    std::vector<unsigned long> ids;
+    ids.reserve(static_cast<size_t>(count));
+    for (int index = 1; index <= count; ++index) {
+        const std::string id = "curve" + std::to_string(index) + ".id";
+        const unsigned long value = static_cast<unsigned long>(
+            std::max(0.0, param(parameters, id.c_str(), 0.0)));
+        if (value != 0) ids.push_back(value);
+    }
+    return ids;
 }
 
 double param(const std::vector<ToolParameter>& parameters, const char* id, double fallback) {
@@ -272,6 +325,971 @@ TopoDS_Face first_face(const TopoDS_Shape& shape) {
     return TopoDS::Face(explorer.Current());
 }
 
+struct OffsetPoint2d {
+    double x = 0.0;
+    double y = 0.0;
+};
+
+double offset_cross(const OffsetPoint2d& first, const OffsetPoint2d& second) {
+    return first.x * second.y - first.y * second.x;
+}
+
+double offset_length(const OffsetPoint2d& value) {
+    return std::sqrt(value.x * value.x + value.y * value.y);
+}
+
+bool offset_segment_intersection(const OffsetPoint2d& first_start,
+                                 const OffsetPoint2d& first_end,
+                                 const OffsetPoint2d& second_start,
+                                 const OffsetPoint2d& second_end,
+                                 OffsetPoint2d& intersection) {
+    const OffsetPoint2d first_direction{
+        first_end.x - first_start.x, first_end.y - first_start.y};
+    const OffsetPoint2d second_direction{
+        second_end.x - second_start.x, second_end.y - second_start.y};
+    const double denominator = offset_cross(
+        first_direction, second_direction);
+    if (std::abs(denominator) <= 1.0e-12) return false;
+    const OffsetPoint2d between{
+        second_start.x - first_start.x,
+        second_start.y - first_start.y};
+    const double first_parameter = offset_cross(
+        between, second_direction) / denominator;
+    const double second_parameter = offset_cross(
+        between, first_direction) / denominator;
+    constexpr double endpoint_tolerance = 1.0e-8;
+    if (first_parameter <= endpoint_tolerance
+        || first_parameter >= 1.0 - endpoint_tolerance
+        || second_parameter <= endpoint_tolerance
+        || second_parameter >= 1.0 - endpoint_tolerance) {
+        return false;
+    }
+    intersection = {
+        first_start.x + first_direction.x * first_parameter,
+        first_start.y + first_direction.y * first_parameter};
+    return true;
+}
+
+double offset_signed_area(const std::vector<OffsetPoint2d>& points) {
+    double twice_area = 0.0;
+    for (size_t index = 0; index < points.size(); ++index) {
+        const OffsetPoint2d& current = points[index];
+        const OffsetPoint2d& next = points[(index + 1) % points.size()];
+        twice_area += offset_cross(current, next);
+    }
+    return 0.5 * twice_area;
+}
+
+void remove_open_offset_loops(std::vector<OffsetPoint2d>& points) {
+    if (points.size() < 4) return;
+    for (size_t pass = 0; pass < points.size(); ++pass) {
+        bool removed = false;
+        for (size_t first = 0; first + 2 < points.size() && !removed; ++first) {
+            for (size_t second = first + 2; second + 1 < points.size(); ++second) {
+                OffsetPoint2d intersection;
+                if (!offset_segment_intersection(
+                        points[first], points[first + 1],
+                        points[second], points[second + 1], intersection)) {
+                    continue;
+                }
+                std::vector<OffsetPoint2d> cleaned;
+                cleaned.reserve(points.size() - (second - first));
+                cleaned.insert(
+                    cleaned.end(), points.begin(), points.begin() + first + 1);
+                cleaned.push_back(intersection);
+                cleaned.insert(
+                    cleaned.end(), points.begin() + second + 1, points.end());
+                points.swap(cleaned);
+                removed = true;
+                break;
+            }
+        }
+        if (!removed) break;
+    }
+}
+
+void remove_closed_offset_loops(std::vector<OffsetPoint2d>& points) {
+    if (points.size() < 4) return;
+    for (size_t pass = 0; pass < points.size(); ++pass) {
+        bool removed = false;
+        const size_t count = points.size();
+        for (size_t first = 0; first < count && !removed; ++first) {
+            const size_t first_next = (first + 1) % count;
+            for (size_t second = first + 1; second < count; ++second) {
+                const size_t second_next = (second + 1) % count;
+                if (first_next == second || second_next == first) continue;
+                OffsetPoint2d intersection;
+                if (!offset_segment_intersection(
+                        points[first], points[first_next],
+                        points[second], points[second_next], intersection)) {
+                    continue;
+                }
+
+                std::vector<OffsetPoint2d> first_loop{intersection};
+                for (size_t index = first_next; index != second_next;
+                     index = (index + 1) % count) {
+                    first_loop.push_back(points[index]);
+                }
+                std::vector<OffsetPoint2d> second_loop{intersection};
+                for (size_t index = second_next; index != first_next;
+                     index = (index + 1) % count) {
+                    second_loop.push_back(points[index]);
+                }
+                const bool keep_first = first_loop.size() >= 3
+                    && (second_loop.size() < 3
+                        || std::abs(offset_signed_area(first_loop))
+                            >= std::abs(offset_signed_area(second_loop)));
+                points = keep_first
+                    ? std::move(first_loop) : std::move(second_loop);
+                removed = true;
+                break;
+            }
+        }
+        if (!removed) break;
+    }
+}
+
+CPoint3d offset_cross3d(const CPoint3d& first, const CPoint3d& second) {
+    return CPoint3d(
+        first.y * second.z - first.z * second.y,
+        first.z * second.x - first.x * second.z,
+        first.x * second.y - first.y * second.x);
+}
+
+double offset_dot3d(const CPoint3d& first, const CPoint3d& second) {
+    return first.x * second.x + first.y * second.y + first.z * second.z;
+}
+
+double offset_length3d(const CPoint3d& value) {
+    return std::sqrt(offset_dot3d(value, value));
+}
+
+CPoint3d offset_normalized3d(const CPoint3d& value) {
+    const double length = offset_length3d(value);
+    return length > 1.0e-12 ? value * (1.0 / length) : CPoint3d{};
+}
+
+bool curve_is_closed(const CAlfaObject& object) {
+    if (const auto* polyline = dynamic_cast<const CPolyline*>(&object)) {
+        return polyline->IsClosed();
+    }
+    if (const auto* spline = dynamic_cast<const CBSpline*>(&object)) {
+        return spline->IsClosed();
+    }
+    return false;
+}
+
+std::vector<CPoint3d> sampled_curve_points(const CAlfaObject& object) {
+    if (const auto* polyline = dynamic_cast<const CPolyline*>(&object)) {
+        std::vector<CPoint3d> points = polyline->GetRoundedPathPoints();
+        if (polyline->IsClosed() && points.size() > 1
+            && offset_length3d(points.back() - points.front()) < 1.0e-8) {
+            points.pop_back();
+        }
+        return points;
+    }
+    const auto* spline = dynamic_cast<const CBSpline*>(&object);
+    if (!spline || spline->GetPointCount() < 2) return {};
+    const bool closed = spline->IsClosed();
+    const int segments = std::clamp(
+        static_cast<int>(spline->GetPointCount()) * 8, 32, 192);
+    std::vector<CPoint3d> points;
+    points.reserve(static_cast<size_t>(segments) + (closed ? 0u : 1u));
+    const int last = closed ? segments - 1 : segments;
+    for (int index = 0; index <= last; ++index) {
+        points.push_back(spline->Evaluate(
+            static_cast<float>(index) / static_cast<float>(segments)));
+    }
+    return points;
+}
+
+bool planar_curve_offset(const CAlfaObject& source,
+                         double distance,
+                         bool delete_loops,
+                         std::vector<CPoint3d>& result,
+                         CPoint3d& plane_origin,
+                         CPoint3d& plane_normal) {
+    std::vector<CPoint3d> points = sampled_curve_points(source);
+    const bool closed = curve_is_closed(source);
+    if (points.size() < (closed ? 3u : 2u) || std::abs(distance) < 1.0e-9) {
+        return false;
+    }
+
+    // Remove duplicate sampled points before constructing segment normals.
+    std::vector<CPoint3d> clean;
+    clean.reserve(points.size());
+    for (const CPoint3d& point : points) {
+        if (clean.empty() || offset_length3d(point - clean.back()) > 1.0e-8) {
+            clean.push_back(point);
+        }
+    }
+    if (closed && clean.size() > 1
+        && offset_length3d(clean.back() - clean.front()) < 1.0e-8) {
+        clean.pop_back();
+    }
+    if (clean.size() < (closed ? 3u : 2u)) return false;
+    points.swap(clean);
+
+    plane_origin = points.front();
+    CPoint3d normal;
+    if (const auto* polyline = dynamic_cast<const CPolyline*>(&source)) {
+        Vec3 locked_origin{};
+        Vec3 locked_normal{};
+        if (polyline->GetLockedPlane(locked_origin, locked_normal)) {
+            plane_origin = CPoint3d(
+                locked_origin.x, locked_origin.y, locked_origin.z);
+            normal = CPoint3d(
+                locked_normal.x, locked_normal.y, locked_normal.z);
+        }
+    }
+    if (offset_length3d(normal) <= 1.0e-12 && closed) {
+        // Newell's normal gives a stable orientation.  With this orientation,
+        // positive distance means outside for a closed contour.
+        for (size_t index = 0; index < points.size(); ++index) {
+            const CPoint3d& current = points[index];
+            const CPoint3d& next = points[(index + 1) % points.size()];
+            normal.x += (current.y - next.y) * (current.z + next.z);
+            normal.y += (current.z - next.z) * (current.x + next.x);
+            normal.z += (current.x - next.x) * (current.y + next.y);
+        }
+    }
+    if (offset_length3d(normal) <= 1.0e-12) {
+        double strongest = 0.0;
+        for (size_t first = 1; first < points.size(); ++first) {
+            for (size_t second = first + 1; second < points.size(); ++second) {
+                const CPoint3d candidate = offset_cross3d(
+                    points[first] - plane_origin,
+                    points[second] - plane_origin);
+                const double strength = offset_dot3d(candidate, candidate);
+                if (strength > strongest) {
+                    strongest = strength;
+                    normal = candidate;
+                }
+            }
+        }
+    }
+    if (offset_length3d(normal) <= 1.0e-10) return false;
+    normal = offset_normalized3d(normal);
+
+    double span = 0.0;
+    for (const CPoint3d& point : points) {
+        span = std::max(span, offset_length3d(point - plane_origin));
+    }
+    const double plane_tolerance = std::max(1.0e-4, span * 1.0e-5);
+    for (const CPoint3d& point : points) {
+        if (std::abs(offset_dot3d(point - plane_origin, normal))
+            > plane_tolerance) {
+            return false;
+        }
+    }
+
+    CPoint3d axis_u;
+    for (size_t index = 1; index < points.size(); ++index) {
+        CPoint3d candidate = points[index] - plane_origin;
+        candidate -= normal * offset_dot3d(candidate, normal);
+        if (offset_length3d(candidate) > 1.0e-10) {
+            axis_u = offset_normalized3d(candidate);
+            break;
+        }
+    }
+    if (offset_length3d(axis_u) <= 1.0e-12) return false;
+    const CPoint3d axis_v = offset_normalized3d(offset_cross3d(normal, axis_u));
+
+    std::vector<OffsetPoint2d> projected;
+    projected.reserve(points.size());
+    for (const CPoint3d& point : points) {
+        const CPoint3d delta = point - plane_origin;
+        projected.push_back({offset_dot3d(delta, axis_u),
+                             offset_dot3d(delta, axis_v)});
+    }
+
+    const size_t segment_count = closed ? projected.size() : projected.size() - 1;
+    std::vector<OffsetPoint2d> directions(segment_count);
+    std::vector<OffsetPoint2d> normals(segment_count);
+    const double side = closed ? -1.0 : 1.0;
+    for (size_t segment = 0; segment < segment_count; ++segment) {
+        const OffsetPoint2d& start = projected[segment];
+        const OffsetPoint2d& end = projected[(segment + 1) % projected.size()];
+        OffsetPoint2d direction{end.x - start.x, end.y - start.y};
+        const double length = offset_length(direction);
+        if (length <= 1.0e-12) return false;
+        direction.x /= length;
+        direction.y /= length;
+        directions[segment] = direction;
+        normals[segment] = {
+            side * -direction.y * distance,
+            side * direction.x * distance};
+    }
+
+    std::vector<OffsetPoint2d> offset_points(projected.size());
+    for (size_t index = 0; index < projected.size(); ++index) {
+        if (!closed && index == 0) {
+            offset_points[index] = {
+                projected[index].x + normals.front().x,
+                projected[index].y + normals.front().y};
+            continue;
+        }
+        if (!closed && index + 1 == projected.size()) {
+            offset_points[index] = {
+                projected[index].x + normals.back().x,
+                projected[index].y + normals.back().y};
+            continue;
+        }
+        const size_t previous = (index + segment_count - 1) % segment_count;
+        const size_t next = index % segment_count;
+        const OffsetPoint2d first_origin{
+            projected[index].x + normals[previous].x,
+            projected[index].y + normals[previous].y};
+        const OffsetPoint2d second_origin{
+            projected[index].x + normals[next].x,
+            projected[index].y + normals[next].y};
+        const double denominator = offset_cross(
+            directions[previous], directions[next]);
+        OffsetPoint2d candidate{
+            0.5 * (first_origin.x + second_origin.x),
+            0.5 * (first_origin.y + second_origin.y)};
+        if (std::abs(denominator) > 1.0e-10) {
+            const OffsetPoint2d between{
+                second_origin.x - first_origin.x,
+                second_origin.y - first_origin.y};
+            const double parameter = offset_cross(between, directions[next])
+                / denominator;
+            const OffsetPoint2d intersection{
+                first_origin.x + directions[previous].x * parameter,
+                first_origin.y + directions[previous].y * parameter};
+            const OffsetPoint2d miter{
+                intersection.x - projected[index].x,
+                intersection.y - projected[index].y};
+            if (offset_length(miter) <= std::abs(distance) * 12.0) {
+                candidate = intersection;
+            }
+        }
+        offset_points[index] = candidate;
+    }
+
+    if (delete_loops) {
+        if (closed) remove_closed_offset_loops(offset_points);
+        else remove_open_offset_loops(offset_points);
+    }
+
+    result.clear();
+    result.reserve(offset_points.size());
+    for (const OffsetPoint2d& point : offset_points) {
+        result.push_back(plane_origin + axis_u * point.x + axis_v * point.y);
+    }
+    plane_normal = normal;
+    return result.size() >= (closed ? 3u : 2u);
+}
+
+void copy_offset_curve_appearance(const CAlfaObject& source,
+                                  CAlfaObject& target) {
+    target.SetColor(source.GetColor());
+    target.SetMaterial(source.GetMaterial());
+    target.SetMaterialId(source.GetMaterialId());
+    target.SetGroupName(source.GetGroupName());
+    target.SetLineWidth(source.GetLineWidth());
+    target.SetLineStyle(source.GetLineStyle());
+    target.SetVisible(source.IsVisible());
+    target.m_LayerID = source.m_LayerID;
+}
+
+bool curve_mirror_plane(const std::vector<ToolParameter>& parameters,
+                        Vec3& point,
+                        Vec3& normal) {
+    point = {};
+    normal = {};
+    const int plane = std::clamp(
+        static_cast<int>(std::lround(param(parameters, "plane", 0.0))),
+        0, 2);
+    const float offset = static_cast<float>(
+        param(parameters, "offset", 0.0));
+    if (plane == 0) {
+        point.x = offset;
+        normal.x = 1.0f;
+    } else if (plane == 1) {
+        point.y = offset;
+        normal.y = 1.0f;
+    } else {
+        point.z = offset;
+        normal.z = 1.0f;
+    }
+    return true;
+}
+
+std::unique_ptr<CAlfaObject> mirrored_curve_copy(
+        const CAlfaObject& source,
+        const std::vector<ToolParameter>& parameters) {
+    if (!dynamic_cast<const CPolyline*>(&source)
+        && !dynamic_cast<const CBSpline*>(&source)) {
+        return {};
+    }
+    std::unique_ptr<CAlfaObject> result = source.Clone();
+    if (!result) return {};
+    Vec3 plane_point{};
+    Vec3 plane_normal{};
+    curve_mirror_plane(parameters, plane_point, plane_normal);
+    result->Mirror(plane_point, plane_normal);
+    result->SetName(source.GetName() + " Mirror");
+    result->ClearParametricDefinition();
+    result->m_id = 0;
+    return result;
+}
+
+bool rebuild_curve_mirror(CAlfaDoc& document,
+                          size_t object_index,
+                          const std::vector<ToolParameter>& parameters) {
+    auto& objects = document.GetObjects();
+    if (object_index >= objects.size() || !objects[object_index]) return false;
+    const unsigned long source_id = static_cast<unsigned long>(
+        std::max(0.0, param(parameters, "profile.id", 0.0)));
+    const CAlfaObject* source = document.FindObjectById(source_id);
+    if (!source || source == objects[object_index].get()) return false;
+    std::unique_ptr<CAlfaObject> replacement =
+        mirrored_curve_copy(*source, parameters);
+    if (!replacement) return false;
+
+    const CAlfaObject& previous = *objects[object_index];
+    replacement->m_id = previous.m_id;
+    replacement->m_LayerID = previous.m_LayerID;
+    replacement->SetName(previous.GetName());
+    replacement->SetGroupName(previous.GetGroupName());
+    replacement->SetParametricDefinition(
+        previous.GetParametricToolId(),
+        previous.GetParametricParameters());
+    objects[object_index] = std::move(replacement);
+    return true;
+}
+
+void create_curve_mirror(CAlfaDoc& document,
+                         const std::vector<ToolParameter>& parameters) {
+    const unsigned long source_id = static_cast<unsigned long>(
+        std::max(0.0, param(parameters, "profile.id", 0.0)));
+    const CAlfaObject* source = document.FindObjectById(source_id);
+    if (!source) return;
+    std::unique_ptr<CAlfaObject> result =
+        mirrored_curve_copy(*source, parameters);
+    if (!result) return;
+    document.AddObject(std::move(result));
+}
+
+bool linked_curve_endpoint(const CAlfaObject& object,
+                           bool at_end,
+                           CPoint3d& point,
+                           CPoint3d& outward_tangent) {
+    if (const auto* polyline = dynamic_cast<const CPolyline*>(&object)) {
+        const auto& points = polyline->GetPoints();
+        if (polyline->IsClosed() || points.size() < 2) return false;
+        const size_t endpoint = at_end ? points.size() - 1 : 0;
+        const size_t neighbor = at_end ? endpoint - 1 : 1;
+        point = points[endpoint];
+        outward_tangent = offset_normalized3d(point - points[neighbor]);
+        return offset_length3d(outward_tangent) > 1.0e-12;
+    }
+    const auto* spline = dynamic_cast<const CBSpline*>(&object);
+    if (!spline || spline->IsClosed() || spline->GetPointCount() < 2) {
+        return false;
+    }
+    constexpr float sample_step = 0.001f;
+    point = spline->Evaluate(at_end ? 1.0f : 0.0f);
+    const CPoint3d neighbor = spline->Evaluate(
+        at_end ? 1.0f - sample_step : sample_step);
+    outward_tangent = offset_normalized3d(point - neighbor);
+    return offset_length3d(outward_tangent) > 1.0e-12;
+}
+
+bool set_linked_curve_geometry(CBSpline& target,
+                               const CAlfaObject& first,
+                               bool first_end,
+                               const CAlfaObject& second,
+                               bool second_end,
+                               int mode,
+                               double handle_percent) {
+    CPoint3d first_point;
+    CPoint3d first_tangent;
+    CPoint3d second_point;
+    CPoint3d second_tangent;
+    if (!linked_curve_endpoint(
+            first, first_end, first_point, first_tangent)
+        || !linked_curve_endpoint(
+            second, second_end, second_point, second_tangent)) {
+        return false;
+    }
+    const CPoint3d chord = second_point - first_point;
+    const double length = offset_length3d(chord);
+    if (length <= 1.0e-9) return false;
+    const double handle = length
+        * std::clamp(handle_percent, 0.0, 200.0) / 100.0;
+
+    CPoint3d control1 = first_point + chord * (1.0f / 3.0f);
+    CPoint3d control2 = first_point + chord * (2.0f / 3.0f);
+    if (mode != 0) {
+        control1 = first_point
+            + first_tangent * static_cast<float>(handle);
+        control2 = second_point
+            + second_tangent * static_cast<float>(handle);
+    }
+    target.Clear();
+    target.SetCurveType(SplineCurveType::Bezier);
+    target.AddPoint(first_point);
+    target.AddPoint(control1);
+    target.AddPoint(control2);
+    target.AddPoint(second_point);
+    target.SetClosed(false);
+    return true;
+}
+
+bool rebuild_linked_curve(CAlfaDoc& document,
+                          size_t object_index,
+                          const std::vector<ToolParameter>& parameters) {
+    auto& objects = document.GetObjects();
+    if (object_index >= objects.size() || !objects[object_index]) return false;
+    const unsigned long first_id = static_cast<unsigned long>(
+        std::max(0.0, param(parameters, "curve1.id", 0.0)));
+    const unsigned long second_id = static_cast<unsigned long>(
+        std::max(0.0, param(parameters, "curve2.id", 0.0)));
+    const CAlfaObject* first = document.FindObjectById(first_id);
+    const CAlfaObject* second = document.FindObjectById(second_id);
+    if (!first || !second || first == second
+        || first == objects[object_index].get()
+        || second == objects[object_index].get()) {
+        return false;
+    }
+    auto replacement = std::make_unique<CBSpline>(
+        objects[object_index]->GetName());
+    if (!set_linked_curve_geometry(
+            *replacement, *first,
+            param(parameters, "curve1.end", 0.0) >= 0.5,
+            *second, param(parameters, "curve2.end", 0.0) >= 0.5,
+            static_cast<int>(param(parameters, "mode", 1.0)),
+            param(parameters, "handle_percent", 33.0))) {
+        return false;
+    }
+    copy_offset_curve_appearance(*objects[object_index], *replacement);
+    replacement->m_id = objects[object_index]->m_id;
+    replacement->m_LayerID = objects[object_index]->m_LayerID;
+    replacement->SetGroupName(objects[object_index]->GetGroupName());
+    replacement->SetParametricDefinition(
+        objects[object_index]->GetParametricToolId(),
+        objects[object_index]->GetParametricParameters());
+    objects[object_index] = std::move(replacement);
+    return true;
+}
+
+void create_linked_curve(CAlfaDoc& document,
+                         const std::vector<ToolParameter>& parameters) {
+    const unsigned long first_id = static_cast<unsigned long>(
+        std::max(0.0, param(parameters, "curve1.id", 0.0)));
+    const unsigned long second_id = static_cast<unsigned long>(
+        std::max(0.0, param(parameters, "curve2.id", 0.0)));
+    const CAlfaObject* first = document.FindObjectById(first_id);
+    const CAlfaObject* second = document.FindObjectById(second_id);
+    if (!first || !second || first == second) return;
+    auto result = std::make_unique<CBSpline>("Linked Curve");
+    if (!set_linked_curve_geometry(
+            *result, *first, param(parameters, "curve1.end", 0.0) >= 0.5,
+            *second, param(parameters, "curve2.end", 0.0) >= 0.5,
+            static_cast<int>(param(parameters, "mode", 1.0)),
+            param(parameters, "handle_percent", 33.0))) {
+        return;
+    }
+    copy_offset_curve_appearance(*first, *result);
+    result->SetName("Linked Curve");
+    result->SetGroupName({});
+    document.AddObject(std::move(result));
+}
+
+struct SmartHybridBuildResult {
+    TopoDS_Shape shape;
+    bool solid = false;
+    size_t patch_count = 0;
+};
+
+SmartHybridBuildResult build_smart_hybrid(
+        CAlfaDoc& document,
+        const std::vector<ToolParameter>& parameters) {
+    SmartHybridBuildResult result;
+    const int curve_count = std::clamp(
+        static_cast<int>(param(parameters, "curve.count", 0.0)), 0, 32);
+    if (curve_count < 4) return result;
+
+    struct NetworkEdge {
+        SweepCurveSamples samples;
+        int first_vertex = -1;
+        int second_vertex = -1;
+    };
+    std::vector<NetworkEdge> edges;
+    edges.reserve(static_cast<size_t>(curve_count));
+    CPoint3d minimum;
+    CPoint3d maximum;
+    bool have_bounds = false;
+    for (int index = 1; index <= curve_count; ++index) {
+        const std::string parameter_id =
+            "curve" + std::to_string(index) + ".id";
+        const unsigned long curve_id = static_cast<unsigned long>(
+            std::max(0.0, param(parameters, parameter_id.c_str(), 0.0)));
+        const CAlfaObject* curve = document.FindObjectById(curve_id);
+        if (!curve || curve_is_closed(*curve)) return result;
+        std::vector<CPoint3d> points = sampled_curve_points(*curve);
+        if (points.size() < 2) return result;
+        for (const CPoint3d& point : points) {
+            if (!have_bounds) {
+                minimum = maximum = point;
+                have_bounds = true;
+            } else {
+                minimum.x = std::min(minimum.x, point.x);
+                minimum.y = std::min(minimum.y, point.y);
+                minimum.z = std::min(minimum.z, point.z);
+                maximum.x = std::max(maximum.x, point.x);
+                maximum.y = std::max(maximum.y, point.y);
+                maximum.z = std::max(maximum.z, point.z);
+            }
+        }
+        edges.push_back({{std::move(points), false}, -1, -1});
+    }
+    if (!have_bounds) return result;
+    const double diagonal = offset_length3d(maximum - minimum);
+    const double vertex_tolerance = std::max(1.0e-5, diagonal * 1.0e-4);
+    const double vertex_tolerance_squared =
+        vertex_tolerance * vertex_tolerance;
+    std::vector<CPoint3d> vertices;
+    const auto vertex_for = [&](const CPoint3d& point) {
+        for (size_t vertex = 0; vertex < vertices.size(); ++vertex) {
+            const CPoint3d delta = vertices[vertex] - point;
+            if (offset_dot3d(delta, delta) <= vertex_tolerance_squared) {
+                return static_cast<int>(vertex);
+            }
+        }
+        vertices.push_back(point);
+        return static_cast<int>(vertices.size() - 1);
+    };
+    for (NetworkEdge& edge : edges) {
+        edge.first_vertex = vertex_for(edge.samples.points.front());
+        edge.second_vertex = vertex_for(edge.samples.points.back());
+        if (edge.first_vertex == edge.second_vertex) return result;
+    }
+
+    BRep_Builder compound_builder;
+    TopoDS_Compound compound;
+    compound_builder.MakeCompound(compound);
+    std::vector<TopoDS_Shape> patches;
+    const size_t edge_count = edges.size();
+    for (size_t a = 0; a + 3 < edge_count; ++a) {
+        for (size_t b = a + 1; b + 2 < edge_count; ++b) {
+            for (size_t c = b + 1; c + 1 < edge_count; ++c) {
+                for (size_t d = c + 1; d < edge_count; ++d) {
+                    const std::array<size_t, 4> selected{a, b, c, d};
+                    std::map<int, int> degree;
+                    std::map<int, std::vector<int>> adjacency;
+                    for (size_t edge_index : selected) {
+                        const NetworkEdge& edge = edges[edge_index];
+                        ++degree[edge.first_vertex];
+                        ++degree[edge.second_vertex];
+                        adjacency[edge.first_vertex].push_back(edge.second_vertex);
+                        adjacency[edge.second_vertex].push_back(edge.first_vertex);
+                    }
+                    if (degree.size() != 4
+                        || std::any_of(
+                            degree.begin(), degree.end(), [](const auto& item) {
+                                return item.second != 2;
+                            })) {
+                        continue;
+                    }
+                    std::set<int> visited;
+                    std::vector<int> pending{degree.begin()->first};
+                    while (!pending.empty()) {
+                        const int vertex = pending.back();
+                        pending.pop_back();
+                        if (!visited.insert(vertex).second) continue;
+                        const auto found = adjacency.find(vertex);
+                        if (found == adjacency.end()) continue;
+                        pending.insert(
+                            pending.end(), found->second.begin(), found->second.end());
+                    }
+                    if (visited.size() != 4) continue;
+
+                    TopoDS_Shape patch = BuildFourSplineSurfaceShape(
+                        edges[a].samples, edges[b].samples,
+                        edges[c].samples, edges[d].samples);
+                    if (patch.IsNull()) continue;
+                    patches.push_back(patch);
+                    compound_builder.Add(compound, patch);
+                }
+            }
+        }
+    }
+    result.patch_count = patches.size();
+    if (patches.empty()) return result;
+
+    const double requested_tolerance = std::max(
+        1.0e-7, param(parameters, "sewing_tolerance", 0.02));
+    BRepBuilderAPI_Sewing sewing(
+        requested_tolerance, Standard_True, Standard_True,
+        Standard_True, Standard_False);
+    for (const TopoDS_Shape& patch : patches) sewing.Add(patch);
+    sewing.Perform();
+    const TopoDS_Shape sewed = sewing.SewedShape();
+    const bool request_solid = param(parameters, "make_solid", 1.0) >= 0.5;
+    if (request_solid && !sewed.IsNull()
+        && sewing.NbFreeEdges() == 0 && sewing.NbMultipleEdges() == 0) {
+        TopoDS_Shell shell;
+        int shell_count = 0;
+        if (sewed.ShapeType() == TopAbs_SHELL) {
+            shell = TopoDS::Shell(sewed);
+            shell_count = 1;
+        } else {
+            for (TopExp_Explorer shells(sewed, TopAbs_SHELL);
+                 shells.More(); shells.Next()) {
+                shell = TopoDS::Shell(shells.Current());
+                ++shell_count;
+            }
+        }
+        if (shell_count == 1 && !shell.IsNull()) {
+            BRepBuilderAPI_MakeSolid solid_builder(shell);
+            if (solid_builder.IsDone() && !solid_builder.Solid().IsNull()) {
+                ShapeFix_Solid fixer(solid_builder.Solid());
+                fixer.Perform();
+                TopoDS_Shape solid = fixer.Solid();
+                if (!solid.IsNull()
+                    && solid.ShapeType() == TopAbs_SOLID
+                    && BRepCheck_Analyzer(solid).IsValid()) {
+                    result.shape = solid;
+                    result.solid = true;
+                    return result;
+                }
+            }
+        }
+    }
+    result.shape = !sewed.IsNull() ? sewed : TopoDS_Shape(compound);
+    return result;
+}
+
+std::unique_ptr<CAlfaObject> smart_hybrid_object(
+        CAlfaDoc& document,
+        const std::vector<ToolParameter>& parameters) {
+    SmartHybridBuildResult build = build_smart_hybrid(document, parameters);
+    if (build.shape.IsNull()) return {};
+    std::unique_ptr<CSolid> object;
+    if (build.solid) {
+        object = std::make_unique<CSolid>(build.shape);
+        object->SetName("Smart Hybrid Solid");
+    } else {
+        TopoDS_Shape surface_shape = build.shape;
+        object = std::make_unique<CSurfaceSet>(surface_shape);
+        object->SetName("Smart Hybrid Surface");
+    }
+    object->SetColor({0.70f, 0.72f, 0.68f});
+    if (!object->ReBuldMesh()) return {};
+    return object;
+}
+
+void create_smart_hybrid(CAlfaDoc& document,
+                         const std::vector<ToolParameter>& parameters) {
+    std::unique_ptr<CAlfaObject> object =
+        smart_hybrid_object(document, parameters);
+    if (object) document.AddObject(std::move(object));
+}
+
+bool rebuild_smart_hybrid(CAlfaDoc& document,
+                          size_t object_index,
+                          const std::vector<ToolParameter>& parameters) {
+    auto& objects = document.GetObjects();
+    if (object_index >= objects.size() || !objects[object_index]) return false;
+    std::unique_ptr<CAlfaObject> replacement =
+        smart_hybrid_object(document, parameters);
+    if (!replacement) return false;
+    copy_offset_curve_appearance(*objects[object_index], *replacement);
+    replacement->m_id = objects[object_index]->m_id;
+    replacement->m_LayerID = objects[object_index]->m_LayerID;
+    replacement->SetName(
+        dynamic_cast<CSurfaceSet*>(replacement.get())
+            ? "Smart Hybrid Surface" : "Smart Hybrid Solid");
+    replacement->SetParametricDefinition(
+        objects[object_index]->GetParametricToolId(),
+        objects[object_index]->GetParametricParameters());
+    objects[object_index] = std::move(replacement);
+    return true;
+}
+
+bool set_smooth_offset_geometry(CBSpline& target,
+                                const std::vector<CPoint3d>& points,
+                                bool closed,
+                                double distance,
+                                size_t source_control_count) {
+    if (points.size() < (closed ? 3u : 2u)) return false;
+    std::vector<CPoint3d> fit_points = points;
+    if (closed) fit_points.push_back(points.front());
+
+    CPoint3d minimum = fit_points.front();
+    CPoint3d maximum = fit_points.front();
+    for (const CPoint3d& point : fit_points) {
+        minimum.x = std::min(minimum.x, point.x);
+        minimum.y = std::min(minimum.y, point.y);
+        minimum.z = std::min(minimum.z, point.z);
+        maximum.x = std::max(maximum.x, point.x);
+        maximum.y = std::max(maximum.y, point.y);
+        maximum.z = std::max(maximum.z, point.z);
+    }
+    const double span = offset_length3d(maximum - minimum);
+    double tolerance = std::max(
+        {0.005, span * 1.0e-5, std::abs(distance) * 1.0e-4});
+    const size_t desired_poles = std::clamp(
+        source_control_count * 2, size_t{8}, size_t{32});
+    Handle(Geom_BSplineCurve) fitted;
+    try {
+        TColgp_Array1OfPnt samples(1, static_cast<int>(fit_points.size()));
+        for (size_t index = 0; index < fit_points.size(); ++index) {
+            const CPoint3d& point = fit_points[index];
+            samples.SetValue(static_cast<int>(index + 1),
+                             gp_Pnt(point.x, point.y, point.z));
+        }
+        for (int attempt = 0; attempt < 9; ++attempt) {
+            GeomAPI_PointsToBSpline approximation(
+                samples, Approx_ChordLength, 3, 5, GeomAbs_C2, tolerance);
+            if (!approximation.IsDone() || approximation.Curve().IsNull()) {
+                tolerance *= 2.0;
+                continue;
+            }
+            fitted = approximation.Curve();
+            if (static_cast<size_t>(fitted->NbPoles()) <= desired_poles
+                || attempt == 8) {
+                break;
+            }
+            tolerance *= 2.0;
+        }
+    } catch (const Standard_Failure&) {
+        return false;
+    }
+    if (fitted.IsNull() || fitted->NbPoles() < 2) return false;
+
+    std::vector<CPoint3d> poles;
+    std::vector<double> weights;
+    std::vector<double> knots;
+    poles.reserve(static_cast<size_t>(fitted->NbPoles()));
+    weights.reserve(static_cast<size_t>(fitted->NbPoles()));
+    for (int index = 1; index <= fitted->NbPoles(); ++index) {
+        const gp_Pnt pole = fitted->Pole(index);
+        poles.emplace_back(pole.X(), pole.Y(), pole.Z());
+        weights.push_back(fitted->IsRational() ? fitted->Weight(index) : 1.0);
+    }
+    for (int index = 1; index <= fitted->NbKnots(); ++index) {
+        for (int repetition = 0;
+             repetition < fitted->Multiplicity(index); ++repetition) {
+            knots.push_back(fitted->Knot(index));
+        }
+    }
+
+    target.Clear();
+    target.SetCurveType(SplineCurveType::Nurbs);
+    for (const CPoint3d& pole : poles) target.AddPoint(pole);
+    target.SetDegree(fitted->Degree());
+    target.SetWeights(std::move(weights));
+    if (!target.SetKnots(std::move(knots))) return false;
+    target.SetClosed(closed);
+    return true;
+}
+
+bool rebuild_curve_offset(CAlfaDoc& document,
+                          size_t object_index,
+                          const std::vector<ToolParameter>& parameters) {
+    auto& objects = document.GetObjects();
+    if (object_index >= objects.size() || !objects[object_index]) return false;
+    auto* target_polyline = dynamic_cast<CPolyline*>(objects[object_index].get());
+    auto* target_spline = dynamic_cast<CBSpline*>(objects[object_index].get());
+    const unsigned long source_id = static_cast<unsigned long>(
+        std::max(0.0, param(parameters, "profile.id", 0.0)));
+    const CAlfaObject* source = document.FindObjectById(source_id);
+    if ((!target_polyline && !target_spline)
+        || !source || source == objects[object_index].get()) return false;
+    std::vector<CPoint3d> points;
+    CPoint3d origin;
+    CPoint3d normal;
+    if (!planar_curve_offset(
+            *source, param(parameters, "distance", 10.0),
+            param(parameters, "delete_loops", 1.0) >= 0.5,
+            points, origin, normal)) {
+        return false;
+    }
+    const auto* source_spline = dynamic_cast<const CBSpline*>(source);
+    if (source_spline && target_polyline) {
+        auto upgraded = std::make_unique<CBSpline>(target_polyline->GetName());
+        if (!set_smooth_offset_geometry(
+                *upgraded, points, source_spline->IsClosed(),
+                param(parameters, "distance", 10.0),
+                source_spline->GetPointCount())) {
+            return false;
+        }
+        copy_offset_curve_appearance(*target_polyline, *upgraded);
+        upgraded->m_id = target_polyline->m_id;
+        upgraded->m_LayerID = target_polyline->m_LayerID;
+        upgraded->SetParametricDefinition(
+            target_polyline->GetParametricToolId(),
+            target_polyline->GetParametricParameters());
+        objects[object_index] = std::move(upgraded);
+        return true;
+    }
+    if (target_spline) {
+        const size_t source_control_count = source_spline
+            ? source_spline->GetPointCount() : points.size();
+        if (!set_smooth_offset_geometry(
+                *target_spline, points, curve_is_closed(*source),
+                param(parameters, "distance", 10.0), source_control_count)) {
+            return false;
+        }
+    } else {
+        target_polyline->Clear();
+        for (const CPoint3d& point : points) target_polyline->AddPoint(point);
+        target_polyline->SetClosed(curve_is_closed(*source));
+        target_polyline->SetLockedPlane(
+            {static_cast<float>(origin.x), static_cast<float>(origin.y),
+             static_cast<float>(origin.z)},
+            {static_cast<float>(normal.x), static_cast<float>(normal.y),
+             static_cast<float>(normal.z)});
+    }
+    return true;
+}
+
+void create_curve_offset(CAlfaDoc& document,
+                         const std::vector<ToolParameter>& parameters) {
+    const unsigned long source_id = static_cast<unsigned long>(
+        std::max(0.0, param(parameters, "profile.id", 0.0)));
+    const CAlfaObject* source = document.FindObjectById(source_id);
+    if (!source) return;
+    std::vector<CPoint3d> points;
+    CPoint3d origin;
+    CPoint3d normal;
+    if (!planar_curve_offset(
+            *source, param(parameters, "distance", 10.0),
+            param(parameters, "delete_loops", 1.0) >= 0.5,
+            points, origin, normal)) {
+        return;
+    }
+    std::unique_ptr<CAlfaObject> result;
+    if (const auto* source_spline = dynamic_cast<const CBSpline*>(source)) {
+        auto smooth = std::make_unique<CBSpline>(
+            source->GetName() + " Offset");
+        if (set_smooth_offset_geometry(
+                *smooth, points, source_spline->IsClosed(),
+                param(parameters, "distance", 10.0),
+                source_spline->GetPointCount())) {
+            result = std::move(smooth);
+        }
+    }
+    if (!result) {
+        auto polyline = std::make_unique<CPolyline>(
+            source->GetName() + " Offset");
+        for (const CPoint3d& point : points) polyline->AddPoint(point);
+        polyline->SetClosed(curve_is_closed(*source));
+        polyline->SetLockedPlane(
+            {static_cast<float>(origin.x), static_cast<float>(origin.y),
+             static_cast<float>(origin.z)},
+            {static_cast<float>(normal.x), static_cast<float>(normal.y),
+             static_cast<float>(normal.z)});
+        result = std::move(polyline);
+    }
+    copy_offset_curve_appearance(*source, *result);
+    document.AddObject(std::move(result));
+}
+
 double cabinet_mounting_height(
     const std::vector<ToolParameter>& parameters) {
     return param(parameters, "overhead", 0.0) >= 0.5
@@ -407,6 +1425,8 @@ bool apply_trim_operation(CSolid& solid,
 }
 
 const char* default_material_name(const std::string& parameter_id) {
+    if(parameter_id=="tile_material_a")return "Tile Terracotta";
+    if(parameter_id=="tile_material_b")return "Tile Cream";
     if (parameter_id.find("facade") != std::string::npos) {
         return "Facade wood";
     }
@@ -430,6 +1450,7 @@ std::vector<ToolParameter> prepare_material_parameters(
     }
 
     FurnitureMaterialFactory::EnsureStandardMaterials(document);
+    if(std::any_of(parameters.begin(),parameters.end(),[](const auto& p){return p.id=="tile_material_a";})) EnsureTileMaterials(document);
     for (ToolParameter& parameter : parameters) {
         if (parameter.type != ToolParameterType::Material) {
             continue;
@@ -750,6 +1771,13 @@ std::vector<ToolParameter> merge_saved_parameters(const std::vector<ToolParamete
                 break;
             }
         }
+    }
+    // Face placement metadata is not part of the visible primitive defaults.
+    // Preserve it when replaying history, including the captured screen margin.
+    for (const auto& item : saved) {
+        if ((item.id == "boolean.body_id" || item.id == "boolean.overlap")
+            && std::none_of(parameters.begin(), parameters.end(), [&](const auto& p) { return p.id == item.id; }))
+            parameters.push_back({item.id, item.id, item.value, 0.0, 4294967295.0, 0.01});
     }
     return parameters;
 }
@@ -2389,6 +3417,10 @@ bool rebuild_solid_operation_tree(const ToolRegistry& registry,
                     *solid, document, operation.tool_id, parameters)) {
                 return false;
             }
+        } else if (operation.tool_id == "SurfaceReverseNormals") {
+            if (!solid->ReverseNormals()) {
+                return false;
+            }
         }
         const std::vector<TopoDS_Face> faces_after = shape_faces(solid->m_Shape);
         if (operation.tool_id == "SolidTransform" && faces_before.size() == faces_after.size()) {
@@ -2462,6 +3494,238 @@ std::unique_ptr<CMesh3D> make_box(const std::string& name, float width, float he
     };
     mesh->SetGeometry(std::move(vertices), std::move(faces));
     return mesh;
+}
+
+std::unique_ptr<CMesh3D> make_cushion_mesh(
+        const std::vector<ToolParameter>& parameters) {
+    constexpr double pi = 3.14159265358979323846;
+    const float length = static_cast<float>(std::max(
+        1.0, param(parameters, "length", 73.0)));
+    const float width = static_cast<float>(std::max(
+        1.0, param(parameters, "width", 56.78)));
+    const float height = static_cast<float>(std::max(
+        0.1, param(parameters, "height", 20.61)));
+    const float side_height = std::clamp(static_cast<float>(param(
+        parameters, "side_height", 11.16)), 0.0f, height - 0.01f);
+    const float bevel = std::clamp(static_cast<float>(param(
+        parameters, "bevel", 6.0)), 0.01f,
+        std::min(length, width) * 0.45f);
+    const float front_extension = std::clamp(static_cast<float>(param(
+        parameters, "front_extension", 7.0)), 0.0f, length * 0.45f);
+    const int length_segments = std::clamp(static_cast<int>(std::lround(
+        param(parameters, "length_segments", 4.0))), 2, 64);
+    const int width_segments = std::clamp(static_cast<int>(std::lround(
+        param(parameters, "width_segments", 4.0))), 2, 64);
+    const int side_segments = std::clamp(static_cast<int>(std::lround(
+        param(parameters, "side_segments", 2.0))), 1, 16);
+
+    const float inner_length = std::max(0.1f, length - 2.0f * bevel);
+    const float inner_width = std::max(0.1f, width - 2.0f * bevel);
+    const double sphere_half = std::min(inner_length, inner_width) * 0.5;
+    const double minimum_sphere_radius =
+        std::sqrt(2.0) * sphere_half + 0.001;
+    const double sphere_radius = std::max(minimum_sphere_radius,
+        param(parameters, "sphere_radius", 60.0));
+    const double sphere_corner_height = std::sqrt(std::max(
+        0.0, sphere_radius * sphere_radius
+            - 2.0 * sphere_half * sphere_half));
+
+    struct GridCoordinate { int i = 0; int j = 0; };
+    const auto grid_offset = [length_segments](int i, int j) {
+        return static_cast<size_t>(j * (length_segments + 1) + i);
+    };
+    std::vector<GridCoordinate> boundary;
+    boundary.reserve(static_cast<size_t>(
+        2 * (length_segments + width_segments)));
+    for (int i = 0; i <= length_segments; ++i)
+        boundary.push_back({i, 0});
+    for (int j = 1; j <= width_segments; ++j)
+        boundary.push_back({length_segments, j});
+    for (int i = length_segments - 1; i >= 0; --i)
+        boundary.push_back({i, width_segments});
+    for (int j = width_segments - 1; j > 0; --j)
+        boundary.push_back({0, j});
+
+    const auto front_weight = [width_segments, pi](int i, int j) {
+        if (i != 0 || j <= 0 || j >= width_segments)
+            return 0.0f;
+        return static_cast<float>(std::sin(
+            pi * static_cast<double>(j) / width_segments));
+    };
+    const auto xy_at = [&](int i, int j, bool inner) {
+        const float inset = inner ? bevel : 0.0f;
+        const float available_length = length - front_extension - 2.0f * inset;
+        const float x0 = -length * 0.5f + front_extension + inset;
+        const float x = x0 + available_length
+            * static_cast<float>(i) / length_segments
+            - front_extension * front_weight(i, j);
+        const float y = -width * 0.5f + inset
+            + (width - 2.0f * inset)
+                * static_cast<float>(j) / width_segments;
+        return Vec3{x, y, 0.0f};
+    };
+    const auto top_at = [&](int i, int j) {
+        Vec3 point = xy_at(i, j, true);
+        const double u = 2.0 * static_cast<double>(i) / length_segments - 1.0;
+        const double v = 2.0 * static_cast<double>(j) / width_segments - 1.0;
+        const double radial_squared = sphere_half * sphere_half
+            * (u * u + v * v);
+        point.z = height + static_cast<float>(
+            std::sqrt(std::max(0.0,
+                sphere_radius * sphere_radius - radial_squared))
+            - sphere_corner_height);
+        return point;
+    };
+
+    std::vector<Vec3> vertices;
+    std::vector<CMesh3D::Face> faces;
+    const size_t grid_vertex_count = static_cast<size_t>(
+        (length_segments + 1) * (width_segments + 1));
+    vertices.reserve(grid_vertex_count * 2
+        + boundary.size() * static_cast<size_t>(side_segments + 2));
+    faces.reserve(static_cast<size_t>(
+        2 * length_segments * width_segments)
+        + boundary.size() * static_cast<size_t>(side_segments + 2));
+
+    const size_t top_grid_start = vertices.size();
+    for (int j = 0; j <= width_segments; ++j)
+        for (int i = 0; i <= length_segments; ++i)
+            vertices.push_back(top_at(i, j));
+    for (int j = 0; j < width_segments; ++j) {
+        for (int i = 0; i < length_segments; ++i) {
+            const size_t a = top_grid_start + grid_offset(i, j);
+            const size_t b = top_grid_start + grid_offset(i + 1, j);
+            const size_t c = top_grid_start + grid_offset(i + 1, j + 1);
+            const size_t d = top_grid_start + grid_offset(i, j + 1);
+            faces.emplace_back(std::initializer_list<size_t>{a, b, c, d});
+        }
+    }
+
+    std::vector<size_t> top_boundary;
+    top_boundary.reserve(boundary.size());
+    for (GridCoordinate coordinate : boundary) {
+        top_boundary.push_back(top_grid_start
+            + grid_offset(coordinate.i, coordinate.j));
+    }
+    std::vector<std::vector<size_t>> bevel_rings;
+    bevel_rings.push_back(top_boundary);
+    for (int segment = 1; segment <= 2; ++segment) {
+        const double angle = (pi * 0.5) * segment / 2.0;
+        const float horizontal = static_cast<float>(std::sin(angle));
+        const float vertical = static_cast<float>(std::cos(angle));
+        std::vector<size_t> ring;
+        ring.reserve(boundary.size());
+        for (size_t index = 0; index < boundary.size(); ++index) {
+            const GridCoordinate coordinate = boundary[index];
+            const Vec3 inner = vertices[top_boundary[index]];
+            const Vec3 outer = xy_at(coordinate.i, coordinate.j, false);
+            ring.push_back(vertices.size());
+            vertices.push_back({
+                inner.x + (outer.x - inner.x) * horizontal,
+                inner.y + (outer.y - inner.y) * horizontal,
+                side_height + (inner.z - side_height) * vertical});
+        }
+        bevel_rings.push_back(std::move(ring));
+    }
+    const auto connect_rings = [&](const std::vector<size_t>& upper,
+                                   const std::vector<size_t>& lower) {
+        for (size_t index = 0; index < boundary.size(); ++index) {
+            const size_t next = (index + 1) % boundary.size();
+            faces.emplace_back(std::initializer_list<size_t>{
+                upper[index], lower[index], lower[next], upper[next]});
+        }
+    };
+    connect_rings(bevel_rings[0], bevel_rings[1]);
+    connect_rings(bevel_rings[1], bevel_rings[2]);
+
+    const size_t bottom_grid_start = vertices.size();
+    for (int j = 0; j <= width_segments; ++j) {
+        for (int i = 0; i <= length_segments; ++i) {
+            Vec3 point = xy_at(i, j, false);
+            point.z = 0.0f;
+            vertices.push_back(point);
+        }
+    }
+    std::vector<size_t> bottom_boundary;
+    bottom_boundary.reserve(boundary.size());
+    for (GridCoordinate coordinate : boundary) {
+        bottom_boundary.push_back(bottom_grid_start
+            + grid_offset(coordinate.i, coordinate.j));
+    }
+
+    std::vector<size_t> previous_ring = bevel_rings.back();
+    for (int segment = 1; segment < side_segments; ++segment) {
+        const float t = static_cast<float>(segment) / side_segments;
+        std::vector<size_t> ring;
+        ring.reserve(boundary.size());
+        for (GridCoordinate coordinate : boundary) {
+            Vec3 point = xy_at(coordinate.i, coordinate.j, false);
+            point.z = side_height * (1.0f - t);
+            ring.push_back(vertices.size());
+            vertices.push_back(point);
+        }
+        connect_rings(previous_ring, ring);
+        previous_ring = std::move(ring);
+    }
+    connect_rings(previous_ring, bottom_boundary);
+
+    for (int j = 0; j < width_segments; ++j) {
+        for (int i = 0; i < length_segments; ++i) {
+            const size_t a = bottom_grid_start + grid_offset(i, j);
+            const size_t b = bottom_grid_start + grid_offset(i + 1, j);
+            const size_t c = bottom_grid_start + grid_offset(i + 1, j + 1);
+            const size_t d = bottom_grid_start + grid_offset(i, j + 1);
+            faces.emplace_back(std::initializer_list<size_t>{a, d, c, b});
+        }
+    }
+
+    auto mesh = std::make_unique<CMesh3D>("Cushion Stage 1");
+    mesh->SetColor(kDefaultMeshObjectColor);
+    if (!mesh->SetGeometry(std::move(vertices), std::move(faces)))
+        return {};
+    return mesh;
+}
+
+std::unique_ptr<CAlfaObject> make_cushion_object(
+        const std::vector<ToolParameter>& parameters) {
+    std::unique_ptr<CMesh3D> mesh = make_cushion_mesh(parameters);
+    if (!mesh || param(parameters, "hybrid", 0.0) < 0.5)
+        return mesh;
+
+    CatmullClarkSurfaceBuildResult build =
+        BuildCatmullClarkSurfaceBody(*mesh);
+    if (build.shape.IsNull() || build.patch_count == 0) return mesh;
+
+    TopoDS_Shape shape = build.shape;
+    std::unique_ptr<CSolid> result;
+    if (build.solid) {
+        result = std::make_unique<CSolid>(shape);
+        result->SetName("Cushion Hybrid Solid");
+    } else {
+        result = std::make_unique<CSurfaceSet>(shape);
+        result->SetName("Cushion Hybrid Surfaces");
+    }
+    result->SetColor(kDefaultMeshObjectColor);
+    // The Hybrid can contain dozens of independent NURBS patches.  The
+    // ordinary SurfaceSet quad mesher processes them serially and makes the
+    // property checkbox look frozen.  OCCT's parallel adaptive mesher keeps
+    // the same CAD faces and prepares only their display triangulation.
+    if (!result->EnsureRenderMesh()) return mesh;
+    return result;
+}
+
+void replace_selected_cushion(
+        CAlfaDoc& document,
+        size_t index,
+        std::unique_ptr<CAlfaObject> replacement) {
+    auto& objects = document.GetObjects();
+    if (index >= objects.size() || !replacement) return;
+    if (objects[index]) {
+        copy_offset_curve_appearance(*objects[index], *replacement);
+        replacement->m_id = objects[index]->m_id;
+        replacement->m_LayerID = objects[index]->m_LayerID;
+    }
+    objects[index] = std::move(replacement);
 }
 
 void copy_solid_surface_appearance(const CAlfaObject& source, CAlfaObject& target) {
@@ -6088,13 +7352,63 @@ ToolRegistry::ToolRegistry() {
     });
 
     tools_.push_back({
+        "SurfaceFromSketch",
+        "Sketch Surface",
+        {
+            {"profile.id", "Sketch ID", 0.0, 0.0, 4294967295.0, 1.0}
+        },
+        [](CAlfaDoc&, const std::vector<ToolParameter>&) {},
+        [](CAlfaDoc& document, size_t index,
+           const std::vector<ToolParameter>& parameters) {
+            document.RebuildSurfaceFromSketch(
+                index,
+                static_cast<unsigned long>(std::max(
+                    0.0, param(parameters, "profile.id", 0.0))));
+        }
+    });
+
+    tools_.push_back({
         "SurfaceLoft",
         "Loft Surface",
-        {},
+        loft_parameter_defaults(),
         [](CAlfaDoc& document, const std::vector<ToolParameter>&) {
             document.CreateLoftSurfaceFromSelectedBSplines();
         },
-        [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {
+        [](CAlfaDoc& document, size_t index,
+           const std::vector<ToolParameter>& parameters) {
+            document.RebuildLoftSurface(index, loft_curve_ids(parameters));
+        }
+    });
+
+    tools_.push_back({
+        "SurfaceTangentCap",
+        "Tangent Cap",
+        {
+            {"curve.id", "Boundary Spline ID", 0.0, 0.0,
+                4294967295.0, 1.0},
+            {"surface.id", "Supporting Surface ID", 0.0, 0.0,
+                4294967295.0, 1.0},
+            {"length_factor", "Nose Length Factor", 0.55, 0.05,
+                3.0, 0.05}
+        },
+        [](CAlfaDoc& document,
+           const std::vector<ToolParameter>& parameters) {
+            document.CreateTangentCap(
+                static_cast<unsigned long>(std::max(
+                    0.0, param(parameters, "curve.id", 0.0))),
+                static_cast<unsigned long>(std::max(
+                    0.0, param(parameters, "surface.id", 0.0))),
+                param(parameters, "length_factor", 0.55));
+        },
+        [](CAlfaDoc& document, size_t index,
+           const std::vector<ToolParameter>& parameters) {
+            document.RebuildTangentCap(
+                index,
+                static_cast<unsigned long>(std::max(
+                    0.0, param(parameters, "curve.id", 0.0))),
+                static_cast<unsigned long>(std::max(
+                    0.0, param(parameters, "surface.id", 0.0))),
+                param(parameters, "length_factor", 0.55));
         }
     });
 
@@ -6257,13 +7571,76 @@ ToolRegistry::ToolRegistry() {
         [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {}
     });
 
+    tools_.push_back({
+        "CurveOffset",
+        "Offset Curve",
+        {
+            {"distance", "Distance", 10.0, -1000000.0, 1000000.0, 0.1,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"delete_loops", "Delete Loops", 1.0, 0.0, 1.0, 1.0,
+                ToolParameterType::Checkbox},
+            {"profile.id", "Source Curve ID", 0.0, 0.0, 4294967295.0, 1.0}
+        },
+        [](CAlfaDoc& document, const std::vector<ToolParameter>& parameters) {
+            create_curve_offset(document, parameters);
+        },
+        [](CAlfaDoc& document, size_t index,
+           const std::vector<ToolParameter>& parameters) {
+            rebuild_curve_offset(document, index, parameters);
+        }
+    });
+
+    tools_.push_back({
+        "CurveMirrorCopy",
+        "Mirror Copy",
+        {
+            {"plane", "Mirror Plane", 0.0, 0.0, 2.0, 1.0,
+                ToolParameterType::Combo, {"YZ", "XZ", "XY"}},
+            {"offset", "Plane Offset", 0.0, -1000000.0, 1000000.0, 0.1,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"profile.id", "Source Curve ID", 0.0, 0.0, 4294967295.0, 1.0}
+        },
+        [](CAlfaDoc& document, const std::vector<ToolParameter>& parameters) {
+            create_curve_mirror(document, parameters);
+        },
+        [](CAlfaDoc& document, size_t index,
+           const std::vector<ToolParameter>& parameters) {
+            rebuild_curve_mirror(document, index, parameters);
+        }
+    });
+
+    tools_.push_back({
+        "CurveLinkedBridge",
+        "Link Curves",
+        {
+            {"mode", "Connection", 1.0, 0.0, 1.0, 1.0,
+                ToolParameterType::Combo, {"Straight", "Smooth"}},
+            {"handle_percent", "Handle Length", 33.0, 0.0, 200.0, 1.0,
+                ToolParameterType::Number},
+            {"curve1.id", "Curve 1 ID", 0.0, 0.0, 4294967295.0, 1.0},
+            {"curve1.end", "Curve 1 End", 0.0, 0.0, 1.0, 1.0,
+                ToolParameterType::Combo, {"Start", "End"}},
+            {"curve2.id", "Curve 2 ID", 0.0, 0.0, 4294967295.0, 1.0},
+            {"curve2.end", "Curve 2 End", 0.0, 0.0, 1.0, 1.0,
+                ToolParameterType::Combo, {"Start", "End"}}
+        },
+        [](CAlfaDoc& document, const std::vector<ToolParameter>& parameters) {
+            create_linked_curve(document, parameters);
+        },
+        [](CAlfaDoc& document, size_t index,
+           const std::vector<ToolParameter>& parameters) {
+            rebuild_linked_curve(document, index, parameters);
+        }
+    });
+
     for (const auto& curve_edit :
          std::vector<std::pair<std::string, std::string>>{
-             {"CurveJoin", "Join"},
-             {"CurveSplit", "Split"},
-             {"CurveExtend", "Extend"},
+              {"CurveJoin", "Join"},
+              {"CurveSplit", "Split at Intersection"},
+              {"CurveCutByCurve", "Cut Curve"},
+              {"CurveExtend", "Extend"},
              {"CurveTrimByPlane", "Trim by Plane"},
-             {"CurveSimplifyByPoint", "Simplify by Point"},
+              {"CurveSimplifyByPoint", "Split by Point"},
              {"CurveReverse", "Reverse"},
              {"NurbsParametersTool", "NURBS Parameters"}}) {
         tools_.push_back({
@@ -6300,6 +7677,30 @@ ToolRegistry::ToolRegistry() {
                 static_cast<unsigned long>(std::max(0.0, param(parameters, "profile.id", 0.0))),
                 static_cast<unsigned long>(std::max(0.0, param(parameters, "guide1.id", 0.0))),
                 static_cast<unsigned long>(std::max(0.0, param(parameters, "guide2.id", 0.0))));
+        }
+    });
+
+    std::vector<ToolParameter> smart_hybrid_parameters =
+        loft_parameter_defaults();
+    smart_hybrid_parameters.insert(
+        smart_hybrid_parameters.begin(),
+        {"make_solid", "Create Solid When Closed", 1.0, 0.0, 1.0, 1.0,
+            ToolParameterType::Checkbox});
+    smart_hybrid_parameters.insert(
+        smart_hybrid_parameters.begin() + 1,
+        {"sewing_tolerance", "Sewing Tolerance", 0.02,
+            0.000001, 100.0, 0.001,
+            ToolParameterType::Number, {}, ToolParameterUnit::Length});
+    tools_.push_back({
+        "SurfaceSmartHybrid",
+        "Smart Hybrid",
+        std::move(smart_hybrid_parameters),
+        [](CAlfaDoc& document, const std::vector<ToolParameter>& parameters) {
+            create_smart_hybrid(document, parameters);
+        },
+        [](CAlfaDoc& document, size_t index,
+           const std::vector<ToolParameter>& parameters) {
+            rebuild_smart_hybrid(document, index, parameters);
         }
     });
 
@@ -6381,6 +7782,41 @@ ToolRegistry::ToolRegistry() {
     });
 
     tools_.push_back({
+        "MeshCushion",
+        "Cushion",
+        {
+            {"length", "Length", 73.0, 1.0, 100000.0, 1.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"width", "Width", 56.78, 1.0, 100000.0, 1.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"height", "Top Edge Height", 20.61, 0.1, 100000.0, 0.1,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"side_height", "Bevel Start Height", 11.16, 0.0, 100000.0, 0.1,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"bevel", "Bevel Width", 6.0, 0.01, 100000.0, 0.1,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"sphere_radius", "Sphere Radius", 60.0, 0.1, 1000000.0, 1.0,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"front_extension", "Front Extension", 7.0, 0.0, 100000.0, 0.1,
+                ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"length_segments", "Length Segments", 4.0, 2.0, 64.0, 1.0},
+            {"width_segments", "Width Segments", 4.0, 2.0, 64.0, 1.0},
+            {"side_segments", "Side Segments", 2.0, 1.0, 16.0, 1.0},
+            {"hybrid", "Hybrid (Catmull-Clark Surfaces)", 0.0, 0.0, 1.0, 1.0,
+                ToolParameterType::Checkbox}
+        },
+        [](CAlfaDoc& document,
+           const std::vector<ToolParameter>& parameters) {
+            document.AddObject(make_cushion_object(parameters));
+        },
+        [](CAlfaDoc& document, size_t index,
+           const std::vector<ToolParameter>& parameters) {
+            replace_selected_cushion(
+                document, index, make_cushion_object(parameters));
+        }
+    });
+
+    tools_.push_back({
         "SolidLowPoly",
         "Low Poly",
         {},
@@ -6397,6 +7833,16 @@ ToolRegistry::ToolRegistry() {
         [](CAlfaDoc&, const std::vector<ToolParameter>&) {
         },
         [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {
+        }
+    });
+
+    tools_.push_back({
+        "tile", "Tile", TileParameters(),
+        [](CAlfaDoc& document,const std::vector<ToolParameter>& parameters) {
+            create_component_assembly(document,BuildTileParts(document,parameters),parameters,"tile","Tile");
+        },
+        [](CAlfaDoc& document,size_t index,const std::vector<ToolParameter>& parameters) {
+            rebuild_component_assembly(document,index,BuildTileParts(document,parameters),parameters,"tile");
         }
     });
 
@@ -7268,7 +8714,8 @@ ActiveParametricObject ToolRegistry::Activate(const std::string& id, CAlfaDoc& d
             static_cast<double>(selected_room_wall_id(document)));
     }
     const size_t object_count_before = document.GetObjects().size();
-    tool->create(document, parameters);
+    try { tool->create(document, parameters); }
+    catch(const TileBuildError& error){QMessageBox::warning(nullptr,"Tile",error.what());return {};}
     if (id == "SolidTwoSketches") {
         if (document.GetObjects().size() <= object_count_before) {
             return {};
@@ -7366,7 +8813,8 @@ ActiveParametricObject ToolRegistry::CreateParametricObject(const std::string& i
         return {};
     }
     const size_t object_count_before = document.GetObjects().size();
-    tool->create(document, prepared.parameters);
+    try { tool->create(document, prepared.parameters); }
+    catch(const TileBuildError& error){QMessageBox::warning(nullptr,"Tile",error.what());return {};}
     if (id == "SolidTwoSketches") {
         if (document.GetObjects().size() <= object_count_before) {
             return {};
@@ -7667,6 +9115,49 @@ ActiveParametricObject ToolRegistry::ApplySketchFeatureToSelection(
     return {kToolId, body_index, operation_index, std::move(parameters)};
 }
 
+bool ToolRegistry::PrepareHoleOnFace(const CAlfaDoc& document, unsigned long body_id,
+    int face_index, const CPoint3d& clicked_point,
+    std::vector<ToolParameter>& parameters, std::string& error) const {
+    const auto* body = dynamic_cast<const CSolid*>(document.FindObjectById(body_id));
+    if (!body || body->GetNumOperations() <= 0 || face_index < 0
+        || face_index >= body->GetNumSurfaces()) {
+        error = "Select a face of a body with parametric history.";
+        return false;
+    }
+    HoleFacePlacement placement;
+    if (!BuildHoleFacePlacement(body->GetTopoFace(face_index),
+            gp_Pnt(clicked_point.x, clicked_point.y, clicked_point.z), placement, error)) return false;
+    auto result = parameters;
+    const auto set = [&result](const std::string& id, double value) {
+        for (auto& parameter : result) if (parameter.id == id) parameter.value = value;
+    };
+    set("hole.center.x", placement.center.X());
+    set("hole.center.y", placement.center.Y());
+    set("hole.center.z", placement.center.Z());
+    set("hole.normal.x", placement.normal.X());
+    set("hole.normal.y", placement.normal.Y());
+    set("hole.normal.z", placement.normal.Z());
+    set("hole.refs.valid", 1.0);
+    // Keep the remembered diameter when it fits. On a small face start with
+    // radius <= half the available clearance, so the first click is usable.
+    const double diameter = param(parameters, "diameter", 10.0);
+    if (!std::isfinite(diameter) || diameter <= 0.0 || diameter >= 2.0 * placement.clearance)
+        set("diameter", placement.clearance);
+    for (size_t i = 0; i < 2; ++i) {
+        const std::string prefix = "hole.edge" + std::to_string(i + 1);
+        set(prefix + ".start.x", placement.starts[i].X());
+        set(prefix + ".start.y", placement.starts[i].Y());
+        set(prefix + ".start.z", placement.starts[i].Z());
+        set(prefix + ".end.x", placement.ends[i].X());
+        set(prefix + ".end.y", placement.ends[i].Y());
+        set(prefix + ".end.z", placement.ends[i].Z());
+        set(prefix + ".side", placement.sides[i]);
+        set("hole.distance" + std::to_string(i + 1), placement.distances[i]);
+    }
+    parameters = std::move(result);
+    return true;
+}
+
 ActiveParametricObject ToolRegistry::ApplyHole(
     CAlfaDoc& document,
     unsigned long body_id,
@@ -7883,7 +9374,8 @@ void ToolRegistry::Rebuild(const ActiveParametricObject& active_object, CAlfaDoc
 
     const ToolDefinition* tool = Find(active_object.tool_id);
     if (tool && tool->rebuild) {
-        tool->rebuild(document, active_object.object_index, active_object.parameters);
+        try { tool->rebuild(document, active_object.object_index, active_object.parameters); }
+        catch(const TileBuildError& error){QMessageBox::warning(nullptr,"Tile",error.what());return;}
         if (active_object.object_index < document.GetObjects().size()) {
             if (auto* assembly = dynamic_cast<CAssembled*>(
                     document.GetObjects()[active_object.object_index].get())) {
@@ -8077,17 +9569,25 @@ bool ToolRegistry::ReplayProfileDependents(unsigned long profile_id, CAlfaDoc& d
     }
 
     bool rebuilt_any = false;
+    std::vector<unsigned long> changed_ids{profile_id};
+    std::set<size_t> rebuilt_objects;
     auto& objects = document.GetObjects();
-    for (size_t i = 0; i < objects.size(); ++i) {
+    for (size_t changed_index = 0; changed_index < changed_ids.size(); ++changed_index) {
+      const unsigned long changed_id = changed_ids[changed_index];
+      for (size_t i = 0; i < objects.size(); ++i) {
+        if (rebuilt_objects.find(i) != rebuilt_objects.end()) continue;
         if (objects[i]
-            && objects[i]->GetParametricToolId() == "cabinet_advanced_slx") {
+            && (objects[i]->GetParametricToolId() == "CurveOffset"
+                || objects[i]->GetParametricToolId() == "CurveMirrorCopy"
+                || objects[i]->GetParametricToolId() == "CurveLinkedBridge"
+                || objects[i]->GetParametricToolId() == "SurfaceSmartHybrid")) {
             const bool uses_profile = std::any_of(
                 objects[i]->GetParametricParameters().begin(),
                 objects[i]->GetParametricParameters().end(),
-                [profile_id](const ParametricParameterValue& parameter) {
-                    return parameter.id.rfind("slx.", 0) == 0
+                [changed_id](const ParametricParameterValue& parameter) {
+                    return is_geometry_reference_parameter(parameter.id)
                         && static_cast<unsigned long>(
-                               std::max(0.0, parameter.value)) == profile_id;
+                               std::max(0.0, parameter.value)) == changed_id;
                 });
             if (uses_profile) {
                 const ActiveParametricObject active = ActiveObjectFromDocument(
@@ -8095,6 +9595,32 @@ bool ToolRegistry::ReplayProfileDependents(unsigned long profile_id, CAlfaDoc& d
                 if (!active.tool_id.empty()) {
                     Rebuild(active, document);
                     rebuilt_any = true;
+                    rebuilt_objects.insert(i);
+                    if (objects[i] && objects[i]->m_id != 0) {
+                        changed_ids.push_back(objects[i]->m_id);
+                    }
+                }
+            }
+            continue;
+        }
+        if (objects[i]
+            && objects[i]->GetParametricToolId() == "cabinet_advanced_slx") {
+            const bool uses_profile = std::any_of(
+                objects[i]->GetParametricParameters().begin(),
+                objects[i]->GetParametricParameters().end(),
+                [changed_id](const ParametricParameterValue& parameter) {
+                    return parameter.id.rfind("slx.", 0) == 0
+                        && static_cast<unsigned long>(
+                               std::max(0.0, parameter.value)) == changed_id;
+                });
+            if (uses_profile) {
+                const ActiveParametricObject active = ActiveObjectFromDocument(
+                    i, *objects[i], 0, &document);
+                if (!active.tool_id.empty()) {
+                    Rebuild(active, document);
+                    rebuilt_any = true;
+                    rebuilt_objects.insert(i);
+                    if (objects[i]->m_id != 0) changed_ids.push_back(objects[i]->m_id);
                 }
             }
             continue;
@@ -8110,12 +9636,8 @@ bool ToolRegistry::ReplayProfileDependents(unsigned long profile_id, CAlfaDoc& d
                 continue;
             }
             for (const ParametricParameterValue& parameter : operation->Parameters) {
-                if ((parameter.id == "profile.id"
-                     || parameter.id == "section.id"
-                     || parameter.id == "guide.id"
-                     || parameter.id == "guide1.id"
-                     || parameter.id == "guide2.id")
-                    && static_cast<unsigned long>(std::max(0.0, parameter.value)) == profile_id) {
+                if (is_geometry_reference_parameter(parameter.id)
+                    && static_cast<unsigned long>(std::max(0.0, parameter.value)) == changed_id) {
                     uses_profile = true;
                     break;
                 }
@@ -8126,7 +9648,12 @@ bool ToolRegistry::ReplayProfileDependents(unsigned long profile_id, CAlfaDoc& d
         }
         if (uses_profile && ReplayOperations(i, document)) {
             rebuilt_any = true;
+            rebuilt_objects.insert(i);
+            if (objects[i] && objects[i]->m_id != 0) {
+                changed_ids.push_back(objects[i]->m_id);
+            }
         }
+      }
     }
     return rebuilt_any;
 }
@@ -8135,6 +9662,19 @@ bool ToolRegistry::ReplayAllProfileDependents(CAlfaDoc& document) const {
     bool rebuilt_any = false;
     auto& objects = document.GetObjects();
     for (size_t i = 0; i < objects.size(); ++i) {
+        if (objects[i]
+            && (objects[i]->GetParametricToolId() == "CurveOffset"
+                || objects[i]->GetParametricToolId() == "CurveMirrorCopy"
+                || objects[i]->GetParametricToolId() == "CurveLinkedBridge"
+                || objects[i]->GetParametricToolId() == "SurfaceSmartHybrid")) {
+            const ActiveParametricObject active = ActiveObjectFromDocument(
+                i, *objects[i], 0, &document);
+            if (!active.tool_id.empty()) {
+                Rebuild(active, document);
+                rebuilt_any = true;
+            }
+            continue;
+        }
         if (objects[i]
             && objects[i]->GetParametricToolId() == "cabinet_advanced_slx") {
             const ActiveParametricObject active = ActiveObjectFromDocument(
@@ -8156,11 +9696,7 @@ bool ToolRegistry::ReplayAllProfileDependents(CAlfaDoc& document) const {
                     operation->Parameters.begin(),
                     operation->Parameters.end(),
                     [](const ParametricParameterValue& parameter) {
-                        return parameter.id == "profile.id"
-                            || parameter.id == "section.id"
-                            || parameter.id == "guide.id"
-                            || parameter.id == "guide1.id"
-                            || parameter.id == "guide2.id";
+                        return is_geometry_reference_parameter(parameter.id);
                     });
                 if (uses_profile) {
                     break;
@@ -8262,18 +9798,6 @@ ActiveParametricObject ToolRegistry::ActiveObjectFromDocument(
                         merge_saved_parameters(
                             primitive_definition->defaults,
                             primitive_operation->Parameters);
-                    for (const ParametricParameterValue& saved :
-                         primitive_operation->Parameters) {
-                        if (saved.id == "boolean.body_id") {
-                            parameters.push_back({
-                                saved.id,
-                                "Boolean Body",
-                                saved.value,
-                                0.0,
-                                4294967295.0,
-                                1.0});
-                        }
-                    }
                     parameters.push_back({
                         "boolean.tool_index",
                         "Boolean Tool",

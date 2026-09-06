@@ -20,6 +20,7 @@
 #include "solid/SurfaceSet.h"
 
 #include <BRepAlgoAPI_Common.hxx>
+#include <BRepAlgoAPI_Check.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepAlgoAPI_Section.hxx>
@@ -38,6 +39,7 @@
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepGProp.hxx>
 #include <BRep_Tool.hxx>
+#include <BRepTools_WireExplorer.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepFilletAPI_MakeChamfer.hxx>
@@ -69,6 +71,7 @@
 #include <Precision.hxx>
 #include <Standard_Failure.hxx>
 #include <ShapeFix_Solid.hxx>
+#include <ShapeAnalysis_FreeBounds.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopExp.hxx>
@@ -85,6 +88,7 @@
 #include <TopTools_ListIteratorOfListOfShape.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_MapOfShape.hxx>
+#include <TopTools_HSequenceOfShape.hxx>
 
 #include <algorithm>
 #include <array>
@@ -904,6 +908,122 @@ TopoDS_Wire make_wire_from_bspline(const CBSpline& spline)
     }
 }
 
+std::vector<const CBSpline*> sort_loft_splines_by_position(
+    const std::vector<const CBSpline*>& splines)
+{
+    if (splines.size() < 3) return splines;
+
+    std::vector<CPoint3d> centres;
+    centres.reserve(splines.size());
+    for (const CBSpline* spline : splines) {
+        CPoint3d centre;
+        constexpr int sample_count = 17;
+        for (int sample = 0; sample < sample_count; ++sample) {
+            const CPoint3d point = spline->Evaluate(
+                static_cast<float>(sample) / (sample_count - 1));
+            centre.x += point.x;
+            centre.y += point.y;
+            centre.z += point.z;
+        }
+        centre.x /= sample_count;
+        centre.y /= sample_count;
+        centre.z /= sample_count;
+        centres.push_back(centre);
+    }
+    const auto distance = [&](size_t first, size_t second) {
+        const double dx = centres[first].x - centres[second].x;
+        const double dy = centres[first].y - centres[second].y;
+        const double dz = centres[first].z - centres[second].z;
+        return std::sqrt(dx * dx + dy * dy + dz * dz);
+    };
+
+    std::vector<size_t> order;
+    const size_t count = splines.size();
+    if (count <= 12) {
+        // Minimum open route through the section centres. Reversing the route
+        // describes the same Loft; selection and creation order must not make
+        // the surface fold back through a distant profile.
+        const size_t state_count = size_t{1} << count;
+        const double infinity = std::numeric_limits<double>::max();
+        std::vector<double> costs(state_count * count, infinity);
+        std::vector<int> previous(state_count * count, -1);
+        for (size_t index = 0; index < count; ++index)
+            costs[(size_t{1} << index) * count + index] = 0.0;
+        for (size_t mask = 1; mask < state_count; ++mask) {
+            for (size_t last = 0; last < count; ++last) {
+                const double current = costs[mask * count + last];
+                if (current == infinity || (mask & (size_t{1} << last)) == 0)
+                    continue;
+                for (size_t next = 0; next < count; ++next) {
+                    if ((mask & (size_t{1} << next)) != 0) continue;
+                    const size_t next_mask = mask | (size_t{1} << next);
+                    const double candidate = current + distance(last, next);
+                    double& best = costs[next_mask * count + next];
+                    if (candidate + 1.0e-9 < best) {
+                        best = candidate;
+                        previous[next_mask * count + next] =
+                            static_cast<int>(last);
+                    }
+                }
+            }
+        }
+        const size_t full_mask = state_count - 1;
+        size_t last = 0;
+        for (size_t index = 1; index < count; ++index) {
+            if (costs[full_mask * count + index]
+                < costs[full_mask * count + last]) last = index;
+        }
+        size_t mask = full_mask;
+        while (true) {
+            order.push_back(last);
+            const int prior = previous[mask * count + last];
+            if (prior < 0) break;
+            mask &= ~(size_t{1} << last);
+            last = static_cast<size_t>(prior);
+        }
+        std::reverse(order.begin(), order.end());
+    } else {
+        // Avoid exponential work for unusually large interactive selections.
+        // Start at a geometric end and append the nearest unused section.
+        size_t start = 0;
+        double farthest_neighbour = -1.0;
+        for (size_t first = 0; first < count; ++first) {
+            double nearest = std::numeric_limits<double>::max();
+            for (size_t second = 0; second < count; ++second) {
+                if (first != second)
+                    nearest = std::min(nearest, distance(first, second));
+            }
+            if (nearest > farthest_neighbour) {
+                farthest_neighbour = nearest;
+                start = first;
+            }
+        }
+        std::vector<bool> used(count, false);
+        order.push_back(start);
+        used[start] = true;
+        while (order.size() < count) {
+            size_t next = count;
+            double best = std::numeric_limits<double>::max();
+            for (size_t candidate = 0; candidate < count; ++candidate) {
+                if (!used[candidate]
+                    && distance(order.back(), candidate) < best) {
+                    best = distance(order.back(), candidate);
+                    next = candidate;
+                }
+            }
+            if (next == count) break;
+            used[next] = true;
+            order.push_back(next);
+        }
+    }
+
+    if (order.size() != splines.size()) return splines;
+    std::vector<const CBSpline*> sorted;
+    sorted.reserve(splines.size());
+    for (size_t index : order) sorted.push_back(splines[index]);
+    return sorted;
+}
+
 TopoDS_Shape make_loft_surface_from_splines(const std::vector<const CBSpline*>& splines)
 {
     if (splines.size() < 2) {
@@ -913,7 +1033,9 @@ TopoDS_Shape make_loft_surface_from_splines(const std::vector<const CBSpline*>& 
     try {
         BRepOffsetAPI_ThruSections loft(Standard_False, Standard_False, 0.001);
         loft.CheckCompatibility(Standard_True);
-        for (const CBSpline* spline : splines) {
+        const std::vector<const CBSpline*> ordered_splines =
+            sort_loft_splines_by_position(splines);
+        for (const CBSpline* spline : ordered_splines) {
             if (!spline || spline->GetPointCount() < 2) {
                 return {};
             }
@@ -998,6 +1120,50 @@ TopoDS_Shape make_two_rail_sweep_surface(const CAlfaObject& profile,
         return {};
     }
     return BuildTwoRailSweepSurfaceShape(profile_samples, first_samples, second_samples);
+}
+
+// SurfaceSet uses the same public deflection value as the Low Poly density
+// control (density = 1 / deflection).  The general no-argument ReBuldMesh()
+// derives that value from the object's bounding-box diagonal, which is useful
+// for triangle display meshes but makes a large Loft start with only a handful
+// of quad strips.  Loft is a smooth modelling surface, so give its initial UV
+// net a predictable medium-fine density, independent of document units.
+constexpr float loft_display_mesh_deflection = 2.0f;
+
+bool valid_fillet_result(const TopoDS_Shape& source_shape,
+                         const TopoDS_Shape& result_shape) {
+    if (source_shape.IsNull() || result_shape.IsNull()) {
+        return false;
+    }
+    try {
+        BRepCheck_Analyzer topology_check(result_shape, Standard_True);
+        if (!topology_check.IsValid()) {
+            return false;
+        }
+
+        int source_solids = 0;
+        int result_solids = 0;
+        for (TopExp_Explorer explorer(source_shape, TopAbs_SOLID);
+             explorer.More(); explorer.Next()) {
+            ++source_solids;
+        }
+        for (TopExp_Explorer explorer(result_shape, TopAbs_SOLID);
+             explorer.More(); explorer.Next()) {
+            ++result_solids;
+        }
+        if (source_solids > 0 && result_solids != source_solids) {
+            return false;
+        }
+
+        // IsDone() alone is insufficient for large fillets: OCCT can return a
+        // topologically assembled result whose new faces intersect near an
+        // end cap. The Boolean pre-check catches that partial/spiked result.
+        BRepAlgoAPI_Check interference_check(
+            result_shape, Standard_False, Standard_True);
+        return interference_check.IsValid();
+    } catch (const Standard_Failure&) {
+        return false;
+    }
 }
 
 double point_distance(const CPoint3d& first, const CPoint3d& second)
@@ -1430,6 +1596,209 @@ std::vector<SupportedBoundaryEdge> surface_boundary_edges(
     return result;
 }
 
+double sampled_wire_to_spline_distance(
+    const std::vector<SupportedBoundaryEdge>& boundaries,
+    const CBSpline& spline)
+{
+    if (boundaries.empty() || spline.GetPointCount() < 3 || !spline.IsClosed())
+        return std::numeric_limits<double>::max();
+    try {
+        constexpr int spline_sample_count = 256;
+        constexpr int edge_sample_count = 96;
+        std::vector<gp_Pnt> edge_points;
+        edge_points.reserve(boundaries.size() * edge_sample_count);
+        for (const SupportedBoundaryEdge& boundary : boundaries) {
+            BRepAdaptor_Curve curve(boundary.edge);
+            const double first = curve.FirstParameter();
+            const double last = curve.LastParameter();
+            if (!std::isfinite(first) || !std::isfinite(last) || last <= first)
+                return std::numeric_limits<double>::max();
+            for (int sample = 0; sample < edge_sample_count; ++sample) {
+                const double t = static_cast<double>(sample) / edge_sample_count;
+                edge_points.push_back(
+                    curve.Value(first + (last - first) * t));
+            }
+        }
+        std::vector<gp_Pnt> spline_points;
+        spline_points.reserve(spline_sample_count);
+        for (int sample = 0; sample < spline_sample_count; ++sample) {
+            const double t = static_cast<double>(sample) / spline_sample_count;
+            const CPoint3d point = spline.Evaluate(static_cast<float>(t));
+            spline_points.emplace_back(point.x, point.y, point.z);
+        }
+        const auto directed_max = [](const auto& source, const auto& target) {
+            double maximum = 0.0;
+            for (const gp_Pnt& point : source) {
+                double nearest = std::numeric_limits<double>::max();
+                for (const gp_Pnt& candidate : target)
+                    nearest = std::min(nearest, point.Distance(candidate));
+                maximum = std::max(maximum, nearest);
+            }
+            return maximum;
+        };
+        return std::max(directed_max(edge_points, spline_points),
+                        directed_max(spline_points, edge_points));
+    } catch (const Standard_Failure&) {
+        return std::numeric_limits<double>::max();
+    }
+}
+
+struct TangentCapBoundary {
+    std::vector<SupportedBoundaryEdge> edges;
+    double distance = std::numeric_limits<double>::max();
+};
+
+TangentCapBoundary tangent_cap_boundary(const TopoDS_Shape& shape,
+                                        const CBSpline& spline)
+{
+    TangentCapBoundary best;
+    const std::vector<SupportedBoundaryEdge> free_edges =
+        surface_boundary_edges(shape);
+    Handle(TopTools_HSequenceOfShape) edge_sequence =
+        new TopTools_HSequenceOfShape;
+    for (const SupportedBoundaryEdge& boundary : free_edges)
+        edge_sequence->Append(boundary.edge);
+    Handle(TopTools_HSequenceOfShape) wire_sequence =
+        new TopTools_HSequenceOfShape;
+    ShapeAnalysis_FreeBounds::ConnectEdgesToWires(
+        edge_sequence, 1.0e-4, Standard_True, wire_sequence);
+    for (Standard_Integer wire_index = 1;
+         wire_index <= wire_sequence->Length(); ++wire_index) {
+        const TopoDS_Wire wire = TopoDS::Wire(wire_sequence->Value(wire_index));
+        std::vector<SupportedBoundaryEdge> ordered_edges;
+        for (BRepTools_WireExplorer explorer(wire);
+             explorer.More(); explorer.Next()) {
+            const TopoDS_Edge oriented_edge = explorer.Current();
+            const auto found = std::find_if(
+                free_edges.begin(), free_edges.end(),
+                [&](const SupportedBoundaryEdge& candidate) {
+                    return candidate.edge.IsSame(oriented_edge);
+                });
+            if (found != free_edges.end())
+                ordered_edges.push_back({oriented_edge, found->face});
+        }
+        if (ordered_edges.empty()) continue;
+        const double distance = sampled_wire_to_spline_distance(
+            ordered_edges, spline);
+        if (distance < best.distance)
+            best = {std::move(ordered_edges), distance};
+    }
+    return best;
+}
+
+double sampled_spline_span(const CBSpline& spline)
+{
+    CPoint3d minimum = spline.Evaluate(0.0f);
+    CPoint3d maximum = minimum;
+    constexpr int sample_count = 64;
+    for (int sample = 1; sample < sample_count; ++sample) {
+        const CPoint3d point = spline.Evaluate(
+            static_cast<float>(sample) / sample_count);
+        minimum.x = std::min(minimum.x, point.x);
+        minimum.y = std::min(minimum.y, point.y);
+        minimum.z = std::min(minimum.z, point.z);
+        maximum.x = std::max(maximum.x, point.x);
+        maximum.y = std::max(maximum.y, point.y);
+        maximum.z = std::max(maximum.z, point.z);
+    }
+    const double dx = maximum.x - minimum.x;
+    const double dy = maximum.y - minimum.y;
+    const double dz = maximum.z - minimum.z;
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+TopoDS_Shape make_tangent_cap(const CBSpline& spline,
+                              const CSurfaceSet& support_surface,
+                              double length_factor,
+                              std::string* error_message)
+{
+    const auto fail = [&](const char* message) -> TopoDS_Shape {
+        if (error_message) *error_message = message;
+        return {};
+    };
+    if (!spline.IsClosed() || spline.GetPointCount() < 3)
+        return fail("Tangent Cap requires one closed spline.");
+    if (!std::isfinite(length_factor) || length_factor <= 0.0)
+        return fail("Nose Length Factor must be greater than zero.");
+    if (support_surface.m_Shape.IsNull())
+        return fail("The supporting surface is empty.");
+
+    const TangentCapBoundary boundary = tangent_cap_boundary(
+        support_surface.m_Shape, spline);
+    if (boundary.edges.empty())
+        return fail("No open boundary was found on the supporting surface.");
+    const double span = sampled_spline_span(spline);
+    const double match_tolerance = std::max(1.0e-4, span * 0.015);
+    if (!std::isfinite(boundary.distance)
+        || boundary.distance > match_tolerance) {
+        return fail("The spline does not coincide with an open surface boundary.");
+    }
+
+    gp_Pnt boundary_center(0.0, 0.0, 0.0);
+    try {
+        constexpr int center_samples_per_edge = 64;
+        int accumulated_samples = 0;
+        for (const SupportedBoundaryEdge& boundary_edge : boundary.edges) {
+            BRepAdaptor_Curve edge_curve(boundary_edge.edge);
+            const double first = edge_curve.FirstParameter();
+            const double last = edge_curve.LastParameter();
+            for (int sample = 0; sample < center_samples_per_edge; ++sample) {
+                const gp_Pnt point = edge_curve.Value(
+                    first + (last - first)
+                        * static_cast<double>(sample)
+                        / center_samples_per_edge);
+                boundary_center.ChangeCoord() += point.XYZ();
+                ++accumulated_samples;
+            }
+        }
+        boundary_center.ChangeCoord() /= accumulated_samples;
+    } catch (const Standard_Failure&) {
+        return fail("The selected surface boundary could not be evaluated.");
+    }
+
+    // A tangency constraint alone has a flat disk as a competing minimum-
+    // energy solution.  Give the plate one interior nose point on the side
+    // opposite the supporting surface.  Its distance scales with the opening,
+    // producing a useful automatic rounded nose while preserving exact G1 at
+    // the complete boundary.
+    GProp_GProps support_properties;
+    BRepGProp::SurfaceProperties(support_surface.m_Shape, support_properties);
+    const gp_Pnt support_center = support_properties.CentreOfMass();
+    gp_Vec outward(support_center, boundary_center);
+    if (outward.SquareMagnitude() <= 1.0e-12)
+        return fail("The outward direction of the tangent cap is ambiguous.");
+    outward.Normalize();
+    const gp_Pnt nose_point = boundary_center.Translated(
+        outward * std::max(span * length_factor, 1.0e-3));
+
+    try {
+        BRepOffsetAPI_MakeFilling filling(
+            4, 30, 4, Standard_True,
+            1.0e-5, 1.0e-4, 0.002, 0.01, 12, 20);
+        for (const SupportedBoundaryEdge& boundary_edge : boundary.edges) {
+            filling.Add(boundary_edge.edge, boundary_edge.face,
+                        GeomAbs_G1, Standard_True);
+        }
+        filling.Add(nose_point);
+        filling.Build();
+        if (!filling.IsDone() || filling.Shape().IsNull())
+            return fail("OpenCascade could not build the tangent cap.");
+        if (!std::isfinite(filling.G1Error()) || filling.G1Error() > 0.03) {
+            if (error_message) {
+                *error_message = "The requested G1 continuity could not be achieved (error "
+                    + std::to_string(filling.G1Error()) + ").";
+            }
+            return {};
+        }
+        TopoDS_Shape result = filling.Shape();
+        if (!BRepCheck_Analyzer(result).IsValid())
+            return fail("The tangent cap is topologically invalid.");
+        return result;
+    } catch (const Standard_Failure&) {
+        return fail("OpenCascade failed while building the tangent cap.");
+    }
+}
+
 SurfaceEdgePair closest_surface_edges(const TopoDS_Shape& first,
                                       const TopoDS_Shape& second)
 {
@@ -1738,6 +2107,7 @@ struct CAlfaDoc::LiveFilletData {
     std::vector<std::pair<int, int>> edge_refs;
     std::vector<int> created_surface_indices;
     size_t object_index = 0;
+    bool preview_valid = false;
 };
 
 struct CAlfaDoc::LiveChamferData {
@@ -2187,6 +2557,7 @@ bool CAlfaDoc::CreateSurfaceFromSelectedSketch(
         error_message->clear();
     }
 
+    EnsureObjectIds();
     const CSmartLine* sketch = GetSelectedSketch();
     if (!sketch) {
         return fail("Select a sketch first.");
@@ -2208,12 +2579,41 @@ bool CAlfaDoc::CreateSurfaceFromSelectedSketch(
         ? "Sketch Surface"
         : sketch->GetName() + " Surface");
     surface->SetColor({0.58f, 0.68f, 0.76f});
+    surface->SetParametricOperation(0,
+        "SurfaceFromSketch", "Sketch Surface", {
+            {"profile.id", static_cast<double>(sketch->m_id)}
+        });
     if (!surface->InitSurfaces()) {
         return fail("Could not initialize the trimmed surface.");
     }
     surface->InitEdges();
     AddObject(std::move(surface));
     return true;
+}
+
+bool CAlfaDoc::RebuildSurfaceFromSketch(size_t object_index,
+                                        unsigned long sketch_id,
+                                        std::string* error_message) {
+    if (object_index >= objects_.size()) {
+        if (error_message) *error_message = "The surface object was not found.";
+        return false;
+    }
+    auto* surface = dynamic_cast<CSurfaceSet*>(objects_[object_index].get());
+    const auto* sketch = dynamic_cast<const CSmartLine*>(FindObjectById(sketch_id));
+    if (!surface || !sketch || !sketch->IsClosed()) {
+        if (error_message) *error_message = "The source sketch was not found or is open.";
+        return false;
+    }
+
+    TopoDS_Face profile_face;
+    Vec3 profile_normal{};
+    if (!BuildSketchProfileFace(*sketch, profile_face, profile_normal)
+        || profile_face.IsNull()) {
+        if (error_message) *error_message = "The sketch does not form a valid planar surface boundary.";
+        return false;
+    }
+    surface->m_Shape = profile_face;
+    return surface->ReBuldMesh();
 }
 
 bool CAlfaDoc::CreatePolylineFromSelectedCurveByLength(
@@ -4412,6 +4812,35 @@ bool CAlfaDoc::SelectCurvePointsInScreenRect(DomRect rect,
     return true;
 }
 
+bool CAlfaDoc::SelectCurvePoint(size_t object_index, size_t point_index) {
+    if (object_index >= objects_.size() || !objects_[object_index]) {
+        return false;
+    }
+    size_t point_count = 0;
+    if (const auto* polyline = dynamic_cast<const CPolyline*>(
+            objects_[object_index].get())) {
+        point_count = polyline->GetPointCount();
+    } else if (const auto* spline = dynamic_cast<const CBSpline*>(
+                   objects_[object_index].get())) {
+        point_count = spline->GetPointCount();
+    } else if (const auto* sketch = dynamic_cast<const CSmartLine*>(
+                   objects_[object_index].get())) {
+        point_count = sketch->GetNodeCount();
+    } else {
+        return false;
+    }
+    if (point_index >= point_count) return false;
+
+    selected_curve_points_ = {{object_index, point_index}};
+    selected_object_indices_ = {object_index};
+    selected_object_index_ = object_index;
+    active_object_index_ = object_index;
+    has_selected_object_ = true;
+    selected_point_index_ = point_index;
+    has_selected_point_ = true;
+    return true;
+}
+
 bool CAlfaDoc::SelectAllPointsOfSelectedCurve() {
     if (!HasSelection() || selected_object_index_ >= objects_.size()
         || !objects_[selected_object_index_]) {
@@ -4933,6 +5362,55 @@ void CAlfaDoc::ClearSelection() {
     ClearPointSelection();
 }
 
+bool CAlfaDoc::ClearInvisibleSelection() {
+    const auto hidden = [this](size_t index) {
+        return index >= objects_.size() || !objects_[index]
+            || !IsObjectVisible(*objects_[index]);
+    };
+    bool changed = false;
+    for (auto& object : objects_) {
+        auto* solid = dynamic_cast<CSolid*>(object.get());
+        if (solid && !IsObjectVisible(*solid)) {
+            changed = solid->HasSelectedEdge() || solid->HasSelectedFace() || changed;
+            solid->ClearSelectedEdge();
+            solid->ClearSelectedFace();
+        }
+    }
+    if (has_selected_solid_face_ && hidden(selected_face_object_index_)) {
+        selected_solid_face_indices_.clear();
+        has_selected_solid_face_ = false;
+        selected_face_object_index_ = 0;
+        draft_face_.reset();
+        changed = true;
+    }
+    const auto point_count = selected_curve_points_.size();
+    selected_curve_points_.erase(std::remove_if(
+        selected_curve_points_.begin(), selected_curve_points_.end(),
+        [&hidden](const auto& point) { return hidden(point.first); }),
+        selected_curve_points_.end());
+    changed = changed || point_count != selected_curve_points_.size();
+    if (has_selected_point_ && hidden(selected_object_index_)) {
+        has_selected_point_ = false;
+        selected_point_index_ = 0;
+        changed = true;
+    }
+    const auto count = selected_object_indices_.size();
+    selected_object_indices_.erase(std::remove_if(
+        selected_object_indices_.begin(), selected_object_indices_.end(), hidden),
+        selected_object_indices_.end());
+    if (count != selected_object_indices_.size()) {
+        changed = true;
+        ClearTransformGizmoOrigin();
+        if (selected_object_indices_.empty()) {
+            ClearSelection();
+        } else if (hidden(selected_object_index_)) {
+            selected_object_index_ = selected_object_indices_.back();
+            active_object_index_ = selected_object_index_;
+        }
+    }
+    return changed;
+}
+
 bool CAlfaDoc::SelectObjectById(unsigned long object_id, SelectionAction action) {
     const size_t index = FindObjectIndexById(object_id);
     if (index >= objects_.size() || !objects_[index]) {
@@ -5035,10 +5513,45 @@ size_t CAlfaDoc::SelectAllVisibleObjects() {
         }
     }
 
+    const auto all_group_members_visible = [this](const CGroup& root) {
+        std::set<unsigned long> visiting;
+        std::function<bool(const CGroup&)> check_group;
+        check_group = [&](const CGroup& group) {
+            if (!visiting.insert(group.m_id).second)
+                return false;
+            for (unsigned long id : group.GetElementIds()) {
+                const CAlfaObject* member = FindObjectById(id);
+                if (!member || !IsObjectVisible(*member)) {
+                    visiting.erase(group.m_id);
+                    return false;
+                }
+                if (const auto* child_group =
+                        dynamic_cast<const CGroup*>(member)) {
+                    if (!check_group(*child_group)) {
+                        visiting.erase(group.m_id);
+                        return false;
+                    }
+                }
+            }
+            visiting.erase(group.m_id);
+            return true;
+        };
+        return check_group(root);
+    };
+
     for (size_t index = 0; index < objects_.size(); ++index) {
-        if (objects_[index] && IsObjectVisible(*objects_[index])) {
-            selected_object_indices_.push_back(index);
+        if (!objects_[index] || !IsObjectVisible(*objects_[index]))
+            continue;
+        // Selecting a group causes Delete to remove all its descendants. A
+        // partially hidden group must therefore stay unselected when Ctrl+A
+        // means "Select All Visible"; its visible children are selected
+        // individually and its hidden children remain protected.
+        if (const auto* group =
+                dynamic_cast<const CGroup*>(objects_[index].get());
+            group && !all_group_members_visible(*group)) {
+            continue;
         }
+        selected_object_indices_.push_back(index);
     }
 
     if (selected_object_indices_.empty()) {
@@ -5616,8 +6129,11 @@ bool CAlfaDoc::MirrorSelectedObjects(Vec3 plane_point, Vec3 plane_normal) {
 }
 
 bool CAlfaDoc::CreateLoftSurfaceFromSelectedBSplines() {
+    EnsureObjectIds();
     std::vector<const CBSpline*> splines;
+    std::vector<unsigned long> curve_ids;
     splines.reserve(selected_object_indices_.size());
+    curve_ids.reserve(selected_object_indices_.size());
     for (size_t index : selected_object_indices_) {
         if (index >= objects_.size() || !objects_[index] || !IsObjectVisible(*objects_[index])) {
             continue;
@@ -5625,6 +6141,7 @@ bool CAlfaDoc::CreateLoftSurfaceFromSelectedBSplines() {
         if (const auto* spline = dynamic_cast<const CBSpline*>(objects_[index].get())) {
             if (spline->GetPointCount() >= 2) {
                 splines.push_back(spline);
+                curve_ids.push_back(spline->m_id);
             }
         }
     }
@@ -5632,6 +6149,12 @@ bool CAlfaDoc::CreateLoftSurfaceFromSelectedBSplines() {
     if (splines.size() < 2) {
         return false;
     }
+
+    splines = sort_loft_splines_by_position(splines);
+    curve_ids.clear();
+    curve_ids.reserve(splines.size());
+    for (const CBSpline* spline : splines)
+        curve_ids.push_back(spline->m_id);
 
     TopoDS_Shape loft_shape = make_loft_surface_from_splines(splines);
     if (loft_shape.IsNull()) {
@@ -5641,9 +6164,130 @@ bool CAlfaDoc::CreateLoftSurfaceFromSelectedBSplines() {
     auto surface = std::make_unique<CSurfaceSet>(loft_shape);
     surface->SetName("Loft Surface");
     surface->SetColor({0.70f, 0.72f, 0.68f});
-    surface->ReBuldMesh();
+    std::vector<ParametricParameterValue> parameters;
+    parameters.reserve(curve_ids.size() + 1);
+    parameters.push_back({"curve.count", static_cast<double>(curve_ids.size())});
+    for (size_t index = 0; index < curve_ids.size(); ++index) {
+        parameters.push_back({
+            "curve" + std::to_string(index + 1) + ".id",
+            static_cast<double>(curve_ids[index])});
+    }
+    surface->SetParametricOperation(
+        0, "SurfaceLoft", "Loft Surface", std::move(parameters));
+    if (!surface->ReBuldMesh(loft_display_mesh_deflection)) {
+        return false;
+    }
     AddObject(std::move(surface));
     return true;
+}
+
+bool CAlfaDoc::RebuildLoftSurface(
+    size_t object_index,
+    const std::vector<unsigned long>& curve_ids) {
+    if (object_index >= objects_.size() || curve_ids.size() < 2) {
+        return false;
+    }
+    auto* surface = dynamic_cast<CSurfaceSet*>(objects_[object_index].get());
+    if (!surface) return false;
+
+    std::vector<const CBSpline*> splines;
+    splines.reserve(curve_ids.size());
+    for (unsigned long curve_id : curve_ids) {
+        const auto* spline = dynamic_cast<const CBSpline*>(FindObjectById(curve_id));
+        if (!spline || spline->GetPointCount() < 2) return false;
+        splines.push_back(spline);
+    }
+    TopoDS_Shape shape = make_loft_surface_from_splines(splines);
+    if (shape.IsNull()) return false;
+    surface->m_Shape = shape;
+    return surface->ReBuldMesh(loft_display_mesh_deflection);
+}
+
+bool CAlfaDoc::CreateTangentCapFromSelection(std::string* error_message) {
+    EnsureObjectIds();
+    const CBSpline* curve = nullptr;
+    const CSurfaceSet* surface = nullptr;
+    for (size_t index : selected_object_indices_) {
+        if (index >= objects_.size() || !objects_[index]
+            || !IsObjectVisible(*objects_[index])) continue;
+        if (const auto* selected_curve = dynamic_cast<const CBSpline*>(
+                objects_[index].get())) {
+            if (curve) {
+                if (error_message) *error_message =
+                    "Select only one closed spline and one surface.";
+                return false;
+            }
+            curve = selected_curve;
+        } else if (const auto* selected_surface =
+                       dynamic_cast<const CSurfaceSet*>(objects_[index].get())) {
+            if (surface) {
+                if (error_message) *error_message =
+                    "Select only one closed spline and one surface.";
+                return false;
+            }
+            surface = selected_surface;
+        }
+    }
+    if (!curve || !surface) {
+        if (error_message) *error_message =
+            "Select one closed boundary spline and its supporting surface.";
+        return false;
+    }
+    return CreateTangentCap(curve->m_id, surface->m_id, 0.55, error_message);
+}
+
+bool CAlfaDoc::CreateTangentCap(unsigned long curve_id,
+                                unsigned long surface_id,
+                                double length_factor,
+                                std::string* error_message) {
+    if (error_message) error_message->clear();
+    const auto* curve = dynamic_cast<const CBSpline*>(FindObjectById(curve_id));
+    const auto* support = dynamic_cast<const CSurfaceSet*>(
+        FindObjectById(surface_id));
+    if (!curve || !support) {
+        if (error_message) *error_message =
+            "The boundary spline or supporting surface was not found.";
+        return false;
+    }
+    TopoDS_Shape shape = make_tangent_cap(
+        *curve, *support, length_factor, error_message);
+    if (shape.IsNull()) return false;
+
+    auto cap = std::make_unique<CSurfaceSet>(shape);
+    cap->SetName("Tangent Cap");
+    cap->SetColor(support->GetColor());
+    cap->SetMaterial(support->GetMaterial());
+    cap->SetMaterialId(support->GetMaterialId());
+    cap->SetParametricOperation(0, "SurfaceTangentCap", "Tangent Cap", {
+        {"curve.id", static_cast<double>(curve_id)},
+        {"surface.id", static_cast<double>(surface_id)},
+        {"length_factor", length_factor}
+    });
+    if (!cap->ReBuldMesh(loft_display_mesh_deflection)) {
+        if (error_message) *error_message =
+            "The tangent cap was built, but its display mesh failed.";
+        return false;
+    }
+    AddObject(std::move(cap));
+    return true;
+}
+
+bool CAlfaDoc::RebuildTangentCap(size_t object_index,
+                                 unsigned long curve_id,
+                                 unsigned long surface_id,
+                                 double length_factor,
+                                 std::string* error_message) {
+    if (object_index >= objects_.size()) return false;
+    auto* cap = dynamic_cast<CSurfaceSet*>(objects_[object_index].get());
+    const auto* curve = dynamic_cast<const CBSpline*>(FindObjectById(curve_id));
+    const auto* support = dynamic_cast<const CSurfaceSet*>(
+        FindObjectById(surface_id));
+    if (!cap || !curve || !support) return false;
+    TopoDS_Shape shape = make_tangent_cap(
+        *curve, *support, length_factor, error_message);
+    if (shape.IsNull()) return false;
+    cap->m_Shape = shape;
+    return cap->ReBuldMesh(loft_display_mesh_deflection);
 }
 
 size_t CAlfaDoc::CreatePlaneIntersectionCurves(
@@ -6419,6 +7063,13 @@ bool CAlfaDoc::ReverseSelectedSurfaceNormals() {
     }
     const bool reversed = solid->ReverseNormals();
     if (reversed) {
+        if (solid->GetNumOperations() > 0) {
+            solid->SetParametricOperation(
+                solid->GetOperationTree().size(),
+                "SurfaceReverseNormals",
+                "Reverse Normals",
+                {});
+        }
         ClearPointSelection();
         selected_solid_face_indices_.clear();
         has_selected_solid_face_ = false;
@@ -6633,6 +7284,17 @@ bool CAlfaDoc::DeleteSelectedObject() {
     for (size_t index : selected_object_indices_) {
         collect_object(index);
     }
+    for (ObjectPtr& object : objects_) {
+        auto* group = dynamic_cast<CGroup*>(object.get());
+        if (!group || visited_ids.count(group->m_id) != 0)
+            continue;
+        std::vector<unsigned long> surviving_ids;
+        for (unsigned long id : group->GetElementIds()) {
+            if (visited_ids.count(id) == 0)
+                surviving_ids.push_back(id);
+        }
+        group->SetElementIds(std::move(surviving_ids));
+    }
     std::sort(indices.begin(), indices.end(), std::greater<size_t>());
     indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
     for (size_t index : indices) {
@@ -6659,7 +7321,7 @@ bool CAlfaDoc::DeleteSelectedPoint() {
     }
 
     CBSpline* spline = GetSelectedBSpline();
-    if (spline && spline->RemovePoint(selected_point_index_)) {
+    if (spline && spline->RemoveNode(selected_point_index_)) {
         ClearPointSelection();
         return true;
     }
@@ -7388,7 +8050,8 @@ bool CAlfaDoc::ApplyFilletToSelectedEdge(double radius) {
         return false;
     }
 
-    if (!rebuild_solid_from_shape(objects_, solid_index, solid, result_shape)) {
+    if (!valid_fillet_result(solid->m_Shape, result_shape)
+        || !rebuild_solid_from_shape(objects_, solid_index, solid, result_shape)) {
         return false;
     }
     selected_object_index_ = solid_index;
@@ -7434,7 +8097,8 @@ bool CAlfaDoc::ApplyFilletToAllSelectedSolidEdges(double radius) {
         return false;
     }
 
-    if (!rebuild_solid_from_shape(objects_, solid_index, solid, result_shape)) {
+    if (!valid_fillet_result(solid->m_Shape, result_shape)
+        || !rebuild_solid_from_shape(objects_, solid_index, solid, result_shape)) {
         return false;
     }
 
@@ -7483,6 +8147,16 @@ bool CAlfaDoc::HasLiveFillet() const {
     return live_fillet_ && live_fillet_->object_index < objects_.size();
 }
 
+bool CAlfaDoc::IsLiveFilletPreviewValid() const {
+    return live_fillet_ && live_fillet_->preview_valid;
+}
+
+void CAlfaDoc::RejectLiveFilletPreview() {
+    if (live_fillet_) {
+        live_fillet_->preview_valid = false;
+    }
+}
+
 std::vector<std::pair<int, int>> CAlfaDoc::GetLiveFilletEdgeRefs() const {
     return live_fillet_ ? live_fillet_->edge_refs : std::vector<std::pair<int, int>>{};
 }
@@ -7511,6 +8185,23 @@ bool CAlfaDoc::GetLiveFilletEndPoints(CPoint3d& start, CPoint3d& end) const {
     return true;
 }
 
+bool CAlfaDoc::GetLiveEdgeToolFrame(double fraction, CPoint3d& point, CPoint3d& tangent) const {
+    const auto* edges = live_fillet_ ? &live_fillet_->edges : live_chamfer_ ? &live_chamfer_->edges : nullptr;
+    if (!edges || edges->empty() || !std::isfinite(fraction)) return false;
+    try {
+        const auto& edge=edges->front();
+        BRepAdaptor_Curve curve(edge);
+        const double t=curve.FirstParameter()+(curve.LastParameter()-curve.FirstParameter())*std::clamp(fraction,0.0,1.0);
+        gp_Pnt p;gp_Vec derivative;curve.D1(t,p,derivative);
+        if(derivative.SquareMagnitude()<=1e-24)return false;
+        derivative.Normalize();
+        if(edge.Orientation()==TopAbs_REVERSED)derivative.Reverse();
+        point=CPoint3d(p.X(),p.Y(),p.Z());
+        tangent=CPoint3d(derivative.X(),derivative.Y(),derivative.Z());
+        return true;
+    } catch(const Standard_Failure&) {return false;}
+}
+
 std::vector<CPoint3d> CAlfaDoc::GetLiveFilletPoints(size_t count) const {
     std::vector<CPoint3d> points;
     if (!live_fillet_ || live_fillet_->edges.empty() || count == 0) {
@@ -7533,11 +8224,35 @@ std::vector<CPoint3d> CAlfaDoc::GetLiveFilletPoints(size_t count) const {
     return points;
 }
 
+std::vector<CPoint3d> CAlfaDoc::GetLiveEdgeToolPoints(size_t count) const {
+    std::vector<CPoint3d> points;
+    const auto* edges = live_fillet_ ? &live_fillet_->edges : live_chamfer_ ? &live_chamfer_->edges : nullptr;
+    if (!edges || edges->empty() || count == 0) {
+        return points;
+    }
+    try {
+        BRepAdaptor_Curve curve(edges->front());
+        const double first = curve.FirstParameter();
+        const double last = curve.LastParameter();
+        points.reserve(count);
+        for (size_t index = 0; index < count; ++index) {
+            const double ratio = count == 1
+                ? 0.0 : static_cast<double>(index) / static_cast<double>(count - 1);
+            const gp_Pnt point = curve.Value(first + (last - first) * ratio);
+            points.emplace_back(point.X(), point.Y(), point.Z());
+        }
+    } catch (const Standard_Failure&) {
+        points.clear();
+    }
+    return points;
+}
+
 bool CAlfaDoc::UpdateLiveFillet(double radius) {
     if (!live_fillet_ || live_fillet_->object_index >= objects_.size()) {
         return false;
     }
 
+    live_fillet_->preview_valid = false;
     auto* solid = dynamic_cast<CSolid*>(
         objects_[live_fillet_->object_index].get());
     if (!solid || live_fillet_->base_shape.IsNull()
@@ -7561,6 +8276,9 @@ bool CAlfaDoc::UpdateLiveFillet(double radius) {
             return false;
         }
         result_shape = fillet.Shape();
+        if (!valid_fillet_result(live_fillet_->base_shape, result_shape)) {
+            return false;
+        }
         created_surface_indices =
             generated_face_indices(fillet, live_fillet_->edges, result_shape);
     } catch (const Standard_Failure&) {
@@ -7569,6 +8287,7 @@ bool CAlfaDoc::UpdateLiveFillet(double radius) {
 
     LiveFilletBuildRequest request;
     request.source_shape = live_fillet_->base_shape;
+    request.base_shape = live_fillet_->base_shape;
     request.object_index = live_fillet_->object_index;
     return ApplyLiveFilletShape(
         request, result_shape, std::move(created_surface_indices));
@@ -7579,6 +8298,7 @@ bool CAlfaDoc::UpdateLiveFillet(double start_radius, double end_radius) {
 }
 
 bool CAlfaDoc::UpdateLiveFillet(const std::vector<double>& radius_law) {
+    RejectLiveFilletPreview();
     LiveFilletBuildRequest request;
     if (!CreateLiveFilletBuildRequest(request)) {
         return false;
@@ -7693,6 +8413,9 @@ bool CAlfaDoc::BuildLiveFilletShape(
                 return false;
             }
             result_shape = fillet.Shape();
+            if (!valid_fillet_result(request.base_shape, result_shape)) {
+                return false;
+            }
             created_surface_indices =
                 generated_face_indices(fillet, build_edges, result_shape);
         } catch (const Standard_Failure&) {
@@ -7707,7 +8430,11 @@ bool CAlfaDoc::ApplyLiveFilletShape(
     std::vector<int> created_surface_indices) {
     if (!live_fillet_ || live_fillet_->object_index != request.object_index
         || !live_fillet_->base_shape.IsSame(request.source_shape)
-        || request.object_index >= objects_.size() || result_shape.IsNull()) {
+        || request.object_index >= objects_.size()
+        || !valid_fillet_result(
+            request.base_shape.IsNull()
+                ? request.source_shape : request.base_shape,
+            result_shape)) {
         return false;
     }
     auto* solid = dynamic_cast<CSolid*>(objects_[request.object_index].get());
@@ -7716,6 +8443,7 @@ bool CAlfaDoc::ApplyLiveFilletShape(
         return false;
     }
     live_fillet_->created_surface_indices = std::move(created_surface_indices);
+    live_fillet_->preview_valid = true;
     selected_object_index_ = request.object_index;
     selected_object_indices_ = {request.object_index};
     active_object_index_ = request.object_index;

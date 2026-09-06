@@ -276,7 +276,8 @@ bool StepIO::Export(const std::string& path, const CAlfaDoc& document, std::stri
     int solid_count = 0;
     for (const auto& object : document.GetObjects()) {
         const auto* solid = dynamic_cast<const CSolid*>(object.get());
-        if (solid && solid->IsVisible() && !solid->m_Shape.IsNull()) {
+        if (solid && document.IsObjectVisible(*solid)
+            && !solid->m_Shape.IsNull()) {
             builder.Add(compound, solid->m_Shape);
             ++solid_count;
         }

@@ -1,3 +1,4 @@
+#include "materials/ProceduralMaterialIO.h"
 #include "Dom3DProjectSerializer.h"
 
 #include "CadCurve3D.h"
@@ -22,18 +23,27 @@
 #include <QDomDocument>
 #include <QBuffer>
 #include <QByteArray>
+#include <QCryptographicHash>
 #include <QFile>
 #include <QFileInfo>
 #include <QImage>
 #include <QSaveFile>
 #include <QStringList>
 #include <QXmlStreamWriter>
+#include <BRepTools.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
+#include <BRep_Builder.hxx>
+#include <TopExp.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <TopoDS_Compound.hxx>
+#include <Standard_Failure.hxx>
 
 #include <cmath>
 #include <algorithm>
 #include <map>
 #include <memory>
 #include <set>
+#include <sstream>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -141,7 +151,8 @@ QString operation_name_for_object(const CAlfaObject& object) {
     return {};
 }
 
-void write_surface_texture_transforms(QXmlStreamWriter& xml, const CSolid& solid) {
+void write_surface_texture_transforms(QXmlStreamWriter& xml, const CSolid& solid,
+                                     bool include_defaults = true) {
     xml.writeStartElement("surfaceTextureTransforms");
     for (int i = 0; i < solid.GetNumSurfaces(); ++i) {
         const CSurfaceFace* surface = solid.GetSurfaceFace(i);
@@ -149,6 +160,18 @@ void write_surface_texture_transforms(QXmlStreamWriter& xml, const CSolid& solid
             continue;
         }
         const SurfaceTextureTransform& transform = surface->TextureTransform;
+        const SurfaceTextureTransform defaults;
+        // Lazy face initialization is equivalent to having default overrides.
+        if (!include_defaults && !surface->MaterialOverride.enabled
+            && !surface->MaterialOverride.coating_enabled
+            && transform.offset_u == defaults.offset_u
+            && transform.offset_v == defaults.offset_v
+            && transform.scale_u == defaults.scale_u
+            && transform.scale_v == defaults.scale_v
+            && transform.rotation_degrees == defaults.rotation_degrees
+            && transform.fit_to_surface == defaults.fit_to_surface) {
+            continue;
+        }
         xml.writeEmptyElement("surface");
         xml.writeAttribute("index", QString::number(i));
         xml.writeAttribute("offsetU", QString::number(transform.offset_u, 'g', 9));
@@ -380,6 +403,9 @@ bool read_size_attr(const QDomElement& element, const char* name, size_t& value,
 
 void write_material(QXmlStreamWriter& xml, const Material& material) {
     xml.writeStartElement("material");
+    xml.writeAttribute("proceduralPlaster", EncodePlaster(material));
+    xml.writeAttribute("proceduralFabric", EncodeFabric(material));
+    xml.writeAttribute("sourceFile", QString::fromStdString(material.source_file_path));
     xml.writeAttribute("id", QString::number(material.id));
     xml.writeAttribute("name", QString::fromStdString(material.name));
     xml.writeAttribute("r", QString::number(material.diffuse.r, 'g', 9));
@@ -407,6 +433,7 @@ void write_material(QXmlStreamWriter& xml, const Material& material) {
     xml.writeAttribute("textureScaleV", QString::number(material.texture_scale_v, 'g', 9));
     xml.writeAttribute("textureRotation", QString::number(material.texture_rotation_degrees, 'g', 9));
     xml.writeAttribute("textureFitToSurface", material.texture_fit_to_surface ? "1" : "0");
+    xml.writeAttribute("textureWrapObject", material.texture_wrap_object ? "1" : "0");
     xml.writeAttribute("colorTexture", QString::fromStdString(material.color_texture_path));
     xml.writeAttribute("lightTexture", QString::fromStdString(material.light_texture_path));
     xml.writeAttribute("bumpTexture", QString::fromStdString(material.bump_texture_path));
@@ -522,8 +549,14 @@ bool read_material_element(const QDomElement& material_element, Material& materi
     }
     material.color_texture_path = material_element.attribute("colorTexture", QString::fromStdString(material.color_texture_path)).toStdString();
     material.texture_fit_to_surface = material_element.attribute("textureFitToSurface", "0") == "1";
+    material.texture_wrap_object = material_element.attribute("textureWrapObject", "0") == "1";
     material.light_texture_path = material_element.attribute("lightTexture", QString::fromStdString(material.light_texture_path)).toStdString();
     material.bump_texture_path = material_element.attribute("bumpTexture", QString::fromStdString(material.bump_texture_path)).toStdString();
+    material.source_file_path = material_element.attribute("sourceFile").toStdString();
+    if(!DecodePlaster(material_element.attribute("proceduralPlaster"),material))
+        qWarning("Unsupported or invalid procedural plaster parameters; using base material.");
+    if(!DecodeFabric(material_element.attribute("proceduralFabric"),material))
+        qWarning("Invalid procedural fabric parameters; using base material.");
     material.normal_texture_path = material_element.attribute("normalTexture", QString::fromStdString(material.normal_texture_path)).toStdString();
     material.roughness_texture_path = material_element.attribute("roughnessTexture", QString::fromStdString(material.roughness_texture_path)).toStdString();
     material.metallic_texture_path = material_element.attribute("metallicTexture", QString::fromStdString(material.metallic_texture_path)).toStdString();
@@ -660,7 +693,43 @@ void write_operation_history(QXmlStreamWriter& xml, const CAlfaObject& object) {
     xml.writeEndElement();
 }
 
-bool write_boolean_tools(QXmlStreamWriter& xml, const CSolid& solid, QString& error) {
+bool geometry_fingerprint_data(const std::vector<const CSolid*>& solids,
+                               QByteArray& data, QString& error) {
+    // Rendering / undo snapshots can populate OCCT's shared triangulation
+    // without editing geometry. Do not treat that display cache as an edit.
+    try {
+        BRep_Builder builder;
+        TopoDS_Compound compound;
+        builder.MakeCompound(compound);
+        for (const CSolid* solid : solids) {
+            if (!solid || solid->m_Shape.IsNull()) {
+                error = "Solid has no BRep shape.";
+                return false;
+            }
+            builder.Add(compound, solid->m_Shape);
+        }
+        // Meshing also changes OCCT's Checked flag. Normalize private topology
+        // copies, never the shared live shapes or the user's saved BRep data.
+        BRepBuilderAPI_Copy copy(compound, false, false);
+        TopTools_IndexedMapOfShape topology;
+        TopExp::MapShapes(copy.Shape(), topology);
+        for (int index = 1; index <= topology.Extent(); ++index) {
+            TopoDS_Shape shape = topology(index);
+            shape.Checked(false);
+        }
+        std::ostringstream stream;
+        BRepTools::Write(copy.Shape(), stream, false, false, TopTools_FormatVersion_CURRENT);
+        if (!stream) return false;
+        data = QByteArray::fromStdString(stream.str());
+        return !data.isEmpty();
+    } catch (const Standard_Failure& failure) {
+        error = failure.GetMessageString();
+        return false;
+    }
+}
+
+bool write_boolean_tools(QXmlStreamWriter& xml, const CSolid& solid, QString& error,
+                         bool include_render_mesh) {
     if (solid.GetBooleanToolCount() == 0) {
         return true;
     }
@@ -673,8 +742,12 @@ bool write_boolean_tools(QXmlStreamWriter& xml, const CSolid& solid, QString& er
         }
         xml.writeStartElement("tool");
         xml.writeAttribute("index", QString::number(i));
-        if (!tool->Save(xml, error)) {
-            return false;
+        if (include_render_mesh) {
+            if (!tool->Save(xml, error)) return false;
+        } else {
+            QByteArray geometry;
+            if (!geometry_fingerprint_data({tool}, geometry, error)) return false;
+            xml.writeTextElement("geometry", QString::fromLatin1(geometry.toBase64()));
         }
         xml.writeEndElement();
     }
@@ -795,7 +868,40 @@ bool Dom3DProjectSerializer::Save(const QString& path,
         return false;
     }
 
-    QXmlStreamWriter xml(&file);
+    if (!Write(file, document, active_room, view_state, thumbnail, error)) {
+        return false;
+    }
+    if (!file.commit()) {
+        error = file.errorString();
+        return false;
+    }
+    return true;
+}
+
+QByteArray Dom3DProjectSerializer::DocumentFingerprint(const CAlfaDoc& document) const {
+    // Stream into the hash instead of retaining another complete XML document.
+    class HashDevice final : public QIODevice {
+    public:
+        QCryptographicHash hash{QCryptographicHash::Sha256};
+        HashDevice() { open(QIODevice::WriteOnly); }
+    protected:
+        qint64 readData(char*, qint64) override { return -1; }
+        qint64 writeData(const char* data, qint64 size) override {
+            hash.addData(QByteArrayView(data, size));
+            return size;
+        }
+    } device;
+    QString error;
+    if (!Write(device, document, {}, {}, {}, error, false)) return {};
+    return device.hash.result();
+}
+
+bool Dom3DProjectSerializer::Write(QIODevice& device, const CAlfaDoc& document,
+                                  const QString& active_room,
+                                  const ProjectViewState& view_state,
+                                  const QImage& thumbnail, QString& error,
+                                  bool include_render_mesh) const {
+    QXmlStreamWriter xml(&device);
     xml.setAutoFormatting(true);
     xml.writeStartDocument("1.0");
     xml.writeStartElement("dom3dProject");
@@ -852,8 +958,9 @@ bool Dom3DProjectSerializer::Save(const QString& path,
     }
     if (!packed_solids.empty()) {
         QByteArray packed_geometry;
-        if (!CSolid::SaveShapePack(
-                packed_solids, packed_geometry, error)) {
+        if (!(include_render_mesh
+                ? CSolid::SaveShapePack(packed_solids, packed_geometry, error)
+                : geometry_fingerprint_data(packed_solids, packed_geometry, error))) {
             return false;
         }
         xml.writeStartElement("geometryStore");
@@ -1181,6 +1288,15 @@ bool Dom3DProjectSerializer::Save(const QString& path,
                 xml.writeTextElement("face", indices.join(' '));
             }
             xml.writeEndElement();
+            if (!mesh->GetSharpEdges().empty()) {
+                xml.writeStartElement("sharpEdges");
+                for (const Edge& edge : mesh->GetSharpEdges()) {
+                    xml.writeEmptyElement("edge");
+                    xml.writeAttribute("v1", QString::number(edge.v1));
+                    xml.writeAttribute("v2", QString::number(edge.v2));
+                }
+                xml.writeEndElement();
+            }
             xml.writeEndElement();
         } else if (const auto* solid = dynamic_cast<const CSolid*>(&object)) {
             const auto packed = packed_solid_indices.find(solid);
@@ -1191,8 +1307,8 @@ bool Dom3DProjectSerializer::Save(const QString& path,
             xml.writeEmptyElement("geometry");
             xml.writeAttribute("kind", "brep-ref");
             xml.writeAttribute("index", QString::number(packed->second));
-            write_surface_texture_transforms(xml, *solid);
-            if (!write_boolean_tools(xml, *solid, error)) {
+            write_surface_texture_transforms(xml, *solid, include_render_mesh);
+            if (!write_boolean_tools(xml, *solid, error, include_render_mesh)) {
                 return false;
             }
         }
@@ -1206,10 +1322,6 @@ bool Dom3DProjectSerializer::Save(const QString& path,
 
     if (xml.hasError()) {
         error = "Could not write XML project.";
-        return false;
-    }
-    if (!file.commit()) {
-        error = file.errorString();
         return false;
     }
     return true;
@@ -1977,6 +2089,25 @@ bool Dom3DProjectSerializer::Load(const QString& path,
                                    std::move(normals))) {
                 error = "Mesh geometry is invalid.";
                 return false;
+            }
+            const QDomElement sharp_edges_element =
+                geometry.firstChildElement("sharpEdges");
+            for (QDomElement edge_element =
+                     sharp_edges_element.firstChildElement("edge");
+                 !edge_element.isNull();
+                 edge_element = edge_element.nextSiblingElement("edge")) {
+                bool first_ok = false;
+                bool second_ok = false;
+                const quint64 first = edge_element.attribute("v1")
+                    .toULongLong(&first_ok);
+                const quint64 second = edge_element.attribute("v2")
+                    .toULongLong(&second_ok);
+                if (!first_ok || !second_ok
+                    || !mesh->AddSharpEdge(static_cast<size_t>(first),
+                                           static_cast<size_t>(second))) {
+                    error = "Mesh contains an invalid sharp edge.";
+                    return false;
+                }
             }
             object = std::move(mesh);
         } else if (type == "Solid" || type == "SurfaceSet" || type == "AssociativeClone") {

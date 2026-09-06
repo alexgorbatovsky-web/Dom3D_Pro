@@ -1,0 +1,7 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<material version="1" id="0" name="Twill" alpha="1" specular="0.2" shininess="24" reflectivity="0" roughness="0.85" metallic="0" proceduralPlaster="" proceduralFabric="{&quot;version&quot;:1,&quot;weave&quot;:2,&quot;seed&quot;:1,&quot;scale&quot;:1,&quot;threadSize&quot;:0.32,&quot;threadWidth&quot;:0.92,&quot;relief&quot;:0.5,&quot;irregularity&quot;:0.12,&quot;colorVariation&quot;:0.18,&quot;roughness&quot;:0.78,&quot;rotation&quot;:0}">
+  <ambient r="0.18" g="0.18" b="0.18" />
+  <diffuse r="0.24" g="0.34" b="0.48" />
+  <emission r="0" g="0" b="0" />
+  <textures />
+</material>

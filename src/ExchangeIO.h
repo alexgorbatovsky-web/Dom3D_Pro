@@ -38,6 +38,16 @@ public:
                 std::string& error) const;
 };
 
+class ThreeMfIO {
+public:
+    bool Import(const std::string& path,
+                std::vector<std::unique_ptr<CMesh3D>>& meshes,
+                std::string& error) const;
+    bool Export(const std::string& path,
+                const CAlfaDoc& document,
+                std::string& error) const;
+};
+
 class StlIO {
 public:
     bool Import(const std::string& path,

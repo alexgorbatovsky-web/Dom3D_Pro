@@ -9,6 +9,7 @@
 #include "../UndoRedo.h"
 
 #include "../ObjIO.h"
+#include "../FbxIO.h"
 #include "../ThreeDSIO.h"
 #include "../ProjectIO.h"
 #include "../Dom3DProjectSerializer.h"
@@ -19,6 +20,7 @@
 #include <QMainWindow>
 #include <QStringList>
 #include <QByteArray>
+#include <QScopedValueRollback>
 
 #include <TopoDS_Shape.hxx>
 
@@ -30,9 +32,11 @@
 class QAction;
 class QAbstractButton;
 class QCheckBox;
+class QComboBox;
 class QCloseEvent;
 class QDockWidget;
 class QDialog;
+class BooleanDialog;
 class QDoubleSpinBox;
 class QDragEnterEvent;
 class QDragMoveEvent;
@@ -64,6 +68,16 @@ public:
     void CompleteStartup(const QString& startup_project_path = {});
 
 private:
+    friend int TestScenePersistence(int argc, char** argv);
+    [[nodiscard]] QScopedValueRollback<bool> RememberCommand(std::function<void()> command);
+    [[nodiscard]] QScopedValueRollback<bool> RememberCommand(void (MainWindow::*command)());
+    void RepeatLastCommand();
+    void RunViewportCommand(void (OpenGLViewport::*command)());
+    void EditSelectedFromPopup();
+    void CreateSurfaceFromSelectedSketch();
+    void ConvertCurveToPolylineByLength();
+    void BeginMovePointToPoint();
+    void BeginMeasurePointToPoint();
     void CreateActions();
     void CreateDocks();
     void CreateVerticalToolBar();
@@ -162,7 +176,9 @@ private:
         None,
         Join,
         Split,
+        CutByCurve,
         Extend,
+        Offset,
         TrimByPlane,
         SimplifyByPoint,
         Reverse
@@ -173,17 +189,20 @@ private:
     void CancelCurveEditCommand(const QString& message = {});
     bool JoinSelectedCurves();
     bool SplitSelectedCurves(CPoint3d near_point);
-    bool ExtendSelectedCurve(CPoint3d endpoint_hint);
+    bool CutCurveWithCurve(unsigned long target_id, unsigned long cutter_id);
+    bool ExtendSelectedCurve(CPoint3d endpoint_hint, bool both_ends = false);
+    bool OffsetSelectedCurves();
+    bool MirrorSelectedCurves();
+    bool LinkSelectedCurves();
+    bool CreateSmartHybridFromSelectedCurves();
     bool TrimSelectedCurveByPlane(CPoint3d keep_point);
     bool SimplifySelectedCurveByPoint(CPoint3d split_point);
     bool ReverseSelectedCurves();
     void BeginSolidBox();
     void BeginSolidCylinder();
+    void BeginSolidPrimitive(bool cylinder);
     void BeginHoleTool();
-    void CompleteHoleFacePick();
-    void CompleteHoleCenterPick(CPoint3d point);
-    void CompleteHoleEdgePick();
-    void ShowHoleDialog();
+    void CompleteHoleFacePick(CPoint3d clicked_point);
     void CancelHoleTool(const QString& message = {});
     void BeginSketchFillet();
     void BeginDrawSpline();
@@ -195,6 +214,8 @@ private:
     void CancelArchitectureOpeningPlacement();
     void ApplySheetBend();
     bool TryApplyPendingTrim();
+    bool BeginPendingTrimPlaneDefinition();
+    bool CompletePendingTrimWithCreatedPlane();
     void CancelPendingTrim(const QString& status_text = {});
     void ShowLowPolyTool();
     void ShowMeshFillContourTool();
@@ -230,7 +251,8 @@ private:
     void NewProject();
     void OpenProject();
     void OpenProjectFromPath(const QString& path);
-    void SaveProject(bool save_as = false);
+    bool SaveProject(bool save_as = false);
+    bool HasUnsavedProjectChanges() const;
     void SaveProjectAs();
     void UpdateAutoSaveTimer();
     void AutoSaveProject();
@@ -339,6 +361,9 @@ private:
     QMenu* recent_files_menu_ = nullptr;
     QAction* orthographic_projection_action_ = nullptr;
     QAction* undo_action_ = nullptr;
+    QAction* repeat_action_ = nullptr;
+    std::function<void()> last_command_;
+    bool command_start_active_ = false;
     QAction* redo_action_ = nullptr;
     QAction* fullscreen_scene_action_ = nullptr;
     QShortcut* exit_fullscreen_f11_shortcut_ = nullptr;
@@ -383,6 +408,11 @@ private:
     int sketch_counter_ = 3;
     QDialog* sketch_fillet_dialog_ = nullptr;
     QDialog* draw_spline_dialog_ = nullptr;
+    BooleanDialog* boolean_dialog_ = nullptr;
+    QDialog* solid_placement_dialog_ = nullptr;
+    QComboBox* solid_placement_combo_ = nullptr;
+    int last_box_placement_ = 0;
+    int last_cylinder_placement_ = 0;
     LightingDialog* lighting_dialog_ = nullptr;
     QSlider* draw_spline_simplification_slider_ = nullptr;
     QLabel* draw_spline_simplification_value_ = nullptr;
@@ -395,6 +425,7 @@ private:
     Dom3DProjectSerializer dom3d_serializer_;
     ProjectIO project_io_;
     ObjIO obj_io_;
+    FbxIO fbx_io_;
     ThreeDSIO three_ds_io_;
     IgesIO iges_io_;
     StepIO step_io_;
@@ -402,6 +433,7 @@ private:
     EpsIO eps_io_;
     HpglIO hpgl_io_;
     StlIO stl_io_;
+    ThreeMfIO three_mf_io_;
     ToolRegistry tool_registry_;
     ActiveParametricObject active_parametric_object_;
     ActiveParametricObject solid_body_dimension_object_;
@@ -428,6 +460,7 @@ private:
     double nurbs_parameter_displayed_weight_ = 1.0;
     bool nurbs_parameters_modified_ = false;
     CurveEditCommand pending_curve_edit_command_ = CurveEditCommand::None;
+    unsigned long pending_curve_cut_target_id_ = 0;
     std::vector<CPoint3d> pending_curve_trim_plane_points_;
     bool plane_three_point_pick_active_ = false;
     bool plane_three_point_method_selected_ = false;
@@ -447,21 +480,11 @@ private:
     enum class HolePickStage {
         None,
         Face,
-        Center,
-        Edge1,
-        Edge2
+        Creating
     };
     HolePickStage hole_pick_stage_ = HolePickStage::None;
     unsigned long hole_body_id_ = 0;
     int hole_face_index_ = -1;
-    Vec3 hole_plane_origin_{};
-    Vec3 hole_plane_x_axis_{1.0f, 0.0f, 0.0f};
-    Vec3 hole_plane_y_axis_{0.0f, 1.0f, 0.0f};
-    Vec3 hole_plane_normal_{0.0f, 0.0f, 1.0f};
-    CPoint3d hole_center_seed_{};
-    std::array<Vec3, 2> hole_edge_starts_{};
-    std::array<Vec3, 2> hole_edge_ends_{};
-    int hole_edge_count_ = 0;
     bool edge_tool_started_from_face_quick_menu_ = false;
     double last_fillet_radius_ = 1.0;
     double last_fillet_start_radius_ = 1.0;
@@ -491,6 +514,7 @@ private:
     std::string furniture_animation_parameter_id_;
     std::string pending_trim_tool_id_;
     unsigned long pending_trim_cutter_id_ = 0;
+    unsigned long pending_trim_plane_body_id_ = 0;
     unsigned long pending_sketch_cut_profile_id_ = 0;
     unsigned long pending_sweep_section_id_ = 0;
     std::string pending_architecture_opening_tool_id_;
@@ -504,4 +528,5 @@ private:
     bool precise_scale_base_point_ready_ = false;
     BooleanOperation last_boolean_operation_ = BooleanOperation::Union;
     std::string project_path_;
+    QByteArray saved_document_fingerprint_;
 };

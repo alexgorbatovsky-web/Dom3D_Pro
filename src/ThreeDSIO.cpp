@@ -985,11 +985,18 @@ bool build_mesh(const MeshData& source,
             : face.indices;
         for (std::uint16_t source_index : oriented_indices) {
             Vec3 normal = face_normals[face_index];
-            if (face.smoothing_group != 0) {
+            {
                 Vec3 sum{};
                 for (size_t adjacent_index : incident_faces[smoothing_vertex[source_index]]) {
                     const FaceData& adjacent = source.faces[adjacent_index];
-                    if ((face.smoothing_group & adjacent.smoothing_group) != 0) {
+                    // Legacy 3DS files often omit smoothing groups altogether.
+                    // Recover gentle transitions while keeping creases >=40 degrees.
+                    constexpr float kSmoothAngleCos = 0.7660444431f;
+                    const bool smooth = face.smoothing_group != 0
+                        ? (face.smoothing_group & adjacent.smoothing_group) != 0
+                        : adjacent.smoothing_group == 0
+                            && dot(face_normals[face_index], face_normals[adjacent_index]) > kSmoothAngleCos;
+                    if (smooth) {
                         sum = sum + face_normals[adjacent_index];
                     }
                 }

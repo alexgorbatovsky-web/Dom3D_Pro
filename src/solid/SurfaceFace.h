@@ -114,6 +114,7 @@ public:
 	bool GetPreparedTopoEdge(int edge_index, TopoDS_Edge& edge) const;
 	bool SetPreparedPolylinePointCount(int edge_index, int point_count);
 	bool SetPreparedPolylinePoints(int edge_index, const std::vector<CPoint3d>& points);
+	void SetCircularCapMasterBoundary(const std::vector<CPoint3d>& points);
 	void UpdateMeshTypeFromBoundary();
 	bool GetRegularMeshBoundaryPoints(int edge_index, std::vector<CPoint3d>& points) const;
 	void DumpPreparedPolylinesToScene() const;
@@ -167,6 +168,7 @@ public:
 	float m_LastLowPolyDensity = 0.0f;
 	std::vector<std::vector<CPoint3d>> m_LastIslandBoundariesUV;
 	std::vector<std::vector<CPoint3d>> m_LastQuadrangulationBoundariesXY;
+	std::vector<CPoint3d> m_CircularCapMasterBoundary3D;
 	std::string m_LastIslandFillError;
 	std::string m_LastQuadrangulationDiagnostic;
 

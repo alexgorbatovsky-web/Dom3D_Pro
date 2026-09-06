@@ -13,6 +13,10 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <memory>
+#include <cstdint>
+
+namespace quadro { class BoundarySnapshot; class BoundaryCache; struct SamplingOptions; }
 
 class QDomElement;
 class QByteArray;
@@ -73,6 +77,7 @@ class CSolid :public CAlfaObject {
 	std::vector<CSurfaceFace*> m_Surfaces;
 	std::vector<ParametricFunction*> m_OperatonTree;
 	std::vector<CSolid*> m_BooleanTools;//tools used for this solid
+	mutable std::unique_ptr<quadro::BoundaryCache> m_QuadroBoundaryCache;
 
 
 public:
@@ -156,6 +161,12 @@ public:
 	void ClearBooleanTools();
 
 	int GetNumSurfaces() const { return static_cast<int>(m_Surfaces.size()); }
+	std::shared_ptr<const quadro::BoundarySnapshot> GetQuadroTopologySnapshot() const;
+	std::shared_ptr<const quadro::BoundarySnapshot> PrepareQuadroBoundary(const quadro::SamplingOptions& options) const;
+	// Required before editing an existing OCCT TShape/curve in place. Shape
+	// replacement and placement/orientation changes are detected automatically.
+	void InvalidateQuadroBoundary();
+	std::uint64_t GetQuadroBoundaryCaptureCount() const;
 	CSurfaceFace* GetSurfaceFace(int indx);
 	const CSurfaceFace* GetSurfaceFace(int indx) const;
 	bool HitTestEdgeScreen(DomPoint point,

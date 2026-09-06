@@ -1,11 +1,14 @@
 #pragma once
 
 #include "Common.h"
+#include "materials/ProceduralMaterial.h"
 
 #include <string>
 #include <vector>
 
 struct Material {
+    ProceduralPlasterParameters plaster;
+    ProceduralFabricParameters fabric;
     Color diffuse{};
     Color ambient{0.18f, 0.18f, 0.18f};
     Color emission{0.0f, 0.0f, 0.0f};
@@ -25,6 +28,7 @@ struct Material {
     float texture_scale_v = 1.0f;
     float texture_rotation_degrees = 0.0f;
     bool texture_fit_to_surface = false;
+    bool texture_wrap_object = false;
     unsigned long id = 0;
     std::string name = "Material";
     std::string color_texture_path;

@@ -1,0 +1,7 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<material version="1" id="0" name="Burlap" alpha="1" specular="0.2" shininess="24" reflectivity="0" roughness="0.85" metallic="0" proceduralPlaster="" proceduralFabric="{&quot;version&quot;:1,&quot;weave&quot;:3,&quot;seed&quot;:1,&quot;scale&quot;:1,&quot;threadSize&quot;:1.2,&quot;threadWidth&quot;:0.65,&quot;relief&quot;:0.9,&quot;irregularity&quot;:0.5,&quot;colorVariation&quot;:0.22,&quot;roughness&quot;:0.88,&quot;rotation&quot;:0}">
+  <ambient r="0.18" g="0.18" b="0.18" />
+  <diffuse r="0.72" g="0.65" b="0.53" />
+  <emission r="0" g="0" b="0" />
+  <textures />
+</material>

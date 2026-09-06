@@ -1,6 +1,7 @@
 #include "CPolyline.h"
 #include "SystemCoord.h"
 #include "OpenGLCompat.h"
+#include "CurveDirectionMarker.h"
 #include "SurfaceUVMapping.h"
 #include "solid/SurfaceFace.h"
 
@@ -572,6 +573,24 @@ void CPolyline::Render3d(bool selected, bool has_selected_point, size_t selected
     }
     glEnd();
     ResetLineAppearance();
+    if (selected && display_points.size() >= 2) {
+        CPoint3d minimum = display_points.front();
+        CPoint3d maximum = display_points.front();
+        for (const CPoint3d& point : display_points) {
+            minimum.x = std::min(minimum.x, point.x);
+            minimum.y = std::min(minimum.y, point.y);
+            minimum.z = std::min(minimum.z, point.z);
+            maximum.x = std::max(maximum.x, point.x);
+            maximum.y = std::max(maximum.y, point.y);
+            maximum.z = std::max(maximum.z, point.z);
+        }
+        const double dx = maximum.x - minimum.x;
+        const double dy = maximum.y - minimum.y;
+        const double dz = maximum.z - minimum.z;
+        DrawCurveStartArrow(
+            display_points[0], display_points[1],
+            std::sqrt(dx * dx + dy * dy + dz * dz));
+    }
     glEnable(GL_DEPTH_TEST);
 
     if (selected && has_selected_point) {

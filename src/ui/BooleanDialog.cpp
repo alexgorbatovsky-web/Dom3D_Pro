@@ -1,17 +1,17 @@
 #include "BooleanDialog.h"
 
 #include <QComboBox>
-#include <QDialogButtonBox>
 #include <QLabel>
-#include <QVBoxLayout>
+#include <QHBoxLayout>
 
 BooleanDialog::BooleanDialog(QWidget* parent)
-    : QDialog(parent) {
+    : QDialog(parent, Qt::Tool) {
+    setObjectName("BooleanToolOptions");
     setWindowTitle("Tool Options");
-    setModal(true);
+    setModal(false);
     setMinimumWidth(260);
 
-    auto* layout = new QVBoxLayout(this);
+    auto* layout = new QHBoxLayout(this);
     layout->setContentsMargins(12, 12, 12, 12);
     layout->setSpacing(8);
 
@@ -19,15 +19,15 @@ BooleanDialog::BooleanDialog(QWidget* parent)
     layout->addWidget(label);
 
     combo_ = new QComboBox(this);
+    combo_->setObjectName("BooleanOperationType");
     combo_->addItem("Add");        // Union
     combo_->addItem("Subtract");   // Cut
     combo_->addItem("Intersect");  // Common
     layout->addWidget(combo_);
 
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
-    connect(buttons, &QDialogButtonBox::accepted, this, &BooleanDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, this, &BooleanDialog::reject);
-    layout->addWidget(buttons);
+    connect(combo_, &QComboBox::currentIndexChanged, this, [this]() {
+        emit SelectedOperationChanged(SelectedOperation());
+    });
 
     setLayout(layout);
 }

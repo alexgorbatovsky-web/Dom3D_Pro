@@ -249,9 +249,11 @@ bool checkFlips(const std::vector<QuadPoint>& contour,
             const int previous = face[(i + face.size() - 1) % face.size()];
             const int current = face[i];
             const int next = face[(i + 1) % face.size()];
-            const Vec3 normal = safeNormal(cross(
+            // Only the sign is needed. A fallback unit normal would turn
+            // tiny clockwise corners into valid +Z corners.
+            const Vec3 normal = cross(
                 contour[next].position - contour[current].position,
-                contour[previous].position - contour[current].position));
+                contour[previous].position - contour[current].position);
             if (dot(normal, contour[current].normal) < 0.0f)
                 ++flipped;
         }
@@ -420,6 +422,48 @@ struct Expansion {
     std::vector<QuadPoint> contour;
     std::vector<QuadFace> faces;
 };
+
+// A candidate can leave a ring of collinear nodes along a straight boundary.
+// Its corners/parent rails pass the intersection test, yet expanding it only
+// creates zero-width strips (Extrude_SL grew to 1100+ nodes). Reject that
+// candidate before committing it so another front can fill the remaining area.
+bool validFrontArea(const std::vector<QuadPoint>& contour)
+{
+    std::vector<bool> visited(contour.size(), false);
+    for (size_t start = 0; start < contour.size(); ++start) {
+        if (visited[start] || contour[start].next < 0)
+            continue;
+        Vec3 area{};
+        Vec3 normal{};
+        const Vec3 origin = contour[start].position;
+        double scale_squared = 0.0;
+        int current = static_cast<int>(start);
+        do {
+            if (current < 0 || current >= static_cast<int>(contour.size())
+                || visited[current])
+                return false;
+            visited[current] = true;
+            const int next = contour[current].next;
+            if (next < 0 || next >= static_cast<int>(contour.size()))
+                return false;
+            const Vec3 a = contour[current].position - origin;
+            const Vec3 b = contour[next].position - origin;
+            area += cross(a, b);
+            normal += contour[current].normal;
+            scale_squared = std::max(scale_squared, lengthSquared(a));
+            current = next;
+        } while (current != static_cast<int>(start));
+        // Positions originate in float meshes. A residual band below their
+        // relative precision is not a viable front, even though double
+        // arithmetic gives it a small positive area. Committing it can stall
+        // along the input boundary; relaxation then opens that band into a
+        // visible slit. Keep the test relative to the ring's extent.
+        if (dot(area, safeNormal(normal))
+            <= scale_squared * std::numeric_limits<float>::epsilon())
+            return false;
+    }
+    return true;
+}
 
 Expansion tryExpand(const std::vector<QuadPoint>& source,
                     int start_point,
@@ -785,6 +829,120 @@ void updateDistanceField(std::vector<QuadPoint>& contour,
     }
 }
 
+// Finish small stalled fronts without dropping collinear CAD samples: test
+// the three diagonals of a six-node ring, or one quad ear plus six nodes for
+// an eight-node ring. Convex partitions keep their established priority.
+bool closeSmallEvenFront(std::vector<QuadPoint>& contour,
+                       std::vector<QuadFace>& faces)
+{
+    for (size_t start = 0; start < contour.size(); ++start) {
+        if (contour[start].next < 0)
+            continue;
+        const int count = contourSize(contour, static_cast<int>(start));
+        if (count != 6 && count != 8) continue;
+        std::vector<int> ring(count);
+        int current = static_cast<int>(start);
+        Vec3 normal{};
+        double scale_squared = 0.0;
+        for (int i = 0; i < count; ++i) {
+            ring[i] = current;
+            normal = normal + contour[current].normal;
+            const Vec3 delta = contour[current].position - contour[start].position;
+            scale_squared = std::max(scale_squared, dot(delta, delta));
+            current = contour[current].next;
+        }
+        normal = safeNormal(normal);
+        const double tolerance = scale_squared * 1.0e-12;
+        const auto valid_quad = [&](QuadFace& face, bool allow_concave) {
+            double area = 0.0;
+            const Vec3 origin = contour[face[0]].position;
+            for (size_t i = 0; i < 4; ++i) {
+                const Vec3 a = contour[face[i]].position;
+                const Vec3 b = contour[face[(i + 1) % 4]].position;
+                const Vec3 c = contour[face[(i + 2) % 4]].position;
+                if (!allow_concave && dot(cross(b - a, c - b), normal) < -tolerance)
+                    return false;
+                area += dot(cross(a - origin, b - origin), normal);
+            }
+            if (area <= tolerance) return false;
+            if (!allow_concave) return true;
+            // A concave quad is valid if its chosen diagonal triangulates it
+            // into two positive triangles. Rotate to that diagonal so rendering
+            // does not put either triangle outside the polygon.
+            for (int diagonal = 0; diagonal < 2; ++diagonal) {
+                const Vec3 a = contour[face[0]].position;
+                const Vec3 b = contour[face[1]].position;
+                const Vec3 c = contour[face[2]].position;
+                const Vec3 d = contour[face[3]].position;
+                if (dot(cross(b - a, c - a), normal) > tolerance
+                    && dot(cross(c - a, d - a), normal) > tolerance) return true;
+                std::rotate(face.begin(), face.begin() + 1, face.end());
+            }
+            return false;
+        };
+        // Preserve the established convex choice before considering a concave
+        // pair for an otherwise unfinished ring around a rounded hole.
+        for (bool allow_concave : {false, true}) {
+            // An eight-node remainder needs one quad ear before the final six.
+            for (int ear = 0; ear < (count == 8 ? 8 : 1); ++ear) {
+                std::vector<int> tail;
+                QuadFace ear_face;
+                if (count == 8) {
+                    for (int i = 0; i < 4; ++i) ear_face.push_back(ring[(ear + i) % 8]);
+                    if (!valid_quad(ear_face, allow_concave)) continue;
+                    bool contains_other = false;
+                    const Vec3 chord_a = contour[ring[ear]].position;
+                    const Vec3 chord_b = contour[ring[(ear + 3) % 8]].position;
+                    for (int i = 4; i < 7; ++i) {
+                        const Vec3 a = contour[ring[(ear + i) % 8]].position;
+                        const Vec3 b = contour[ring[(ear + i + 1) % 8]].position;
+                        const double ab_a = dot(cross(chord_b - chord_a, a - chord_a), normal);
+                        const double ab_b = dot(cross(chord_b - chord_a, b - chord_a), normal);
+                        const double cd_a = dot(cross(b - a, chord_a - a), normal);
+                        const double cd_b = dot(cross(b - a, chord_b - a), normal);
+                        const auto opposite = [tolerance](double x, double y) {
+                            return (x > tolerance && y < -tolerance)
+                                || (x < -tolerance && y > tolerance);
+                        };
+                        contains_other = contains_other
+                            || (opposite(ab_a, ab_b) && opposite(cd_a, cd_b));
+                    }
+                    for (int i = 4; i < 8; ++i) {
+                        const Vec3 p = contour[ring[(ear + i) % 8]].position;
+                        for (int triangle = 1; triangle < 3; ++triangle) {
+                            const Vec3 a = contour[ear_face[0]].position;
+                            const Vec3 b = contour[ear_face[triangle]].position;
+                            const Vec3 c = contour[ear_face[triangle + 1]].position;
+                            contains_other = contains_other
+                                || (dot(cross(b - a, p - a), normal) >= -tolerance
+                                    && dot(cross(c - b, p - b), normal) >= -tolerance
+                                    && dot(cross(a - c, p - c), normal) >= -tolerance);
+                        }
+                    }
+                    if (contains_other) continue;
+                    for (int i = 3; i < 9; ++i) tail.push_back(ring[(ear + i) % 8]);
+                } else tail = ring;
+                for (int diagonal = 0; diagonal < 3; ++diagonal) {
+                    QuadFace first, second;
+                    for (int i = 0; i < 4; ++i) {
+                        first.push_back(tail[(diagonal + i) % 6]);
+                        second.push_back(tail[(diagonal + 3 + i) % 6]);
+                    }
+                    if (!valid_quad(first, allow_concave) || !valid_quad(second, allow_concave))
+                        continue;
+                    faces.push_back(std::move(first));
+                    faces.push_back(std::move(second));
+                    if (count == 8) faces.push_back(std::move(ear_face));
+                    for (int index : ring)
+                        contour[index].previous = contour[index].next = -1;
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
 bool build3DCoatQuadrangulationCandidate(
     const std::vector<Vec3>& vertices,
     const std::vector<CMesh3D::Face>& triangles,
@@ -893,6 +1051,7 @@ bool build3DCoatQuadrangulationCandidate(
 
     for (int pass = 0; pass < 5000; ++pass) {
         bool contour_found = false;
+        bool closed_contour = false;
         std::vector<int> starts;
         Expansion best;
         for (size_t i = 0; i < contour.size(); ++i) {
@@ -912,6 +1071,7 @@ bool build3DCoatQuadrangulationCandidate(
                     current = next;
                 }
                 output_faces.push_back(std::move(closing));
+                closed_contour = true;
                 starts.clear();
                 break;
             }
@@ -925,9 +1085,9 @@ bool build3DCoatQuadrangulationCandidate(
                 contour, start, snapper, exact_reference);
             if (candidate.cost >= best.cost)
                 continue;
-            if (!checkFlips(candidate.contour, candidate.faces)
-                || checkSelfIntersections(
-                    candidate.contour, exact_reference))
+            if (!validFrontArea(candidate.contour)
+                || !checkFlips(candidate.contour, candidate.faces)
+                || checkSelfIntersections(candidate.contour, exact_reference))
                 continue;
             best = std::move(candidate);
         }
@@ -943,9 +1103,36 @@ bool build3DCoatQuadrangulationCandidate(
 				|| output_faces.size() > face_budget) {
 				return false;
 			}
-        } else {
-            crease *= 0.9;
-            updateDirections(contour, false, crease);
+        } else if (!closed_contour) {
+            // With an unchanged front only the corner classification can
+            // make another expansion possible. Skip identical classifications
+            // and stop when every convex corner is already eligible.
+            std::vector<int> previous_types;
+            previous_types.reserve(contour.size());
+            for (const QuadPoint& point : contour)
+                previous_types.push_back(point.edge_type);
+            bool changed = false;
+            do {
+                crease *= 0.9;
+                if (crease < 1.0e-12)
+                    crease = 0.0;
+                updateDirections(contour, false, crease);
+                for (size_t i = 0; i < contour.size(); ++i)
+                    changed = changed || (contour[i].next >= 0
+                        && contour[i].edge_type != previous_types[i]);
+            } while (!changed && crease > 0.0);
+            // Match the old iteration-limit result, without reevaluating an
+            // identical candidate set thousands of times.
+            if (!changed) {
+                std::vector<QuadFace> closing;
+                if (!closeSmallEvenFront(contour, closing))
+                    break;
+                output_faces.insert(output_faces.end(), closing.begin(), closing.end());
+                addAdjacency(closing, adjacency);
+                updateDistanceField(contour, adjacency);
+                updateDirections(contour);
+                crease = 50.0;
+            }
         }
 
         double current_area = 0.0;

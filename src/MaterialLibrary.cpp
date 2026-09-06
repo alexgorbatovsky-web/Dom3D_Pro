@@ -1,3 +1,4 @@
+#include "materials/ProceduralMaterialIO.h"
 #include "MaterialLibrary.h"
 
 #include <QCoreApplication>
@@ -193,6 +194,8 @@ bool MaterialLibrary::SaveMaterial(const QString& file_path, const Material& mat
     xml.setAutoFormatting(true);
     xml.writeStartDocument();
     xml.writeStartElement("material");
+    xml.writeAttribute("proceduralPlaster", EncodePlaster(material));
+    xml.writeAttribute("proceduralFabric", EncodeFabric(material));
     xml.writeAttribute("version", "1");
     xml.writeAttribute("id", QString::number(material.id));
     xml.writeAttribute("name", QString::fromStdString(material.name));
@@ -212,6 +215,7 @@ bool MaterialLibrary::SaveMaterial(const QString& file_path, const Material& mat
     xml.writeAttribute("textureScaleV", QString::number(material.texture_scale_v, 'g', 9));
     xml.writeAttribute("textureRotation", QString::number(material.texture_rotation_degrees, 'g', 9));
     xml.writeAttribute("textureFitToSurface", material.texture_fit_to_surface ? "1" : "0");
+    xml.writeAttribute("textureWrapObject", material.texture_wrap_object ? "1" : "0");
     write_color(xml, "ambient", material.ambient);
     write_color(xml, "diffuse", material.diffuse);
     write_color(xml, "emission", material.emission);
@@ -275,6 +279,14 @@ bool MaterialLibrary::LoadMaterial(const QString& file_path, Material& material,
     material.specular = read_float_attr(root, "specular", material.specular);
     material.shininess = read_float_attr(root, "shininess", material.shininess);
     material.reflectivity = read_float_attr(root, "reflectivity", material.reflectivity);
+    if(!DecodePlaster(root.attribute("proceduralPlaster"),material)) {
+        if(error)*error=QStringLiteral("Unsupported or invalid procedural plaster parameters; using base material.");
+        qWarning("Unsupported or invalid procedural plaster parameters; using base material.");
+    }
+    if(!DecodeFabric(root.attribute("proceduralFabric"),material)) {
+        if(error)*error=QStringLiteral("Invalid procedural fabric parameters; using base material.");
+        qWarning("Invalid procedural fabric parameters; using base material.");
+    }
     material.roughness = read_float_attr(root, "roughness", material.roughness);
     material.metallic = read_float_attr(root, "metallic", material.metallic);
     material.coat_weight = read_float_attr(root, "coatWeight", material.coat_weight);
@@ -287,6 +299,7 @@ bool MaterialLibrary::LoadMaterial(const QString& file_path, Material& material,
     material.texture_scale_v = read_float_attr(root, "textureScaleV", material.texture_scale_v);
     material.texture_rotation_degrees = read_float_attr(root, "textureRotation", material.texture_rotation_degrees);
     material.texture_fit_to_surface = root.attribute("textureFitToSurface", "0") == "1";
+    material.texture_wrap_object = root.attribute("textureWrapObject", "0") == "1";
     if (!read_color(root, "ambient", material.ambient, error)
         || !read_color(root, "diffuse", material.diffuse, error)
         || !read_color(root, "emission", material.emission, error)) {
@@ -304,7 +317,7 @@ bool MaterialLibrary::LoadMaterial(const QString& file_path, Material& material,
         material.displacement_texture_path = textures.attribute("displacement").toStdString();
     }
 
-    material.source_file_path = file_path.toStdString();
+    material.source_file_path = QFileInfo(file_path).absoluteFilePath().toStdString();
     return true;
 }
 

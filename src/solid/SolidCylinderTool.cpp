@@ -62,9 +62,10 @@ bool SolidCylinderTool::DoParamOperation(CAlfaDoc& document, size_t object_index
 }
 
 bool SolidCylinderTool::RebuildShape(CSolid& solid, const std::vector<ToolParameter>& parameters) const {
-	constexpr double kFaceBooleanOverlap = 0.01;
+	// Fixed model-space overlap; obsolete screen-based values in history are ignored.
+    constexpr double overlap = 0.001;
     const float diameter = static_cast<float>(std::max(GetParameter(parameters, "diameter", Diameter), 0.001));
-    const float height = static_cast<float>(GetParameter(parameters, "height", Height));
+    float height = static_cast<float>(GetParameter(parameters, "height", Height));
     if (std::fabs(height) <= 0.001f) {
         return false;
     }
@@ -83,7 +84,9 @@ bool SolidCylinderTool::RebuildShape(CSolid& solid, const std::vector<ToolParame
 			if (height < 0.0f)
 				extrusion_direction.Reverse();
 			origin.Translate(gp_Vec(extrusion_direction)
-				* -kFaceBooleanOverlap);
+				* -overlap);
+            // Keep the far end at the requested distance from the original face.
+            height += static_cast<float>(std::copysign(overlap, height));
 		}
         return CreateCylinder(solid, diameter, height, origin, normal, u_direction);
     } catch (...) {

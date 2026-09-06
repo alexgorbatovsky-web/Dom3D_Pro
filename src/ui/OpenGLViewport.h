@@ -23,6 +23,14 @@ class OpenGLViewport : public QOpenGLWidget {
     Q_OBJECT
 
 public:
+    enum class SpatialCurvePreviewKind {
+        None,
+        Polyline,
+        BSpline,
+        Bezier,
+        Nurbs
+    };
+
     enum class SketchPlane {
         XY,
         XZ,
@@ -49,6 +57,7 @@ public:
     void BeginThickSolidTool(double thickness);
     void SetThickSolidThickness(double thickness);
     void BeginBooleanTool(BooleanOperation operation);
+    void SetBooleanOperation(BooleanOperation operation);
     SelectionMode GetSelectionMode() const;
     void SetSelectionMode(SelectionMode mode);
     void SetSelectionConfirmationMode(bool enabled);
@@ -72,6 +81,8 @@ public:
     void SetCoordinateAxesVisible(bool visible);
     bool IsFloorGridVisible() const;
     void SetFloorGridVisible(bool visible);
+    bool AreCurvePointsVisible() const;
+    void SetCurvePointsVisible(bool visible);
     void SetBackgroundColor(const QColor& color);
     Vec3 GetBackgroundColor() const;
     QImage CaptureSceneImage(const QSize& requested_size);
@@ -110,6 +121,7 @@ public:
     void BeginSolidBoxFaceSelection();
     void BeginSolidCylinderCircle(SketchPlane plane);
     void BeginSolidCylinderFaceSelection();
+    void SetSolidPrimitivePlacement(SketchPlane plane, bool on_face);
     void SetSolidDimensionEdit(
         const ActiveParametricObject& active_object,
         const QString& primary_parameter = {});
@@ -120,6 +132,10 @@ public:
     void ClearSolidDimensionEdit();
     void BeginPickXYPoint(const QString& prompt = {});
     void BeginPick3DPoint(const QString& prompt = {});
+    void BeginSpatialCurvePreview(SpatialCurvePreviewKind kind);
+    void SetSpatialCurvePreviewObject(unsigned long object_id);
+    void SetSpatialCurvePreviewPoints(const std::vector<CPoint3d>& points);
+    void EndSpatialCurvePreview();
     void BeginPick3DPointOnObject(unsigned long object_id, const QString& prompt = {});
     void BeginPick3DPointOnPlane(CPoint3d plane_origin,
                                  Vec3 plane_normal,
@@ -152,6 +168,7 @@ signals:
     void FirstFrameRendered();
     void DocumentChanged();
     void SelectionChanged();
+    void CurveNodeDeleteRequested();
     void SelectionConfirmed();
     void SelectionCommandCanceled();
     void StatusTextChanged(const QString& text);
@@ -163,6 +180,7 @@ signals:
     void XYPointPicked(CPoint3d point);
     void XYPointPickCanceled();
     void Point3DPicked(CPoint3d point);
+    void PlanarFaceClicked(CPoint3d point);
     void Point3DPickFinished();
     void Point3DPickCloseRequested();
     void Point3DPickCanceled();
@@ -174,7 +192,7 @@ signals:
     void SolidCylinderCircleFinished(std::vector<ToolParameter> parameters);
     void SketchFaceSelectionFinished(bool selected);
     void SolidDimensionEditRequested(int operation_index, QString parameter_id, double current_value);
-    void SolidDimensionGripChanged(int operation_index, QString parameter_id, double value, bool finished);
+    void SolidDimensionGripChanged(int operation_index, QString parameter_id, double value, bool finished, bool move_base = false);
     void EdgeQuickMenuRequested(QPoint global_position);
     void FaceQuickMenuRequested(QPoint global_position);
     void SketchQuickMenuRequested(QPoint global_position);
@@ -237,6 +255,7 @@ private:
     void HandleSketchFilletClick(const QPoint& point);
     void HandleSketchConstraintClick(const QPoint& point);
     bool ScreenToSketchPlane(const QPoint& point, CPoint3d& result) const;
+    void ReprojectSolidPrimitiveAnchor();
     bool SnapCreationPoint(const QPoint& point,
                            CPoint3d& result,
                            bool require_sketch_plane) const;
@@ -294,6 +313,7 @@ private:
     void DrawCurveRubberBand();
     void DrawSplinePreview();
     void DrawSelectedCurvePointHandles();
+    void DrawVisibleCurvePoints();
     void UpdateHoveredSolidEdge(const QPoint& point);
     void ClearHoveredSolidEdge();
     void DrawHoveredSolidEdge();
@@ -359,6 +379,7 @@ private:
     bool right_button_dragged_ = false;
     QString navigation_preset_ = "dom3d";
     bool xy_plane_view_enabled_ = false;
+    bool show_curve_points_ = false;
     bool dragging_transform_ = false;
     bool dragging_face_extrude_ = false;
     bool dragging_draft_face_ = false;
@@ -379,6 +400,10 @@ private:
     size_t highlighted_sketch_handle_index_ = 0;
     bool curve_preview_valid_ = false;
     CPoint3d curve_preview_point_{};
+    SpatialCurvePreviewKind spatial_curve_preview_kind_ =
+        SpatialCurvePreviewKind::None;
+    unsigned long spatial_curve_preview_object_id_ = 0;
+    std::vector<CPoint3d> spatial_curve_preview_points_;
     bool drawing_spline_stroke_ = false;
     int draw_spline_simplification_ = 50;
     std::vector<QPoint> draw_spline_screen_points_;
@@ -507,6 +532,7 @@ private:
         DomPoint line_start{};
         DomPoint line_end{};
         size_t source_index = 0;
+        bool move_base = false;
     };
     ActiveParametricObject solid_dimension_object_;
     std::vector<ActiveParametricObject> solid_dimension_objects_;
@@ -519,6 +545,7 @@ private:
     QString active_solid_dimension_grip_;
     int active_solid_dimension_operation_index_ = -1;
     bool dragging_solid_dimension_grip_ = false;
+    bool solid_dimension_drag_move_base_ = false;
     QPoint solid_dimension_drag_start_mouse_;
     double solid_dimension_drag_start_value_ = 0.0;
     double solid_dimension_drag_minimum_ = 0.0;
@@ -527,6 +554,11 @@ private:
     QPointF solid_dimension_drag_screen_direction_;
     double solid_dimension_drag_screen_length_ = 1.0;
     double solid_dimension_drag_current_value_ = 0.0;
+    QPoint fillet_pick_screen_;
+    bool fillet_pick_valid_ = false;
+    bool fillet_anchor_valid_ = false;
+    CPoint3d fillet_anchor_;
+    CPoint3d fillet_drag_direction_;
     QPoint edge_quick_menu_anchor_;
     unsigned int edge_quick_menu_generation_ = 0;
     Material material_drag_preview_;

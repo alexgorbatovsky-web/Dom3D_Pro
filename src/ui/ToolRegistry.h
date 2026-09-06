@@ -84,6 +84,9 @@ public:
     ActiveParametricObject ApplyHole(CAlfaDoc& document,
                                      unsigned long body_id,
                                      const std::vector<ToolParameter>& parameters) const;
+    bool PrepareHoleOnFace(const CAlfaDoc& document, unsigned long body_id, int face_index,
+                           const CPoint3d& clicked_point,
+                           std::vector<ToolParameter>& parameters, std::string& error) const;
     ActiveParametricObject ApplyOffsetFaceToSelection(CAlfaDoc& document) const;
     bool ApplyOffsetFaceOnce(CAlfaDoc& document, double distance) const;
     void Rebuild(const ActiveParametricObject& active_object, CAlfaDoc& document) const;

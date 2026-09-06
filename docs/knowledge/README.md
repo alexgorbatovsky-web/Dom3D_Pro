@@ -6,6 +6,8 @@
 
 ## Как пользоваться
 
+- [Tile: восемь раскладок плитки из мешей](architecture-tile.md).
+
 - Начинайте поиск с тематического указателя ниже.
 - Статус в начале статьи показывает, насколько надёжен описанный вывод.
 - Для нового исследования используйте [шаблон статьи](_template.md).
@@ -22,14 +24,40 @@
 | `Внедрено` | Решение присутствует в коде и имеет проверку. |
 | `Отложено` | Работа осознанно перенесена; причина указана в статье. |
 
+## Инструменты твёрдых тел
+
+- [Отверстие одним кликом по грани](solid/hole-one-click.md)
+
 ## Сетка и геометрия
+
+### CAD-границы и согласование Quadro
+
+- [Кэш topology на уровне тела, коррекция параметров и UV-адаптер](mesh/quadro-boundary-cache-and-charts.md)
+- [Реализация CAD snapshot и master-дискретизации: API, тесты, ограничения](mesh/quadro-boundary-implementation.md)
+- [Подушка и фен: разрывы границ, причины и первый этап исправления](mesh/quadro-boundary-failures.md)
+- [Подушка-2: диагностика передачи регулярных границ](mesh/pillow-2-quadro-diagnostics.md)
+- [Фен: допуски CAD, периодические швы и отказы заполнения](mesh/hairdryer-quadro-diagnostics.md)
+- [Проект новой архитектуры подготовки границ Quadros](mesh/quadro-boundary-architecture.md)
+
+### Quadro-сетка аналитических поверхностей
+
+- [Сфера из куба по топологии Catmull–Clark](mesh/sphere-from-cube-catmull-clark.md)
+- [CapRetopo для круглой и эллиптической плоской границы](mesh/circular-cap-retopo.md)
 
 ### Тримминг
 
+- [Prism_And_2_Fill_Var-2: отказ нормали на схлопнутой стороне](mesh/prism-two-fillets-normal.md)
+- [ChamferAndFillets: удаление ячейки у полюса скругления](mesh/chamfer-and-fillets-pole.md)
+- [Box_Min_Box_Filled: разбитая CAD-дуга и незавершённый фронт](mesh/box-min-box-filled-boundary.md)
+- [Extrude_SL: вырожденный остаточный фронт в UV](mesh/extrude-sl-degenerate-front.md)
 - [CMesh3D::TrimByPline — карта метода и программа исследований](mesh/trimming/trim-by-pline.md)
 - [Варианты локального тримминга ячейки: Var-0 — Var-11](mesh/trimming/trim-variants.md)
 - [Boolean_Fill: сингулярные B-Spline-поверхности](mesh/trimming/boolean-fill-singular-bspline.md)
 - [SLX: схождение лучей воротника на угловом отверстии](mesh/trimming/slx-angular-collar.md)
+- [SLX: два разреза Var-7 используют одну ячейку](mesh/trimming/slx-shared-var7-cell.md)
+- [SLX: скруглённые углы призмы, Var-11 и привязка Var-8](mesh/trimming/slx-filleted-prism-var11.md)
+- [Boolean-4_All_fill: ложное дно, незамкнутый контур и полюса](mesh/trimming/boolean-four-fill-boundaries.md)
+- [Boolean-3: конфликт Var-5, Var-7 и Var-8 на шве отверстия](mesh/trimming/boolean-three-paired-cuts.md)
 - [Острова как топологический эталон для SLX](mesh-trimming-slx-islands-reference.md)
 
 ## Устройство проекта
@@ -76,8 +104,14 @@ cmake --build build --target HtmlWiki --config Release
   после этого и только для внутренних вырезов.
 - В режиме Low Poly круглая граница отверстия строится минимум из восьми
   сегментов; общая OCCT-кромка синхронизирует её с цилиндрической стенкой.
-- Включённый `Mesh Quadro Hole SLX` всегда означает выполнение ветки SLX.
-  Скрытая подмена методом островов запрещена.
+- Полная сфера строится из шести квад-патчей куба по связности Catmull–Clark;
+  UV-полюса и треугольные вееры не используются.
+- Плоская грань с одной круглой или эллиптической границей строится методом
+  `CapRetopo`, используя точное внешнее кольцо соседней криволинейной
+  поверхности.
+- Для грани с отверстиями включённый `Mesh Quadro Hole SLX` означает выполнение
+  ветки SLX. Скрытая подмена методом островов запрещена. На грани без отверстий
+  этот флаг не требует запуска SLX.
 - Воротник является частью SLX, а удаление лишних диагоналей остаётся отдельным
   будущим этапом очистки топологии.
 - Кольца воротника углового отверстия строятся из локальных направлений соседних
@@ -87,6 +121,23 @@ cmake --build build --target HtmlWiki --config Release
 [об островах и SLX](mesh-trimming-slx-islands-reference.md).
 
 ## Открытые исследования
+
+- [Подушка-2: квадро по CAD-границам](mesh/pillow-2-cad-quadro.md): подключён первый
+  потребитель boundary, 18 граней, замкнутая сетка из четырёхугольников.
+- [Фен: согласование в CAD-допусках](mesh/hairdryer-cad-boundary-reconciliation.md):
+  подготовлены 85/85 и 283/283 UV-областей двух оболочек; заполнение сеткой — следующий этап.
+- [Фен: экспериментальный потребитель charts](mesh/hairdryer-cad-chart-consumer.md):
+  85 корректных UV-входов, 67 граней с принятыми квадро-клетками; 18 отказов пока
+  блокируют публикацию полного тела.
+- [Согласование границ Quadros](mesh/quadro-boundary-cache-and-charts.md): кэш тела,
+  master-дискретизация и single-chart UV-адаптер.
+  Далее — заполнение многосвязных UV-областей фена с сохранением общих границ;
+  quadrangulator на этапе подготовки не менялся.
+
+[Box_Min_4_Hole: сохранение воротников и плотность окружностей](mesh/trimming/box-four-hole-collars.md).
+
+Исправление цилиндра с двумя прямоугольными вырезами:
+[метрическое разрезание Cylinder_Min_2_Box](mesh/trimming/cylinder-box-windows-metric.md).
 
 - Поведение `TrimByPline`, когда шаг точек контура заметно меньше шага фоновой
   сетки.

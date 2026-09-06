@@ -1,3 +1,12 @@
+#include "../materials/ProceduralMaterialIO.h"
+#include "MaterialPreviewGL.h"
+#include "../materials/PlasterBaker.h"
+#include <QProgressDialog>
+#include <QDialogButtonBox>
+#include <QScrollArea>
+#include <QRandomGenerator>
+#include <QTimer>
+#include <QTabWidget>
 #include "MaterialEditorDialog.h"
 
 #include "MaterialDrag.h"
@@ -196,30 +205,7 @@ QColor to_qcolor(Color color) {
 }
 
 QPixmap material_sphere_pixmap(const Material& material, int size, bool selected) {
-    QPixmap pixmap(size, size);
-    pixmap.fill(Qt::transparent);
-
-    QPainter painter(&pixmap);
-    painter.setRenderHint(QPainter::Antialiasing, true);
-    const qreal inset = selected ? 2.0 : 8.0;
-    const QRectF sphere(inset, inset, size - inset * 2.0, size - inset * 2.0);
-    const QColor diffuse = to_qcolor(material.diffuse);
-    const QColor ambient = to_qcolor(material.ambient);
-
-    QRadialGradient gradient(sphere.center() - QPointF(size * 0.17, size * 0.22), size * 0.62);
-    gradient.setColorAt(0.0, diffuse.lighter(172));
-    gradient.setColorAt(0.45, diffuse);
-    gradient.setColorAt(1.0, ambient.darker(155));
-
-    painter.setPen(QPen(selected ? QColor(255, 255, 255) : QColor(205, 205, 198), selected ? 3 : 2));
-    painter.setBrush(gradient);
-    painter.drawEllipse(sphere);
-
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor(255, 255, 255, 62));
-    painter.drawEllipse(QRectF(sphere.left() + size * 0.19, sphere.top() + size * 0.16, size * 0.15, size * 0.11));
-    painter.end();
-    return pixmap;
+    return MaterialDrag::SpherePixmap(material,size,selected);
 }
 
 QString color_style(Color color) {
@@ -376,6 +362,138 @@ MaterialEditorDialog::MaterialEditorDialog(const QString& library_path,
     name_edit_ = new QLineEdit(editor);
     id_edit_ = new QLineEdit(editor);
     form->addRow("Name", name_edit_);
+    auto* plasterButton=new QPushButton("Procedural Plaster...",editor);
+    plasterButton->setObjectName("ProceduralPlasterButton");form->addRow("Surface source",plasterButton);
+    connect(plasterButton,&QPushButton::clicked,this,[this,plasterButton](){
+        QDialog dialog(this);dialog.setWindowTitle("Procedural Fine Plaster");dialog.resize(780,700);
+        auto* layout=new QVBoxLayout(&dialog);
+        auto* enabled=new QCheckBox("Use Procedural Fine Plaster",&dialog);layout->addWidget(enabled);
+        Material initial=EditorMaterial();enabled->setChecked(initial.plaster.enabled);
+        auto* images=new QHBoxLayout;auto* preview=new QLabel(&dialog);auto* reference=new QLabel("Reference image (visual guide only)",&dialog);
+        preview->setFixedSize(280,280);reference->setFixedSize(280,280);reference->setAlignment(Qt::AlignCenter);
+        images->addWidget(preview);images->addWidget(reference);layout->addLayout(images);
+        auto* referenceButton=new QPushButton("Choose reference image...",&dialog);layout->addWidget(referenceButton);
+        connect(referenceButton,&QPushButton::clicked,&dialog,[&](){auto path=QFileDialog::getOpenFileName(&dialog,"Reference image",{},"Images (*.png *.jpg *.jpeg *.bmp)");if(!path.isEmpty())reference->setPixmap(QPixmap(path).scaled(reference->size(),Qt::KeepAspectRatio,Qt::SmoothTransformation));});
+        auto* tabs=new QTabWidget(&dialog);layout->addWidget(tabs);
+        auto* surface=new QWidget(tabs);auto* advanced=new QWidget(tabs);
+        auto* surfaceForm=new QFormLayout(surface);auto* advancedForm=new QFormLayout(advanced);
+        auto addTab=[&](QWidget* widget,const char* title){auto* scroll=new QScrollArea(tabs);scroll->setWidgetResizable(true);scroll->setWidget(widget);tabs->addTab(scroll,title);};
+        addTab(surface,"Surface");addTab(advanced,"Advanced");
+#define CONTROL(name,value,lo,hi,label) {auto* spin=new QDoubleSpinBox(&dialog);spin->setObjectName("plaster_" #name);spin->setDecimals(3);spin->setRange(lo,hi);spin->setSingleStep((hi-lo)/100);spin->setValue(initial.plaster.name);auto* f=(QString(#name).startsWith("macro")||QString(#name).startsWith("micro"))?advancedForm:surfaceForm;f->addRow(label,spin);}
+        DOM_PLASTER_PARAMETERS(CONTROL)
+#undef CONTROL
+        // Scale is a multiplier: a range-derived step was almost 1.0 and
+        // doubled the default grain size with a single click.
+        dialog.findChild<QDoubleSpinBox*>("plaster_scale")->setSingleStep(0.01);
+        auto* seed=new QDoubleSpinBox(&dialog);seed->setDecimals(0);seed->setRange(0,4294967295.0);seed->setValue(initial.plaster.seed);surfaceForm->addRow("Seed",seed);
+        auto* high=new QCheckBox("High quality",&dialog);high->setChecked(initial.plaster.highQuality);surfaceForm->addRow(high);
+        auto* random=new QPushButton("Randomize Seed",&dialog);surfaceForm->addRow(random);
+        connect(random,&QPushButton::clicked,&dialog,[&](){seed->setValue(QRandomGenerator::global()->generate());});
+        auto* color=new QPushButton("Base Color...",&dialog);surfaceForm->addRow(color);
+        QTimer timer(&dialog);timer.setSingleShot(true);timer.setInterval(120);
+        auto refresh=[&](){
+            Material material=EditorMaterial();material.plaster.enabled=enabled->isChecked();material.plaster.seed=std::uint32_t(seed->value());material.plaster.highQuality=high->isChecked();
+#define READ_CONTROL(name,defaultValue,lo,hi,label) material.plaster.name=float(dialog.findChild<QDoubleSpinBox*>("plaster_" #name)->value());
+            DOM_PLASTER_PARAMETERS(READ_CONTROL)
+#undef READ_CONTROL
+            plasterButton->setProperty("configuration",EncodePlaster(material));
+            if(material.plaster.enabled){material.fabric.enabled=false;material.metallic=0;metallic_spin_->setValue(0);
+                findChild<QPushButton*>("ProceduralFabricButton")->setProperty("configuration",QString());}
+            preview->setPixmap(QPixmap::fromImage(RenderMaterialSphereGL(material,280)));
+            CommitEditorChanges();
+        };
+        connect(&timer,&QTimer::timeout,&dialog,refresh);
+        for(auto* spin:dialog.findChildren<QDoubleSpinBox*>())connect(spin,qOverload<double>(&QDoubleSpinBox::valueChanged),&dialog,[&](){timer.start();});
+        connect(high,&QCheckBox::toggled,&dialog,[&](){timer.start();});
+        connect(enabled,&QCheckBox::toggled,&dialog,[&](bool on){if(on&&!initial.plaster.enabled)SetColorButton(diffuse_button_,{.84f,.84f,.82f});timer.start();});
+        connect(color,&QPushButton::clicked,&dialog,[&](){PickColor(diffuse_button_);timer.start();});
+        auto* bake=new QPushButton("Export PBR Maps...",&dialog);
+        bake->setObjectName("ExportPlasterMapsButton");layout->addWidget(bake);bake->setEnabled(enabled->isChecked());
+        connect(enabled,&QCheckBox::toggled,bake,&QWidget::setEnabled);
+        connect(bake,&QPushButton::clicked,&dialog,[&](){
+            timer.stop();refresh();
+            QDialog options(&dialog);options.setWindowTitle("Export Fine Plaster PBR Maps");
+            auto* form=new QFormLayout(&options);
+            auto* resolution=new QComboBox(&options);
+            for(int n:{256,512,1024,2048,4096})resolution->addItem(QString::number(n)+" x "+QString::number(n),n);
+            resolution->setCurrentIndex(2);form->addRow("Resolution",resolution);
+            auto dimension=[&](const QString& title,double value,double minimum,double maximum){
+                auto* spin=new QDoubleSpinBox(&options);spin->setDecimals(3);spin->setRange(minimum,maximum);spin->setValue(value);form->addRow(title,spin);return spin;};
+            auto* width=dimension("Width (mm)",100,.1,100000);
+            auto* height=dimension("Height (mm)",100,.1,100000);
+            auto* x=dimension("Origin X (mm)",0,-100000,100000);
+            auto* y=dimension("Origin Y (mm)",0,-100000,100000);
+            auto* z=dimension("Origin Z (mm)",0,-100000,100000);
+            auto* note=new QLabel("XY surface. Uses the current Seed and quality.\nExports a finite region; edges are not seamless.\nHeight: 16-bit PNG. Normals: OpenGL and DirectX.",&options);
+            form->addRow(note);
+            auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&options);form->addRow(buttons);
+            connect(buttons,&QDialogButtonBox::accepted,&options,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&options,&QDialog::reject);
+            if(options.exec()!=QDialog::Accepted)return;
+            const QString directory=QFileDialog::getExistingDirectory(&dialog,"Export PBR maps into a new folder");if(directory.isEmpty())return;
+            PlasterBakeSettings settings;settings.resolution=resolution->currentData().toInt();settings.widthMm=float(width->value());settings.heightMm=float(height->value());
+            settings.originMm={float(x->value()),float(y->value()),float(z->value())};
+            QProgressDialog progress("Baking PBR maps...","Cancel",0,100,&dialog);progress.setWindowModality(Qt::WindowModal);progress.setMinimumDuration(0);progress.setAutoClose(false);
+            QString package,error;
+            const bool ok=BakePlasterMaps(EditorMaterial(),settings,directory,package,error,[&](int value,const QString& label){
+                progress.setLabelText(label);progress.setValue(value);QApplication::processEvents();return !progress.wasCanceled();});
+            progress.close();
+            if(ok)QMessageBox::information(&dialog,"PBR Maps", "Exported maps and FinePlaster.d3mat:\n"+QDir::toNativeSeparators(package));
+            else if(error!="Canceled.")QMessageBox::warning(&dialog,"PBR Export",error);
+        });
+        auto* close=new QDialogButtonBox(QDialogButtonBox::Close,&dialog);layout->addWidget(close);connect(close,&QDialogButtonBox::rejected,&dialog,&QDialog::accept);
+        refresh();dialog.exec();if(timer.isActive()){timer.stop();refresh();}
+    });
+
+    auto* fabricButton=new QPushButton("Procedural Fabric...",editor);
+    fabricButton->setObjectName("ProceduralFabricButton");form->addRow("Surface source",fabricButton);
+    connect(fabricButton,&QPushButton::clicked,this,[this,fabricButton](){
+        QDialog dialog(this);dialog.setWindowTitle("Procedural Fabric");dialog.resize(480,720);
+        auto* layout=new QVBoxLayout(&dialog);
+        auto* enabled=new QCheckBox("Use Procedural Fabric",&dialog);enabled->setObjectName("fabric_enabled");layout->addWidget(enabled);
+        const Material initial=EditorMaterial();enabled->setChecked(initial.fabric.enabled);
+        auto* preview=new QLabel(&dialog);preview->setFixedSize(280,280);layout->addWidget(preview,0,Qt::AlignHCenter);
+        auto* form=new QFormLayout;layout->addLayout(form);
+        auto* preset=new QComboBox(&dialog);preset->setObjectName("fabric_preset");
+        preset->addItems({"Linen / Лён","Cotton / Хлопок","Twill / Саржа","Burlap / Мешковина"});
+        preset->setCurrentIndex(initial.fabric.weave);form->addRow("Type / Preset",preset);
+        auto* useUV=new QCheckBox("Follow texture UV (color + weave)",&dialog);
+        useUV->setObjectName("fabric_useUV");useUV->setChecked(initial.fabric.useUV);form->addRow(useUV);
+#define FABRIC_CONTROL(name,def,lo,hi,label) {auto* spin=new QDoubleSpinBox(&dialog);spin->setObjectName("fabric_" #name);spin->setDecimals(3);spin->setRange(lo,hi);spin->setSingleStep(QString(#name)=="rotation"?1.0:0.01);spin->setValue(initial.fabric.name);form->addRow(label,spin);}
+        DOM_FABRIC_PARAMETERS(FABRIC_CONTROL)
+#undef FABRIC_CONTROL
+        auto* seed=new QDoubleSpinBox(&dialog);seed->setDecimals(0);seed->setRange(0,4294967295.0);seed->setValue(initial.fabric.seed);form->addRow("Seed",seed);
+        auto* color=new QPushButton("Base Color...",&dialog);form->addRow(color);
+        auto* note=new QLabel("Thread spacing is in millimeters. Presets reset the weave settings; your base color is preserved.",&dialog);note->setWordWrap(true);layout->addWidget(note);
+        QTimer timer(&dialog);timer.setSingleShot(true);timer.setInterval(120);
+        auto refresh=[&](){
+            Material material=EditorMaterial();material.fabric.enabled=enabled->isChecked();
+            material.fabric.useUV=useUV->isChecked();
+            material.fabric.weave=preset->currentIndex();material.fabric.seed=std::uint32_t(seed->value());
+#define READ_FABRIC_CONTROL(name,def,lo,hi,label) material.fabric.name=float(dialog.findChild<QDoubleSpinBox*>("fabric_" #name)->value());
+            DOM_FABRIC_PARAMETERS(READ_FABRIC_CONTROL)
+#undef READ_FABRIC_CONTROL
+            if(material.fabric.enabled){material.plaster.enabled=false;material.metallic=0;metallic_spin_->setValue(0);
+                findChild<QPushButton*>("ProceduralPlasterButton")->setProperty("configuration",QString());}
+            fabricButton->setProperty("configuration",EncodeFabric(material));
+            preview->setPixmap(QPixmap::fromImage(RenderMaterialSphereGL(material,280)));CommitEditorChanges();
+        };
+        connect(&timer,&QTimer::timeout,&dialog,refresh);
+        for(auto* spin:dialog.findChildren<QDoubleSpinBox*>())connect(spin,qOverload<double>(&QDoubleSpinBox::valueChanged),&dialog,[&](){timer.start();});
+        connect(enabled,&QCheckBox::toggled,&dialog,[&](){timer.start();});
+        connect(useUV,&QCheckBox::toggled,&dialog,[&](){timer.start();});
+        connect(color,&QPushButton::clicked,&dialog,[&](){PickColor(diffuse_button_);timer.start();});
+        connect(preset,qOverload<int>(&QComboBox::activated),&dialog,[&](int index){
+            const auto p=FabricPreset(index);
+#define SET_FABRIC_CONTROL(name,def,lo,hi,label) dialog.findChild<QDoubleSpinBox*>("fabric_" #name)->setValue(p.name);
+            DOM_FABRIC_PARAMETERS(SET_FABRIC_CONTROL)
+#undef SET_FABRIC_CONTROL
+            enabled->setChecked(true);timer.start();
+        });
+        auto* close=new QDialogButtonBox(QDialogButtonBox::Close,&dialog);layout->addWidget(close);
+        connect(close,&QDialogButtonBox::rejected,&dialog,&QDialog::accept);
+        refresh();dialog.exec();if(timer.isActive()){timer.stop();refresh();}
+    });
+
     id_edit_->hide();
 
     coating_group_ = new QGroupBox("Configurable coating", editor);
@@ -472,6 +590,10 @@ MaterialEditorDialog::MaterialEditorDialog(const QString& library_path,
     texture_rotation_spin_ = add_spin(-3600.0, 3600.0, 1.0, 2);
     texture_rotate_90_check_ = new QCheckBox("Rotate texture 90°", textures_group);
     texture_fit_to_surface_check_ = new QCheckBox("Fit one image to each surface", textures_group);
+    auto* wrapObject=new QCheckBox("Wrap whole object (seam underneath)",textures_group);
+    wrapObject->setObjectName("TextureWrapObject");
+    wrapObject->setToolTip("Shared top-and-side mapping for cushions aligned to Z. Distortion is concentrated underneath. Applies to all texture maps.");
+    connect(wrapObject,&QCheckBox::toggled,this,[this](bool){CommitEditorChanges();});
 
     auto* uv_layout = new QGridLayout();
     uv_layout->setContentsMargins(0, 6, 0, 0);
@@ -487,6 +609,7 @@ MaterialEditorDialog::MaterialEditorDialog(const QString& library_path,
     uv_layout->addWidget(texture_rotation_spin_, 2, 1);
     uv_layout->addWidget(texture_rotate_90_check_, 2, 2, 1, 2);
     uv_layout->addWidget(texture_fit_to_surface_check_, 3, 0, 1, 4);
+    uv_layout->addWidget(wrapObject,4,0,1,4);
     textures_layout->addLayout(uv_layout, 7, 0, 1, 3);
     editor_layout->addWidget(textures_group);
     editor_layout->addStretch(1);
@@ -741,7 +864,10 @@ void MaterialEditorDialog::LoadMaterialToEditor(const Material& material, const 
         texture_rotate_90_check_->setChecked(std::abs(normalized - 90.0) < 0.001);
     }
     texture_fit_to_surface_check_->setChecked(material.texture_fit_to_surface);
+    findChild<QCheckBox*>("TextureWrapObject")->setChecked(material.texture_wrap_object);
     UpdateCoatingControls(material, candidate_path);
+    findChild<QPushButton*>("ProceduralPlasterButton")->setProperty("configuration",EncodePlaster(material));
+    findChild<QPushButton*>("ProceduralFabricButton")->setProperty("configuration",EncodeFabric(material));
     loading_editor_ = false;
 }
 
@@ -889,7 +1015,11 @@ Material MaterialEditorDialog::EditorMaterial() const {
     material.texture_scale_v = static_cast<float>(texture_scale_v_spin_->value());
     material.texture_rotation_degrees = static_cast<float>(texture_rotation_spin_->value());
     material.texture_fit_to_surface = texture_fit_to_surface_check_->isChecked();
+    material.texture_wrap_object=findChild<QCheckBox*>("TextureWrapObject")->isChecked();
     material.source_file_path = current_file_path_.toStdString();
+    DecodePlaster(findChild<QPushButton*>("ProceduralPlasterButton")->property("configuration").toString(),material);
+    DecodeFabric(findChild<QPushButton*>("ProceduralFabricButton")->property("configuration").toString(),material);
+    if(material.plaster.enabled || material.fabric.enabled)material.metallic=0;
     return material;
 }
 

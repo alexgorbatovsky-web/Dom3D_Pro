@@ -2,6 +2,36 @@
   "schemaVersion": 1,
   "cases": [
     {
+      "id": "cylinder-box-windows-metric",
+      "file": "Cylinder_Min_2_Box.dom3d",
+      "sha256": "590D5D54B81705D9893F3ACD9E259113A66CDDBCA8F1933F1739CA6A0F768891",
+      "meshMode": "quadro",
+      "densities": [0.35, 0.40, 0.45, 0.50, 0.80, 1.00],
+      "status": "pass_at_tested_densities",
+      "expected": {
+        "solidName": "Boolean Cut",
+        "surfaceCount": 9,
+        "rebuild": true,
+        "emptySurfaces": []
+      },
+      "notes": "CylinderBoxWindows additionally checks repeated density changes in both SLX modes, CAD classification of cell centres, maximum edge length, four outer-cylinder boundary loops and closed manifold welding. Trimming uses metric cylindrical coordinates in every retry."
+    },
+    {
+      "id": "cylinder-two-seam-windows",
+      "file": "Cylinder_Min_2_Cylinder.dom3d",
+      "sha256": "E627AC4E19969AC14033689A942C224047F6BC39827E68F4AE5A6FE348AD1787",
+      "meshMode": "quadro",
+      "densities": [0.35, 0.50, 0.65, 0.80, 1.00],
+      "status": "pass_at_tested_densities",
+      "expected": {
+        "solidName": "Boolean Cut",
+        "surfaceCount": 5,
+        "rebuild": true,
+        "emptySurfaces": []
+      },
+      "notes": "CylinderMultipleWindows separately verifies both SLX settings, four boundary loops on the outer cylinder, and a closed manifold welded body. At Density 0.50 the old mesh had 104 open edges. Coarse Density 0.20 and 0.25 still expose a separate cell-trimming defect and are not covered by the passing density range."
+    },
+    {
       "id": "boolean-fill-singular-bspline",
       "file": "Boolean_Fill.dom3d",
       "sha256": "0BC3273204A8CFB080ED4F2F677E030D7B7C5D00046950974F350B8BECF1CD3E",
@@ -12,14 +42,44 @@
       },
       "meshMode": "quadro",
       "densities": [0.10, 0.25, 0.50, 1.00, 1.50],
-      "status": "known_failure",
+      "status": "normal_failure_fixed_topology_pending",
       "expected": {
         "solidName": "Boolean Cut",
         "surfaceCount": 68,
-        "rebuild": false,
-        "emptySurfaces": [51, 66]
+        "rebuild": true,
+        "emptySurfaces": []
       },
-      "notes": "Two regular three-sided B-Spline patches have one degenerated OCCT edge. CNet fails while evaluating a normal at the singular UV boundary. Operation-tree rebuild is outside this mesh regression."
+      "notes": "Nearby analytic derivatives now recover normals on singular spline boundaries: surfaces 51 and 66 are no longer empty at any corpus density. This expectation checks rebuild/nonempty surfaces only, not complete mesh quality: at density 0.5 the welded mesh still has 14 open edges on surface 38. Operation-tree rebuild is outside this mesh regression."
+    },
+    {
+      "id": "box-six-hole-shared-zone",
+      "file": "Box_Min_6_Boxex.dom3d",
+      "sha256": "CB9CBBBB2502495E1E16809688C2354E42A14F79E13B3A9D5903745E4FB7E20C",
+      "meshMode": "quadro",
+      "densities": [0.25, 0.35, 0.40, 0.50],
+      "status": "pass_at_tested_densities",
+      "expected": {
+        "solidName": "Boolean Cut",
+        "surfaceCount": 36,
+        "rebuild": true,
+        "emptySurfaces": []
+      },
+      "notes": "Six aligned rectangular cuts share one local transition zone. SixHoleSharedZone checks both hole modes, seven loops on the top plate, bounded edge length, connected topology, and closed manifold welding."
+    },
+    {
+      "id": "pillow-cad-boundary-quadro",
+      "file": "Podushka-2.dom3d",
+      "sha256": "68A39E6AB57F69997B64F2E781B7A9168431292B6295D4DEEAC130B91A6258EF",
+      "meshMode": "quadro",
+      "densities": [0.25, 0.50, 1.00],
+      "status": "pass_at_tested_densities",
+      "expected": {
+        "solidName": "Extrude Solid",
+        "surfaceCount": 18,
+        "rebuild": true,
+        "emptySurfaces": []
+      },
+      "notes": "Visually checked from exported OBJ. PillowCadQuadro additionally checks all-quad cells, closed oriented manifold edges, Euler=2, CAD volume, CAD containment and one topology capture across density changes. Only ordinary Quadro; SLX is outside this case."
     }
   ]
 }

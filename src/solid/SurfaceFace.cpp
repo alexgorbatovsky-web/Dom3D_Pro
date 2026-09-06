@@ -50,6 +50,7 @@
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <Geom_BezierCurve.hxx>
+#include <Geom2d_Curve.hxx>
 #include <GeomAPI_Interpolate.hxx>
 #include <TColgp_HArray1OfPnt.hxx>
 #include <BRepBuilderAPI_GTransform.hxx>
@@ -548,6 +549,8 @@ void adjust_mesh_quantities_from_prepared_edges(CSurfaceFace* surface,
 
 	const double uv_span = std::max(u_max - u_min, v_max - v_min);
 	const double edge_eps = std::max(uv_span * 1.0e-4, 1.0e-7);
+	int prepared_qty_u = 0;
+	int prepared_qty_v = 0;
 
 	for (int edge_index = 0; edge_index < surface->GetPreparedPolylineCount(); ++edge_index) {
 		std::vector<CPoint3d> source_points;
@@ -556,7 +559,24 @@ void adjust_mesh_quantities_from_prepared_edges(CSurfaceFace* surface,
 		CPolyline uv_edge;
 		for (const CPoint3d& point : source_points)
 			uv_edge.AddPoint(point);
-		if (!uv_edge.PutOnSurface(surface) || uv_edge.GetPointCount() < 2)
+		// The native pcurve stays on the correct UV branch even at a sphere
+		// pole, where projecting XYZ samples cannot determine longitude.
+		bool native_uv = false;
+		TopoDS_Edge topo_edge;
+		if (surface->GetPreparedTopoEdge(edge_index, topo_edge)) {
+			Standard_Real first = 0.0, last = 0.0;
+			Handle(Geom2d_Curve) curve = BRep_Tool::CurveOnSurface(
+				topo_edge, TopoDS::Face(surface->m_Face), first, last);
+			if (!curve.IsNull() && std::isfinite(first) && std::isfinite(last)) {
+				for (size_t i = 0; i < source_points.size(); ++i) {
+					const gp_Pnt2d uv = curve->Value(first + (last - first)
+						* static_cast<double>(i) / (source_points.size() - 1));
+					*uv_edge.P(static_cast<int>(i)) = CPoint3d(uv.X(), uv.Y(), 0.0);
+				}
+				native_uv = true;
+			}
+		}
+		if ((!native_uv && !uv_edge.PutOnSurface(surface)) || uv_edge.GetPointCount() < 2)
 			continue;
 		double edge_u_min = uv_edge.GetPoints().front().x;
 		double edge_u_max = edge_u_min;
@@ -582,19 +602,26 @@ void adjust_mesh_quantities_from_prepared_edges(CSurfaceFace* surface,
 		const bool u_direction_edge = edge_v_span <= edge_eps && on_v_bound;
 		const bool v_direction_edge = edge_u_span <= edge_eps && on_u_bound;
 		if (u_direction_edge) {
-			qty_u = std::max(qty_u, point_count);
+			prepared_qty_u = std::max(prepared_qty_u, point_count);
 			continue;
 		}
 		if (v_direction_edge) {
-			qty_v = std::max(qty_v, point_count);
+			prepared_qty_v = std::max(prepared_qty_v, point_count);
 			continue;
 		}
 
 		const double dominant_ratio = 2.5;
 		if (edge_u_span > edge_v_span * dominant_ratio)
-			qty_u = std::max(qty_u, point_count);
+			prepared_qty_u = std::max(prepared_qty_u, point_count);
 		else if (edge_v_span > edge_u_span * dominant_ratio)
-			qty_v = std::max(qty_v, point_count);
+			prepared_qty_v = std::max(prepared_qty_v, point_count);
+	}
+	if (prepared_qty_u >= 2 && prepared_qty_v >= 2) {
+		qty_u = prepared_qty_u;
+		qty_v = prepared_qty_v;
+	} else {
+		qty_u = std::max(qty_u, prepared_qty_u);
+		qty_v = std::max(qty_v, prepared_qty_v);
 	}
 }
 
@@ -618,6 +645,237 @@ bool build_regular_uv_mesh(CSurfaceFace* surface, float deflection)
 		return false;
 
 	surface->IsTrimmed = false;
+	surface->IsInitMesh = true;
+	return true;
+}
+
+bool build_oblique_cylinder_quad_strip(CSurfaceFace* surface)
+{
+	if (!surface || surface->m_Face.IsNull()
+		|| (surface->GetPreparedPolylineCount() != 4
+			&& surface->GetPreparedPolylineCount() != 6))
+		return false;
+	const TopoDS_Face face = TopoDS::Face(surface->m_Face);
+	BRepAdaptor_Surface adaptor(face);
+	if (adaptor.GetType() != GeomAbs_Cylinder || !adaptor.IsUPeriodic())
+		return false;
+	const double period = adaptor.UPeriod();
+	if (!(period > 0.0) || !std::isfinite(period))
+		return false;
+	double u_min = 0.0, u_max = 0.0, v_min = 0.0, v_max = 0.0;
+	BRepTools::UVBounds(face, u_min, u_max, v_min, v_max);
+	const gp_Cylinder cylinder = adaptor.Cylinder();
+	struct Boundary {
+		std::vector<std::pair<double, double>> samples;
+		double v_span = 0.0;
+		int point_count = 0;
+	};
+	struct BoundarySegment {
+		std::vector<std::pair<double, double>> samples;
+		double mean_v = 0.0;
+	};
+	std::vector<BoundarySegment> circumferential_segments;
+	std::vector<Boundary> circular_boundaries;
+	int generator_point_count = 2;
+	for (int edge_index = 0;
+		edge_index < surface->GetPreparedPolylineCount(); ++edge_index) {
+		std::vector<CPoint3d> points;
+		if (!surface->GetPreparedPolylinePoints(edge_index, points)
+			|| points.size() < 2) continue;
+		std::vector<std::pair<double, double>> projected;
+		projected.reserve(points.size());
+		double previous_u = 0.0;
+		bool have_previous = false;
+		for (const CPoint3d& point : points) {
+			double u = 0.0, v = 0.0;
+			ElSLib::Parameters(cylinder,
+				gp_Pnt(point.x, point.y, point.z), u, v);
+			if (have_previous)
+				u += std::round((previous_u - u) / period) * period;
+			projected.emplace_back(u, v);
+			previous_u = u;
+			have_previous = true;
+		}
+		double projected_u_min = projected.front().first;
+		double projected_u_max = projected_u_min;
+		double projected_v_min = projected.front().second;
+		double projected_v_max = projected_v_min;
+		for (const auto& [u, v] : projected) {
+			projected_u_min = std::min(projected_u_min, u);
+			projected_u_max = std::max(projected_u_max, u);
+			projected_v_min = std::min(projected_v_min, v);
+			projected_v_max = std::max(projected_v_max, v);
+		}
+		// A generator is nearly constant in U. An oblique end contour may be one
+		// complete edge or several shorter Boolean-result arcs; retain every arc
+		// with a meaningful angular span and assemble the two rings afterwards.
+		if (projected_u_max - projected_u_min < period * 0.10) {
+			generator_point_count = std::max(generator_point_count,
+				static_cast<int>(points.size()));
+			continue;
+		}
+		BoundarySegment segment;
+		double mean_v = 0.0;
+		for (const auto& [source_u, v] : projected) {
+			double wrapped_u = u_min + std::fmod(source_u - u_min, period);
+			if (wrapped_u < u_min) wrapped_u += period;
+			segment.samples.emplace_back(wrapped_u, v);
+			mean_v += v;
+		}
+		segment.mean_v = mean_v / static_cast<double>(projected.size());
+		circumferential_segments.push_back(std::move(segment));
+	}
+	if (circumferential_segments.size() < 2)
+		return false;
+	std::sort(circumferential_segments.begin(),
+		circumferential_segments.end(),
+		[](const BoundarySegment& first, const BoundarySegment& second) {
+			return first.mean_v < second.mean_v;
+		});
+	size_t split = 1;
+	double largest_v_gap = -1.0;
+	for (size_t index = 1; index < circumferential_segments.size(); ++index) {
+		const double gap = circumferential_segments[index].mean_v
+			- circumferential_segments[index - 1].mean_v;
+		if (gap > largest_v_gap) {
+			largest_v_gap = gap;
+			split = index;
+		}
+	}
+	const auto assemble_boundary = [&](size_t first, size_t last) {
+		Boundary boundary;
+		double minimum_v = std::numeric_limits<double>::max();
+		double maximum_v = std::numeric_limits<double>::lowest();
+		for (size_t segment_index = first; segment_index < last; ++segment_index) {
+			for (const auto& sample :
+				circumferential_segments[segment_index].samples) {
+				boundary.samples.push_back(sample);
+				minimum_v = std::min(minimum_v, sample.second);
+				maximum_v = std::max(maximum_v, sample.second);
+			}
+		}
+		std::sort(boundary.samples.begin(), boundary.samples.end(),
+			[](const auto& first, const auto& second) {
+				return first.first < second.first;
+			});
+		std::vector<std::pair<double, double>> unique;
+		for (const auto& sample : boundary.samples) {
+			if (!unique.empty()
+				&& std::fabs(unique.back().first - sample.first) <= 1.0e-8) {
+				unique.back().second = (unique.back().second + sample.second) * 0.5;
+			} else {
+				unique.push_back(sample);
+			}
+		}
+		boundary.samples = std::move(unique);
+		boundary.point_count = static_cast<int>(boundary.samples.size()) + 1;
+		boundary.v_span = maximum_v - minimum_v;
+		return boundary;
+	};
+	circular_boundaries.push_back(assemble_boundary(0, split));
+	circular_boundaries.push_back(assemble_boundary(
+		split, circumferential_segments.size()));
+	if (circular_boundaries.size() != 2)
+		return false;
+	const double v_scale = std::max(std::fabs(v_max - v_min), 1.0);
+	if (circular_boundaries[0].v_span <= v_scale * 1.0e-5
+		&& circular_boundaries[1].v_span <= v_scale * 1.0e-5)
+		return false;
+	const auto value_at = [u_min, period](const Boundary& boundary,
+		double target_u) {
+		std::vector<std::pair<double, double>> samples = boundary.samples;
+		if (samples.empty()) return 0.0;
+		samples.insert(samples.begin(),
+			{samples.back().first - period, samples.back().second});
+		samples.push_back({samples[1].first + period, samples[1].second});
+		target_u = u_min + std::fmod(target_u - u_min, period);
+		if (target_u < u_min) target_u += period;
+		for (size_t index = 1; index < samples.size(); ++index) {
+			if (target_u > samples[index].first) continue;
+			const double span = samples[index].first - samples[index - 1].first;
+			const double alpha = span > 1.0e-12
+				? (target_u - samples[index - 1].first) / span : 0.0;
+			return samples[index - 1].second
+				+ (samples[index].second - samples[index - 1].second) * alpha;
+		}
+		return samples.back().second;
+	};
+	const int angular_segments = std::max(6, static_cast<int>(std::max(
+		circular_boundaries[0].samples.size(),
+		circular_boundaries[1].samples.size())));
+	const int generator_segments = std::max(2, generator_point_count - 1);
+	const auto boundary_node = [period](const Boundary& boundary,
+		int column, int segment_count) {
+		const double position = static_cast<double>(column)
+			* static_cast<double>(boundary.samples.size()) / segment_count;
+		const size_t first = static_cast<size_t>(std::floor(position))
+			% boundary.samples.size();
+		const size_t second = (first + 1) % boundary.samples.size();
+		const double alpha = position - std::floor(position);
+		double first_u = boundary.samples[first].first;
+		double second_u = boundary.samples[second].first;
+		if (second == 0) second_u += period;
+		return std::pair<double, double>{
+			first_u + (second_u - first_u) * alpha,
+			boundary.samples[first].second
+				+ (boundary.samples[second].second
+					- boundary.samples[first].second) * alpha};
+	};
+	std::vector<Vec3> vertices;
+	std::vector<UV> uvs;
+	std::vector<CMesh3D::Face> faces;
+	vertices.reserve(static_cast<size_t>(angular_segments)
+		* static_cast<size_t>(generator_segments + 1));
+	uvs.reserve(vertices.capacity());
+	for (int row = 0; row <= generator_segments; ++row) {
+		const double row_alpha = static_cast<double>(row) / generator_segments;
+		for (int column = 0; column < angular_segments; ++column) {
+			double u = 0.0;
+			double v = 0.0;
+			if (surface->GetPreparedPolylineCount() == 6) {
+				auto first = boundary_node(
+					circular_boundaries[0], column, angular_segments);
+				auto second = boundary_node(
+					circular_boundaries[1], column, angular_segments);
+				second.first += std::round((first.first - second.first) / period)
+					* period;
+				u = first.first + (second.first - first.first) * row_alpha;
+				v = first.second + (second.second - first.second) * row_alpha;
+			} else {
+				u = u_min + period * static_cast<double>(column) / angular_segments;
+				const double first_v = value_at(circular_boundaries[0], u);
+				const double second_v = value_at(circular_boundaries[1], u);
+				v = first_v + (second_v - first_v) * row_alpha;
+			}
+			const gp_Pnt point = adaptor.Value(u, v);
+			vertices.push_back({static_cast<float>(point.X()),
+				static_cast<float>(point.Y()), static_cast<float>(point.Z())});
+			uvs.push_back({static_cast<float>(u), static_cast<float>(v)});
+		}
+	}
+	const auto index = [angular_segments](int column, int row) {
+		column = (column + angular_segments) % angular_segments;
+		return static_cast<size_t>(row * angular_segments + column);
+	};
+	for (int row = 0; row < generator_segments; ++row) {
+		for (int column = 0; column < angular_segments; ++column) {
+			CMesh3D::Face quad{index(column, row), index(column + 1, row),
+				index(column + 1, row + 1), index(column, row + 1)};
+			faces.push_back(std::move(quad));
+		}
+	}
+	if (face.Orientation() == TopAbs_REVERSED) {
+		for (CMesh3D::Face& mesh_face : faces)
+			std::reverse(mesh_face.corners.begin(), mesh_face.corners.end());
+	}
+	if (!surface->pMesh3D) surface->pMesh3D = new CMesh3D;
+	if (!surface->pMesh3D->SetGeometry(
+			std::move(vertices), std::move(faces), std::move(uvs), {}))
+		return false;
+	surface->m_QtyU = 0;
+	surface->m_QtyV = 0;
+	surface->m_TypeMesh = TRIMMED_MESH;
+	surface->IsTrimmed = true;
 	surface->IsInitMesh = true;
 	return true;
 }
@@ -832,6 +1090,23 @@ void merge_trim_triangle_pairs_to_quads(CMesh3D& mesh)
 			reference.push_back(corner.v);
 		if (signed_area(cycle) * signed_area(reference) < 0.0)
 			std::reverse(cycle.begin(), cycle.end());
+		// A shared edge alone does not make a valid quad: concave or folded
+		// pairs can reverse one of the triangles used to display the polygon.
+		const double orientation = signed_area(reference) >= 0.0 ? 1.0 : -1.0;
+		bool convex = true;
+		for (size_t i = 0; i < cycle.size(); ++i) {
+			const Vec3& a = vertices[cycle[i]];
+			const Vec3& b = vertices[cycle[(i + 1) % 4]];
+			const Vec3& c = vertices[cycle[(i + 2) % 4]];
+			const double turn = (static_cast<double>(b.x) - a.x) * (c.y - b.y)
+				- (static_cast<double>(b.y) - a.y) * (c.x - b.x);
+			if (turn * orientation <= candidate.shared_length_sq * 1.0e-10) {
+				convex = false;
+				break;
+			}
+		}
+		if (!convex)
+			continue;
 
 		CMesh3D::Face quad;
 		for (size_t vertex : cycle)
@@ -1778,41 +2053,38 @@ bool trim_mesh_by_independent_boundary_loops(CMesh3D* mesh,
 	if (!mesh || !surface || source_lines.empty())
 		return false;
 
-	std::vector<std::unique_ptr<CPolyline>> storage;
-	std::vector<CPolyline*> lines;
-	storage.reserve(source_lines.size());
-	lines.reserve(source_lines.size());
-	for (const CPolyline* source : source_lines) {
-		std::unique_ptr<CPolyline> copy = copy_polyline_points(source);
-		if (!copy || copy->GetPointCount() < 2)
-			continue;
-		lines.push_back(copy.get());
-		storage.push_back(std::move(copy));
-	}
-	if (lines.empty())
-		return false;
-
-	std::vector<CPolyline*> loops;
-	CPolyline::JoinMultuLines(&lines, &loops, delta);
-	if (loops.empty())
-		return false;
-
 	bool changed = false;
-	for (CPolyline* loop : loops) {
-		if (!loop || loop->GetPointCount() < 3)
+	for (const CPolyline* source : source_lines) {
+		std::unique_ptr<CPolyline> loop = copy_polyline_points(source);
+		if (!loop || loop->GetPointCount() < 2)
 			continue;
 		if (loop->P(0)->DistTo(loop->PLast()) <= delta)
 			loop->SetClosed(true);
 		if (!loop->PutOnSurface(surface))
 			continue;
 
-		Face2D loop_face = polyline_to_face2d(loop);
+		CPolyline* trim_loop = loop.get();
+		std::unique_ptr<CPolyline> boundary_loop;
+		if (!trim_loop->IsClosed()) {
+			boundary_loop = make_closed_uv_boundary_trim_loop(
+				surface, mesh, trim_loop, delta);
+			if (!boundary_loop)
+				continue;
+			trim_loop = boundary_loop.get();
+		} else {
+			boundary_loop = make_uv_bounds_clipped_trim_loop(
+				surface, trim_loop, delta);
+			if (boundary_loop)
+				trim_loop = boundary_loop.get();
+		}
+
+		Face2D loop_face = polyline_to_face2d(trim_loop);
 		if (loop_face.verts.size() < 3 || std::fabs(polygon_area_2d(loop_face)) <= 1.0e-9)
 			continue;
 
 		const cVec2 keep = choose_point_outside_loop(mesh, loop_face);
 		CPoint3d pc(keep.x, keep.y, 0.0);
-		const bool trimmed = mesh->TrimByPline(loop, pc);
+		const bool trimmed = mesh->TrimByPline(trim_loop, pc);
 		changed = trimmed || changed;
 	}
 	return changed;
@@ -2234,6 +2506,8 @@ float distance_to_screen_segment(DomPoint point, DomPoint start, DomPoint end)
 
 
 bool IsEqual(double val1, double val2, float delta);
+bool BuildSphereCubeQuadMesh(
+	CSurfaceFace* surface, float deflection, bool trim_to_face);
 
 int CSurfaceFace::m_QtyMin = 3;
 
@@ -3337,16 +3611,12 @@ void CSurfaceFace::PrepareEdges(float Deflection, bool normalized_quadro_density
 	// need their own density-driven angular count: scaling only by the longest
 	// edge of the body pins a small corner fillet to the same minimum count over
 	// nearly the complete Density range.
-	// A closed circle is the one fidelity exception to the length rule: at low
-	// density a three- or eight-sided cylinder no longer represents the source
-	// geometry. Keep the exception named and isolated so it can become a tool
-	// parameter later without changing the 3DCoat sizing formula above. The
-	// shared OCCT edge synchronization gives the cylindrical wall the same ring.
+	// Closed circles also follow Density. Keep a minimum octagon at the coarse
+	// end, then increase angular resolution; the old fixed 18-degree limit pinned
+	// small holes to 22 sectors throughout the useful low-density range.
+	// Shared OCCT edge synchronization gives the wall and cap the same ring.
 	constexpr double pi = 3.14159265358979323846;
 	constexpr double curved_edge_max_angle = pi / 4.0;
-	// Independent from density_reference_quantity: this is a silhouette
-	// fidelity limit of 18 degrees per sector for a closed circle/ellipse.
-	constexpr double closed_circular_max_angle = pi / 10.0;
 	for (int edge_index = 0;
 		edge_index < static_cast<int>(Polylines.size()); ++edge_index) {
 		TopoDS_Edge topo_edge;
@@ -3358,10 +3628,10 @@ void CSurfaceFace::PrepareEdges(float Deflection, bool normalized_quadro_density
 			const double last = curve.LastParameter();
 			if (!std::isfinite(first) || !std::isfinite(last) || last <= first)
 				continue;
-			const int current_segments = std::max(
-				1, GetPreparedPolylinePointCount(edge_index) - 1);
 			const bool circular = curve.GetType() == GeomAbs_Circle
 				|| curve.GetType() == GeomAbs_Ellipse;
+			const int current_segments = std::max(
+				1, GetPreparedPolylinePointCount(edge_index) - 1);
 			int fidelity_segments = 1;
 			if (circular) {
 				if (normalized_quadro_density) {
@@ -3371,8 +3641,8 @@ void CSurfaceFace::PrepareEdges(float Deflection, bool normalized_quadro_density
 						(last - first) * 8.0 * density
 						/ 3.14159265358979323846));
 					const int closed_fidelity = curve.IsClosed()
-						? static_cast<int>(std::ceil(
-							(last - first) / closed_circular_max_angle))
+						? std::max(8, 2 * static_cast<int>(std::ceil(
+							(last - first) * 10.0 * density / pi - 1.0e-6)))
 						: 2;
 					fidelity_segments = std::clamp(
 						std::max(closed_fidelity, density_segments), 2, 512);
@@ -3558,6 +3828,49 @@ bool CSurfaceFace::SetPreparedPolylinePointCount(int edge_index, int point_count
 		return true;
 
 	const std::vector<CPoint3d> source = polyline->GetPoints();
+	// Raising a shared curved edge's count must sample the curve again.
+	// Subdividing its old chords leaves new nodes inside the arc (for a
+	// radius-0.3 quarter circle, the 3-to-5 node error is 0.022836), while
+	// the neighbouring analytic surface evaluates its nodes on the arc.
+	// Closed mesh rings retain their existing start phase and use the
+	// polyline fallback below.
+	TopoDS_Edge topo_edge;
+	if (GetPreparedTopoEdge(edge_index, topo_edge)) {
+		try {
+			BRepAdaptor_Curve curve(topo_edge);
+			const double first = curve.FirstParameter();
+			const double last = curve.LastParameter();
+			if (!curve.IsClosed() && std::isfinite(first)
+				&& std::isfinite(last) && last > first) {
+				GCPnts_UniformAbscissa uniform(curve, point_count, first, last);
+				if (uniform.IsDone()) {
+					std::vector<CPoint3d> exact_points;
+					exact_points.reserve(static_cast<size_t>(point_count));
+					for (int i = 1; i <= point_count; ++i) {
+						const gp_Pnt point = curve.Value(uniform.Parameter(i));
+						exact_points.emplace_back(point.X(), point.Y(), point.Z());
+					}
+					const auto distance = [](const CPoint3d& a, const CPoint3d& b) {
+						return std::hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+					};
+					if (distance(source.front(), exact_points.back())
+						< distance(source.front(), exact_points.front())) {
+						std::reverse(exact_points.begin(), exact_points.end());
+					}
+					// A prepared polyline can also represent just part of an
+					// edge; do not replace such a boundary with the whole curve.
+					const double endpoint_tolerance = std::max(
+						1.0e-6, polyline->GetLength() * 1.0e-5);
+					if (distance(source.front(), exact_points.front()) <= endpoint_tolerance
+						&& distance(source.back(), exact_points.back()) <= endpoint_tolerance) {
+						return SetPreparedPolylinePoints(edge_index, exact_points);
+					}
+				}
+			}
+		} catch (const Standard_Failure&) {
+			// Retain support for boundaries without an evaluable OCCT curve.
+		}
+	}
 	std::vector<double> length_at(source.size(), 0.0);
 	for (size_t i = 1; i < source.size(); ++i) {
 		const double dx = source[i].x - source[i - 1].x;
@@ -3629,6 +3942,12 @@ void CSurfaceFace::UpdateMeshTypeFromBoundary()
 	// boolean Box/Cylinder cut, leaving an apparently solid top over the cavity.
 	if (has_concave_planar_outer_wire(TopoDS::Face(m_Face)))
 		return;
+	// A tensor-product net exposes four complete boundary rows. When a
+	// natural side is split into multiple CAD edges, donating the same whole
+	// row to each fragment duplicates that side and opens the receiver's loop.
+	// Fill from the exact contour so every split-edge sample is retained.
+	if (Polylines.size() > 4)
+		return;
 
 	m_TypeMesh = REGULAR_MESH;
 	for (CPolyline* line : Polylines) {
@@ -3642,7 +3961,11 @@ void CSurfaceFace::UpdateMeshTypeFromBoundary()
 bool CSurfaceFace::GetRegularMeshBoundaryPoints(int edge_index, std::vector<CPoint3d>& points) const
 {
 	points.clear();
-	if (m_TypeMesh != REGULAR_MESH || !pMesh3D
+	// Four-sided BSpline compatibility patches are built as a complete
+	// tensor-product QtyU x QtyV net even when endpoint tolerances leave their
+	// classification as TRIMMED_MESH.  The caller decides whether such a mesh is
+	// a valid structured donor; expose its boundary rows here as well.
+	if (!pMesh3D
 		|| edge_index < 0 || edge_index >= static_cast<int>(Polylines.size())
 		|| !Polylines[static_cast<size_t>(edge_index)]
 		|| m_QtyU < 2 || m_QtyV < 2) {
@@ -3835,16 +4158,111 @@ bool CSurfaceFace::BuildTrimmingMesh(CSolid* psol, float Deflection){
 	const bool four_sided_bspline_compatibility = low_poly_quadro
 		&& surface_type_of(F1) == GeomAbs_BSplineSurface
 		&& topological_edge_count == 4;
+	if (low_poly_quadro && psol && psol->GetNumSurfaces() <= 4
+		&& topological_edge_count >= 4
+		&& build_oblique_cylinder_quad_strip(this))
+		return true;
+	bool full_longitude_sphere = false;
+	if (low_poly_quadro && surface_type_of(F1) == GeomAbs_Sphere) {
+		try {
+			BRepAdaptor_Surface sphere_adaptor(F1);
+			double sphere_u_min = 0.0;
+			double sphere_u_max = 0.0;
+			double sphere_v_min = 0.0;
+			double sphere_v_max = 0.0;
+			BRepTools::UVBounds(F1, sphere_u_min, sphere_u_max,
+				sphere_v_min, sphere_v_max);
+			const double period = sphere_adaptor.IsUPeriodic()
+				? sphere_adaptor.UPeriod() : 0.0;
+			full_longitude_sphere = period > 0.0
+				&& sphere_u_max - sphere_u_min >= period - 1.0e-5;
+		} catch (const Standard_Failure&) {
+			full_longitude_sphere = false;
+		}
+	}
+	if (full_longitude_sphere
+		&& BuildSphereCubeQuadMesh(this, Deflection, true)) {
+		return true;
+	}
 	if (low_poly_quadro && m_TypeMesh != REGULAR_MESH
 		&& !four_sided_bspline_compatibility) {
-		if (BuildFilledMeshWhithHoles(Deflection,
-			psol && psol->MeshQuadroHoleSLX))
-			return true;
+		const bool cylinder_surface = surface_type_of(F1) == GeomAbs_Cylinder;
+		bool cylinder_has_curved_intersection = false;
+		if (cylinder_surface && m_PreparedTopoEdges.size() >= 8) {
+			for (const TopoDS_Edge& edge : m_PreparedTopoEdges) {
+				try {
+					const GeomAbs_CurveType curve_type = BRepAdaptor_Curve(edge).GetType();
+					if (curve_type != GeomAbs_Line && curve_type != GeomAbs_Circle) {
+						cylinder_has_curved_intersection = true;
+						break;
+					}
+				} catch (const Standard_Failure&) {
+				}
+			}
+		}
+		const bool cylinder_with_trimmed_window = cylinder_surface
+			&& m_PreparedTopoEdges.size() >= 8 && cylinder_has_curved_intersection;
+		// A periodic cylinder window must be meshed from its exact synthesized UV
+		// hole contour. The ordinary island quadrangulator can escape one of the
+		// seam-split bridge patches and expose the rectangular cell-centre cut.
+		// Reuse the exact-contour SLX cutter in both UI modes for the outer cylinder;
+		// the two-edge inner cylinder keeps its dedicated all-quad strip.
+		const bool use_slx_for_surface = psol
+			&& (psol->MeshQuadroHoleSLX || cylinder_with_trimmed_window)
+			&& (!cylinder_surface || cylinder_with_trimmed_window);
+		const bool filled_mesh = BuildFilledMeshWhithHoles(
+			Deflection, use_slx_for_surface);
+		if (filled_mesh) {
+			// Island filling can leave adjacent triangle pairs even in Quadro
+			// mode. Restore every unambiguous convex source cell before the
+			// result is accepted by the Low Poly dialog.
+			if (pMesh3D)
+				merge_trim_triangle_pairs_to_quads(*pMesh3D);
+			bool reject_cylinder_period_jump = false;
+			bool reject_generic_cylinder_non_quads = false;
+			if (surface_type_of(F1) == GeomAbs_Cylinder && pMesh3D) {
+				std::vector<double> edge_lengths;
+				double maximum_edge = 0.0;
+				const auto& vertices = pMesh3D->GetVertices();
+				for (const CMesh3D::Face& face : pMesh3D->GetFaces()) {
+					if (face.deleted || face.corners.size() < 3)
+						continue;
+					reject_generic_cylinder_non_quads =
+						reject_generic_cylinder_non_quads
+						|| (!use_slx_for_surface && face.corners.size() != 4);
+					for (size_t corner = 0; corner < face.corners.size(); ++corner) {
+						const size_t first = face.corners[corner].v;
+						const size_t second = face.corners[
+							(corner + 1) % face.corners.size()].v;
+						if (first >= vertices.size() || second >= vertices.size())
+							continue;
+						const Vec3 edge = vertices[second] - vertices[first];
+						const double length = std::sqrt(
+							static_cast<double>(dot(edge, edge)));
+						if (length > 1.0e-7 && std::isfinite(length)) {
+							edge_lengths.push_back(length);
+							maximum_edge = std::max(maximum_edge, length);
+						}
+					}
+				}
+				if (!edge_lengths.empty()) {
+					std::sort(edge_lengths.begin(), edge_lengths.end());
+					const double median_edge = edge_lengths[
+						edge_lengths.size() / 2];
+					reject_cylinder_period_jump = maximum_edge
+						> median_edge * 5.0;
+				}
+			}
+			if (!reject_cylinder_period_jump
+				&& !reject_generic_cylinder_non_quads)
+				return true;
+			pMesh3D->Clear();
+		}
 		// SLX is an explicitly selected algorithm.  Falling through after an SLX
 		// failure used to display the legacy island/CNet result under the checked
 		// SLX box, which made a failed outer quadrangulation look like a wildly
 		// different SLX mesh.  Preserve the failure and its diagnostic instead.
-		if (psol && psol->MeshQuadroHoleSLX)
+		if (psol && psol->MeshQuadroHoleSLX && !cylinder_surface)
 			return false;
 		// On a planar face a failed island is not permission to show an
 		// unrelated legacy CNet triangulation under the cached island boundaries.
@@ -3953,7 +4371,63 @@ bool CSurfaceFace::BuildTrimmingMesh(CSolid* psol, float Deflection){
 	try {
 		if (pMesh3D && pMesh3D->PutOnSurface(this)) {
 			double delta = 0.01;
-			trimmed = trim_mesh_by_surface_boundary(pMesh3D, this, Polylines, delta);
+			// On a trimmed cylinder the complete topological wire also contains
+			// natural end circles and two coincident seam copies. Joining all of
+			// them hides the actual intersection loop, so the old path only deleted
+			// whole cells by their centres. Cut first by the non-natural edges alone;
+			// TrimByPline then splits boundary cells at the exact BRep intersection.
+			std::vector<CPolyline*> cylinder_trim_lines;
+			if (surface_type == GeomAbs_Cylinder) {
+				double bounds_u_min = 0.0;
+				double bounds_u_max = 0.0;
+				double bounds_v_min = 0.0;
+				double bounds_v_max = 0.0;
+				BRepTools::UVBounds(F1, bounds_u_min, bounds_u_max,
+					bounds_v_min, bounds_v_max);
+				const double bounds_span = std::max({
+					bounds_u_max - bounds_u_min,
+					bounds_v_max - bounds_v_min, 1.0});
+				const double bounds_epsilon = bounds_span * 1.0e-5;
+				for (CPolyline* source : Polylines) {
+					std::unique_ptr<CPolyline> projected =
+						copy_polyline_points(source);
+					if (!projected || projected->GetPointCount() < 2
+						|| !projected->PutOnSurface(this)) {
+						continue;
+					}
+					double edge_u_min = projected->GetPoints().front().x;
+					double edge_u_max = edge_u_min;
+					double edge_v_min = projected->GetPoints().front().y;
+					double edge_v_max = edge_v_min;
+					for (const CPoint3d& point : projected->GetPoints()) {
+						edge_u_min = std::min(edge_u_min, point.x);
+						edge_u_max = std::max(edge_u_max, point.x);
+						edge_v_min = std::min(edge_v_min, point.y);
+						edge_v_max = std::max(edge_v_max, point.y);
+					}
+					const bool natural_u = edge_u_max - edge_u_min <= bounds_epsilon
+						&& (std::fabs(edge_u_min - bounds_u_min) <= bounds_epsilon
+							|| std::fabs(edge_u_min - bounds_u_max) <= bounds_epsilon);
+					const bool natural_v = edge_v_max - edge_v_min <= bounds_epsilon
+						&& (std::fabs(edge_v_min - bounds_v_min) <= bounds_epsilon
+							|| std::fabs(edge_v_min - bounds_v_max) <= bounds_epsilon);
+					if (!natural_u && !natural_v)
+						cylinder_trim_lines.push_back(source);
+				}
+			}
+			const bool precise_cylinder_curve_cut = surface_type != GeomAbs_Cylinder
+				|| m_PreparedTopoEdges.size() <= 8;
+			if (precise_cylinder_curve_cut && !cylinder_trim_lines.empty()) {
+				trimmed = Polylines.size() > 2
+					? trim_mesh_by_independent_boundary_loops(
+						pMesh3D, this, cylinder_trim_lines, delta)
+					: trim_mesh_by_surface_boundary(
+						pMesh3D, this, cylinder_trim_lines, delta);
+			}
+			if (precise_cylinder_curve_cut) {
+				trimmed = trim_mesh_by_surface_boundary(
+					pMesh3D, this, Polylines, delta) || trimmed;
+			}
 			classified = delete_mesh_faces_outside_occt_face(pMesh3D, this);
 			const size_t trimmed_face_count = active_face_count(pMesh3D);
 			if (trim_removed_too_much(source_face_count, trimmed_face_count, surface_type)
@@ -3989,8 +4463,16 @@ bool CSurfaceFace::BuildTrimmingMesh(CSolid* psol, float Deflection){
 
 
 	IsTrimmed = trimmed || classified;
+	if (low_poly_quadro && pMesh3D)
+		merge_trim_triangle_pairs_to_quads(*pMesh3D);
 	IsInitMesh = true;
 	return true;
+}
+
+void CSurfaceFace::SetCircularCapMasterBoundary(
+	const std::vector<CPoint3d>& points)
+{
+	m_CircularCapMasterBoundary3D = points;
 }
 
 bool CSurfaceFace::RemoveOutsideMeshFaces3D()
@@ -4030,6 +4512,7 @@ bool CSurfaceFace::MakeFilledContour(const std::vector<Vec3>& contour,
 	bool use_sphere_pole_projection = false;
 	double sphere_radius = 1.0;
 	double sphere_v_sign = 1.0;
+	double sphere_u_reference = 0.0;
 	if (!m_Face.IsNull()) {
 		try {
 			BRepAdaptor_Surface adaptor(TopoDS::Face(m_Face));
@@ -4071,6 +4554,19 @@ bool CSurfaceFace::MakeFilledContour(const std::vector<Vec3>& contour,
 	}
 	std::vector<Vec3> working_contour = contour;
 	if (use_sphere_pole_projection) {
+		// U is undefined at the pole. Pick the middle of the non-polar
+		// contour's unwrapped interval, not atan2 of floating-point noise.
+		double minimum_u = std::numeric_limits<double>::max();
+		double maximum_u = std::numeric_limits<double>::lowest();
+		for (const Vec3& point : contour) {
+			if (std::abs(std::cos(static_cast<double>(point.y)))
+				<= 4.0 * std::numeric_limits<float>::epsilon())
+				continue;
+			minimum_u = std::min(minimum_u, static_cast<double>(point.x));
+			maximum_u = std::max(maximum_u, static_cast<double>(point.x));
+		}
+		if (minimum_u <= maximum_u)
+			sphere_u_reference = (minimum_u + maximum_u) * 0.5;
 		for (Vec3& point : working_contour) {
 			const double radial = sphere_radius
 				* std::cos(static_cast<double>(point.y));
@@ -4083,7 +4579,7 @@ bool CSurfaceFace::MakeFilledContour(const std::vector<Vec3>& contour,
 			point.x = static_cast<float>(point.x * metric_u_scale);
 	}
 	const auto copy_working_mesh_to_uv = [metric_u_scale,
-		use_sphere_pole_projection, sphere_radius, sphere_v_sign](
+		use_sphere_pole_projection, sphere_radius, sphere_v_sign, sphere_u_reference](
 		const CMesh3D& source, CMesh3D* destination) {
 		if (!destination)
 			return false;
@@ -4094,7 +4590,15 @@ bool CSurfaceFace::MakeFilledContour(const std::vector<Vec3>& contour,
 				const double y = point.y;
 				const double normalized_radius = std::clamp(
 					std::hypot(x, y) / sphere_radius, 0.0, 1.0);
-				point.x = static_cast<float>(std::atan2(y, x));
+				const double period = 2.0 * std::acos(-1.0);
+				const double u = normalized_radius
+					<= 4.0 * std::numeric_limits<float>::epsilon()
+					? sphere_u_reference : std::atan2(y, x);
+				// atan2 returns [-pi, pi], whereas the CAD wire may use e.g.
+				// [5.3, 2*pi]. Keep every vertex in the contour's same period
+				// before UV cell-centre classification.
+				point.x = static_cast<float>(u + period
+					* std::round((sphere_u_reference - u) / period));
 				point.y = static_cast<float>(sphere_v_sign
 					* std::acos(normalized_radius));
 			}
@@ -4397,14 +4901,418 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 		return false;
 	}
 
+	// A trimmed cylindrical face can be bounded by two topological copies of
+	// exactly the same 3D curve. They are the two sides of the periodic seam, not
+	// a curve followed backwards. Generic 3D projection places both copies on one
+	// UV branch and creates a zero-area contour, after which the legacy grid is
+	// merely classified by cell centres and visibly protrudes through the cut.
+	// Keep every synchronized 3D boundary node, but choose its equivalent U from
+	// the OCCT pcurve belonging to that particular edge.
+	try {
+		const TopoDS_Face face = TopoDS::Face(m_Face);
+		BRepAdaptor_Surface adaptor(face);
+		if (adaptor.GetType() == GeomAbs_Cylinder && adaptor.IsUPeriodic()
+			&& Polylines.size() == 2 && m_PreparedTopoEdges.size() == 2) {
+			const double period = adaptor.UPeriod();
+			const gp_Cylinder cylinder = adaptor.Cylinder();
+			std::vector<SurfacePatchPoint> seam_contour;
+			std::vector<std::vector<SurfacePatchPoint>> seam_sides;
+			bool valid_seam = period > 1.0e-9;
+			for (size_t edge_index = 0;
+				valid_seam && edge_index < Polylines.size(); ++edge_index) {
+				CPolyline* polyline = Polylines[edge_index];
+				if (!polyline || polyline->GetPointCount() < 2) {
+					valid_seam = false;
+					break;
+				}
+				Standard_Real first_parameter = 0.0;
+				Standard_Real last_parameter = 0.0;
+				Handle(Geom2d_Curve) pcurve = BRep_Tool::CurveOnSurface(
+					m_PreparedTopoEdges[edge_index], face,
+					first_parameter, last_parameter);
+				if (pcurve.IsNull()) {
+					valid_seam = false;
+					break;
+				}
+				const double branch_u = pcurve->Value(
+					(first_parameter + last_parameter) * 0.5).X();
+				std::vector<SurfacePatchPoint> side;
+				side.reserve(polyline->GetPointCount());
+				for (const CPoint3d& point : polyline->GetPoints()) {
+					double u = 0.0;
+					double v = 0.0;
+					ElSLib::Parameters(cylinder,
+						gp_Pnt(point.x, point.y, point.z), u, v);
+					u += std::round((branch_u - u) / period) * period;
+					const bool duplicate_join = !seam_contour.empty()
+						&& std::hypot(seam_contour.back().u - u,
+							seam_contour.back().v - v) <= 1.0e-9;
+					if (!duplicate_join)
+						seam_contour.push_back({u, v});
+					side.push_back({u, v});
+				}
+				seam_sides.push_back(std::move(side));
+			}
+			if (valid_seam && seam_sides.size() == 2
+				&& seam_sides[0].size() >= 3
+				&& seam_sides[0].size() == seam_sides[1].size()) {
+				auto& first_side = seam_sides[0];
+				auto& second_side = seam_sides[1];
+				const double same_start = std::hypot(
+					first_side.front().u - second_side.front().u,
+					first_side.front().v - second_side.front().v);
+				const double opposite_start = std::hypot(
+					first_side.front().u - second_side.back().u,
+					first_side.front().v - second_side.back().v);
+				if (opposite_start < same_start)
+					std::reverse(second_side.begin(), second_side.end());
+
+				std::vector<double> boundary_steps;
+				double maximum_cross_distance = 0.0;
+				const double radius = cylinder.Radius();
+				for (size_t index = 0; index < first_side.size(); ++index) {
+					maximum_cross_distance = std::max(maximum_cross_distance,
+						std::hypot((second_side[index].u - first_side[index].u)
+							* radius, second_side[index].v - first_side[index].v));
+					if (index == 0)
+						continue;
+					for (const auto* side : {&first_side, &second_side}) {
+						const double step = std::hypot(
+							((*side)[index].u - (*side)[index - 1].u) * radius,
+							(*side)[index].v - (*side)[index - 1].v);
+						if (step > 1.0e-8 && std::isfinite(step))
+							boundary_steps.push_back(step);
+					}
+				}
+				std::sort(boundary_steps.begin(), boundary_steps.end());
+				const double boundary_step = boundary_steps.empty()
+					? maximum_cross_distance
+					: boundary_steps[boundary_steps.size() / 2];
+				int row_segments = std::clamp(
+					static_cast<int>(std::ceil(maximum_cross_distance
+						/ std::max(boundary_step, 1.0e-8))), 2, 32);
+				if ((row_segments & 1) != 0)
+					row_segments = std::min(row_segments + 1, 32);
+				const size_t columns = first_side.size();
+				std::vector<Vec3> vertices;
+				std::vector<CMesh3D::Face> faces;
+				vertices.reserve(static_cast<size_t>(row_segments + 1) * columns);
+				faces.reserve(static_cast<size_t>(row_segments) * (columns - 1));
+				for (int row = 0; row <= row_segments; ++row) {
+					const double alpha = static_cast<double>(row) / row_segments;
+					for (size_t column = 0; column < columns; ++column) {
+						vertices.push_back({
+							static_cast<float>(first_side[column].u
+								+ (second_side[column].u - first_side[column].u) * alpha),
+							static_cast<float>(first_side[column].v
+								+ (second_side[column].v - first_side[column].v) * alpha),
+							0.0f});
+					}
+				}
+				const auto append_quad = [&faces](
+					size_t a, size_t b, size_t c, size_t d) {
+					CMesh3D::Face mesh_face;
+					mesh_face.corners = {{a, a, a}, {b, b, b},
+						{c, c, c}, {d, d, d}};
+					faces.push_back(std::move(mesh_face));
+				};
+				for (int row = 0; row < row_segments; ++row) {
+					for (size_t column = 1; column + 1 < columns - 1; ++column) {
+						const size_t a = static_cast<size_t>(row) * columns + column;
+						const size_t b = a + 1;
+						const size_t d = static_cast<size_t>(row + 1) * columns + column;
+						const size_t c = d + 1;
+						append_quad(a, b, c, d);
+					}
+				}
+				const size_t first_pole = 0;
+				const size_t last_pole = columns - 1;
+				for (int row = 0; row < row_segments; row += 2) {
+					const size_t first_a = static_cast<size_t>(row) * columns + 1;
+					const size_t first_b = static_cast<size_t>(row + 1) * columns + 1;
+					const size_t first_c = static_cast<size_t>(row + 2) * columns + 1;
+					append_quad(first_pole, first_a, first_b, first_c);
+
+					const size_t adjacent_column = columns - 2;
+					const size_t last_a = static_cast<size_t>(row) * columns
+						+ adjacent_column;
+					const size_t last_b = static_cast<size_t>(row + 1) * columns
+						+ adjacent_column;
+					const size_t last_c = static_cast<size_t>(row + 2) * columns
+						+ adjacent_column;
+					append_quad(last_pole, last_c, last_b, last_a);
+				}
+				if (m_Face.Orientation() == TopAbs_REVERSED) {
+					for (CMesh3D::Face& mesh_face : faces)
+						std::reverse(mesh_face.corners.begin(), mesh_face.corners.end());
+				}
+				if (pMesh3D->SetGeometry(std::move(vertices), std::move(faces), {}, {})
+					&& pMesh3D->RestoreTo3DFromUVSurface(this)) {
+					m_LastIslandBoundariesUV.clear();
+					for (const auto& side : seam_sides) {
+						std::vector<CPoint3d> diagnostic;
+						for (SurfacePatchPoint point : side)
+							diagnostic.emplace_back(point.u, point.v, 0.0);
+						m_LastIslandBoundariesUV.push_back(std::move(diagnostic));
+					}
+					IsTrimmed = true;
+					IsInitMesh = true;
+					return true;
+				}
+				pMesh3D->Clear();
+			}
+			if (seam_contour.size() > 3) {
+				double area = 0.0;
+				for (size_t index = 0; index < seam_contour.size(); ++index) {
+					const SurfacePatchPoint first = seam_contour[index];
+					const SurfacePatchPoint second = seam_contour[
+						(index + 1) % seam_contour.size()];
+					area += first.u * second.v - second.u * first.v;
+				}
+				if (valid_seam && std::fabs(area) > 1.0e-10) {
+					uv_contours.clear();
+					uv_contours.push_back(std::move(seam_contour));
+				}
+			}
+		}
+	} catch (const Standard_Failure&) {
+	}
+
+	size_t topological_wire_count = 0;
+	for (TopExp_Explorer wire(m_Face, TopAbs_WIRE); wire.More(); wire.Next())
+		++topological_wire_count;
+
+	// 3DCoat CapRetopo::DoCap2 special case. A planar face bounded by one
+	// exact circle does not need the general advancing-front quadrangulator:
+	// preserve its prepared boundary, create QtyDiv concentric inner rings and
+	// close the last ring with quads made from three consecutive nodes and the
+	// centre. This produces the predictable radial topology of the original
+	// CapRetopo tool instead of long strips crossing a circular cap.
+	const auto build_circular_cap_retopo = [&]() {
+		if (topological_wire_count != 1 || uv_contours.size() != 1
+			|| BRepAdaptor_Surface(TopoDS::Face(m_Face)).GetType()
+				!= GeomAbs_Plane) {
+			return false;
+		}
+
+		size_t circular_edge_count = 0;
+		bool elliptical_boundary = false;
+		for (TopExp_Explorer edge(m_Face, TopAbs_EDGE); edge.More(); edge.Next()) {
+			const TopoDS_Edge topo_edge = TopoDS::Edge(edge.Current());
+			if (topo_edge.IsNull() || BRep_Tool::Degenerated(topo_edge))
+				continue;
+			BRepAdaptor_Curve curve(topo_edge);
+			if (curve.GetType() != GeomAbs_Circle
+				&& curve.GetType() != GeomAbs_Ellipse)
+				return false;
+			elliptical_boundary = elliptical_boundary
+				|| curve.GetType() == GeomAbs_Ellipse;
+			++circular_edge_count;
+		}
+		if (circular_edge_count == 0)
+			return false;
+
+		std::vector<SurfacePatchPoint> boundary;
+		if (!m_CircularCapMasterBoundary3D.empty()) {
+			SurfaceUVMapping cap_mapping(this);
+			if (!cap_mapping.IsValid())
+				return false;
+			boundary.reserve(m_CircularCapMasterBoundary3D.size());
+			for (const CPoint3d& point : m_CircularCapMasterBoundary3D) {
+				SurfaceUVPoint uv{};
+				if (!cap_mapping.Project({static_cast<float>(point.x),
+						static_cast<float>(point.y), static_cast<float>(point.z)}, uv)) {
+					return false;
+				}
+				boundary.push_back({uv.u, uv.v});
+			}
+		} else {
+			boundary = uv_contours.front();
+		}
+		double boundary_coordinate_scale = 1.0;
+		for (SurfacePatchPoint point : boundary) {
+			boundary_coordinate_scale = std::max(boundary_coordinate_scale,
+				std::max(std::fabs(point.u), std::fabs(point.v)));
+		}
+		const double closure_tolerance = boundary_coordinate_scale * 1.0e-6;
+		while (boundary.size() > 3
+			&& std::hypot(boundary.front().u - boundary.back().u,
+				boundary.front().v - boundary.back().v) <= closure_tolerance) {
+			boundary.pop_back();
+		}
+		if (boundary.size() < 6)
+			return false;
+		SurfacePatchPoint centre{};
+		for (SurfacePatchPoint point : boundary) {
+			centre.u += point.u;
+			centre.v += point.v;
+		}
+		centre.u /= static_cast<double>(boundary.size());
+		centre.v /= static_cast<double>(boundary.size());
+
+		double mean_radius = 0.0;
+		double minimum_radius = std::numeric_limits<double>::max();
+		double maximum_radius = 0.0;
+		std::vector<double> edge_lengths;
+		edge_lengths.reserve(boundary.size());
+		double signed_area = 0.0;
+		for (size_t index = 0; index < boundary.size(); ++index) {
+			const SurfacePatchPoint point = boundary[index];
+			const SurfacePatchPoint next = boundary[(index + 1) % boundary.size()];
+			const double radius = std::hypot(
+				point.u - centre.u, point.v - centre.v);
+			mean_radius += radius;
+			minimum_radius = std::min(minimum_radius, radius);
+			maximum_radius = std::max(maximum_radius, radius);
+			edge_lengths.push_back(std::hypot(
+				next.u - point.u, next.v - point.v));
+			signed_area += point.u * next.v - next.u * point.v;
+		}
+		mean_radius /= static_cast<double>(boundary.size());
+		if (!std::isfinite(mean_radius) || mean_radius <= 1.0e-9
+			|| (!elliptical_boundary
+				&& minimum_radius / maximum_radius < 0.98)) {
+			return false;
+		}
+		if (signed_area < 0.0)
+			std::reverse(boundary.begin(), boundary.end());
+		// The clipped cube-sphere owns the exact outer nodes. Where the trim crosses
+		// a cube patch seam, two consecutive nodes can be much closer than the
+		// normal circle step. Propagating their original radial directions through
+		// every CapRetopo ring creates the visible doubled rays. Keep ring zero
+		// untouched for the conforming sphere seam, but fit one uniform angular
+		// phase for all inner rings. The spacing correction is then absorbed by the
+		// first quad row instead of continuing all the way to the centre.
+		constexpr double cap_pi = 3.14159265358979323846;
+		const double uniform_angle_step = 2.0 * cap_pi
+			/ static_cast<double>(boundary.size());
+		std::vector<double> boundary_angles(boundary.size(), 0.0);
+		double uniform_phase = 0.0;
+		for (size_t index = 0; index < boundary.size(); ++index) {
+			double angle = std::atan2(boundary[index].v - centre.v,
+				boundary[index].u - centre.u);
+			if (index > 0) {
+				while (angle <= boundary_angles[index - 1])
+					angle += 2.0 * cap_pi;
+			}
+			boundary_angles[index] = angle;
+			uniform_phase += angle
+				- uniform_angle_step * static_cast<double>(index);
+		}
+		uniform_phase /= static_cast<double>(boundary.size());
+
+		std::sort(edge_lengths.begin(), edge_lengths.end());
+		const double boundary_step = edge_lengths[edge_lengths.size() / 2];
+		if (!std::isfinite(boundary_step) || boundary_step <= 1.0e-9)
+			return false;
+		// DoCap2 exposes QtyDiv as 1..10. Derive the same value from the current
+		// Low Poly boundary step so radial and circumferential edges stay similar.
+		const int qty_div = std::clamp(
+			static_cast<int>(std::lround(mean_radius / boundary_step)) - 1,
+			1, 10);
+
+		std::vector<Vec3> vertices;
+		std::vector<CMesh3D::Face> faces;
+		const size_t ring_size = boundary.size();
+		vertices.reserve(ring_size * static_cast<size_t>(qty_div + 1) + 1);
+		faces.reserve(ring_size * static_cast<size_t>(qty_div)
+			+ ring_size / 2);
+		for (int ring = 0; ring <= qty_div; ++ring) {
+			const double scale = 1.0
+				- static_cast<double>(ring) / static_cast<double>(qty_div + 1);
+			for (size_t index = 0; index < boundary.size(); ++index) {
+				if (ring == 0) {
+					const SurfacePatchPoint point = boundary[index];
+					vertices.push_back({static_cast<float>(point.u),
+						static_cast<float>(point.v), 0.0f});
+				} else if (!elliptical_boundary) {
+					const double angle = uniform_phase
+						+ uniform_angle_step * static_cast<double>(index);
+					vertices.push_back({
+						static_cast<float>(centre.u
+							+ std::cos(angle) * mean_radius * scale),
+						static_cast<float>(centre.v
+							+ std::sin(angle) * mean_radius * scale),
+						0.0f});
+				} else {
+					const SurfacePatchPoint point = boundary[index];
+					vertices.push_back({
+						static_cast<float>(centre.u
+							+ (point.u - centre.u) * scale),
+						static_cast<float>(centre.v
+							+ (point.v - centre.v) * scale),
+						0.0f});
+				}
+			}
+		}
+		const size_t centre_index = vertices.size();
+		vertices.push_back({static_cast<float>(centre.u),
+			static_cast<float>(centre.v), 0.0f});
+
+		const auto append_quad = [&](size_t a, size_t b, size_t c, size_t d) {
+			CMesh3D::Face face;
+			face.corners = {{a, a, a}, {b, b, b}, {c, c, c}, {d, d, d}};
+			faces.push_back(std::move(face));
+		};
+		const auto append_triangle = [&](size_t a, size_t b, size_t c) {
+			CMesh3D::Face face;
+			face.corners = {{a, a, a}, {b, b, b}, {c, c, c}};
+			faces.push_back(std::move(face));
+		};
+		for (int ring = 0; ring < qty_div; ++ring) {
+			const size_t outer_start = static_cast<size_t>(ring) * ring_size;
+			const size_t inner_start = outer_start + ring_size;
+			for (size_t index = 0; index < ring_size; ++index) {
+				const size_t next = (index + 1) % ring_size;
+				append_quad(outer_start + index, outer_start + next,
+					inner_start + next, inner_start + index);
+			}
+		}
+		const size_t last_ring = static_cast<size_t>(qty_div) * ring_size;
+		const size_t paired_ring_size = ring_size - (ring_size & 1U);
+		for (size_t index = 0; index < paired_ring_size; index += 2) {
+			append_quad(last_ring + index,
+				last_ring + (index + 1) % ring_size,
+				last_ring + (index + 2) % ring_size, centre_index);
+		}
+		// Clipping a curved donor can remove one boundary node and leave an odd
+		// ring. An all-quad disk has even boundary parity, so close the final edge
+		// with one explicit triangle instead of discarding the donor contour and
+		// rebuilding the Cap with a different angular phase.
+		if ((ring_size & 1U) != 0)
+			append_triangle(last_ring + ring_size - 1, last_ring, centre_index);
+
+		if (m_Face.Orientation() == TopAbs_REVERSED) {
+			for (CMesh3D::Face& face : faces)
+				std::reverse(face.corners.begin(), face.corners.end());
+		}
+		if (!pMesh3D->SetGeometry(std::move(vertices), std::move(faces), {}, {})
+			|| !pMesh3D->RestoreTo3DFromUVSurface(this)) {
+			pMesh3D->Clear();
+			return false;
+		}
+		m_LastIslandBoundariesUV.clear();
+		std::vector<CPoint3d> diagnostic_boundary;
+		diagnostic_boundary.reserve(boundary.size());
+		for (SurfacePatchPoint point : boundary)
+			diagnostic_boundary.emplace_back(point.u, point.v, 0.0);
+		m_LastIslandBoundariesUV.push_back(std::move(diagnostic_boundary));
+		IsTrimmed = true;
+		IsInitMesh = true;
+		return true;
+	};
+	if (build_circular_cap_retopo())
+		return true;
+
+	size_t synthesized_cylinder_hole_count = 0;
 	// A window cut across a cylinder's parameter seam is represented by one
 	// finite-area loop around U=0 plus the top and bottom circles, which collapse
 	// to zero-area horizontal lines in UV. The generic patch builder then mistakes
 	// the cutout for the outer contour and fills the side that OCCT says is OUT.
 	// Move the working seam opposite that loop, synthesize the complete periodic
 	// rectangle as the outer contour, and retain the classified OUT loop as a hole.
-	// This is deliberately limited to one enclosed seam-crossing cut; cylinders
-	// with ordinary outer contours continue through the established path below.
+	// Preserve all enclosed seam-crossing windows; ordinary outer contours
+	// continue through the established path below.
 	try {
 		const TopoDS_Face face = TopoDS::Face(m_Face);
 		BRepAdaptor_Surface adaptor(face);
@@ -4429,21 +5337,6 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 					return std::hypot(first.u - second.u,
 						first.v - second.v) <= retrace_epsilon;
 				};
-				const auto remove_retraced_spikes = [&](const auto& source) {
-					std::vector<SurfacePatchPoint> clean;
-					clean.reserve(source.size());
-					for (SurfacePatchPoint point : source) {
-						if (!clean.empty() && same_uv(clean.back(), point))
-							continue;
-						if (clean.size() >= 2
-							&& same_uv(clean[clean.size() - 2], point)) {
-							clean.pop_back();
-							continue;
-						}
-						clean.push_back(point);
-					}
-					return clean;
-				};
 				const auto signed_area = [](const auto& contour) {
 					double area = 0.0;
 					for (size_t index = 0; index < contour.size(); ++index) {
@@ -4454,16 +5347,28 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 					return area * 0.5;
 				};
 
+				// Decompose the closed walk into cycles. A repeated vertex may
+				// close a real window before a retraced seam starts; discarding
+				// every A...B...A path also discarded that entire window.
 				std::vector<std::vector<SurfacePatchPoint>> finite_loops;
 				for (const auto& source : uv_contours) {
-					auto clean = remove_retraced_spikes(source);
-					if (clean.size() >= 3
-						&& std::fabs(signed_area(clean)) > epsilon * epsilon) {
-						finite_loops.push_back(std::move(clean));
+					std::vector<SurfacePatchPoint> walk;
+					for (size_t index = 0; index <= source.size(); ++index) {
+						const auto point = source[index % source.size()];
+						auto repeated = std::find_if(walk.begin(), walk.end(),
+							[&](SurfacePatchPoint candidate) { return same_uv(candidate, point); });
+						if (repeated == walk.end()) {
+							walk.push_back(point);
+							continue;
+						}
+						std::vector<SurfacePatchPoint> cycle(repeated, walk.end());
+						if (cycle.size() >= 3 && std::fabs(signed_area(cycle)) > epsilon * epsilon)
+							finite_loops.push_back(std::move(cycle));
+						walk.erase(repeated + 1, walk.end());
 					}
 				}
-				if (finite_loops.size() == 1) {
-					auto hole = std::move(finite_loops.front());
+				if (!finite_loops.empty()) {
+					auto hole = finite_loops.front();
 					SurfacePatchPoint center{};
 					for (SurfacePatchPoint point : hole) {
 						center.u += point.u;
@@ -4471,45 +5376,57 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 					}
 					center.u /= static_cast<double>(hole.size());
 					center.v /= static_cast<double>(hole.size());
-					for (SurfacePatchPoint& point : hole)
-						point.u += std::round((center.u - point.u) / period) * period;
-					double hole_v_min = std::numeric_limits<double>::max();
-					double hole_v_max = std::numeric_limits<double>::lowest();
-					for (SurfacePatchPoint point : hole) {
-						hole_v_min = std::min(hole_v_min, point.v);
-						hole_v_max = std::max(hole_v_max, point.v);
+					bool enclosed_in_v = true;
+					bool all_holes_outside = true;
+					// Keep every window on the same periodic branch as the first.
+					for (auto& loop : finite_loops) {
+						SurfacePatchPoint loop_center{};
+						for (auto& point : loop) {
+							point.u += std::round((center.u - point.u) / period) * period;
+							loop_center.u += point.u;
+							loop_center.v += point.v;
+							enclosed_in_v = enclosed_in_v
+								&& point.v > face_v_min + epsilon
+								&& point.v < face_v_max - epsilon;
+						}
+						loop_center.u /= loop.size();
+						loop_center.v /= loop.size();
+						double u = face_u_min + std::fmod(loop_center.u - face_u_min, period);
+						if (u < face_u_min) u += period;
+						BRepClass_FaceClassifier hole_classifier(face,
+							gp_Pnt2d(u, loop_center.v), EPS2D, Standard_False);
+						all_holes_outside = all_holes_outside && hole_classifier.State() == TopAbs_OUT;
 					}
-					double classifier_u = face_u_min
-						+ std::fmod(center.u - face_u_min, period);
-					if (classifier_u < face_u_min)
-						classifier_u += period;
-					BRepClass_FaceClassifier classifier(face,
-						gp_Pnt2d(classifier_u, center.v), EPS2D,
-						Standard_False);
-					const bool enclosed_in_v = hole_v_min > face_v_min + epsilon
-						&& hole_v_max < face_v_max - epsilon;
-					if (enclosed_in_v && classifier.State() == TopAbs_OUT) {
-						const double work_u_min = center.u - period * 0.5;
-						const double work_u_max = center.u + period * 0.5;
+					if (enclosed_in_v && all_holes_outside) {
+						double holes_u_min = std::numeric_limits<double>::max();
+						double holes_u_max = std::numeric_limits<double>::lowest();
+						for (const auto& loop : finite_loops)
+							for (auto point : loop) {
+								holes_u_min = std::min(holes_u_min, point.u);
+								holes_u_max = std::max(holes_u_max, point.u);
+							}
+						const double work_center_u = (holes_u_min + holes_u_max) * 0.5;
+						const double work_u_min = work_center_u - period * 0.5;
+						const double work_u_max = work_center_u + period * 0.5;
 						std::vector<double> metric_edge_lengths;
-						metric_edge_lengths.reserve(hole.size());
 						const double radius = adaptor.Cylinder().Radius();
-						for (size_t index = 0; index < hole.size(); ++index) {
-							const auto& first = hole[index];
-							const auto& second = hole[(index + 1) % hole.size()];
-							const double length = std::hypot(
-								(second.u - first.u) * radius,
-								second.v - first.v);
-							if (length > epsilon && std::isfinite(length))
-								metric_edge_lengths.push_back(length);
+						for (const auto& loop : finite_loops) {
+							for (size_t index = 0; index < loop.size(); ++index) {
+								const auto& first = loop[index];
+								const auto& second = loop[(index + 1) % loop.size()];
+								const double length = std::hypot(
+									(second.u - first.u) * radius, second.v - first.v);
+								if (length > epsilon && std::isfinite(length))
+									metric_edge_lengths.push_back(length);
+							}
 						}
 						std::sort(metric_edge_lengths.begin(),
 							metric_edge_lengths.end());
 						const double boundary_step = metric_edge_lengths.empty()
 							? std::max(radius * period, face_v_max - face_v_min)
 							: metric_edge_lengths[metric_edge_lengths.size() / 2];
-						const int u_segments = std::max(2,
-							static_cast<int>(std::ceil(radius * period / boundary_step)));
+						const int u_segments = std::max(2, 2 *
+							static_cast<int>(std::ceil(radius * period / (2.0 * boundary_step))));
 						const int v_segments = std::max(2,
 							static_cast<int>(std::ceil(
 								(face_v_max - face_v_min) / boundary_step)));
@@ -4536,20 +5453,117 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 							outer.push_back({work_u_min, face_v_min
 								+ (face_v_max - face_v_min) * alpha});
 						}
+						synthesized_cylinder_hole_count = finite_loops.size();
 						uv_contours.clear();
 						uv_contours.push_back(std::move(outer));
-						uv_contours.push_back(std::move(hole));
+						for (auto& loop : finite_loops)
+							uv_contours.push_back(std::move(loop));
+					} else if (!enclosed_in_v && finite_loops.size() == 1) {
+						// A box-like cut that reaches a cylinder end is one open side
+						// of the unrolled outer boundary.  Projection also supplied the
+						// coincident seam twice, so the generic island builder saw a
+						// separate fan.  Combine the exact notched end path with the
+						// opposite circular end and let the two implicit closing edges
+						// represent the two copies of the periodic seam.
+						const bool on_min = std::fabs(hole.front().v - face_v_min)
+							<= retrace_epsilon
+							&& std::fabs(hole.back().v - face_v_min)
+								<= retrace_epsilon;
+						const bool on_max = std::fabs(hole.front().v - face_v_max)
+							<= retrace_epsilon
+							&& std::fabs(hole.back().v - face_v_max)
+								<= retrace_epsilon;
+						const double end_u_span = std::fabs(
+							hole.back().u - hole.front().u);
+						if ((on_min || on_max)
+							&& end_u_span >= period - retrace_epsilon * 10.0) {
+							if (hole.front().u > hole.back().u)
+								std::reverse(hole.begin(), hole.end());
+							const double opposite_v = on_min ? face_v_max : face_v_min;
+							const auto opposite = std::max_element(
+								uv_contours.begin(), uv_contours.end(),
+								[&](const auto& first, const auto& second) {
+									const auto score = [opposite_v](const auto& contour) {
+										double span = 0.0;
+										if (!contour.empty()) {
+											double u_min = contour.front().u;
+											double u_max = u_min;
+											for (SurfacePatchPoint point : contour) {
+												if (std::fabs(point.v - opposite_v) > 1.0e-4)
+													return 0.0;
+												u_min = std::min(u_min, point.u);
+												u_max = std::max(u_max, point.u);
+											}
+											span = u_max - u_min;
+										}
+										return span;
+									};
+									return score(first) < score(second);
+								});
+							if (opposite != uv_contours.end()) {
+								std::vector<SurfacePatchPoint> outer = std::move(hole);
+								std::vector<SurfacePatchPoint> far_end = *opposite;
+								if (far_end.front().u < far_end.back().u)
+									std::reverse(far_end.begin(), far_end.end());
+								std::vector<double> boundary_steps;
+								for (size_t index = 1; index < outer.size(); ++index) {
+									const double step = std::hypot(
+										(outer[index].u - outer[index - 1].u)
+											* adaptor.Cylinder().Radius(),
+										outer[index].v - outer[index - 1].v);
+									if (step > retrace_epsilon && std::isfinite(step))
+										boundary_steps.push_back(step);
+								}
+								std::sort(boundary_steps.begin(), boundary_steps.end());
+								const double side_step = boundary_steps.empty()
+									? std::fabs(face_v_max - face_v_min)
+									: boundary_steps[boundary_steps.size() / 2];
+								const int side_segments = std::max(2,
+									static_cast<int>(std::ceil(std::fabs(
+										face_v_max - face_v_min) / side_step)));
+								for (int index = 1; index < side_segments; ++index) {
+									const double alpha = static_cast<double>(index)
+										/ static_cast<double>(side_segments);
+									outer.push_back({outer.front().u + period,
+										(on_min ? face_v_min : face_v_max)
+										+ (opposite_v - (on_min ? face_v_min : face_v_max))
+											* alpha});
+								}
+								outer.insert(outer.end(), far_end.begin(), far_end.end());
+								for (int index = 1; index < side_segments; ++index) {
+									const double alpha = static_cast<double>(index)
+										/ static_cast<double>(side_segments);
+									outer.push_back({outer.front().u, opposite_v
+										+ ((on_min ? face_v_min : face_v_max) - opposite_v)
+											* alpha});
+								}
+								uv_contours.clear();
+								uv_contours.push_back(std::move(outer));
+							}
+						}
 					}
 				}
 			}
 		}
 	} catch (const Standard_Failure&) {
 	}
-	size_t topological_wire_count = 0;
-	for (TopExp_Explorer wire(m_Face, TopAbs_WIRE); wire.More(); wire.Next())
-		++topological_wire_count;
+	const bool periodic_cylinder_hole = use_mesh_quadro_hole_slx
+		&& BRepAdaptor_Surface(TopoDS::Face(m_Face)).GetType()
+			== GeomAbs_Cylinder
+		&& uv_contours.size() > 1;
+	// A missing outer wire must never promote the largest hole to the filled
+	// domain. On a plane each CAD wire must survive as a closed UV contour;
+	// periodic faces retain their separate seam reconstruction rules above.
+	if (BRepAdaptor_Surface(TopoDS::Face(m_Face)).GetType() == GeomAbs_Plane
+		&& uv_contours.size() < topological_wire_count) {
+		pMesh3D->Clear();
+		m_LastIslandFillError = "Incomplete planar boundary: expected "
+			+ std::to_string(topological_wire_count) + " closed contours, got "
+			+ std::to_string(uv_contours.size()) + ".";
+		return false;
+	}
 	const bool slx_face_has_holes = use_mesh_quadro_hole_slx
-		&& topological_wire_count > 1;
+		&& (topological_wire_count > 1 || periodic_cylinder_hole);
 	if (slx_face_has_holes && uv_contours.size() <= 1) {
 		pMesh3D->Clear();
 		m_LastIslandFillError = "Mesh Quadro Hole SLX: the OCCT face has "
@@ -4635,6 +5649,678 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 		}
 	}
 
+	// Several small cuts arranged in one row must share one transition zone.
+	// Giving every cut its own bridge/collar makes neighbouring sizing fields
+	// overlap as soon as the background step becomes wider than the gap.  Split
+	// the face once around a compact rectangular zone, then solve all cuts only
+	// inside that zone.  The same explicit strategy is used by both hole modes;
+	// it is deliberately limited to planar, aligned clusters and falls through
+	// to the established algorithms if any construction step is unsuccessful.
+	const auto try_build_shared_hole_zone = [&](bool use_slx_background) {
+		if (BRepAdaptor_Surface(TopoDS::Face(m_Face)).GetType() != GeomAbs_Plane
+			|| uv_contours.size() < 4) {
+			return false;
+		}
+		const auto area = [](const std::vector<SurfacePatchPoint>& ring) {
+			double result = 0.0;
+			for (size_t i = 0; i < ring.size(); ++i) {
+				const auto& a = ring[i];
+				const auto& b = ring[(i + 1) % ring.size()];
+				result += a.u * b.v - b.u * a.v;
+			}
+			return result * 0.5;
+		};
+		const size_t outer_index = static_cast<size_t>(std::distance(
+			uv_contours.begin(), std::max_element(uv_contours.begin(),
+				uv_contours.end(), [&](const auto& a, const auto& b) {
+					return std::fabs(area(a)) < std::fabs(area(b));
+				})));
+		const auto& outer = uv_contours[outer_index];
+		if (outer.size() < 4)
+			return false;
+
+		struct Bounds {
+			double min_u = std::numeric_limits<double>::max();
+			double max_u = std::numeric_limits<double>::lowest();
+			double min_v = std::numeric_limits<double>::max();
+			double max_v = std::numeric_limits<double>::lowest();
+			size_t contour_index = 0;
+		};
+		auto bounds_of = [](const std::vector<SurfacePatchPoint>& ring) {
+			Bounds bounds;
+			for (SurfacePatchPoint point : ring) {
+				bounds.min_u = std::min(bounds.min_u, point.u);
+				bounds.max_u = std::max(bounds.max_u, point.u);
+				bounds.min_v = std::min(bounds.min_v, point.v);
+				bounds.max_v = std::max(bounds.max_v, point.v);
+			}
+			return bounds;
+		};
+		const Bounds outer_bounds = bounds_of(outer);
+		std::vector<Bounds> holes;
+		for (size_t i = 0; i < uv_contours.size(); ++i) {
+			if (i == outer_index || uv_contours[i].size() < 4)
+				continue;
+			Bounds bounds = bounds_of(uv_contours[i]);
+			bounds.contour_index = i;
+			if (bounds.max_u > bounds.min_u && bounds.max_v > bounds.min_v)
+				holes.push_back(bounds);
+		}
+		if (holes.size() < 3)
+			return false;
+
+		std::vector<double> outer_edges;
+		outer_edges.reserve(outer.size());
+		for (size_t i = 0; i < outer.size(); ++i) {
+			const auto& a = outer[i];
+			const auto& b = outer[(i + 1) % outer.size()];
+			const double length = std::hypot(b.u - a.u, b.v - a.v);
+			if (length > 1.0e-9 && std::isfinite(length))
+				outer_edges.push_back(length);
+		}
+		if (outer_edges.empty())
+			return false;
+		std::sort(outer_edges.begin(), outer_edges.end());
+		const double background_step = outer_edges[outer_edges.size() / 2];
+		const double rectangle_epsilon = std::max(background_step * 1.0e-6, 1.0e-9);
+		for (const Bounds& hole : holes) {
+			for (SurfacePatchPoint point : uv_contours[hole.contour_index]) {
+				const bool on_box_boundary =
+					std::fabs(point.u - hole.min_u) <= rectangle_epsilon
+					|| std::fabs(point.u - hole.max_u) <= rectangle_epsilon
+					|| std::fabs(point.v - hole.min_v) <= rectangle_epsilon
+					|| std::fabs(point.v - hole.max_v) <= rectangle_epsilon;
+				if (!on_box_boundary)
+					return false;
+			}
+		}
+
+		auto median = [](std::vector<double> values) {
+			std::sort(values.begin(), values.end());
+			return values[values.size() / 2];
+		};
+		std::vector<double> widths, heights, centres_u, centres_v;
+		for (const Bounds& hole : holes) {
+			widths.push_back(hole.max_u - hole.min_u);
+			heights.push_back(hole.max_v - hole.min_v);
+			centres_u.push_back((hole.min_u + hole.max_u) * 0.5);
+			centres_v.push_back((hole.min_v + hole.max_v) * 0.5);
+		}
+		const double median_width = median(widths);
+		const double median_height = median(heights);
+		const auto spread = [](const std::vector<double>& values) {
+			const auto limits = std::minmax_element(values.begin(), values.end());
+			return *limits.second - *limits.first;
+		};
+		const bool horizontal = spread(centres_v) <= median_height * 0.35;
+		const bool vertical = spread(centres_u) <= median_width * 0.35;
+		if (!horizontal && !vertical)
+			return false;
+		const bool along_u = horizontal || !vertical;
+		std::sort(holes.begin(), holes.end(), [&](const Bounds& a, const Bounds& b) {
+			return along_u ? a.min_u < b.min_u : a.min_v < b.min_v;
+		});
+		for (size_t i = 1; i < holes.size(); ++i) {
+			const double gap = along_u
+				? holes[i].min_u - holes[i - 1].max_u
+				: holes[i].min_v - holes[i - 1].max_v;
+			const double feature_size = along_u ? median_width : median_height;
+			if (gap > std::max(background_step * 1.5, feature_size * 2.5))
+				return false;
+		}
+
+		Bounds cluster;
+		for (const Bounds& hole : holes) {
+			cluster.min_u = std::min(cluster.min_u, hole.min_u);
+			cluster.max_u = std::max(cluster.max_u, hole.max_u);
+			cluster.min_v = std::min(cluster.min_v, hole.min_v);
+			cluster.max_v = std::max(cluster.max_v, hole.max_v);
+		}
+		const Bounds feature_bounds = cluster;
+		const double margin = background_step * 0.8;
+		cluster.min_u = std::max(cluster.min_u - margin,
+			outer_bounds.min_u + background_step * 0.25);
+		cluster.max_u = std::min(cluster.max_u + margin,
+			outer_bounds.max_u - background_step * 0.25);
+		cluster.min_v = std::max(cluster.min_v - margin,
+			outer_bounds.min_v + background_step * 0.25);
+		cluster.max_v = std::min(cluster.max_v + margin,
+			outer_bounds.max_v - background_step * 0.25);
+		if (cluster.max_u <= cluster.min_u || cluster.max_v <= cluster.min_v)
+			return false;
+
+		std::vector<SurfacePatchPoint> zone;
+		const auto append_edge = [&](double u0, double v0, double u1, double v1) {
+			const int segments = std::max(1, static_cast<int>(std::ceil(
+				std::hypot(u1 - u0, v1 - v0) / background_step)));
+			for (int i = 0; i < segments; ++i) {
+				const double t = static_cast<double>(i) / segments;
+				zone.push_back({u0 + (u1 - u0) * t,
+					v0 + (v1 - v0) * t, true});
+			}
+		};
+		append_edge(cluster.min_u, cluster.min_v, cluster.max_u, cluster.min_v);
+		append_edge(cluster.max_u, cluster.min_v, cluster.max_u, cluster.max_v);
+		append_edge(cluster.max_u, cluster.max_v, cluster.min_u, cluster.max_v);
+		append_edge(cluster.min_u, cluster.max_v, cluster.min_u, cluster.min_v);
+		Face2D outer_face;
+		for (SurfacePatchPoint point : outer)
+			outer_face.verts.emplace_back(point.u, point.v);
+		for (SurfacePatchPoint point : zone) {
+			if (ClassifyPointInFace2(outer_face,
+					cVec2(point.u, point.v), EPS2D) == PFP_OUTSIDE)
+				return false;
+		}
+
+		CMesh3D slx_background;
+		std::vector<SurfacePatchPoint> local_outer = zone;
+		if (use_slx_background) {
+			std::vector<Vec3> outer_contour;
+			for (SurfacePatchPoint point : outer)
+				outer_contour.push_back({static_cast<float>(point.u),
+					static_cast<float>(point.v), 0.0f});
+			if (!MakeFilledContour(outer_contour, {0.0f, 0.0f, 1.0f},
+					&slx_background, Deflection >= 1.5f,
+					nullptr, nullptr, nullptr)) {
+				return false;
+			}
+			Face2D zone_face;
+			for (SurfacePatchPoint point : zone)
+				zone_face.verts.emplace_back(point.u, point.v);
+			CPoint3d keep_point;
+			bool found_keep = false;
+			for (const CMesh3D::Face& face : slx_background.GetFaces()) {
+				if (face.deleted || face.corners.size() < 3)
+					continue;
+				cVec2 centre{};
+				bool valid = true;
+				for (const MeshCorner& corner : face.corners) {
+					if (corner.v >= slx_background.GetVertices().size()) {
+						valid = false;
+						break;
+					}
+					const Vec3 point = slx_background.GetVertices()[corner.v];
+					centre.x += point.x;
+					centre.y += point.y;
+				}
+				if (!valid)
+					continue;
+				centre.x /= static_cast<double>(face.corners.size());
+				centre.y /= static_cast<double>(face.corners.size());
+				if (ClassifyPointInFace2(zone_face, centre, EPS2D) == PFP_OUTSIDE) {
+					keep_point = CPoint3d(centre.x, centre.y, 0.0);
+					found_keep = true;
+					break;
+				}
+			}
+			if (!found_keep)
+				return false;
+			CPolyline zone_line;
+			for (SurfacePatchPoint point : zone)
+				zone_line.AddPoint(CPoint3d(point.u, point.v, 0.0));
+			zone_line.SetClosed(true);
+			slx_background.TrimByPline(&zone_line, keep_point);
+			slx_background.KeepConnectedComponentAt(keep_point);
+			merge_trim_triangle_pairs_to_quads(slx_background);
+
+			using Edge = std::pair<size_t, size_t>;
+			std::map<Edge, int> edge_uses;
+			for (const CMesh3D::Face& face : slx_background.GetFaces()) {
+				if (face.deleted || face.corners.size() < 3)
+					continue;
+				for (size_t i = 0; i < face.corners.size(); ++i) {
+					const size_t a = face.corners[i].v;
+					const size_t b = face.corners[(i + 1) % face.corners.size()].v;
+					if (a != b)
+						++edge_uses[std::minmax(a, b)];
+				}
+			}
+			std::map<size_t, std::vector<size_t>> boundary_neighbors;
+			for (const auto& [edge, uses] : edge_uses) {
+				if (uses != 1)
+					continue;
+				boundary_neighbors[edge.first].push_back(edge.second);
+				boundary_neighbors[edge.second].push_back(edge.first);
+			}
+			std::set<Edge> visited;
+			std::vector<std::vector<size_t>> loops;
+			for (const auto& [start, neighbors] : boundary_neighbors) {
+				for (size_t first_next : neighbors) {
+					if (visited.count(std::minmax(start, first_next)))
+						continue;
+					std::vector<size_t> loop;
+					size_t previous = std::numeric_limits<size_t>::max();
+					size_t current = start;
+					size_t next = first_next;
+					for (size_t guard = 0; guard <= boundary_neighbors.size() + 1; ++guard) {
+						loop.push_back(current);
+						visited.insert(std::minmax(current, next));
+						previous = current;
+						current = next;
+						if (current == start)
+							break;
+						const auto found = boundary_neighbors.find(current);
+						if (found == boundary_neighbors.end()
+							|| found->second.size() != 2) {
+							loop.clear();
+							break;
+						}
+						next = found->second[0] == previous
+							? found->second[1] : found->second[0];
+					}
+					if (loop.size() >= 3 && current == start)
+						loops.push_back(std::move(loop));
+				}
+			}
+			if (loops.size() < 2)
+				return false;
+			const auto loop_area = [&](const std::vector<size_t>& loop) {
+				double result = 0.0;
+				for (size_t i = 0; i < loop.size(); ++i) {
+					const Vec3& a = slx_background.GetVertices()[loop[i]];
+					const Vec3& b = slx_background.GetVertices()[
+						loop[(i + 1) % loop.size()]];
+					result += static_cast<double>(a.x) * b.y
+						- static_cast<double>(b.x) * a.y;
+				}
+				return std::fabs(result * 0.5);
+			};
+			const auto cut_loop = std::min_element(loops.begin(), loops.end(),
+				[&](const auto& a, const auto& b) {
+					return loop_area(a) < loop_area(b);
+				});
+			local_outer.clear();
+			for (size_t index : *cut_loop) {
+				const Vec3 point = slx_background.GetVertices()[index];
+				local_outer.push_back({point.x, point.y, true});
+			}
+		}
+
+		std::vector<std::vector<SurfacePatchPoint>> outside_contours{outer, zone};
+		std::vector<double> strip_u;
+		std::vector<double> strip_v;
+		std::vector<SurfacePatchPoint> strip_outer;
+		std::array<std::vector<SurfacePatchPoint>, 4> bridge_outer;
+		std::array<std::vector<SurfacePatchPoint>, 4> bridge_inner;
+		bool structured_strip = true;
+		// The structured strip is exactly the row envelope. There is no second
+		// offset line above or below the holes: its only filled cells are the
+		// rectangular gaps between neighbouring cuts.
+		Bounds strip_bounds = feature_bounds;
+		if (strip_bounds.min_u >= strip_bounds.max_u
+			|| strip_bounds.min_v >= strip_bounds.max_v) {
+			structured_strip = false;
+		}
+		for (const Bounds& hole : holes) {
+			for (SurfacePatchPoint point : uv_contours[hole.contour_index]) {
+				strip_u.push_back(point.u);
+				strip_v.push_back(point.v);
+			}
+		}
+		strip_u.push_back(strip_bounds.min_u);
+		strip_u.push_back(strip_bounds.max_u);
+		strip_v.push_back(strip_bounds.min_v);
+		strip_v.push_back(strip_bounds.max_v);
+		const auto unique_axis = [rectangle_epsilon](std::vector<double>& axis) {
+			std::sort(axis.begin(), axis.end());
+			axis.erase(std::unique(axis.begin(), axis.end(),
+				[rectangle_epsilon](double a, double b) {
+					return std::fabs(a - b) <= rectangle_epsilon;
+				}), axis.end());
+		};
+		unique_axis(strip_u);
+		unique_axis(strip_v);
+		// A grid coordinate crossing a hole side must already be an exact CAD
+		// boundary node of that hole. This prevents the extra short-edge splits
+		// visible on the small vertical faces.
+		for (const Bounds& hole : holes) {
+			const auto& contour = uv_contours[hole.contour_index];
+			const auto has_vertical_node = [&](double v) {
+				return std::any_of(contour.begin(), contour.end(), [&](SurfacePatchPoint p) {
+					return std::fabs(p.v - v) <= rectangle_epsilon
+						&& (std::fabs(p.u - hole.min_u) <= rectangle_epsilon
+							|| std::fabs(p.u - hole.max_u) <= rectangle_epsilon);
+				});
+			};
+			const auto has_horizontal_node = [&](double u) {
+				return std::any_of(contour.begin(), contour.end(), [&](SurfacePatchPoint p) {
+					return std::fabs(p.u - u) <= rectangle_epsilon
+						&& (std::fabs(p.v - hole.min_v) <= rectangle_epsilon
+							|| std::fabs(p.v - hole.max_v) <= rectangle_epsilon);
+				});
+			};
+			for (double v : strip_v) {
+				if (v > hole.min_v + rectangle_epsilon
+					&& v < hole.max_v - rectangle_epsilon
+					&& !has_vertical_node(v)) {
+					structured_strip = false;
+				}
+			}
+			for (double u : strip_u) {
+				if (u > hole.min_u + rectangle_epsilon
+					&& u < hole.max_u - rectangle_epsilon
+					&& !has_horizontal_node(u)) {
+					structured_strip = false;
+				}
+			}
+		}
+		if (structured_strip) {
+			for (double u : strip_u)
+				strip_outer.push_back({u, strip_v.front(), true});
+			for (size_t i = 1; i < strip_v.size(); ++i)
+				strip_outer.push_back({strip_u.back(), strip_v[i], true});
+			for (size_t i = strip_u.size() - 1; i-- > 0;)
+				strip_outer.push_back({strip_u[i], strip_v.back(), true});
+			for (size_t i = strip_v.size() - 1; i-- > 1;)
+				strip_outer.push_back({strip_u.front(), strip_v[i], true});
+			Face2D local_face;
+			for (SurfacePatchPoint point : local_outer)
+				local_face.verts.emplace_back(point.u, point.v);
+			for (SurfacePatchPoint point : strip_outer) {
+				if (ClassifyPointInFace2(local_face,
+						cVec2(point.u, point.v), EPS2D) == PFP_OUTSIDE) {
+					structured_strip = false;
+					break;
+				}
+			}
+			// Split the rectangular annulus into four ordered one-cell strips.
+			// BuildSurfacePatchesWithoutHoles is intentionally not used here: it
+			// may connect unrelated vertices across this thin frame and produce
+			// the irregular crossing lines seen below a row of close holes.
+			const double side_tolerance = std::max(
+				rectangle_epsilon * 8.0, background_step * 1.0e-4);
+			for (SurfacePatchPoint point : local_outer) {
+				if (std::fabs(point.v - cluster.min_v) <= side_tolerance)
+					bridge_outer[0].push_back(point);
+				if (std::fabs(point.u - cluster.max_u) <= side_tolerance)
+					bridge_outer[1].push_back(point);
+				if (std::fabs(point.v - cluster.max_v) <= side_tolerance)
+					bridge_outer[2].push_back(point);
+				if (std::fabs(point.u - cluster.min_u) <= side_tolerance)
+					bridge_outer[3].push_back(point);
+			}
+			for (double u : strip_u) {
+				bridge_inner[0].push_back({u, strip_bounds.min_v, true});
+				bridge_inner[2].push_back({u, strip_bounds.max_v, true});
+			}
+			for (double v : strip_v) {
+				bridge_inner[1].push_back({strip_bounds.max_u, v, true});
+				bridge_inner[3].push_back({strip_bounds.min_u, v, true});
+			}
+			const auto prepare_chain = [side_tolerance](
+					std::vector<SurfacePatchPoint>& chain, bool use_u,
+					bool ascending) {
+				std::sort(chain.begin(), chain.end(), [&](SurfacePatchPoint a,
+						SurfacePatchPoint b) {
+					const double av = use_u ? a.u : a.v;
+					const double bv = use_u ? b.u : b.v;
+					return ascending ? av < bv : av > bv;
+				});
+				chain.erase(std::unique(chain.begin(), chain.end(),
+					[side_tolerance](SurfacePatchPoint a, SurfacePatchPoint b) {
+						return std::hypot(a.u - b.u, a.v - b.v)
+							<= side_tolerance;
+					}), chain.end());
+			};
+			prepare_chain(bridge_outer[0], true, true);
+			prepare_chain(bridge_inner[0], true, true);
+			prepare_chain(bridge_outer[1], false, true);
+			prepare_chain(bridge_inner[1], false, true);
+			prepare_chain(bridge_outer[2], true, false);
+			prepare_chain(bridge_inner[2], true, false);
+			prepare_chain(bridge_outer[3], false, false);
+			prepare_chain(bridge_inner[3], false, false);
+			for (size_t side = 0; side < bridge_outer.size(); ++side) {
+				if (bridge_outer[side].size() < 2
+					|| bridge_inner[side].size() < 2) {
+					structured_strip = false;
+					break;
+				}
+			}
+		}
+
+		std::vector<std::vector<SurfacePatchPoint>> inside_contours;
+		if (!structured_strip) {
+			inside_contours.push_back(local_outer);
+			for (const Bounds& hole : holes)
+				inside_contours.push_back(uv_contours[hole.contour_index]);
+		}
+		std::vector<std::vector<SurfacePatchPoint>> patches;
+		std::vector<std::vector<SurfacePatchPoint>> local_patches;
+		std::string patch_error;
+		if ((!use_slx_background
+				&& !BuildSurfacePatchesWithoutHoles(
+					outside_contours, patches, &patch_error))
+			|| (!structured_strip && !BuildSurfacePatchesWithoutHoles(
+				inside_contours, local_patches, &patch_error))) {
+			return false;
+		}
+		patches.insert(patches.end(), local_patches.begin(), local_patches.end());
+		if (patches.empty() && !use_slx_background)
+			return false;
+
+		std::vector<Vec3> vertices;
+		std::vector<CMesh3D::Face> faces;
+		const double coordinate_scale = std::max({1.0,
+			std::fabs(outer_bounds.min_u), std::fabs(outer_bounds.max_u),
+			std::fabs(outer_bounds.min_v), std::fabs(outer_bounds.max_v)});
+		const double weld_tolerance = std::max(1.0e-7,
+			coordinate_scale * std::numeric_limits<float>::epsilon() * 8.0);
+		std::multimap<float, size_t> vertices_by_u;
+		const auto weld_vertex = [&](Vec3 requested) {
+			const float min_u = static_cast<float>(requested.x - weld_tolerance);
+			const float max_u = static_cast<float>(requested.x + weld_tolerance);
+			for (auto candidate = vertices_by_u.lower_bound(min_u);
+				candidate != vertices_by_u.end() && candidate->first <= max_u;
+				++candidate) {
+				const Vec3 delta = vertices[candidate->second] - requested;
+				if (static_cast<double>(dot(delta, delta))
+					<= weld_tolerance * weld_tolerance)
+					return candidate->second;
+			}
+			const size_t index = vertices.size();
+			vertices.push_back(requested);
+			vertices_by_u.emplace(requested.x, index);
+			return index;
+		};
+		if (use_slx_background) {
+			std::vector<size_t> remap(slx_background.GetVertices().size());
+			for (size_t i = 0; i < remap.size(); ++i)
+				remap[i] = weld_vertex(slx_background.GetVertices()[i]);
+			for (const CMesh3D::Face& source : slx_background.GetFaces()) {
+				if (source.deleted || source.corners.size() < 3)
+					continue;
+				CMesh3D::Face face = source;
+				for (MeshCorner& corner : face.corners) {
+					if (corner.v >= remap.size()) {
+						face.corners.clear();
+						break;
+					}
+					corner.v = remap[corner.v];
+					corner.uv = corner.n = corner.v;
+				}
+				if (face.corners.size() >= 3)
+					faces.push_back(std::move(face));
+			}
+		}
+		if (structured_strip) {
+			const auto append_bridge = [&](const auto& outer_chain,
+					const auto& inner_chain) {
+				std::vector<size_t> outer_indices, inner_indices;
+				for (SurfacePatchPoint point : outer_chain) {
+					outer_indices.push_back(weld_vertex({static_cast<float>(point.u),
+						static_cast<float>(point.v), 0.0f}));
+				}
+				for (SurfacePatchPoint point : inner_chain) {
+					inner_indices.push_back(weld_vertex({static_cast<float>(point.u),
+						static_cast<float>(point.v), 0.0f}));
+				}
+				const size_t outer_segments = outer_indices.size() - 1;
+				const size_t inner_segments = inner_indices.size() - 1;
+				if (outer_segments <= inner_segments) {
+					size_t inner_index = 0;
+					for (size_t outer_index = 0;
+							outer_index < outer_segments; ++outer_index) {
+						const size_t target_inner = static_cast<size_t>(std::llround(
+							static_cast<double>(outer_index + 1) * inner_segments
+							/ outer_segments));
+						while (inner_index + 1 < target_inner) {
+							CMesh3D::Face triangle;
+							triangle.corners = {
+								{outer_indices[outer_index], 0, 0},
+								{inner_indices[inner_index + 1], 0, 0},
+								{inner_indices[inner_index], 0, 0}};
+							faces.push_back(std::move(triangle));
+							++inner_index;
+						}
+						CMesh3D::Face quad;
+						quad.corners = {
+							{outer_indices[outer_index], 0, 0},
+							{outer_indices[outer_index + 1], 0, 0},
+							{inner_indices[target_inner], 0, 0},
+							{inner_indices[inner_index], 0, 0}};
+						faces.push_back(std::move(quad));
+						inner_index = target_inner;
+					}
+				} else {
+					size_t outer_index = 0;
+					for (size_t inner_index = 0;
+							inner_index < inner_segments; ++inner_index) {
+						const size_t target_outer = static_cast<size_t>(std::llround(
+							static_cast<double>(inner_index + 1) * outer_segments
+							/ inner_segments));
+						while (outer_index + 1 < target_outer) {
+							CMesh3D::Face triangle;
+							triangle.corners = {
+								{outer_indices[outer_index], 0, 0},
+								{outer_indices[outer_index + 1], 0, 0},
+								{inner_indices[inner_index], 0, 0}};
+							faces.push_back(std::move(triangle));
+							++outer_index;
+						}
+						CMesh3D::Face quad;
+						quad.corners = {
+							{outer_indices[outer_index], 0, 0},
+							{outer_indices[target_outer], 0, 0},
+							{inner_indices[inner_index + 1], 0, 0},
+							{inner_indices[inner_index], 0, 0}};
+						faces.push_back(std::move(quad));
+						outer_index = target_outer;
+					}
+				}
+			};
+			for (size_t side = 0; side < bridge_outer.size(); ++side)
+				append_bridge(bridge_outer[side], bridge_inner[side]);
+
+			std::vector<std::vector<size_t>> grid(strip_v.size(),
+				std::vector<size_t>(strip_u.size()));
+			for (size_t row = 0; row < strip_v.size(); ++row) {
+				for (size_t column = 0; column < strip_u.size(); ++column) {
+					grid[row][column] = weld_vertex({
+						static_cast<float>(strip_u[column]),
+						static_cast<float>(strip_v[row]), 0.0f});
+				}
+			}
+			std::vector<Face2D> hole_faces;
+			for (const Bounds& hole : holes) {
+				Face2D face;
+				for (SurfacePatchPoint point : uv_contours[hole.contour_index])
+					face.verts.emplace_back(point.u, point.v);
+				hole_faces.push_back(std::move(face));
+			}
+			for (size_t row = 0; row + 1 < strip_v.size(); ++row) {
+				for (size_t column = 0; column + 1 < strip_u.size(); ++column) {
+					const cVec2 centre(
+						(strip_u[column] + strip_u[column + 1]) * 0.5,
+						(strip_v[row] + strip_v[row + 1]) * 0.5);
+					if (std::any_of(hole_faces.begin(), hole_faces.end(),
+							[&](const Face2D& hole) {
+								return ClassifyPointInFace2(
+									hole, centre, EPS2D) != PFP_OUTSIDE;
+							})) {
+						continue;
+					}
+					CMesh3D::Face face;
+					face.corners = {
+						{grid[row][column], 0, 0},
+						{grid[row][column + 1], 0, 0},
+						{grid[row + 1][column + 1], 0, 0},
+						{grid[row + 1][column], 0, 0}};
+					faces.push_back(std::move(face));
+				}
+			}
+		}
+		for (const auto& patch : patches) {
+			std::vector<Vec3> contour;
+			for (SurfacePatchPoint point : patch)
+				contour.push_back({static_cast<float>(point.u),
+					static_cast<float>(point.v), 0.0f});
+			CMesh3D patch_mesh;
+			if (!MakeFilledContour(contour, {0.0f, 0.0f, 1.0f},
+					&patch_mesh, false, nullptr, nullptr, nullptr))
+				return false;
+			std::vector<size_t> remap(patch_mesh.GetVertices().size());
+			for (size_t i = 0; i < remap.size(); ++i)
+				remap[i] = weld_vertex(patch_mesh.GetVertices()[i]);
+			for (const auto& source : patch_mesh.GetFaces()) {
+				if (source.deleted || source.corners.size() < 3)
+					continue;
+				CMesh3D::Face face = source;
+				for (MeshCorner& corner : face.corners) {
+					if (corner.v >= remap.size()) {
+						face.corners.clear();
+						break;
+					}
+					corner.v = remap[corner.v];
+					corner.uv = corner.n = corner.v;
+				}
+				if (face.corners.size() >= 3)
+					faces.push_back(std::move(face));
+			}
+		}
+		if (vertices.empty() || faces.empty())
+			return false;
+		if (m_Face.Orientation() == TopAbs_REVERSED) {
+			for (auto& face : faces)
+				std::reverse(face.corners.begin(), face.corners.end());
+		}
+		CMesh3D result;
+		if (!result.SetGeometry(std::move(vertices), std::move(faces), {}, {}))
+			return false;
+		// The ordered bridge is emitted as a triangle/quad strip when its two
+		// borders have different point counts. Merge adjacent compatible
+		// triangles immediately so the transition keeps the smallest regular
+		// set of visible edges on both sides of the hole row.
+		if (structured_strip)
+			merge_trim_triangle_pairs_to_quads(result);
+		// The coarse front can leave a simple N-gon at the shared-zone junction.
+		// Keep its boundary and split only that remainder for rendering/export.
+		if (!triangulate_mesh_ngons_in_xy(result))
+			return false;
+		delete_mesh_faces_outside_occt_face(&result, this);
+		if (!std::any_of(result.GetFaces().begin(), result.GetFaces().end(),
+				[](const CMesh3D::Face& face) {
+					return !face.deleted && face.corners.size() >= 3;
+				}) || !result.RestoreTo3DFromUVSurface(this)) {
+			return false;
+		}
+		if (!pMesh3D->SetGeometry(result.GetVertices(), result.GetFaces(),
+				result.GetUVs(), result.GetNormals()))
+			return false;
+		m_LastIslandBoundariesUV.clear();
+		for (const auto& patch : patches) {
+			std::vector<CPoint3d> boundary;
+			for (SurfacePatchPoint point : patch)
+				boundary.emplace_back(point.u, point.v, 0.0);
+			m_LastIslandBoundariesUV.push_back(std::move(boundary));
+		}
+		IsTrimmed = true;
+		IsInitMesh = true;
+		return true;
+	};
+	if (try_build_shared_hole_zone(use_mesh_quadro_hole_slx))
+		return true;
+
 	// Mesh_Quadro_Hole_SLX: quadrangulate the complete outer domain as if
 	// holes did not exist, then cut that single coherent mesh by every inner
 	// contour.  TrimByPline owns the carefully tuned cell-splitting variants;
@@ -4695,7 +6381,14 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 				return std::fabs(signed_area(uv_contours[first]))
 					< std::fabs(signed_area(uv_contours[second]));
 			});
-		const size_t topological_hole_count = topological_wire_count - 1;
+		// A periodic cylinder cut can be encoded as one topological wire: the
+		// intersection arcs are connected through the two copies of the seam.
+		// After moving that seam, count the explicit reconstructed windows,
+		// not wire_count-1: several windows can belong to the same CAD wire.
+		const size_t topological_hole_count = periodic_cylinder_hole
+			? std::max<size_t>(std::max<size_t>(1, synthesized_cylinder_hole_count), topological_wire_count > 0
+				? topological_wire_count - 1 : 0)
+			: (topological_wire_count > 0 ? topological_wire_count - 1 : 0);
 		if (hole_indices.size() > topological_hole_count)
 			hole_indices.resize(topological_hole_count);
 
@@ -4745,6 +6438,24 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 		}
 
 		if (quadrangulator_created) {
+			const double slx_u_scale = periodic_cylinder_hole
+				? BRepAdaptor_Surface(TopoDS::Face(m_Face)).Cylinder().Radius()
+				: 1.0;
+			const auto trim_metric_contour = [&](const std::vector<SurfacePatchPoint>& contour,
+				const CPoint3d& keep) {
+				// Vertex snapping uses Euclidean distances. Use the same metric
+				// development as the quadrangulator: X = radius * U, Y = V.
+				// Every retry must use it too, including the exact-hole fallback.
+				CPolyline line;
+				for (auto point : contour)
+					line.AddPoint(CPoint3d(point.u * slx_u_scale, point.v, 0.0));
+				line.SetClosed(true);
+				for (Vec3& vertex : slx_mesh.GetVertices())
+					vertex.x = static_cast<float>(vertex.x * slx_u_scale);
+				slx_mesh.TrimByPline(&line, CPoint3d(keep.x * slx_u_scale, keep.y, 0.0));
+				for (Vec3& vertex : slx_mesh.GetVertices())
+					vertex.x = static_cast<float>(vertex.x / slx_u_scale);
+			};
 			// A coarse SLX background cannot be cut reliably by a much finer hole
 			// polyline: several consecutive contour nodes then fall into one cell and
 			// TrimByPline has to create a long fan.  Move that scale transition into a
@@ -4752,6 +6463,7 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 			// ring; the exact OCCT hole remains its inner ring.
 			struct SlxHoleCollar {
 				size_t contour_index = 0;
+				double width = 0.0;
 				std::vector<std::vector<SurfacePatchPoint>> rings;
 				bool snap_cut_to_background_cells = false;
 				bool cut_matches_requested_outer = true;
@@ -4767,13 +6479,14 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 				return ClassifyPointInFace2(
 					face, cVec2(point.u, point.v), EPS2D) != PFP_OUTSIDE;
 			};
-			const auto median_edge_length = [](const std::vector<SurfacePatchPoint>& ring) {
+			const auto median_edge_length = [slx_u_scale](const std::vector<SurfacePatchPoint>& ring) {
 				std::vector<double> lengths;
 				lengths.reserve(ring.size());
 				for (size_t i = 0; i < ring.size(); ++i) {
 					const SurfacePatchPoint& a = ring[i];
 					const SurfacePatchPoint& b = ring[(i + 1) % ring.size()];
-					const double length = std::hypot(b.u - a.u, b.v - a.v);
+					const double length = std::hypot(
+						(b.u - a.u) * slx_u_scale, b.v - a.v);
 					if (length > 1.0e-12 && std::isfinite(length))
 						lengths.push_back(length);
 				}
@@ -4791,8 +6504,11 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 				}
 				return area * 0.5;
 			};
-			const auto point_segment_distance = [](SurfacePatchPoint point,
+			const auto point_segment_distance = [slx_u_scale](SurfacePatchPoint point,
 				SurfacePatchPoint a, SurfacePatchPoint b) {
+				point.u *= slx_u_scale;
+				a.u *= slx_u_scale;
+				b.u *= slx_u_scale;
 				const double du = b.u - a.u;
 				const double dv = b.v - a.v;
 				const double length_sq = du * du + dv * dv;
@@ -4803,7 +6519,7 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 				return std::hypot(point.u - (a.u + du * t),
 					point.v - (a.v + dv * t));
 			};
-			const auto offset_ring = [](const std::vector<SurfacePatchPoint>& ring,
+			const auto offset_ring = [slx_u_scale](const std::vector<SurfacePatchPoint>& ring,
 				double distance, std::vector<SurfacePatchPoint>& result) {
 				result.clear();
 				if (ring.size() < 3 || distance <= 0.0)
@@ -4816,10 +6532,13 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 				// eight-sided round hole farther than the proven radial variant did.
 				constexpr double miter_limit = 1.0;
 				for (size_t i = 0; i < ring.size(); ++i) {
-					const SurfacePatchPoint& previous = ring[
+					SurfacePatchPoint previous = ring[
 						(i + ring.size() - 1) % ring.size()];
-					const SurfacePatchPoint& current = ring[i];
-					const SurfacePatchPoint& next = ring[(i + 1) % ring.size()];
+					SurfacePatchPoint current = ring[i];
+					SurfacePatchPoint next = ring[(i + 1) % ring.size()];
+					previous.u *= slx_u_scale;
+					current.u *= slx_u_scale;
+					next.u *= slx_u_scale;
 					double previous_du = current.u - previous.u;
 					double previous_dv = current.v - previous.v;
 					double next_du = next.u - current.u;
@@ -4866,7 +6585,8 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 						candidate_u = current.u + miter_u;
 						candidate_v = current.v + miter_v;
 					}
-					result.push_back({candidate_u, candidate_v, true});
+					result.push_back({candidate_u / slx_u_scale,
+						candidate_v, true});
 				}
 				return true;
 			};
@@ -4908,8 +6628,9 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 							|| second >= slx_mesh.GetVertices().size()) {
 							continue;
 						}
-						const Vec3 delta = slx_mesh.GetVertices()[second]
+						Vec3 delta = slx_mesh.GetVertices()[second]
 							- slx_mesh.GetVertices()[first];
+						delta.x = static_cast<float>(delta.x * slx_u_scale);
 						const double length = std::sqrt(static_cast<double>(dot(delta, delta)));
 						if (length > 1.0e-12 && std::isfinite(length))
 							mesh_edges.push_back(length);
@@ -4928,8 +6649,10 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 				if (ring_signed_area(hole) < 0.0)
 					std::reverse(hole.begin(), hole.end());
 				const double hole_step = median_edge_length(hole);
+				const double collar_activation_ratio = periodic_cylinder_hole
+					? 0.75 : 1.35;
 				if (hole.size() < 4 || hole_step <= 0.0
-					|| background_step <= hole_step * 1.35) {
+					|| background_step <= hole_step * collar_activation_ratio) {
 					continue;
 				}
 				SurfacePatchPoint center{};
@@ -4942,7 +6665,9 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 				double mean_radius = 0.0;
 				double clearance = std::numeric_limits<double>::max();
 				for (SurfacePatchPoint point : hole) {
-					mean_radius += std::hypot(point.u - center.u, point.v - center.v);
+					mean_radius += std::hypot(
+						(point.u - center.u) * slx_u_scale,
+						point.v - center.v);
 					for (size_t obstacle_index = 0;
 						obstacle_index < uv_contours.size(); ++obstacle_index) {
 						if (obstacle_index == contour_index)
@@ -4978,8 +6703,13 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 				const int ring_count = collar_width >= hole_step * 1.1 ? 2 : 1;
 				SlxHoleCollar collar;
 				collar.contour_index = contour_index;
-				collar.snap_cut_to_background_cells = small_hole;
-				collar.cut_matches_requested_outer = !small_hole;
+				collar.width = collar_width;
+				// A hole can span several background cells while its boundary is
+				// still much finer than those cells. Keep the conforming cell collar
+				// in that case too; radius alone switches to a fragile direct cut.
+				collar.snap_cut_to_background_cells = small_hole
+					|| (!periodic_cylinder_hole && background_step >= 2.0 * hole_step);
+				collar.cut_matches_requested_outer = !collar.snap_cut_to_background_cells;
 				collar.rings.push_back(hole);
 				bool valid = true;
 				for (int ring = 1; ring <= ring_count && valid; ++ring) {
@@ -5017,11 +6747,16 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 					double maximum_radius = 0.0;
 					for (SurfacePatchPoint point : hole) {
 						const double radius = std::hypot(
-							point.u - center.u, point.v - center.v);
+							(point.u - center.u) * slx_u_scale,
+							point.v - center.v);
 						minimum_radius = std::min(minimum_radius, radius);
 						maximum_radius = std::max(maximum_radius, radius);
 					}
-					if (hole.size() >= 16 && maximum_radius > 1.0e-12
+					// Whole-cell removal never sends this ring to TrimByPline.
+					// Keep matching nodes on both collar rows in that case; reducing
+					// 22 nodes to eight needlessly twists the radial quad strip.
+					if (!collar.snap_cut_to_background_cells
+						&& hole.size() >= 16 && maximum_radius > 1.0e-12
 						&& minimum_radius / maximum_radius >= 0.95) {
 						const auto& dense_outer = collar.rings.back();
 						double outer_perimeter = 0.0;
@@ -5030,7 +6765,8 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 							const SurfacePatchPoint& second = dense_outer[
 								(point + 1) % dense_outer.size()];
 							outer_perimeter += std::hypot(
-								second.u - first.u, second.v - first.v);
+								(second.u - first.u) * slx_u_scale,
+								second.v - first.v);
 						}
 						// Match the outer collar edge length to the local SLX edge
 						// instead of inheriting the dense sampling of the exact hole.
@@ -5051,7 +6787,8 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 									const SurfacePatchPoint& second = dense_outer[
 										(edge + 1) % dense_outer.size()];
 									const double edge_length = std::hypot(
-										second.u - first.u, second.v - first.v);
+										(second.u - first.u) * slx_u_scale,
+										second.v - first.v);
 									if (traversed + edge_length >= target)
 										break;
 									traversed += edge_length;
@@ -5061,7 +6798,8 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 								const SurfacePatchPoint& second = dense_outer[
 									(edge + 1) % dense_outer.size()];
 								const double edge_length = std::hypot(
-									second.u - first.u, second.v - first.v);
+									(second.u - first.u) * slx_u_scale,
+									second.v - first.v);
 								const double alpha = edge_length > 1.0e-12
 									? std::clamp((target - traversed) / edge_length,
 										0.0, 1.0) : 0.0;
@@ -5088,74 +6826,73 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 			const cVec2 keep_uv = choose_boundary_keep_point(
 				&slx_mesh, loop_faces, outer_index);
 			const CPoint3d keep_point(keep_uv.x, keep_uv.y, 0.0);
-			for (size_t contour_index : hole_indices) {
-				const SlxHoleCollar* collar = nullptr;
-				for (SlxHoleCollar& candidate : slx_collars) {
-					if (candidate.contour_index == contour_index) {
-						collar = &candidate;
-						candidate.used = true;
-						break;
+			const auto cut_slx_holes = [&]() {
+				for (size_t contour_index : hole_indices) {
+					const SlxHoleCollar* collar = nullptr;
+					for (SlxHoleCollar& candidate : slx_collars) {
+						if (candidate.contour_index == contour_index) {
+							collar = &candidate;
+							candidate.used = true;
+							break;
+						}
 					}
-				}
-				const auto& trim_contour = collar
-					? collar->rings.back() : uv_contours[contour_index];
-				if (collar && collar->snap_cut_to_background_cells) {
-					Face2D removal_polygon;
-					for (SurfacePatchPoint point : trim_contour)
-						removal_polygon.verts.emplace_back(point.u, point.v);
-					SurfacePatchPoint center{};
-					for (SurfacePatchPoint point : collar->rings.front()) {
-						center.u += point.u;
-						center.v += point.v;
-					}
-					center.u /= static_cast<double>(collar->rings.front().size());
-					center.v /= static_cast<double>(collar->rings.front().size());
-					for (CMesh3D::Face& face : slx_mesh.GetFaces()) {
-						if (face.deleted || face.corners.size() < 3)
-							continue;
-						Face2D cell;
-						cVec2 cell_center{};
-						bool valid = true;
-						for (const MeshCorner& corner : face.corners) {
-							if (corner.v >= slx_mesh.GetVertices().size()) {
-								valid = false;
-								break;
+					const auto& trim_contour = collar
+						? collar->rings.back() : uv_contours[contour_index];
+					if (collar && collar->snap_cut_to_background_cells) {
+						Face2D removal_polygon;
+						for (SurfacePatchPoint point : trim_contour)
+							removal_polygon.verts.emplace_back(point.u, point.v);
+						SurfacePatchPoint center{};
+						for (SurfacePatchPoint point : collar->rings.front()) {
+							center.u += point.u;
+							center.v += point.v;
+						}
+						center.u /= static_cast<double>(collar->rings.front().size());
+						center.v /= static_cast<double>(collar->rings.front().size());
+						for (CMesh3D::Face& face : slx_mesh.GetFaces()) {
+							if (face.deleted || face.corners.size() < 3)
+								continue;
+							Face2D cell;
+							cVec2 cell_center{};
+							bool valid = true;
+							for (const MeshCorner& corner : face.corners) {
+								if (corner.v >= slx_mesh.GetVertices().size()) {
+									valid = false;
+									break;
+								}
+								const Vec3 vertex = slx_mesh.GetVertices()[corner.v];
+								cell.verts.emplace_back(vertex.x, vertex.y);
+								cell_center.x += vertex.x;
+								cell_center.y += vertex.y;
 							}
-							const Vec3 vertex = slx_mesh.GetVertices()[corner.v];
-							cell.verts.emplace_back(vertex.x, vertex.y);
-							cell_center.x += vertex.x;
-							cell_center.y += vertex.y;
-						}
-						if (!valid)
-							continue;
-						cell_center.x /= static_cast<double>(cell.verts.size());
-						cell_center.y /= static_cast<double>(cell.verts.size());
-						bool intersects_collar = ClassifyPointInFace2(cell,
-								cVec2(center.u, center.v), EPS2D) != PFP_OUTSIDE
-							|| ClassifyPointInFace2(removal_polygon,
-								cell_center, EPS2D) != PFP_OUTSIDE;
-						for (const cVec2& vertex : cell.verts) {
-							intersects_collar = intersects_collar
+							if (!valid)
+								continue;
+							cell_center.x /= static_cast<double>(cell.verts.size());
+							cell_center.y /= static_cast<double>(cell.verts.size());
+							bool intersects_collar = ClassifyPointInFace2(cell,
+									cVec2(center.u, center.v), EPS2D) != PFP_OUTSIDE
 								|| ClassifyPointInFace2(removal_polygon,
-									vertex, EPS2D) != PFP_OUTSIDE;
+									cell_center, EPS2D) != PFP_OUTSIDE;
+							for (const cVec2& vertex : cell.verts) {
+								intersects_collar = intersects_collar
+									|| ClassifyPointInFace2(removal_polygon,
+										vertex, EPS2D) != PFP_OUTSIDE;
+							}
+							for (SurfacePatchPoint point : trim_contour) {
+								intersects_collar = intersects_collar
+									|| ClassifyPointInFace2(cell,
+										cVec2(point.u, point.v), EPS2D) != PFP_OUTSIDE;
+							}
+							if (intersects_collar) {
+								face.deleted = true;
+							}
 						}
-						for (SurfacePatchPoint point : trim_contour) {
-							intersects_collar = intersects_collar
-								|| ClassifyPointInFace2(cell,
-									cVec2(point.u, point.v), EPS2D) != PFP_OUTSIDE;
-						}
-						if (intersects_collar) {
-							face.deleted = true;
-						}
+					} else {
+						trim_metric_contour(trim_contour, keep_point);
 					}
-				} else {
-					CPolyline hole;
-					for (SurfacePatchPoint point : trim_contour)
-						hole.AddPoint(CPoint3d(point.u, point.v, 0.0));
-					hole.SetClosed(true);
-					slx_mesh.TrimByPline(&hole, keep_point);
 				}
-			}
+			};
+			cut_slx_holes();
 			const bool trim_created_triangles = std::any_of(
 				slx_mesh.GetFaces().begin(), slx_mesh.GetFaces().end(),
 				[](const CMesh3D::Face& face) {
@@ -5435,8 +7172,9 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 					double best_start_distance = std::numeric_limits<double>::max();
 					for (size_t i = 0; i < inner_indices.size(); ++i) {
 						for (size_t j = 0; j < outer_indices.size(); ++j) {
-							const Vec3 delta = merged_vertices[inner_indices[i]]
+							Vec3 delta = merged_vertices[inner_indices[i]]
 								- merged_vertices[outer_indices[j]];
+							delta.x = static_cast<float>(delta.x * slx_u_scale);
 							const double distance = static_cast<double>(dot(delta, delta));
 							if (distance < best_start_distance) {
 								best_start_distance = distance;
@@ -5453,8 +7191,9 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 						std::vector<double> parameters(indices.size() + 1, 0.0);
 						double perimeter = 0.0;
 						for (size_t i = 0; i < indices.size(); ++i) {
-							const Vec3 delta = merged_vertices[indices[(i + 1) % indices.size()]]
+							Vec3 delta = merged_vertices[indices[(i + 1) % indices.size()]]
 								- merged_vertices[indices[i]];
+							delta.x = static_cast<float>(delta.x * slx_u_scale);
 							perimeter += std::sqrt(static_cast<double>(dot(delta, delta)));
 							parameters[i + 1] = perimeter;
 						}
@@ -5470,6 +7209,7 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 						perimeter_parameters(outer_indices);
 					const size_t inner_count = inner_indices.size();
 					const size_t outer_count = outer_indices.size();
+					const size_t transition_begin = merged_faces.size();
 					// Counts are intentionally unrestricted (for example 9 against 14).
 					// Walk both normalized perimeters and keep every surplus advance as
 					// one short local triangle instead of forcing an even node count.
@@ -5500,6 +7240,82 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 							++outer;
 						}
 					}
+					// Equal fractions of two perimeters need not correspond spatially.
+					// At an inward corner of a whole-cell cut the greedy walk can fold
+					// over itself while still passing every undirected manifold test.
+					const auto triangle_area = [&](size_t a, size_t b, size_t c) {
+						const Vec3& p = merged_vertices[a];
+						const Vec3& q = merged_vertices[b];
+						const Vec3& r = merged_vertices[c];
+						return ((static_cast<double>(q.x) - p.x) * (r.y - p.y)
+							- (static_cast<double>(q.y) - p.y) * (r.x - p.x)) * slx_u_scale;
+					};
+					const double area_epsilon = background_step * background_step * 1.0e-10;
+					bool positive = true;
+					for (size_t f = transition_begin; f < merged_faces.size(); ++f) {
+						const auto& corners = merged_faces[f].corners;
+						for (size_t j = 1; j + 1 < corners.size(); ++j)
+							positive = positive && triangle_area(corners[0].v,
+								corners[j].v, corners[j + 1].v) > area_epsilon;
+					}
+					if (!positive) {
+						// Find a monotone strip consisting only of positive triangles.
+						// Each state advances on one of the two ordered boundary loops;
+						// both loops and all boundary vertices remain exactly unchanged.
+						merged_faces.resize(transition_begin);
+						const size_t columns = outer_count + 1;
+						const size_t states = (inner_count + 1) * columns;
+						std::vector<double> costs(states, std::numeric_limits<double>::infinity());
+						std::vector<char> previous(states, 0);
+						costs[0] = 0.0;
+						const auto quality_cost = [&](size_t a, size_t b, size_t c) {
+							const double area = triangle_area(a, b, c);
+							if (area <= area_epsilon)
+								return std::numeric_limits<double>::infinity();
+							double length_sq = 0.0;
+							for (const auto edge : {std::make_pair(a, b), std::make_pair(b, c), std::make_pair(c, a)}) {
+								Vec3 delta = merged_vertices[edge.first] - merged_vertices[edge.second];
+								delta.x = static_cast<float>(delta.x * slx_u_scale);
+								length_sq += static_cast<double>(dot(delta, delta));
+							}
+							return length_sq / area;
+						};
+						for (size_t i = 0; i <= inner_count; ++i) {
+							for (size_t j = 0; j <= outer_count; ++j) {
+								const size_t state = i * columns + j;
+								if (!std::isfinite(costs[state])) continue;
+								const size_t a = inner_indices[i % inner_count];
+								const size_t b = outer_indices[j % outer_count];
+								const auto relax = [&](size_t next, double cost, char direction) {
+									if (costs[state] + cost < costs[next]) {
+										costs[next] = costs[state] + cost;
+										previous[next] = direction;
+									}
+								};
+								if (i < inner_count)
+									relax(state + columns, quality_cost(a, b,
+										inner_indices[(i + 1) % inner_count]), 'i');
+								if (j < outer_count)
+									relax(state + 1, quality_cost(a, b,
+										outer_indices[(j + 1) % outer_count]), 'o');
+							}
+						}
+						if (!std::isfinite(costs.back())) {
+							collar_merge_ok = false;
+							break;
+						}
+						for (size_t i = inner_count, j = outer_count; i || j;) {
+							if (previous[i * columns + j] == 'i') {
+								--i;
+								append_face({inner_indices[i], outer_indices[j % outer_count],
+									inner_indices[(i + 1) % inner_count]});
+							} else {
+								--j;
+								append_face({inner_indices[i % inner_count], outer_indices[j],
+									outer_indices[(j + 1) % outer_count]});
+							}
+						}
+					}
 				}
 				if (collar_merge_ok) {
 					collar_merge_ok = cut_mesh.SetGeometry(
@@ -5512,6 +7328,38 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 			// by TrimByPline are restored to quads after the merge below.
 			bool collar_merge_ok = !trim_created_triangles
 				&& stitch_slx_collars(slx_mesh);
+			// Removing whole coarse cells can join neighbouring collar regions even
+			// when their requested rings are disjoint. Retry narrower collars on the
+			// same background before abandoning the rings for a direct hole cut.
+			// Rebuild dense outer rows too: a whole-cell cut does not need the sparse
+			// ring used by TrimByPline, and the retained quad rows must stay conforming.
+			if (!collar_merge_ok && !periodic_cylinder_hole && !slx_collars.empty()) {
+				const auto requested_collars = slx_collars;
+				for (double width_scale : {1.0, 0.75, 0.5, 0.25}) {
+					slx_collars = requested_collars;
+					bool valid_rings = true;
+					for (auto& collar : slx_collars) {
+						const size_t rows = collar.rings.size() - 1;
+						collar.rings.resize(1);
+						collar.snap_cut_to_background_cells = true;
+						collar.cut_matches_requested_outer = false;
+						for (size_t row = 1; row <= rows; ++row) {
+							std::vector<SurfacePatchPoint> ring;
+							valid_rings = offset_ring(collar.rings.front(),
+								collar.width * width_scale * row / rows, ring) && valid_rings;
+							collar.rings.push_back(std::move(ring));
+						}
+					}
+					if (!valid_rings) continue;
+					slx_mesh.Clear();
+					if (!MakeFilledContour(outer_contour, {0.0f, 0.0f, 1.0f},
+						&slx_mesh, Deflection >= 1.5f, nullptr, nullptr, nullptr)) break;
+					cut_slx_holes();
+					collar_merge_ok = stitch_slx_collars(slx_mesh);
+					if (collar_merge_ok) break;
+				}
+				if (!collar_merge_ok) slx_collars = requested_collars;
+			}
 			if (!collar_merge_ok) {
 				slx_mesh.Clear();
 				if (MakeFilledContour(outer_contour, {0.0f, 0.0f, 1.0f},
@@ -5569,11 +7417,7 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 				if (MakeFilledContour(outer_contour, {0.0f, 0.0f, 1.0f},
 						&slx_mesh, Deflection >= 1.5f, nullptr, nullptr, nullptr)) {
 					for (size_t contour_index : hole_indices) {
-						CPolyline hole;
-						for (SurfacePatchPoint point : uv_contours[contour_index])
-							hole.AddPoint(CPoint3d(point.u, point.v, 0.0));
-						hole.SetClosed(true);
-						slx_mesh.TrimByPline(&hole, keep_point);
+						trim_metric_contour(uv_contours[contour_index], keep_point);
 					}
 				}
 			}
@@ -5628,11 +7472,7 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 						&slx_mesh, Deflection >= 1.5f,
 						nullptr, nullptr, nullptr)) {
 					for (size_t contour_index : hole_indices) {
-						CPolyline hole;
-						for (SurfacePatchPoint point : uv_contours[contour_index])
-							hole.AddPoint(CPoint3d(point.u, point.v, 0.0));
-						hole.SetClosed(true);
-						slx_mesh.TrimByPline(&hole, keep_point);
+						trim_metric_contour(uv_contours[contour_index], keep_point);
 					}
 				}
 			}
@@ -6048,8 +7888,7 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 			}
 		}
 	}
-	const bool guard_cylinder_patch_spacing = patches.size() > 1
-		&& !use_mesh_quadro_hole_slx
+	const bool guard_cylinder_patch_spacing = !use_mesh_quadro_hole_slx
 		&& BRepAdaptor_Surface(TopoDS::Face(m_Face)).GetType()
 			== GeomAbs_Cylinder;
 	for (size_t patch_index = 0; patch_index < patches.size(); ++patch_index) {

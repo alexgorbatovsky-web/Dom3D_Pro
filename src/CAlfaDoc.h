@@ -92,6 +92,9 @@ public:
     bool CreateMeshFromSelectedPolyline(CVector3d dir, float dist);
     bool CreateSurfaceFromSelectedSketch(
         std::string* error_message = nullptr);
+    bool RebuildSurfaceFromSketch(size_t object_index,
+                                  unsigned long sketch_id,
+                                  std::string* error_message = nullptr);
     bool CreatePolylineFromSelectedCurveByLength(
         double segment_length,
         std::string* error_message = nullptr);
@@ -203,6 +206,7 @@ public:
                                   const std::function<bool(Vec3, DomPoint&)>& world_to_screen,
                                   float tolerance,
                                   SelectionAction action = SelectionAction::Replace);
+    bool SelectCurvePoint(size_t object_index, size_t point_index);
     bool PickSelectedCurvePointAtScreen(DomPoint point,
                                         const std::function<bool(Vec3, DomPoint&)>& world_to_screen,
                                         float tolerance,
@@ -226,6 +230,7 @@ public:
                                    size_t& object_index,
                                    size_t& point_index) const;
     void ClearSelection();
+    bool ClearInvisibleSelection();
     bool SelectObjectById(unsigned long object_id,
                           SelectionAction action = SelectionAction::Replace);
     void ClearPointSelection();
@@ -277,6 +282,18 @@ public:
     bool RebuildTwoSketchSolid(size_t object_index);
     bool MirrorSelectedObjects(Vec3 plane_point, Vec3 plane_normal);
     bool CreateLoftSurfaceFromSelectedBSplines();
+    bool RebuildLoftSurface(size_t object_index,
+                            const std::vector<unsigned long>& curve_ids);
+    bool CreateTangentCapFromSelection(std::string* error_message = nullptr);
+    bool CreateTangentCap(unsigned long curve_id,
+                          unsigned long surface_id,
+                          double length_factor = 0.55,
+                          std::string* error_message = nullptr);
+    bool RebuildTangentCap(size_t object_index,
+                           unsigned long curve_id,
+                           unsigned long surface_id,
+                           double length_factor = 0.55,
+                           std::string* error_message = nullptr);
     bool JoinSelectedSurfaces();
     size_t CreatePlaneIntersectionCurves(
         std::string* error_message = nullptr);
@@ -363,10 +380,14 @@ public:
     bool ApplyFilletToAllSelectedSolidEdges(double radius);
     bool BeginLiveFilletSelectedEdges(bool all_edges);
     bool HasLiveFillet() const;
+    bool IsLiveFilletPreviewValid() const;
+    void RejectLiveFilletPreview();
     std::vector<std::pair<int, int>> GetLiveFilletEdgeRefs() const;
     std::vector<int> GetLiveFilletCreatedSurfaceIndices() const;
     bool GetLiveFilletEndPoints(CPoint3d& start, CPoint3d& end) const;
     std::vector<CPoint3d> GetLiveFilletPoints(size_t count) const;
+    std::vector<CPoint3d> GetLiveEdgeToolPoints(size_t count) const;
+    bool GetLiveEdgeToolFrame(double fraction, CPoint3d& point, CPoint3d& tangent) const;
     bool UpdateLiveFillet(double radius);
     bool UpdateLiveFillet(double start_radius, double end_radius);
     bool UpdateLiveFillet(const std::vector<double>& radius_law);

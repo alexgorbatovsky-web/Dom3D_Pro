@@ -66,6 +66,8 @@ if(NOT Qt6_FOUND)
     )
 endif()
 find_package(OpenGL REQUIRED)
+include(cmake/Lib3MF.cmake)
+include(cmake/Assimp.cmake)
 
 # Legacy 3DCoat communication/utility engine. The copied comms sources depend
 # on the sibling comms-Math module, so keep the original 3DCoat checkout as a
@@ -219,6 +221,9 @@ set(DOM3D_SOURCES
     src/UndoRedo.cpp
     src/ExtrudeShapeBuilder.cpp
     src/CMesh3D.cpp
+    src/CatmullClarkSurfaceBuilder.cpp
+    src/Tools_Mesh3D.cpp
+    src/solid/HolePlacement.cpp
     src/ReferenceImage.cpp
     src/FillContour.cpp
     src/ContourQuadrangulator3DCoat.cpp
@@ -234,6 +239,8 @@ set(DOM3D_SOURCES
     src/Dom3DProjectSerializer.cpp
     src/CadCurve3D.cpp
     src/ExchangeIO.cpp
+    src/ThreeMfIO.cpp
+    src/FbxIO.cpp
     src/IgesIO.cpp
     src/IgesShapeCollector.cpp
     src/ObjIO.cpp
@@ -262,6 +269,8 @@ set(DOM3D_SOURCES
     src/ui/MeasurementUnits.cpp
     src/ui/MaterialEditorDialog.cpp
     src/ui/MaterialDrag.cpp
+    src/ui/MaterialPreviewGL.cpp
+    src/materials/PlasterBaker.cpp
     src/ui/MaterialSphereBrowser.cpp
     src/ui/OpenGLViewport.cpp
     src/ui/PreferencesDialog.cpp
@@ -277,9 +286,15 @@ set(DOM3D_SOURCES
     src/ui/ToolRegistry.cpp
     src/ui/BooleanDialog.cpp
     src/ui/ExtrudeFaceDialog.cpp
+    src/ui/ProjectOpenDialog.cpp
     src/resources/icons.qrc
     src/solid/Solid.cpp
     src/solid/SurfaceFace.cpp
+    src/solid/QuadroBoundary.cpp
+    src/solid/QuadroFaceBoundary.cpp
+    src/solid/QuadroPatchMesh.cpp
+    src/solid/QuadroChartMesher.cpp
+    src/solid/QuadroBodyMesher.cpp
     src/Point3d.cpp
     src/ageom.cpp
     src/Plane.cpp
@@ -323,6 +338,9 @@ set(DOM3D_HEADERS
     src/ExtrudeShapeBuilder.h
     src/Common.h
     src/CMesh3D.h
+    src/CatmullClarkSurfaceBuilder.h
+    src/Tools_Mesh3D.h
+    src/solid/HolePlacement.h
     src/FillContour.h
     src/ContourQuadrangulator3DCoat.h
     src/Line2D.h
@@ -336,6 +354,7 @@ set(DOM3D_HEADERS
     src/Dom3DProjectSerializer.h
     src/CadCurve3D.h
     src/ExchangeIO.h
+    src/FbxIO.h
     src/IgesIO.h
     src/ObjIO.h
     src/OpenGLCompat.h
@@ -378,6 +397,7 @@ set(DOM3D_HEADERS
     src/ui/ToolRegistry.h
     src/ui/BooleanDialog.h
     src/ui/ExtrudeFaceDialog.h
+    src/ui/ProjectOpenDialog.h
     src/solid/Solid.h
     src/solid/SurfaceFace.h
     src/Point3d.h
@@ -462,6 +482,8 @@ add_executable(Dom3D_Pro
     ${DOM3D_SKETCH_SOURCES}
     ${DOM3D_SKETCH_MIGRATION_FILES}
 )
+dom3d_link_3mf(Dom3D_Pro)
+dom3d_link_assimp(Dom3D_Pro)
 
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT Dom3D_Pro)
 set_target_properties(Dom3D_Pro PROPERTIES
@@ -627,6 +649,8 @@ if(BUILD_TESTING)
         tests/PropertyPanelTests.cpp
         src/ui/PropertyPanel.cpp
         src/ui/PropertyPanel.h
+        src/ui/LanguageManager.cpp
+        src/ui/LanguageManager.h
         src/ui/MeasurementUnits.cpp
         src/ui/MeasurementUnits.h
     )
@@ -635,7 +659,7 @@ if(BUILD_TESTING)
         src
         "${DOM3D_OPENCASCADE_INCLUDE_DIR}"
     )
-    target_link_libraries(PropertyPanelTests PRIVATE Qt6::Widgets)
+    target_link_libraries(PropertyPanelTests PRIVATE Qt6::Widgets Qt6::Xml)
     if(MSVC)
         target_compile_options(PropertyPanelTests PRIVATE
             /W4
@@ -658,15 +682,36 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME PbrMaterialLibraryTests COMMAND PbrMaterialLibraryTests)
 
+    add_executable(QuadroBoundaryTests tests/QuadroBoundaryTests.cpp src/solid/QuadroBoundary.cpp src/solid/QuadroFaceBoundary.cpp src/solid/QuadroPatchMesh.cpp)
+    target_compile_features(QuadroBoundaryTests PRIVATE cxx_std_17)
+    target_include_directories(QuadroBoundaryTests PRIVATE src "${DOM3D_OPENCASCADE_INCLUDE_DIR}")
+    target_link_directories(QuadroBoundaryTests PRIVATE "${DOM3D_OPENCASCADE_LIBRARY_DIR}")
+    target_link_libraries(QuadroBoundaryTests PRIVATE ${DOM3D_OPENCASCADE_LIBS})
+    add_test(NAME QuadroBoundarySnapshot COMMAND QuadroBoundaryTests)
+
     set(CATALOG_IMPORT_TEST_SOURCES ${DOM3D_SOURCES})
     list(REMOVE_ITEM CATALOG_IMPORT_TEST_SOURCES src/main.cpp)
     add_executable(CatalogImportTests
         tests/CatalogImportTests.cpp
+        tests/RepeatCommandTests.cpp
+        tests/ScenePersistenceTests.cpp
+        tests/ProjectOpenDialogTests.cpp
+        tests/BooleanToolTests.cpp
+        tests/SolidPrimitiveToolTests.cpp
+        tests/TileToolTests.cpp
+        tests/ProceduralMaterialTests.cpp
+        tests/ToolsMesh3DTests.cpp
+        tests/HolePlacementTests.cpp
+        tests/QuadroPillowTests.cpp
+        tests/QuadroHairdryerTests.cpp
+        tests/QuadroChartFillTests.cpp
         ${CATALOG_IMPORT_TEST_SOURCES}
         ${DOM3D_HEADERS}
         ${DOM3D_SKETCH_SOURCES}
     )
     target_compile_features(CatalogImportTests PRIVATE cxx_std_17)
+    dom3d_link_3mf(CatalogImportTests)
+    dom3d_link_assimp(CatalogImportTests)
     target_include_directories(CatalogImportTests PRIVATE
         src
         "${DOM3D_OPENCASCADE_INCLUDE_DIR}"
@@ -690,6 +735,35 @@ if(BUILD_TESTING)
         )
     endif()
     add_test(NAME CatalogImportTests COMMAND CatalogImportTests)
+    add_test(NAME QuadroBodyBoundaryCache COMMAND CatalogImportTests --test-quadro-body-cache)
+    add_test(NAME PillowCadQuadro COMMAND CatalogImportTests --test-pillow-cad-quadro
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Podushka-2.dom3d")
+    set_tests_properties(PillowCadQuadro PROPERTIES TIMEOUT 90)
+    add_test(NAME HairdryerCadBoundary COMMAND CatalogImportTests --test-hairdryer-cad-boundary
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Hairdryer.dom3d")
+    set_tests_properties(HairdryerCadBoundary PROPERTIES TIMEOUT 90)
+    add_test(NAME HairdryerCadChartConsumer COMMAND CatalogImportTests --diagnose-hairdryer-chart-fill
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Hairdryer.dom3d" "${CMAKE_CURRENT_BINARY_DIR}/hairdryer-chart-consumer")
+    set_tests_properties(HairdryerCadChartConsumer PROPERTIES TIMEOUT 240)
+    add_test(NAME RepeatCommand COMMAND CatalogImportTests --test-repeat-command -platform offscreen)
+    add_test(NAME ScenePersistence COMMAND CatalogImportTests --test-scene-persistence -platform offscreen)
+    set_tests_properties(ScenePersistence PROPERTIES TIMEOUT 60)
+    add_test(NAME ProjectOpenDialog COMMAND CatalogImportTests --test-project-open-dialog -platform offscreen)
+    set_tests_properties(ProjectOpenDialog PROPERTIES TIMEOUT 30)
+    add_test(NAME BooleanTool COMMAND CatalogImportTests --test-boolean-tool -platform offscreen)
+    add_test(NAME SolidPrimitiveTool COMMAND CatalogImportTests --test-solid-primitive-tool -platform offscreen)
+    set_tests_properties(SolidPrimitiveTool PROPERTIES TIMEOUT 30)
+    add_test(NAME TileTool COMMAND CatalogImportTests --test-tile -platform offscreen)
+    add_test(NAME ProceduralMaterial COMMAND CatalogImportTests --test-procedural-material -platform offscreen)
+    set_tests_properties(TileTool PROPERTIES TIMEOUT 60 ENVIRONMENT "QT_QPA_PLATFORM_PLUGIN_PATH=${DOM3D_QT_MSVC2022_PATH}/plugins/platforms")
+    add_test(NAME FacePrimitiveCut COMMAND CatalogImportTests --test-face-primitive-cut -platform offscreen)
+    set_tests_properties(FacePrimitiveCut PROPERTIES TIMEOUT 30)
+    set_tests_properties(BooleanTool PROPERTIES TIMEOUT 30)
+    set_tests_properties(RepeatCommand PROPERTIES TIMEOUT 30)
+    add_test(NAME ToolsMesh3DFillContour
+        COMMAND CatalogImportTests --test-tools-mesh3d
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Extrude_SL_Boundary_UV_D050.txt")
+    set_tests_properties(ToolsMesh3DFillContour PROPERTIES TIMEOUT 30)
     add_test(NAME MeshVar7Regression
         COMMAND CatalogImportTests --test-mesh-var7)
     add_test(NAME TrimClassificationDiagnostics
@@ -698,20 +772,81 @@ if(BUILD_TESTING)
         COMMAND CatalogImportTests --test-create-sketch-surface)
     add_test(NAME CurveToPolylineByLength
         COMMAND CatalogImportTests --test-curve-to-polyline-by-length)
+    add_test(NAME ParametricCurveOffset
+        COMMAND CatalogImportTests --test-curve-offset)
+    add_test(NAME ParametricCurveMirrorCopy
+        COMMAND CatalogImportTests --test-curve-mirror-copy)
+    add_test(NAME ParametricCurveLink
+        COMMAND CatalogImportTests --test-curve-link)
+    add_test(NAME ParametricSmartHybrid
+        COMMAND CatalogImportTests --test-smart-hybrid)
+    add_test(NAME LiveFilletValidation
+        COMMAND CatalogImportTests --test-live-fillet-validation)
     add_test(NAME MeshWireColor
         COMMAND CatalogImportTests --test-mesh-wire-color)
     add_test(NAME LowPolyDensityCalibration
         COMMAND CatalogImportTests --test-low-poly-density-calibration)
     add_test(NAME SurfacePatchWelding
         COMMAND CatalogImportTests --test-surface-patch-welding)
+    add_test(NAME BezierCollarWelding
+        COMMAND CatalogImportTests --test-bezier-collar-welding
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/welding/Bezier-4.dom3d")
     add_test(NAME SmallHoleSlxCollar
         COMMAND CatalogImportTests --test-small-hole-slx-collar)
+    add_test(NAME HoleLowDensityCollar
+        COMMAND CatalogImportTests --test-hole-low-density-collar
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/welding/Hole.dom3d")
     add_test(NAME FusionCylinderFrontGuard
         COMMAND CatalogImportTests --fusion-cylinder-front-guard)
     add_test(NAME CylinderSeamTrimDirection
         COMMAND CatalogImportTests --test-cylinder-seam-trim)
+    add_test(NAME CylinderMultipleWindows
+        COMMAND CatalogImportTests --test-cylinder-multiple-windows
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Cylinder_Min_2_Cylinder.dom3d")
+    set_tests_properties(CylinderMultipleWindows PROPERTIES TIMEOUT 60)
+    add_test(NAME CylinderBoxWindows
+        COMMAND CatalogImportTests --test-cylinder-box-windows
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Cylinder_Min_2_Box.dom3d")
+    set_tests_properties(CylinderBoxWindows PROPERTIES TIMEOUT 60)
+    add_test(NAME FourHoleCollars
+        COMMAND CatalogImportTests --test-four-hole-collars
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Box_Min_4_Hole.dom3d")
+    set_tests_properties(FourHoleCollars PROPERTIES TIMEOUT 60)
+    add_test(NAME SixHoleSharedZone
+        COMMAND CatalogImportTests --test-six-hole-shared-zone
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Box_Min_6_Boxex.dom3d")
+    set_tests_properties(SixHoleSharedZone PROPERTIES TIMEOUT 60)
     add_test(NAME SpherePoleQuadro
         COMMAND CatalogImportTests --test-sphere-pole-quadro)
+    add_test(NAME ExtrudeSlQuadro
+        COMMAND CatalogImportTests --test-extrude-sl-quadro
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Extrude_SL.dom3d")
+    add_test(NAME BoxMinBoxFilledQuadro
+        COMMAND CatalogImportTests --test-box-min-box-filled
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Box_Min_Box_Filled.dom3d")
+    add_test(NAME ChamferAndFilletsQuadro
+        COMMAND CatalogImportTests --test-chamfer-and-fillets
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/ChamferAndFillets.dom3d")
+    add_test(NAME PrismTwoFilletsQuadro
+        COMMAND CatalogImportTests --test-prism-two-fillets
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Prism_And_2_Fill_Var-2.dom3d")
+    add_test(NAME MeshVar11Regression COMMAND CatalogImportTests --test-mesh-var11)
+    add_test(NAME MeshVar5Reallocation COMMAND CatalogImportTests --test-mesh-var5-reallocation)
+    add_test(NAME HoleFacePlacement COMMAND CatalogImportTests --test-hole-placement)
+    set_tests_properties(HoleFacePlacement PROPERTIES TIMEOUT 60)
+    add_test(NAME MeshPointSplitReallocation COMMAND CatalogImportTests --test-mesh-point-split-reallocation)
+    add_test(NAME BooleanFourFillQuadro
+        COMMAND CatalogImportTests --test-boolean-four-fill
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Boolean-4_All_fill.dom3d")
+    add_test(NAME BooleanThreeSlx
+        COMMAND CatalogImportTests --test-boolean-three-slx
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Boolean-3.dom3d")
+    add_test(NAME PrismFilletedSlx
+        COMMAND CatalogImportTests --test-prism-filleted-slx
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Box_Min_Prism-3_Filleted.dom3d")
+    add_test(NAME BoxDoubleCutSlx
+        COMMAND CatalogImportTests --test-box-double-cut-slx
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Box_Min_Box_And_Miin_Box.dom3d")
     add_test(NAME MeshRegressionCorpus
         COMMAND powershell -NoProfile -ExecutionPolicy Bypass
             -File "${CMAKE_CURRENT_SOURCE_DIR}/tools/Test-MeshRegression.ps1"
@@ -719,24 +854,39 @@ if(BUILD_TESTING)
             -Configuration "$<CONFIG>"
     )
     string(REPLACE ";" "\\;" DOM3D_CTEST_HOST_PATH "$ENV{PATH}")
-    set_tests_properties(CatalogImportTests MeshVar7Regression
+    set_tests_properties(HairdryerCadChartConsumer HairdryerCadBoundary PillowCadQuadro QuadroBodyBoundaryCache QuadroBoundarySnapshot CatalogImportTests RepeatCommand ScenePersistence ProjectOpenDialog BooleanTool SolidPrimitiveTool FacePrimitiveCut MeshVar7Regression
         TrimClassificationDiagnostics CreateSketchSurface
-        CurveToPolylineByLength MeshWireColor LowPolyDensityCalibration
-        SurfacePatchWelding SmallHoleSlxCollar FusionCylinderFrontGuard
-        CylinderSeamTrimDirection SpherePoleQuadro
-        MeshRegressionCorpus PROPERTIES
+        CurveToPolylineByLength ParametricCurveOffset ParametricCurveMirrorCopy
+        ParametricCurveLink ParametricSmartHybrid LiveFilletValidation MeshWireColor LowPolyDensityCalibration
+        SurfacePatchWelding BezierCollarWelding SmallHoleSlxCollar HoleLowDensityCollar FusionCylinderFrontGuard
+        CylinderSeamTrimDirection CylinderMultipleWindows CylinderBoxWindows FourHoleCollars SixHoleSharedZone SpherePoleQuadro ExtrudeSlQuadro BoxMinBoxFilledQuadro ChamferAndFilletsQuadro PrismTwoFilletsQuadro
+        MeshVar11Regression MeshVar5Reallocation MeshPointSplitReallocation HoleFacePlacement PrismFilletedSlx BoxDoubleCutSlx BooleanFourFillQuadro BooleanThreeSlx MeshRegressionCorpus PROPERTIES
         ENVIRONMENT "PATH=${DOM3D_QT_MSVC2022_PATH}/bin\;${DOM3D_OPENCASCADE_BINARY_DIR}\;${DOM3D_CTEST_HOST_PATH}"
     )
     set_tests_properties(FusionCylinderFrontGuard PROPERTIES TIMEOUT 10)
+    set_property(TEST RepeatCommand ScenePersistence ProjectOpenDialog BooleanTool SolidPrimitiveTool FacePrimitiveCut APPEND PROPERTY ENVIRONMENT
+        "QT_QPA_PLATFORM_PLUGIN_PATH=$<TARGET_FILE_DIR:Qt6::QOffscreenIntegrationPlugin>")
     set_tests_properties(CylinderSeamTrimDirection PROPERTIES TIMEOUT 20)
+    set_tests_properties(ExtrudeSlQuadro PROPERTIES TIMEOUT 60)
+    set_tests_properties(BoxMinBoxFilledQuadro PROPERTIES TIMEOUT 60)
+    set_tests_properties(ChamferAndFilletsQuadro PROPERTIES TIMEOUT 60)
+    set_tests_properties(PrismTwoFilletsQuadro PROPERTIES TIMEOUT 60)
+    set_tests_properties(BoxDoubleCutSlx PROPERTIES TIMEOUT 120)
+    set_tests_properties(PrismFilletedSlx PROPERTIES TIMEOUT 120)
+    set_tests_properties(BooleanFourFillQuadro PROPERTIES TIMEOUT 120)
+    set_tests_properties(BooleanThreeSlx PROPERTIES TIMEOUT 120)
 
     add_executable(ExchangeIOTests
         tests/ExchangeIOTests.cpp
+        tests/ThreeMfIOTests.cpp
+        tests/FbxIOTests.cpp
         ${CATALOG_IMPORT_TEST_SOURCES}
         ${DOM3D_HEADERS}
         ${DOM3D_SKETCH_SOURCES}
     )
     target_compile_features(ExchangeIOTests PRIVATE cxx_std_17)
+    dom3d_link_3mf(ExchangeIOTests)
+    dom3d_link_assimp(ExchangeIOTests)
     target_include_directories(ExchangeIOTests PRIVATE
         src
         "${DOM3D_OPENCASCADE_INCLUDE_DIR}"

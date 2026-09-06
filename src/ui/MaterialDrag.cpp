@@ -1,3 +1,5 @@
+#include "MaterialPreviewGL.h"
+#include "../materials/ProceduralMaterialIO.h"
 #include "MaterialDrag.h"
 
 #include <QBuffer>
@@ -70,7 +72,7 @@ QByteArray Encode(const Material& material)
     QByteArray payload;
     QDataStream stream(&payload, QIODevice::WriteOnly);
     stream.setVersion(QDataStream::Qt_6_0);
-    stream << static_cast<quint32>(5);
+    stream << static_cast<quint32>(8);
     stream << static_cast<qulonglong>(material.id);
     stream << QString::fromStdString(material.name);
     write_color(stream, material.ambient);
@@ -92,6 +94,8 @@ QByteArray Encode(const Material& material)
            << QString::fromStdString(material.metallic_texture_path)
            << QString::fromStdString(material.displacement_texture_path);
     stream << material.coat_weight << material.coat_roughness;
+    stream << EncodePlaster(material);
+    stream << EncodeFabric(material) << material.texture_wrap_object;
     return payload;
 }
 
@@ -108,7 +112,7 @@ bool Decode(const QMimeData* mime_data, Material& material)
     qulonglong id = 0;
     QString name;
     stream >> version;
-    if (version < 1 || version > 5) {
+    if (version < 1 || version > 8) {
         return false;
     }
 
@@ -156,6 +160,10 @@ bool Decode(const QMimeData* mime_data, Material& material)
     if (version >= 5) {
         stream >> material.coat_weight >> material.coat_roughness;
     }
+    material.plaster={};
+    if(version>=6){QString text;stream>>text;if(!DecodePlaster(text,material))return false;}
+    if(version>=7){QString text;stream>>text;if(!DecodeFabric(text,material))return false;}
+    if(version>=8)stream>>material.texture_wrap_object;
     return stream.status() == QDataStream::Ok;
 }
 
@@ -166,52 +174,13 @@ QPixmap SpherePixmap(const Material& material, int size, bool selected)
 
 QPixmap SpherePixmap(const Material& material, int size, bool selected, const QString& material_file_path)
 {
-    QPixmap pixmap(size, size);
-    pixmap.fill(Qt::transparent);
-
+    Material preview=material;if(!material_file_path.isEmpty())preview.source_file_path=material_file_path.toStdString();
+    QImage image=RenderMaterialSphereGL(preview,size);
+    QPixmap pixmap=size>0?QPixmap(size,size):QPixmap();pixmap.fill(QColor(28,30,33));
     QPainter painter(&pixmap);
-    painter.setRenderHint(QPainter::Antialiasing, true);
-    const qreal inset = selected ? 2.0 : 6.0;
-    const QRectF sphere(inset, inset, size - inset * 2.0, size - inset * 2.0);
-    const QColor diffuse = to_qcolor(material.diffuse);
-    const QColor ambient = to_qcolor(material.ambient);
-
-    painter.setPen(QPen(selected ? QColor(255, 255, 255) : QColor(205, 205, 198), selected ? 3 : 2));
-    const QString texture_path = resolved_texture_path(material, material_file_path);
-    const QImage texture(texture_path);
-    if (!texture.isNull()) {
-        QPainterPath clip;
-        clip.addEllipse(sphere);
-        painter.save();
-        painter.setClipPath(clip);
-        painter.drawImage(sphere, texture);
-        painter.setCompositionMode(QPainter::CompositionMode_Multiply);
-        painter.fillRect(sphere, QColor::fromRgbF(diffuse.redF(), diffuse.greenF(), diffuse.blueF(), std::clamp(material.alpha, 0.25f, 1.0f)));
-        painter.restore();
-        painter.setBrush(Qt::NoBrush);
-        painter.drawEllipse(sphere);
-    } else {
-        QRadialGradient gradient(sphere.center() - QPointF(size * 0.17, size * 0.22), size * 0.62);
-        gradient.setColorAt(0.0, diffuse.lighter(172));
-        gradient.setColorAt(0.45, diffuse);
-        gradient.setColorAt(1.0, ambient.darker(155));
-        painter.setBrush(gradient);
-        painter.drawEllipse(sphere);
-    }
-
-    QRadialGradient volume(sphere.center() - QPointF(size * 0.16, size * 0.22), size * 0.66);
-    volume.setColorAt(0.0, QColor(255, 255, 255, 72));
-    volume.setColorAt(0.42, QColor(255, 255, 255, 0));
-    volume.setColorAt(0.78, QColor(0, 0, 0, 30));
-    volume.setColorAt(1.0, QColor(0, 0, 0, 105));
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(volume);
-    painter.drawEllipse(sphere);
-
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor(255, 255, 255, 62));
-    painter.drawEllipse(QRectF(sphere.left() + size * 0.19, sphere.top() + size * 0.16, size * 0.15, size * 0.11));
-    painter.end();
+    if(!image.isNull())painter.drawImage(0,0,image);
+    else {painter.setPen(Qt::gray);painter.drawText(pixmap.rect(),Qt::AlignCenter,"GL unavailable");}
+    if(selected){painter.setPen(QPen(Qt::white,2));painter.drawRect(pixmap.rect().adjusted(1,1,-2,-2));}
     return pixmap;
 }
 }

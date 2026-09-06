@@ -1,3 +1,6 @@
+#include <chrono>
+#include <cstdlib>
+#include <iostream>
 #include "IgesIO.h"
 #include "IgesShapeCollector.h"
 
@@ -44,6 +47,10 @@
 
 namespace {
 constexpr int kCurveSampleCount = 96;
+struct IgesStageTimer {
+    const char* name;int index;std::chrono::steady_clock::time_point start=std::chrono::steady_clock::now();
+    ~IgesStageTimer(){if(std::getenv("DOM3D_PROFILE_IGES"))std::cerr<<"IGES "<<name<<" "<<index<<": "<<std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count()<<" s"<<std::endl;}
+};
 
 Handle(Geom_BSplineCurve) make_bspline_curve(
     const std::vector<CPoint3d>& points,
@@ -257,6 +264,7 @@ void collect_top_level_shapes(const TopoDS_Shape& shape, std::vector<TopoDS_Shap
 
 std::unique_ptr<CSurfaceSet> make_imported_surface(const TopoDS_Shape& source_shape, int index, int count)
 {
+    IgesStageTimer timer{"surface mesh",index};
     TopoDS_Shape shape = source_shape;
     auto loaded = std::make_unique<CSurfaceSet>(shape);
     loaded->SetName(count > 1 ? "Imported IGES Surface Set " + std::to_string(index) : "Imported IGES Surface Set");
@@ -270,6 +278,10 @@ std::unique_ptr<CSurfaceSet> make_imported_surface(const TopoDS_Shape& source_sh
     // mesh even for IGES surfaces hundreds or thousands of units wide.  On
     // large NURBS patches that creates an excessive triangulation and blocks
     // the UI for many seconds.  Use a scale-aware 0.1% model deflection.
+    // Imported CAD needs the display mesher. SurfaceSet defaults to Quadro,
+    // whose normalized density is not the linear deflection computed here.
+    // Passing a large model's deflection to Quadro can create millions of cells.
+    loaded->MeshQuadro = false;
     loaded->BuldMesh(ComputeIgesMeshDeflection(shape));
     return loaded;
 }
@@ -443,7 +455,7 @@ bool IgesIO::Import(const std::string& path, std::vector<std::unique_ptr<CAlfaOb
     objects.clear();
 
     IGESControl_Reader reader;
-    const IFSelect_ReturnStatus status = reader.ReadFile(path.c_str());
+    IFSelect_ReturnStatus status;{IgesStageTimer timer{"read",0};status=reader.ReadFile(path.c_str());}
     if (status != IFSelect_RetDone) {
         error = "Could not read IGES file.";
         return false;
