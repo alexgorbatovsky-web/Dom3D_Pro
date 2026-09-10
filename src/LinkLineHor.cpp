@@ -20,6 +20,7 @@ std::unique_ptr<CLinkLine> CLinkLineHor::Clone() const {
 }
 
 void CLinkLineHor::EnforceGeometry() {
-    CPoint3d* end = P(1);
-    end->y = GetStart().y;
+    CPoint3d end = GetEnd();
+    end.y = GetStart().y;
+    SetEndpointRaw(1,end);
 }

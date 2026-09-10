@@ -15,7 +15,9 @@ class ProjectThumbnailLabel;
 class ProjectOpenDialog : public QFileDialog {
     Q_OBJECT
 public:
-    explicit ProjectOpenDialog(const QString& directory, QWidget* parent = nullptr);
+    explicit ProjectOpenDialog(const QString& directory, QWidget* parent = nullptr,
+                               AcceptMode mode = AcceptOpen, const QString& filters = {});
+    void SetExportPreview(const QImage& image);
 
 protected:
     void done(int result) override;
@@ -34,8 +36,10 @@ private:
     QLabel* preview_details_ = nullptr;
     QTimer* preview_timer_ = nullptr;
     QString preview_path_;
+    QString settings_group_;
     int browser_view_ = 5; // Details; the other modes use QFileDialog's list view.
     QActionGroup* view_actions_ = nullptr;
     QAbstractItemDelegate* default_list_delegate_ = nullptr;
     QAbstractItemDelegate* information_delegate_ = nullptr;
+    QAbstractItemDelegate* thumbnail_delegate_ = nullptr;
 };

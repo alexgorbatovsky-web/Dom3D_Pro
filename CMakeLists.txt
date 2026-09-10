@@ -214,10 +214,13 @@ set(DOM3D_SOURCES
     src/CAssembled.cpp
     src/CFacadeFurniture.cpp
     src/solid/FacadeFrameShapeBuilder.cpp
+    src/KitchenLayout.cpp
+    src/ui/KitchenLayoutDialog.cpp
     src/CFurnitureAssemblies.cpp
     src/CFurnitureDrawer.cpp
     src/CKitchenCabinet.cpp
     src/CAlfaDoc.cpp
+    src/CurveEndpointLinks.cpp
     src/UndoRedo.cpp
     src/ExtrudeShapeBuilder.cpp
     src/CMesh3D.cpp
@@ -241,6 +244,8 @@ set(DOM3D_SOURCES
     src/ExchangeIO.cpp
     src/ThreeMfIO.cpp
     src/FbxIO.cpp
+    src/GlbIO.cpp
+    src/materials/GlbMaterialBaker.cpp
     src/IgesIO.cpp
     src/IgesShapeCollector.cpp
     src/ObjIO.cpp
@@ -266,6 +271,7 @@ set(DOM3D_SOURCES
     src/solid/TrimShapeBuilder.cpp
     src/ui/MainWindow.cpp
     src/ui/DraftingWorkspace.cpp
+    src/ui/DraftingDimensions.cpp
     src/ui/MeasurementUnits.cpp
     src/ui/MaterialEditorDialog.cpp
     src/ui/MaterialDrag.cpp
@@ -289,6 +295,7 @@ set(DOM3D_SOURCES
     src/ui/ProjectOpenDialog.cpp
     src/resources/icons.qrc
     src/solid/Solid.cpp
+    src/solid/SolidCenterlines.cpp
     src/solid/SurfaceFace.cpp
     src/solid/QuadroBoundary.cpp
     src/solid/QuadroFaceBoundary.cpp
@@ -355,6 +362,7 @@ set(DOM3D_HEADERS
     src/CadCurve3D.h
     src/ExchangeIO.h
     src/FbxIO.h
+    src/GlbIO.h
     src/IgesIO.h
     src/ObjIO.h
     src/OpenGLCompat.h
@@ -431,6 +439,9 @@ set(DOM3D_SKETCH_SOURCES
     src/Fillet.h
     src/LinkLine.cpp
     src/LinkLine.h
+    src/SurfaceRevolveProfile.h
+    src/ui/RevolveToolHelp.h
+    src/SketchGeometry.h
     src/LinkLineHor.cpp
     src/LinkLineHor.h
     src/LinkLineVert.cpp
@@ -693,12 +704,19 @@ if(BUILD_TESTING)
     list(REMOVE_ITEM CATALOG_IMPORT_TEST_SOURCES src/main.cpp)
     add_executable(CatalogImportTests
         tests/CatalogImportTests.cpp
+        tests/SolidCenterlineTests.cpp
         tests/RepeatCommandTests.cpp
         tests/ScenePersistenceTests.cpp
+        tests/DraftingOutlineTests.cpp
+        tests/DraftingDimensionTests.cpp
+        tests/SheetBendTests.cpp
         tests/ProjectOpenDialogTests.cpp
         tests/BooleanToolTests.cpp
         tests/SolidPrimitiveToolTests.cpp
         tests/TileToolTests.cpp
+        tests/SurfaceDisplayNetTests.cpp
+        tests/KitchenLayoutTests.cpp
+        tests/CurveEndpointLinkTests.cpp
         tests/ProceduralMaterialTests.cpp
         tests/ToolsMesh3DTests.cpp
         tests/HolePlacementTests.cpp
@@ -734,11 +752,20 @@ if(BUILD_TESTING)
             "/FI${CMAKE_CURRENT_SOURCE_DIR}/src/legacy_compat.h"
         )
     endif()
+    target_sources(CatalogImportTests PRIVATE tests/NativeColorTests.cpp)
+    add_test(NAME NativeColors COMMAND CatalogImportTests --test-native-colors)
     add_test(NAME CatalogImportTests COMMAND CatalogImportTests)
+    add_test(NAME SurfaceDisplayNet COMMAND CatalogImportTests --test-surface-display-net)
+    add_test(NAME KitchenLayout COMMAND CatalogImportTests --test-kitchen-layout -platform offscreen)
+    add_test(NAME CurveEndpointLinks COMMAND CatalogImportTests --test-curve-endpoint-links -platform offscreen)
     add_test(NAME QuadroBodyBoundaryCache COMMAND CatalogImportTests --test-quadro-body-cache)
     add_test(NAME PillowCadQuadro COMMAND CatalogImportTests --test-pillow-cad-quadro
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Podushka-2.dom3d")
-    set_tests_properties(PillowCadQuadro PROPERTIES TIMEOUT 90)
+    add_test(NAME FilletMeshNormals COMMAND CatalogImportTests --test-fillet-mesh-normals
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Prism_Extrude_AllFillet.dom3d")
+    add_test(NAME FrameCadQuadro COMMAND CatalogImportTests --test-frame-cad-quadro
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Frame.dom3d")
+    set_tests_properties(PillowCadQuadro FrameCadQuadro PROPERTIES TIMEOUT 90)
     add_test(NAME HairdryerCadBoundary COMMAND CatalogImportTests --test-hairdryer-cad-boundary
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Hairdryer.dom3d")
     set_tests_properties(HairdryerCadBoundary PROPERTIES TIMEOUT 90)
@@ -747,15 +774,55 @@ if(BUILD_TESTING)
     set_tests_properties(HairdryerCadChartConsumer PROPERTIES TIMEOUT 240)
     add_test(NAME RepeatCommand COMMAND CatalogImportTests --test-repeat-command -platform offscreen)
     add_test(NAME ScenePersistence COMMAND CatalogImportTests --test-scene-persistence -platform offscreen)
+    if(WIN32)
+        # QOpenGLWidget needs the Windows platform plugin for framebuffer tests.
+        # The test window is placed outside the desktop.
+        add_test(NAME AxisClipping COMMAND CatalogImportTests --test-scene-persistence --axes-clipping-only -platform windows)
+        set_tests_properties(AxisClipping PROPERTIES TIMEOUT 30)
+    endif()
+    add_test(NAME RevolveTools COMMAND CatalogImportTests --test-scene-persistence --revolve-tools-only -platform offscreen)
+    set_tests_properties(RevolveTools PROPERTIES TIMEOUT 90)
+    add_test(NAME SketchTransactions COMMAND CatalogImportTests --test-scene-persistence --sketch-transaction-only -platform offscreen)
+    set_tests_properties(SketchTransactions PROPERTIES TIMEOUT 60)
+    add_test(NAME MovedCylinderFilletHandle COMMAND CatalogImportTests
+        --test-scene-persistence --fillet-handle-only -platform offscreen)
+    add_test(NAME DraftingDimensions COMMAND CatalogImportTests --test-drafting-dimensions)
+    add_test(NAME DraftingDimensionHoleRecovery COMMAND CatalogImportTests --test-drafting-dimensions --recover-detail
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Detail-1-dimensions-hole.dom3d")
+    add_test(NAME DraftingOutlines COMMAND CatalogImportTests --test-drafting-outlines
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Wire_Drawing.dom3d")
+    add_test(NAME DraftingFirstShow COMMAND CatalogImportTests --test-drafting-outlines
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Wire_Drawing.dom3d" --first-show-only
+        -platform offscreen)
+    add_test(NAME PolylineShift COMMAND CatalogImportTests --test-scene-persistence --polyline-shift-only -platform offscreen)
+    add_test(NAME SheetBendDetail COMMAND CatalogImportTests --test-sheet-bend-detail
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Detail-1.dom3d")
+    add_test(NAME SheetBendThird COMMAND CatalogImportTests --test-sheet-bend-third
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Detail-1-third-bend.dom3d")
+    add_test(NAME SheetBendFourth COMMAND CatalogImportTests --test-sheet-bend-fourth
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Detail-1-fourth-bend.dom3d")
+    add_test(NAME SheetBendPreview COMMAND CatalogImportTests --test-scene-persistence
+        --sheet-bend-ui-only "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Detail-1.dom3d"
+        -platform offscreen)
     set_tests_properties(ScenePersistence PROPERTIES TIMEOUT 60)
     add_test(NAME ProjectOpenDialog COMMAND CatalogImportTests --test-project-open-dialog -platform offscreen)
     set_tests_properties(ProjectOpenDialog PROPERTIES TIMEOUT 30)
     add_test(NAME BooleanTool COMMAND CatalogImportTests --test-boolean-tool -platform offscreen)
     add_test(NAME SolidPrimitiveTool COMMAND CatalogImportTests --test-solid-primitive-tool -platform offscreen)
+    add_test(NAME ReferencePlanes COMMAND CatalogImportTests --test-solid-primitive-tool --reference-planes-only -platform offscreen)
+    set_tests_properties(ReferencePlanes PROPERTIES TIMEOUT 60)
+    add_test(NAME SketchCameraAnimation COMMAND CatalogImportTests --test-solid-primitive-tool --camera-animation-only -platform offscreen)
+    set_tests_properties(SketchCameraAnimation PROPERTIES TIMEOUT 30)
+    add_test(NAME PrimitiveEnter COMMAND CatalogImportTests --test-solid-primitive-tool --primitive-enter-only -platform offscreen)
+    set_tests_properties(PrimitiveEnter PROPERTIES TIMEOUT 30)
+    add_test(NAME CoordinateAxisSelection COMMAND CatalogImportTests --test-solid-primitive-tool --coordinate-axis-only -platform offscreen)
+    set_tests_properties(CoordinateAxisSelection PROPERTIES TIMEOUT 60)
     set_tests_properties(SolidPrimitiveTool PROPERTIES TIMEOUT 30)
     add_test(NAME TileTool COMMAND CatalogImportTests --test-tile -platform offscreen)
     add_test(NAME ProceduralMaterial COMMAND CatalogImportTests --test-procedural-material -platform offscreen)
     set_tests_properties(TileTool PROPERTIES TIMEOUT 60 ENVIRONMENT "QT_QPA_PLATFORM_PLUGIN_PATH=${DOM3D_QT_MSVC2022_PATH}/plugins/platforms")
+    add_test(NAME OrbitDimensionGrips COMMAND CatalogImportTests --test-face-primitive-cut --orbit-dimensions)
+    set_tests_properties(OrbitDimensionGrips PROPERTIES TIMEOUT 30)
     add_test(NAME FacePrimitiveCut COMMAND CatalogImportTests --test-face-primitive-cut -platform offscreen)
     set_tests_properties(FacePrimitiveCut PROPERTIES TIMEOUT 30)
     set_tests_properties(BooleanTool PROPERTIES TIMEOUT 30)
@@ -818,19 +885,34 @@ if(BUILD_TESTING)
     set_tests_properties(SixHoleSharedZone PROPERTIES TIMEOUT 60)
     add_test(NAME SpherePoleQuadro
         COMMAND CatalogImportTests --test-sphere-pole-quadro)
+    add_test(NAME WireCircularCaps
+        COMMAND CatalogImportTests --test-wire-circular-caps
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Wire.dom3d")
     add_test(NAME ExtrudeSlQuadro
         COMMAND CatalogImportTests --test-extrude-sl-quadro
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Extrude_SL.dom3d")
     add_test(NAME BoxMinBoxFilledQuadro
         COMMAND CatalogImportTests --test-box-min-box-filled
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Box_Min_Box_Filled.dom3d")
+    add_test(NAME ChamferAndFilletsQuadro
+        COMMAND CatalogImportTests --test-chamfer-and-fillets
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/ChamferAndFillets.dom3d")
+    add_test(NAME RevolveAllFilletedQuadro
+        COMMAND CatalogImportTests --test-revolve-all-filleted
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Revolve_All_Filleted.dom3d")
+    set_tests_properties(RevolveAllFilletedQuadro PROPERTIES TIMEOUT 60)
     add_test(NAME ShellRimQuadro
         COMMAND CatalogImportTests --test-shell-rim-quadro
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Shell_Bag.dom3d")
     set_tests_properties(ShellRimQuadro PROPERTIES TIMEOUT 60)
-    add_test(NAME ChamferAndFilletsQuadro
-        COMMAND CatalogImportTests --test-chamfer-and-fillets
-            "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/ChamferAndFillets.dom3d")
+    add_test(NAME PolyhedronProjectRebuild
+        COMMAND CatalogImportTests --test-rebuild-polyhedron
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Polyhedron.dom3d"
+            "${CMAKE_CURRENT_BINARY_DIR}/polyhedron-regression.dom3d")
+    set_tests_properties(PolyhedronProjectRebuild PROPERTIES TIMEOUT 60)
+    add_test(NAME SolidCenterlines COMMAND CatalogImportTests --test-solid-centerlines
+        "${CMAKE_CURRENT_BINARY_DIR}/centerlines-regression")
+    set_tests_properties(SolidCenterlines PROPERTIES TIMEOUT 120)
     add_test(NAME PrismTwoFilletsQuadro
         COMMAND CatalogImportTests --test-prism-two-fillets
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Prism_And_2_Fill_Var-2.dom3d")
@@ -858,7 +940,7 @@ if(BUILD_TESTING)
             -Configuration "$<CONFIG>"
     )
     string(REPLACE ";" "\\;" DOM3D_CTEST_HOST_PATH "$ENV{PATH}")
-    set_tests_properties(HairdryerCadChartConsumer HairdryerCadBoundary PillowCadQuadro QuadroBodyBoundaryCache QuadroBoundarySnapshot CatalogImportTests RepeatCommand ScenePersistence ProjectOpenDialog BooleanTool SolidPrimitiveTool FacePrimitiveCut MeshVar7Regression
+    set_tests_properties(HairdryerCadChartConsumer HairdryerCadBoundary PillowCadQuadro FrameCadQuadro FilletMeshNormals QuadroBodyBoundaryCache QuadroBoundarySnapshot CatalogImportTests RepeatCommand ScenePersistence ProjectOpenDialog BooleanTool SolidPrimitiveTool FacePrimitiveCut OrbitDimensionGrips MeshVar7Regression
         TrimClassificationDiagnostics CreateSketchSurface
         CurveToPolylineByLength ParametricCurveOffset ParametricCurveMirrorCopy
         ParametricCurveLink ParametricSmartHybrid LiveFilletValidation MeshWireColor LowPolyDensityCalibration
@@ -884,6 +966,7 @@ if(BUILD_TESTING)
         tests/ExchangeIOTests.cpp
         tests/ThreeMfIOTests.cpp
         tests/FbxIOTests.cpp
+        tests/GlbIOTests.cpp
         ${CATALOG_IMPORT_TEST_SOURCES}
         ${DOM3D_HEADERS}
         ${DOM3D_SKETCH_SOURCES}

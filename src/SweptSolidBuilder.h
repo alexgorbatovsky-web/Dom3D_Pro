@@ -79,5 +79,6 @@ TopoDS_Shape BuildFrameSolidShape(const CSmartLine& profile,
                                   double width,
                                   double height);
 
-TopoDS_Shape BuildWireSolidShape(const CPolyline& path, double radius);
-TopoDS_Shape BuildWireSolidShape(const CAlfaObject& path, double radius);
+TopoDS_Shape BuildWireSolidShape(const CPolyline& path, double radius, TopoDS_Wire* center_path = nullptr);
+TopoDS_Shape BuildWireSolidShape(const CAlfaObject& path, double radius, TopoDS_Wire* center_path = nullptr);
+TopoDS_Wire BuildSolidCenterPath(const CAlfaObject& path);

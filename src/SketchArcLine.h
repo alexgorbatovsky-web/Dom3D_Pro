@@ -13,7 +13,7 @@ public:
     CPoint3d GetTangent(double parameter) const override;
     std::vector<CPoint3d> Sample(std::size_t segments = 32) const override;
 
-    const CPoint3d& GetPointOnArc() const;
+    CPoint3d GetPointOnArc() const;
     void SetPointOnArc(CPoint3d point);
     bool IsValid() const;
 
@@ -21,5 +21,5 @@ private:
     bool Circle(double& center_x, double& center_y,
                 double& radius, double& start_angle, double& sweep) const;
 
-    CPoint3d point_on_arc_;
+    SketchPoint point_on_arc_;
 };

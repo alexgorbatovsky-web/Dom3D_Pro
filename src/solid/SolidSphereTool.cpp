@@ -68,6 +68,8 @@ bool SolidSphereTool::CreateSphere(CSolid& solid, float diameter) const {
         return false;
     }
     solid.m_Shape = sphere_builder.Shape();
+    solid.ClearCenterlines();
+    solid.SetAxis("base:rotation", SolidCenterlineKind::RotationAxis, {}, {0, 0, 1});
     if (solid.m_Shape.IsNull()) {
         return false;
     }

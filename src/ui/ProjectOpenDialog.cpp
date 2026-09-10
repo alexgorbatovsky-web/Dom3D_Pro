@@ -278,6 +278,42 @@ QImage ReadFolderThumbnail(const QString& path, const QPromise<QImage>& promise)
     return {};
 }
 
+// Keep a fixed icon slot and a separate caption. The standard delegate sizes
+// its decoration from the actual pixmap aspect ratio; with uniform list items
+// a landscape thumbnail can leave square folder icons with no caption space.
+class FileThumbnailDelegate final : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+    void paint(QPainter* painter, const QStyleOptionViewItem& option,
+               const QModelIndex& index) const override {
+        QStyleOptionViewItem item(option);
+        initStyleOption(&item, index);
+        const QString name=item.text;
+        const QIcon icon=item.icon;
+        item.text.clear();item.icon={};
+        item.features &= ~(QStyleOptionViewItem::HasDisplay | QStyleOptionViewItem::HasDecoration);
+        const auto* list=qobject_cast<const QListView*>(parent());
+        const int height=list->iconSize().height();
+        list->style()->drawControl(QStyle::CE_ItemViewItem,&item,painter,list);
+        const QRect icon_rect(option.rect.left()+4,option.rect.top()+4,option.rect.width()-8,height);
+        icon.paint(painter,icon_rect,Qt::AlignCenter,
+            option.state & QStyle::State_Enabled ? QIcon::Normal : QIcon::Disabled);
+        const QRect caption(option.rect.left()+4,option.rect.top()+height+8,
+            option.rect.width()-8,option.fontMetrics.height()+4);
+        painter->save();painter->setFont(option.font);
+        painter->setPen(option.palette.color(option.state & QStyle::State_Selected
+            ? QPalette::HighlightedText : QPalette::Text));
+        painter->drawText(caption,Qt::AlignHCenter|Qt::AlignVCenter,
+            option.fontMetrics.elidedText(name,Qt::ElideMiddle,caption.width()));
+        painter->restore();
+    }
+    QSize sizeHint(const QStyleOptionViewItem& option,const QModelIndex&) const override {
+        const auto* list=qobject_cast<const QListView*>(parent());
+        return QSize(std::max(112,list->iconSize().width()+28),
+            list->iconSize().height()+option.fontMetrics.height()+20);
+    }
+};
+
 // Tiles and Content show secondary information alongside the file icon.
 class FileInformationDelegate final : public QStyledItemDelegate {
 public:
@@ -420,15 +456,18 @@ protected:
 };
 }
 
-ProjectOpenDialog::ProjectOpenDialog(const QString& directory, QWidget* parent)
-    : QFileDialog(parent, tr("Open Dom3D Project"), directory) {
-    setObjectName("ProjectOpenDialog");
+ProjectOpenDialog::ProjectOpenDialog(const QString& directory, QWidget* parent,
+                                   AcceptMode accept_mode, const QString& filters)
+    : QFileDialog(parent, accept_mode == AcceptSave ? tr("Export") : tr("Open Dom3D Project"), directory),
+      settings_group_(accept_mode == AcceptSave ? "files/exportDialog" : "files/openProjectDialog") {
+    setObjectName(accept_mode == AcceptSave ? "ProjectExportDialog" : "ProjectOpenDialog");
     // Keep the preview inside the browser; a native QFileDialog cannot embed Qt widgets.
     setOption(QFileDialog::DontUseNativeDialog, true);
-    setAcceptMode(QFileDialog::AcceptOpen);
-    setFileMode(QFileDialog::ExistingFile);
+    setAcceptMode(accept_mode);
+    setFileMode(accept_mode == AcceptSave ? QFileDialog::AnyFile : QFileDialog::ExistingFile);
     setNameFilters({tr("Dom3D Project (*.dom3d)"),
                     tr("Legacy Dom3D Project (*.d3dm *.wrk)"), tr("All files (*.*)")});
+    if (!filters.isEmpty()) setNameFilter(filters);
     setViewMode(QFileDialog::Detail);
     setWindowFlag(Qt::WindowMaximizeButtonHint, true);
     setSizeGripEnabled(true);
@@ -443,6 +482,7 @@ ProjectOpenDialog::ProjectOpenDialog(const QString& directory, QWidget* parent)
     if (auto* list = findChild<QListView*>("listView")) {
         default_list_delegate_ = list->itemDelegate();
         information_delegate_ = new FileInformationDelegate(list);
+        thumbnail_delegate_ = new FileThumbnailDelegate(list);
     }
     // Replace Qt's two fixed view buttons with one Explorer-style menu.
     for (const char* name : {"listModeButton", "detailModeButton"}) {
@@ -611,7 +651,7 @@ ProjectOpenDialog::ProjectOpenDialog(const QString& directory, QWidget* parent)
     }
 
     QSettings settings;
-    settings.beginGroup("files/openProjectDialog");
+    settings.beginGroup(settings_group_);
     if (settings.contains("browserState")) restoreState(settings.value("browserState").toByteArray());
     setDirectory(directory);
     QScreen* target_screen = QGuiApplication::screenAt(QCursor::pos());
@@ -662,7 +702,8 @@ void ProjectOpenDialog::SetBrowserView(int mode) {
     auto* list = findChild<QListView*>("listView");
     if (!list) return;
     const bool information = browser_view_ >= 6;
-    list->setItemDelegate(information ? information_delegate_ : default_list_delegate_);
+    list->setItemDelegate(information ? information_delegate_
+        : browser_view_ <= 2 ? thumbnail_delegate_ : default_list_delegate_);
     list->setProperty("projectContentView", browser_view_ == 7);
     list->setResizeMode(QListView::Adjust);
     list->setMovement(QListView::Static);
@@ -683,7 +724,8 @@ void ProjectOpenDialog::SetBrowserView(int mode) {
         list->setFlow(QListView::LeftToRight);
         list->setWrapping(true);
         list->setWordWrap(true);
-        list->setGridSize(QSize(std::max(112, size + 28), size + 48));
+        list->setGridSize(QSize(std::max(112, size + 28),
+            size + std::max(48, list->fontMetrics().height() + 20)));
     } else if (browser_view_ == 3 || browser_view_ == 4) {
         list->setIconSize(QSize(16, 16));
         list->setFlow(browser_view_ == 3 ? QListView::LeftToRight : QListView::TopToBottom);
@@ -702,6 +744,7 @@ void ProjectOpenDialog::SetBrowserView(int mode) {
 }
 
 void ProjectOpenDialog::QueuePreview(const QString& path) {
+    if (acceptMode() == AcceptSave) return;
     preview_timer_->stop();
     preview_path_ = path;
     preview_name_->clear();
@@ -721,6 +764,13 @@ void ProjectOpenDialog::QueuePreview(const QString& path) {
     if (supported) preview_timer_->start();
 }
 
+void ProjectOpenDialog::SetExportPreview(const QImage& image) {
+    preview_timer_->stop();
+    preview_->SetImage(image, tr("Scene preview unavailable"));
+    preview_name_->setText(tr("Current scene"));
+    preview_details_->setText(tr("Viewport preview of the scene being exported"));
+}
+
 void ProjectOpenDialog::LoadPreview() {
     QImage image;
     QString error;
@@ -731,7 +781,7 @@ void ProjectOpenDialog::LoadPreview() {
 
 void ProjectOpenDialog::done(int result) {
     QSettings settings;
-    settings.beginGroup("files/openProjectDialog");
+    settings.beginGroup(settings_group_);
     settings.setValue("geometry", saveGeometry());
     settings.setValue("browserState", saveState());
     settings.setValue("viewMode", browser_view_);

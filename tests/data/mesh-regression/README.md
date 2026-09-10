@@ -8,6 +8,40 @@
 стыки на плотностях 0.25, 0.50, 0.70, 1.00 и повторной 0.50.
 [Причина и ограничения](../../../docs/knowledge/mesh/shell-rim-quadro.md).
 
+## Polyhedron: боковые панели без диагоналей
+
+`Polyhedron.dom3d`, SHA256
+`418DF9B507971694CD922A273F21426CE8F7038F66475F9339078EC44139D4C1`.
+`PolyhedronProjectRebuild` проверяет перестроение и восстановление выбранного
+скругления, объём и отсутствие треугольных боковых панелей.
+[Подробности и ограничения](../../../docs/knowledge/mesh/polyhedron-side-faces.md).
+
+## Revolve_All_Filleted: скругления тела вращения
+
+`Revolve_All_Filleted.dom3d`, SHA256
+`2A570ECACA17CEF3CA62DF716DA112E0569F0C027DEDEB984668A72CDEBE596D`.
+`RevolveAllFilletedQuadro` проверяет проекцию граничных точек, связность,
+квадро-полосу скругления и замкнутость всего тела на плотностях 0.25, 0.35,
+0.50, 0.80 и повторной 0.35. [Описание исправления](../../../docs/knowledge/mesh/revolve-all-filleted.md).
+
+## Wire_Drawing: линии очерка в чертеже
+
+`Wire_Drawing.dom3d`, SHA256
+`D9C562E310133FD81F1C6C6BCC5809E87A6D4370C7BB0BBEAE0F3634A0A537D8`.
+Два листа с пятью ранее сохранёнными видами Wire и цилиндра.
+`DraftingOutlines` проверяет добавление очерков, отсутствие ложных
+протяжённых кривых, сохранение размещения и работу скрытых линий.
+Описание: [линии очерка](../../../docs/knowledge/drafting-model-outlines.md).
+
+## Wire: Cap для круглого сплайнового торца
+
+`Wire.dom3d`, SHA256
+`991E3788234AF3895E56B14C562A058183910AAD1563F7EB817A684DDB0914EA`.
+`WireCircularCaps` проверяет два торца тела `Wire` при Density 0.30, 0.50,
+0.80: кольцевая квадро-топология и совпадение внешних узлов с боковой сеткой.
+Проверка ограничена торцами, а не замкнутостью всего тела.
+Также проверяется отказ распознавания открытой дуги, некруглого и неплоского
+сплайна. Исходный проект содержит цилиндр для визуального сравнения.
 
 ## Box_Min_Hole_And_Min_Box: тонкая перемычка над угловым вырезом
 
@@ -278,3 +312,70 @@ SHA-256: `590D5D54B81705D9893F3ACD9E259113A66CDDBCA8F1933F1739CA6A0F768891`.
 ```powershell
 ctest --test-dir build -C Release -R ToolsMesh3DFillContour --output-on-failure
 ```
+
+### Frame: замкнутая квадросетка профильной рамы
+
+`Frame.dom3d` — исходная модель из `Bags_Mesh/Frame.dom3d`, 32 грани.
+SHA-256: `495AAF842EA519239F421EDA92D0238953AD4DE639FEF99FB5AEE425E089746C`.
+В обычном Mesh Quadro при Density 0.45 независимые сетки граней оставляли
+280 открытых рёбер после сварки; два цилиндрических контура не собирались.
+Замкнутые четырёхсторонние оболочки с характеристикой Эйлера 0 теперь используют
+общие CAD-узлы и структурные UV-патчи, как существующий обработчик Podushka-2.
+Отверстия внутри отдельных граней, периодические швы и вырожденные рёбра
+по-прежнему исключены из этого маршрута; режим Hole SLX не изменён.
+
+`FrameCadQuadro` проверяет плотности 0.25, 0.45, 1.0 и возврат к 0.45:
+только четырёхугольники, отсутствие открытых и неманифолдных рёбер,
+согласованную ориентацию, Эйлер=0, центры ячеек внутри CAD-граней,
+ошибку объёма менее 3%, повторяемость и повторное использование CAD-топологии.
+
+```powershell
+ctest --test-dir build -C Release -R FrameCadQuadro --output-on-failure
+```
+
+### Prism_Extrude_AllFillet: нормали двух сферических углов
+
+`Prism_Extrude_AllFillet.dom3d` — исходный файл из `Bags_Mesh`.
+SHA-256: `BCA7D365A3E566562D20866C0DDC997CBE90EF9891520CBC1F58E632BA47AFBF`.
+В обычной сетке у сферических граней 30 и 41 нормали были направлены против
+обхода треугольников: при параметре перестроения 1.0 по 456 несовпадений
+на каждой грани. Радиальная нормаль учитывала TopAbs_REVERSED, но пропускала
+знак непрямой системы координат gp_Sphere. Теперь этот знак учитывается
+перед ориентацией грани; радиальное вычисление сохраняется и в полюсах.
+
+`FilletMeshNormals` перестраивает обычную сетку с параметрами 0.25, 1.0 и 5.0
+и проверяет согласованность нормалей с обходом треугольников сферических
+скруглений как с прямой, так и с непрямой системой координат.
+
+### Detail-1: повторная гибка и выбор подвижной стороны
+
+`Detail-1.dom3d` — исходная деталь с уже согнутой правой полкой.
+SHA-256: `06E8E8F0029E7E7B93D6AF2E559FAC9FE768C14B7A01BA20E47556F76CB17BD0`.
+`SheetBendDetail` проверяет сгиб малой левой полки, сохранение основной части,
+объёма и одного связного Solid, а также повторение истории операций.
+`SheetBendPreview` проверяет выбор стороны, предпросмотр и отмену диалога.
+
+
+### Detail-1-third-bend: elevated construction line
+
+`Detail-1-third-bend.dom3d` is the updated user file with two existing bends.
+SHA-256: `63A100ACB20AFA016209A7F8149D4DC6237D1BFE07B0E85D3BE709E193EEF396`.
+Line 93 is at Z=1.37241548 above a sheet at Z=-3..0. `SheetBendThird` checks
+projection, the third bend, preservation of the earlier bends, and history replay.
+
+### Detail-1-fourth-bend: supporting face after three bends
+
+`Detail-1-fourth-bend.dom3d` is the updated user file with three existing bends.
+SHA-256: `F6B8EA9A2352469A9FBA8CD317AB2615BFFAB156757D3EADD952D69F8D2B921D`.
+Line 94 must select the actual base face, excluding closer infinite planes of
+other flanges. `SheetBendFourth` checks local thickness, the fourth bend,
+preservation of the fixed part, volume, validity, and history replay.
+
+### Detail-1: dimensions after adding a hole
+
+`Detail-1-dimensions-hole.dom3d` preserves the user report with nine drawing
+dimensions. Five refer to the body before its last hole (143 edges); the current
+body has 146 edges. `DraftingDimensionHoleRecovery` reconstructs the preceding
+history in a separate document, maps the unchanged curves geometrically, checks
+all nine dimensions, and verifies that editing the diameter preserves the others.
+The source fixture is never overwritten.

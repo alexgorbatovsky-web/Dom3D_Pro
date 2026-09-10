@@ -72,6 +72,7 @@ void append_mesh(RenderScene& scene,
     if (source.GetVertices().empty()) return;
     RenderMesh mesh;
     mesh.name = name;
+    mesh.group_name = QString::fromStdString(source.GetGroupName());
     mesh.independent_surface_patch = independent_surface_patch;
     mesh.material_index = append_material(scene, material);
     mesh.vertices = source.GetVertices();
@@ -344,10 +345,14 @@ RenderScene BuildRenderScene(const CAlfaDoc& document,
             material.texture_rotation_degrees += surface->TextureTransform.rotation_degrees;
             material.texture_fit_to_surface = material.texture_fit_to_surface
                 || surface->TextureTransform.fit_to_surface;
+            const size_t previous_mesh_count = scene.meshes.size();
             append_mesh(scene, *surface->pMesh3D, material,
                 QString("%1 Surface %2")
                     .arg(QString::fromStdString(solid->GetName()))
                     .arg(index + 1), independent_surface_patch);
+            if (scene.meshes.size() > previous_mesh_count)
+                scene.meshes.back().group_name = QString::fromStdString(solid->GetGroupName())
+                    + "/" + QString::fromStdString(solid->GetName());
         }
     }
     return scene;

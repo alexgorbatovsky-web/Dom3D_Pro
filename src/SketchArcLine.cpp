@@ -16,7 +16,6 @@ double positive_angle(double angle) {
 
 CSketchArcLine::CSketchArcLine(CPoint3d start, CPoint3d point_on_arc, CPoint3d end)
     : CLinkLine(start, end), point_on_arc_(point_on_arc) {
-    point_on_arc_.z = 0.0;
 }
 
 LinkLineType CSketchArcLine::GetType() const { return LinkLineType::Arc; }
@@ -87,8 +86,10 @@ std::vector<CPoint3d> CSketchArcLine::Sample(std::size_t segments) const {
     return result;
 }
 
-const CPoint3d& CSketchArcLine::GetPointOnArc() const { return point_on_arc_; }
+CPoint3d CSketchArcLine::GetPointOnArc() const { return point_on_arc_; }
 void CSketchArcLine::SetPointOnArc(CPoint3d point) {
     point.z = 0.0;
-    point_on_arc_ = point;
+    const SketchPoint value(point);
+    if (value.u == point_on_arc_.u && value.v == point_on_arc_.v) return;
+    GeometryChanged(); point_on_arc_ = value;
 }

@@ -3,17 +3,15 @@
 CSurfaceSet::CSurfaceSet()
     : CSolid() {
     SetName("Surface Set");
-    // Standalone surfaces benefit from the regular UV net used by the old
-    // Dom-3D CSurface::UpdateFace path. BuildTrimmingMesh keeps the UV grid
-    // for natural, untrimmed bounds and falls back to contour trimming when
-    // the face is trimmed.
-    MeshQuadro = true;
+    // Display uses adaptive CNet sampling; MeshQuadro selects the separate
+    // Low Poly density-based mesher only when explicitly requested.
+    MeshQuadro = false;
 }
 
 CSurfaceSet::CSurfaceSet(TopoDS_Shape& shape)
     : CSolid(shape) {
     SetName("Surface Set");
-    MeshQuadro = true;
+    MeshQuadro = false;
 }
 
 void CSurfaceSet::Render3d(bool selected) const {

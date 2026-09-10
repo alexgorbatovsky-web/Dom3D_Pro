@@ -1,4 +1,15 @@
 #include "DraftingWorkspace.h"
+#include "DraftingDimensions.h"
+#include "DraftingDimensionReferences.h"
+#include <QColorDialog>
+#include <QCursor>
+#include <QSet>
+#include <QDataStream>
+#include <QFontMetricsF>
+#include <QSpinBox>
+#include <QGraphicsPathItem>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <TopExp.hxx>
 
 #include "../CAlfaDoc.h"
 #include "../solid/Solid.h"
@@ -46,6 +57,7 @@
 #include <QPushButton>
 #include <QRadioButton>
 #include <QScrollBar>
+#include <QShowEvent>
 #include <QTabWidget>
 #include <QToolBar>
 #include <QToolTip>
@@ -55,9 +67,14 @@
 #include <QPolygonF>
 
 #include <BRepAdaptor_Curve.hxx>
+#include <BRepAdaptor_Surface.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
+#include <BRepMesh_IncrementalMesh.hxx>
 #include <HLRAlgo_Projector.hxx>
 #include <HLRBRep_Algo.hxx>
 #include <HLRBRep_HLRToShape.hxx>
+#include <HLRBRep_PolyAlgo.hxx>
+#include <HLRBRep_PolyHLRToShape.hxx>
 #include <Standard_Failure.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
@@ -83,10 +100,17 @@ struct Primitive {
     QString font = "Arial";
     double text_height = 5.0;
     double rotation = 0.0;
+    drafting::Dimension dimension;
+    bool has_dimension = false;
+    QPointF view_center;
+    bool has_view_center = false;
+    bool has_center_lines = false;
     QString projection;
     double view_scale = 1.0;
+    bool show_hidden = false;
     QVector<QPolygonF> visible_lines;
     QVector<QPolygonF> hidden_lines;
+    QVector<QPolygonF> center_lines;
 };
 
 struct SheetData {
@@ -127,14 +151,25 @@ QJsonObject primitive_json(const Primitive& p) {
             {"ref2", p.ref2}, {"anchor2", p.anchor2},
             {"font", p.font}, {"textHeight", p.text_height},
             {"rotation", p.rotation}, {"projection", p.projection},
+            {"dimension", p.has_dimension ? QJsonValue(drafting::ToJson(p.dimension)) : QJsonValue()},
+            {"viewCenterX", p.view_center.x()}, {"viewCenterY", p.view_center.y()},
             {"viewScale", p.view_scale},
+            {"showHidden", p.show_hidden},
             {"visibleLines", write_lines(p.visible_lines)},
-            {"hiddenLines", write_lines(p.hidden_lines)}};
+            {"hiddenLines", write_lines(p.hidden_lines)},
+            {"centerLines", write_lines(p.center_lines)}, {"centerLinesVersion", 2}};
 }
 
 Primitive primitive_from_json(const QJsonObject& object) {
     Primitive p;
     p.id = object.value("id").toInt();
+    p.has_dimension = object.value("dimension").isObject();
+    if (p.has_dimension) p.dimension = drafting::FromJson(object.value("dimension").toObject());
+    p.has_view_center = object.contains("viewCenterX") && object.contains("viewCenterY");
+    // Saved view geometry may predate recovered/edited solid axes even when
+    // its format version is current. Revalidate once when opening the sheet.
+    p.has_center_lines = false;
+    p.view_center = {object.value("viewCenterX").toDouble(), object.value("viewCenterY").toDouble()};
     p.type = object.value("type").toString();
     p.p1 = {object.value("x1").toDouble(), object.value("y1").toDouble()};
     p.p2 = {object.value("x2").toDouble(), object.value("y2").toDouble()};
@@ -163,6 +198,8 @@ Primitive primitive_from_json(const QJsonObject& object) {
     };
     p.visible_lines = read_lines(object.value("visibleLines").toArray());
     p.hidden_lines = read_lines(object.value("hiddenLines").toArray());
+    p.center_lines = read_lines(object.value("centerLines").toArray());
+    p.show_hidden = object.value("showHidden").toBool(!p.hidden_lines.isEmpty());
     return p;
 }
 
@@ -352,17 +389,34 @@ bool generate_model_view(const CAlfaDoc* document,
                          bool include_hidden,
                          QVector<QPolygonF>& visible,
                          QVector<QPolygonF>& hidden,
-                         QString& error) {
+                         QString& error, QPointF* output_center = nullptr,
+                         QVector<QPolygonF>* centerlines = nullptr) {
+    if (centerlines) centerlines->clear();
+    visible.clear();
+    hidden.clear();
+    error.clear();
+    if (!std::isfinite(scale) || scale <= 0.0) {
+        error = QString::fromUtf8("Масштаб вида должен быть положительным.");
+        return false;
+    }
     if (!document) {
         error = QString::fromUtf8("Документ модели недоступен.");
         return false;
     }
     Handle(HLRBRep_Algo) algorithm = new HLRBRep_Algo();
+    std::vector<TopoDS_Shape> shapes;
+    bool spline_outlines = false;
     int shape_count = 0;
     for (const auto& object : document->GetObjects()) {
         const auto* solid = object ? dynamic_cast<const CSolid*>(object.get()) : nullptr;
         if (!solid || solid->m_Shape.IsNull() || !solid->IsVisible()) continue;
         algorithm->Add(solid->m_Shape);
+        shapes.push_back(solid->m_Shape);
+        for (TopExp_Explorer face(solid->m_Shape, TopAbs_FACE); face.More(); face.Next()) {
+            const auto type = BRepAdaptor_Surface(TopoDS::Face(face.Current())).GetType();
+            spline_outlines = spline_outlines || type == GeomAbs_BSplineSurface
+                || type == GeomAbs_BezierSurface;
+        }
         ++shape_count;
     }
     if (shape_count == 0) {
@@ -384,12 +438,43 @@ bool generate_model_view(const CAlfaDoc* document,
     }
 
     try {
-        algorithm->Projector(HLRAlgo_Projector(gp_Ax2(gp_Pnt(0, 0, 0), direction, x_direction)));
+        const HLRAlgo_Projector projector(gp_Ax2(gp_Pnt(0, 0, 0), direction, x_direction));
+        algorithm->Projector(projector);
         algorithm->Update();
         algorithm->Hide();
         HLRBRep_HLRToShape result(algorithm);
         visible = extract_hlr_polylines(result.VCompound());
-        if (include_hidden) hidden = extract_hlr_polylines(result.HCompound());
+        // HLR separates sharp CAD edges from view-dependent outlines. A
+        // cylinder or swept face has no topological edges at its silhouette.
+        if (include_hidden) {
+            hidden = extract_hlr_polylines(result.HCompound());
+        }
+        if (spline_outlines) {
+            // Exact HLR can extrapolate swept B-spline outlines outside the
+            // face (Wire's isometric view). Use tessellation-based HLR only
+            // for silhouettes; retain the exact CAD edge curves above.
+            // Triangulate private copies, independently of viewport/Low Poly
+            // meshes. Deflection is 0.02 mm on paper, below the line width.
+            Handle(HLRBRep_PolyAlgo) poly = new HLRBRep_PolyAlgo();
+            poly->Projector(projector);
+            for (const auto& shape : shapes) {
+                TopoDS_Shape copy = BRepBuilderAPI_Copy(shape).Shape();
+                BRepMesh_IncrementalMesh mesher(copy, 0.02 * scale, false, 0.08, true);
+                if (!mesher.IsDone()) {
+                    error = QString::fromUtf8("Не удалось построить очерк поверхности.");
+                    return false;
+                }
+                poly->Load(copy);
+            }
+            poly->Update();
+            HLRBRep_PolyHLRToShape outline;
+            outline.Update(poly);
+            visible += extract_hlr_polylines(outline.OutLineVCompound());
+            if (include_hidden) hidden += extract_hlr_polylines(outline.OutLineHCompound());
+        } else {
+            visible += extract_hlr_polylines(result.OutLineVCompound());
+            if (include_hidden) hidden += extract_hlr_polylines(result.OutLineHCompound());
+        }
     } catch (const Standard_Failure& failure) {
         error = QString::fromUtf8("Open Cascade не смог построить вид: %1")
                     .arg(QString::fromLocal8Bit(failure.GetMessageString()));
@@ -417,6 +502,7 @@ bool generate_model_view(const CAlfaDoc* document,
     include_bounds(visible);
     include_bounds(hidden);
     const QPointF center((min_x + max_x) * 0.5, (min_y + max_y) * 0.5);
+    if (output_center) *output_center = center;
     const auto normalize = [center, scale](QVector<QPolygonF>& lines) {
         for (QPolygonF& line : lines)
             for (QPointF& point : line)
@@ -425,6 +511,66 @@ bool generate_model_view(const CAlfaDoc* document,
     };
     normalize(visible);
     normalize(hidden);
+    if (centerlines) {
+        const gp_Ax2 frame(gp_Pnt(0, 0, 0), direction, x_direction);
+        const auto project = [&](const gp_Pnt& p) {
+            return QPointF((p.XYZ().Dot(frame.XDirection().XYZ()) - center.x()) / scale,
+                          -(p.XYZ().Dot(frame.YDirection().XYZ()) - center.y()) / scale);
+        };
+        const auto append = [&](const QPolygonF& line) {
+            for (const auto& other : *centerlines) {
+                if (other.size() != line.size()) continue;
+                bool same = true, reversed = true;
+                for (int i = 0; i < line.size(); ++i) {
+                    same &= QLineF(other[i], line[i]).length() < 1e-5;
+                    reversed &= QLineF(other[other.size() - 1 - i], line[i]).length() < 1e-5;
+                }
+                if (same || reversed) return;
+            }
+            centerlines->push_back(line);
+        };
+        for (const auto& object : document->GetObjects()) {
+            const auto* solid = dynamic_cast<const CSolid*>(object.get());
+            if (!solid || !solid->IsVisible() || solid->m_Shape.IsNull()) continue;
+            for (const auto& source : solid->GetCenterlines()) {
+                QPolygonF line;
+                for (const auto& p : source.points) {
+                    const auto q = project(p);
+                    if (line.isEmpty() || QLineF(line.back(), q).length() > 1e-6) line.push_back(q);
+                }
+                if (line.isEmpty()) continue;
+                if (line.size() == 1 && source.kind != SolidCenterlineKind::Path) {
+                    // Looking down an axis: cross the associated circular surface,
+                    // extending each end by 5% of its diameter.
+                    const auto p = line.front();
+                    double radius = 0;
+                    for (TopExp_Explorer faces(solid->m_Shape, TopAbs_FACE); faces.More(); faces.Next()) {
+                        BRepAdaptor_Surface surface(TopoDS::Face(faces.Current()));
+                        if (surface.GetType() != GeomAbs_Cylinder) continue;
+                        const auto cylinder = surface.Cylinder();
+                        if (!cylinder.Axis().Direction().IsParallel(direction, 1e-6)) continue;
+                        if (QLineF(project(cylinder.Location()), p).length() > 1e-5) continue;
+                        radius = std::max(radius, cylinder.Radius() / scale);
+                    }
+                    const double extent = radius > 1e-6 ? radius * 1.1 : 3.0;
+                    append(QPolygonF(QVector<QPointF>{p - QPointF(extent, 0), p + QPointF(extent, 0)}));
+                    append(QPolygonF(QVector<QPointF>{p - QPointF(0, extent), p + QPointF(0, extent)}));
+                } else if (line.size() >= 2) {
+                    if (source.closed) {
+                        if (QLineF(line.front(), line.back()).length() > 1e-6) line.push_back(line.front());
+                    } else {
+                        const auto first = line[1] - line.front();
+                        const auto last = line.back() - line[line.size() - 2];
+                        double length = 0;
+                        for (int i = 1; i < line.size(); ++i) length += QLineF(line[i-1], line[i]).length();
+                        line.front() -= first * (0.05 * length / std::hypot(first.x(), first.y()));
+                        line.back() += last * (0.05 * length / std::hypot(last.x(), last.y()));
+                    }
+                    append(line);
+                }
+            }
+        }
+    }
     return true;
 }
 }
@@ -438,10 +584,18 @@ public:
     }
 
     std::function<void()> changed;
+    std::function<void(const QString&)> dimensionPromptChanged;
 
     void SetTool(DraftingWorkspace::Tool tool) {
+        CancelDimension();
         tool_ = tool;
         clearSelection();
+        if (IsDimensionTool()) ShowDimensionPrompt();
+        else {
+            for(auto* view:views()) {view->unsetCursor();view->setToolTip({});view->setStatusTip({});}
+            if(dimensionPromptChanged)dimensionPromptChanged({});
+            QToolTip::hideText();
+        }
     }
 
     bool DeleteSelectedPrimitives() {
@@ -461,9 +615,10 @@ public:
         data_->primitives.erase(
             std::remove_if(data_->primitives.begin(), data_->primitives.end(),
                 [&deleted_ids](const Primitive& primitive) {
-                    return primitive.type == "dimension"
-                        && (deleted_ids.contains(primitive.ref1)
-                            || deleted_ids.contains(primitive.ref2));
+                    if (primitive.type != "dimension") return false;
+                    if (deleted_ids.contains(primitive.ref1) || deleted_ids.contains(primitive.ref2)) return true;
+                    for (const auto& ref : primitive.dimension.refs) if (deleted_ids.contains(ref.primitive)) return true;
+                    return false;
                 }), data_->primitives.end());
         Rebuild();
         if (changed) changed();
@@ -485,13 +640,24 @@ public:
 
     void Rebuild() {
         clear();
+        dimension_preview_ = nullptr;
+        dimension_snap_ = nullptr;
         preview_item_ = nullptr;
         // QGraphicsScene::clear() invalidates the automatically calculated
         // scene rectangle. Restore the physical paper rectangle explicitly.
         UpdatePage();
         for (Primitive& primitive : data_->primitives) {
-            if (primitive.type == "model_view") ClampModelViewToPaper(primitive);
+            if (primitive.type == "model_view") {
+                if((!primitive.has_view_center || !primitive.has_center_lines) && document_) {
+                    QString error;
+                    primitive.has_view_center=generate_model_view(document_,primitive.projection,primitive.view_scale,
+                        primitive.show_hidden,primitive.visible_lines,primitive.hidden_lines,error,&primitive.view_center,&primitive.center_lines);
+                    primitive.has_center_lines = primitive.has_view_center;
+                }
+                ClampModelViewToPaper(primitive);
+            }
         }
+        BuildDimensionFeatures();
         AddPaperItems();
         const QPen pen(Qt::black, 0.35);
         for (int i = 0; i < data_->primitives.size(); ++i) {
@@ -530,34 +696,23 @@ public:
                     for (int point = 1; point < line.size(); ++point) path.lineTo(p.p1 + line[point]);
                     group->addToGroup(addPath(path, hidden_pen));
                 }
+                QPen center_pen(Qt::black, 0.18, Qt::DashDotLine);
+                center_pen.setDashPattern({12.0 / 0.18, 2.0 / 0.18, 1.0 / 0.18, 2.0 / 0.18});
+                for (const auto& line : p.center_lines) {
+                    if (line.size() < 2) continue;
+                    QPainterPath path(p.p1 + line.front());
+                    for (int point = 1; point < line.size(); ++point) path.lineTo(p.p1 + line[point]);
+                    auto* axis = addPath(path, center_pen);
+                    axis->setData(1, "centerline");
+                    group->addToGroup(axis);
+                }
                 item = group;
             } else if (p.type == "dimension") {
-                auto* group = createItemGroup({});
-                const QPointF p1 = ResolveReferencePoint(p.ref1, p.anchor1, p.p1);
-                const QPointF p2 = ResolveReferencePoint(p.ref2, p.anchor2, p.p2);
-                const double offset = -10.0;
-                const QPointF a(p1.x(), p1.y() + offset);
-                const QPointF b(p2.x(), p2.y() + offset);
-                group->addToGroup(addLine(QLineF(p1, a), pen));
-                group->addToGroup(addLine(QLineF(p2, b), pen));
-                group->addToGroup(addLine(QLineF(a, b), pen));
-                QPainterPath arrows;
-                const double sign = b.x() >= a.x() ? 1.0 : -1.0;
-                arrows.moveTo(a); arrows.lineTo(a + QPointF(3.0 * sign, -1.5));
-                arrows.moveTo(a); arrows.lineTo(a + QPointF(3.0 * sign, 1.5));
-                arrows.moveTo(b); arrows.lineTo(b - QPointF(3.0 * sign, -1.5));
-                arrows.moveTo(b); arrows.lineTo(b - QPointF(3.0 * sign, 1.5));
-                group->addToGroup(addPath(arrows, pen));
-                auto* text = addSimpleText(QString::number(QLineF(p1, p2).length() * data_->scale, 'f', 2));
-                text->setBrush(Qt::black);
-                text->setScale(0.45);
-                text->setPos((a + b) / 2.0 - QPointF(text->boundingRect().width() * 0.225, 4.0));
-                group->addToGroup(text);
-                item = group;
+                item = DrawDimension(p);
             }
             if (item) {
                 item->setFlag(QGraphicsItem::ItemIsSelectable);
-                item->setFlag(QGraphicsItem::ItemIsMovable, p.type != "dimension");
+                item->setFlag(QGraphicsItem::ItemIsMovable);
                 item->setData(0, i);
             }
         }
@@ -572,7 +727,12 @@ protected:
         Q_UNUSED(painter);
     }
 
+    void mouseDoubleClickEvent(QGraphicsSceneMouseEvent* event) override {
+        if (tool_ == DraftingWorkspace::Tool::Select && EditDimensionAt(event->scenePos())) {event->accept();return;}
+        QGraphicsScene::mouseDoubleClickEvent(event);
+    }
     void mousePressEvent(QGraphicsSceneMouseEvent* event) override {
+        if (IsDimensionTool()) { DimensionClick(event); return; }
         if (tool_ == DraftingWorkspace::Tool::Select) {
             QGraphicsScene::mousePressEvent(event);
             return;
@@ -617,11 +777,12 @@ protected:
             primitive.p2 = start_;
             primitive.projection = dialog.projection();
             primitive.view_scale = dialog.scale();
+            primitive.show_hidden = dialog.hidden();
             QString error;
             QApplication::setOverrideCursor(Qt::WaitCursor);
             const bool generated = generate_model_view(
                 document_, primitive.projection, primitive.view_scale,
-                dialog.hidden(), primitive.visible_lines, primitive.hidden_lines, error);
+                primitive.show_hidden, primitive.visible_lines, primitive.hidden_lines, error, &primitive.view_center, &primitive.center_lines);
             QApplication::restoreOverrideCursor();
             if (!generated) {
                 QMessageBox::warning(QApplication::activeWindow(),
@@ -640,6 +801,7 @@ protected:
     }
 
     void mouseMoveEvent(QGraphicsSceneMouseEvent* event) override {
+        if (IsDimensionTool()) { DimensionHover(event); return; }
         if (!drawing_) {
             QGraphicsScene::mouseMoveEvent(event);
             return;
@@ -656,6 +818,7 @@ protected:
     }
 
     void mouseReleaseEvent(QGraphicsSceneMouseEvent* event) override {
+        if (IsDimensionTool()) {event->accept();return;}
         if (!drawing_) {
             QGraphicsScene::mouseReleaseEvent(event);
             if (tool_ == DraftingWorkspace::Tool::Select)
@@ -703,6 +866,7 @@ protected:
     }
 
     void keyPressEvent(QKeyEvent* event) override {
+        if (event->key() == Qt::Key_Escape && IsDimensionTool()) {CancelDimension();if(IsDimensionTool())ShowDimensionPrompt();else SetTool(DraftingWorkspace::Tool::Select);event->accept();return;}
         if (event->key() == Qt::Key_Delete && DeleteSelectedPrimitives()) {
             return;
         }
@@ -710,6 +874,7 @@ protected:
     }
 
 private:
+#include "DraftingDimensionScene.inc"
     void AddPaperItems() {
         auto prepare_background_item = [](QGraphicsItem* item, qreal z) {
             item->setZValue(z);
@@ -772,6 +937,7 @@ private:
         };
         include_lines(primitive.visible_lines);
         include_lines(primitive.hidden_lines);
+        include_lines(primitive.center_lines);
         return has_point ? QRectF(QPointF(min_x, min_y), QPointF(max_x, max_y))
                          : QRectF();
     }
@@ -800,14 +966,26 @@ private:
 
     void CommitMovedSelection() {
         bool moved = false;
+        QSet<int> moving_sources;
+        for(auto* item:selectedItems()) {
+            const int index=item->data(0).toInt();
+            if(index>=0 && index<data_->primitives.size() && data_->primitives[index].type!="dimension" && !item->pos().isNull())
+                moving_sources.insert(data_->primitives[index].id);
+        }
         for (QGraphicsItem* item : selectedItems()) {
             const QPointF delta = item->pos();
             if (qFuzzyIsNull(delta.x()) && qFuzzyIsNull(delta.y())) continue;
             const int index = item->data(0).toInt();
             if (index < 0 || index >= data_->primitives.size()) continue;
             Primitive& primitive = data_->primitives[index];
-            primitive.p1 += delta;
-            primitive.p2 += delta;
+            if (primitive.type == "dimension") {
+                UpgradeDimension(primitive);
+                if(primitive.dimension.refs.isEmpty() || !moving_sources.contains(primitive.dimension.refs.front().primitive))
+                    primitive.dimension.offset += delta;
+            } else {
+                primitive.p1 += delta;
+                primitive.p2 += delta;
+            }
             if (primitive.type == "model_view") ClampModelViewToPaper(primitive);
             item->setPos(0, 0);
             moved = true;
@@ -1014,10 +1192,15 @@ public:
             QPoint last_pan_position_;
         };
         view_ = new ZoomView(scene_, this);
+        view_->setMouseTracking(true);
         view_->setRenderHints(QPainter::Antialiasing | QPainter::TextAntialiasing);
         view_->setBackgroundBrush(QColor(220, 220, 220));
         view_->setDragMode(QGraphicsView::RubberBandDrag);
         layout->addWidget(view_);
+        auto* hint=new QLabel(this);hint->setObjectName("draftingDimensionHint");hint->setWordWrap(true);
+        hint->setStyleSheet("QLabel { background: #e8f2ff; color: #17395d; padding: 6px; }");
+        hint->hide();layout->addWidget(hint);
+        scene_->dimensionPromptChanged=[hint](const QString& text) {hint->setText(text);hint->setVisible(!text.isEmpty());};
         Fit();
     }
 
@@ -1026,7 +1209,16 @@ public:
     const SheetData& data() const { return data_; }
     DraftingScene* scene() const { return scene_; }
     void SetTool(DraftingWorkspace::Tool tool) { scene_->SetTool(tool); }
-    void Fit() { QTimer::singleShot(0, view_, [this] { view_->fitInView(scene_->PaperRect().adjusted(-8, -8, 8, 8), Qt::KeepAspectRatio); }); }
+    void Fit() {
+        fit_pending_ = true;
+        QTimer::singleShot(0, view_, [this] {
+            // Project loading also creates sheets in the hidden workspace
+            // and inactive tabs. Their viewport sizes are not usable yet.
+            if (!fit_pending_ || !isVisible() || !view_->isVisible()) return;
+            view_->fitInView(scene_->PaperRect().adjusted(-8, -8, 8, 8), Qt::KeepAspectRatio);
+            fit_pending_ = false;
+        });
+    }
 
     QJsonObject ToJson() const {
         QJsonArray primitives;
@@ -1057,7 +1249,16 @@ public:
         return data;
     }
 
+protected:
+    void showEvent(QShowEvent* event) override {
+        QWidget::showEvent(event);
+        // Queue after layout has assigned the visible viewport its size.
+        // Only the initial/pending fit runs here; preserve later zoom/pan.
+        if (fit_pending_) Fit();
+    }
+
 private:
+    bool fit_pending_ = true;
     SheetData data_;
     DraftingScene* scene_ = nullptr;
     QGraphicsView* view_ = nullptr;
@@ -1092,6 +1293,7 @@ DraftingWorkspace::DraftingWorkspace(QWidget* parent) : QWidget(parent) {
     toolbar_->addSeparator();
 
     toolbar_->addAction(QString::fromUtf8("Вписать лист"), this, [this] { if (auto* s = CurrentSheet()) s->Fit(); });
+    toolbar_->addAction(QString::fromUtf8("Обновить виды"), this, &DraftingWorkspace::RefreshViews);
     toolbar_->addAction(QString::fromUtf8("Просмотр печати"), this, &DraftingWorkspace::ShowPrintPreview);
     toolbar_->addAction(QString::fromUtf8("Печать / плоттер"), this, &DraftingWorkspace::PrintCurrentDrawing);
     toolbar_->addAction("PDF", this, &DraftingWorkspace::ExportPdf);
@@ -1121,7 +1323,13 @@ DraftingWorkspace::DraftingWorkspace(QWidget* parent) : QWidget(parent) {
     add_tool(QString::fromUtf8("Прямоугольник"), Tool::Rectangle);
     add_tool(QString::fromUtf8("Эллипс"), Tool::Ellipse);
     add_tool(QString::fromUtf8("Текст"), Tool::Text);
-    add_tool(QString::fromUtf8("Размер"), Tool::Dimension);
+    add_tool(QString::fromUtf8("Горизонтальный"), Tool::HorizontalDimension);
+    add_tool(QString::fromUtf8("Вертикальный"), Tool::VerticalDimension);
+    add_tool(QString::fromUtf8("Параллельный"), Tool::ParallelDimension);
+    add_tool(QString::fromUtf8("Перпендикулярный"), Tool::PerpendicularDimension);
+    add_tool(QString::fromUtf8("Радиусный"), Tool::RadiusDimension);
+    add_tool(QString::fromUtf8("Диаметральный"), Tool::DiameterDimension);
+    add_tool(QString::fromUtf8("Угловой"), Tool::AngularDimension);
     tools_toolbar_->addSeparator();
     add_tool(QString::fromUtf8("Вид модели"), Tool::ModelView);
     tools_toolbar_->addSeparator();
@@ -1141,12 +1349,110 @@ DraftingWorkspace::DraftingWorkspace(QWidget* parent) : QWidget(parent) {
     UpdateActionState();
 }
 
+bool DraftingWorkspace::BuildModelView(const CAlfaDoc* document, const QString& projection,
+                                      double scale, bool includeHidden,
+                                      QVector<QPolygonF>& visible, QVector<QPolygonF>& hidden,
+                                      QString& error, QVector<QPolygonF>* centerlines) {
+    return generate_model_view(document, projection, scale, includeHidden, visible, hidden, error, nullptr, centerlines);
+}
+
+bool DraftingWorkspace::RefreshModelViews(CAlfaDoc& document, QString& error) {
+    error.clear();
+    if (document.GetDraftingData().empty()) return true;
+    QJsonParseError parse_error;
+    const auto json = QJsonDocument::fromJson(
+        QByteArray::fromStdString(document.GetDraftingData()), &parse_error);
+    if (parse_error.error != QJsonParseError::NoError || !json.isObject()) {
+        error = QString::fromUtf8("Не удалось прочитать данные чертежа.");
+        return false;
+    }
+    auto root = json.object();
+    auto sheets = root.value("sheets").toArray();
+    for (qsizetype s = 0; s < sheets.size(); ++s) {
+        auto sheet = sheets[s].toObject();
+        auto primitives = sheet.value("primitives").toArray();
+        for (qsizetype i = 0; i < primitives.size(); ++i) {
+            auto original = primitives[i].toObject();
+            Primitive view = primitive_from_json(original);
+            if (view.type != "model_view") continue;
+            if (!generate_model_view(&document, view.projection, view.view_scale,
+                                     view.show_hidden, view.visible_lines, view.hidden_lines, error, &view.view_center, &view.center_lines))
+                return false;
+            const auto rebuilt = primitive_json(view);
+            original.insert("visibleLines", rebuilt.value("visibleLines"));
+            original.insert("hiddenLines", rebuilt.value("hiddenLines"));
+            original.insert("centerLines", rebuilt.value("centerLines"));
+            original.insert("centerLinesVersion", rebuilt.value("centerLinesVersion"));
+            original.insert("showHidden", view.show_hidden);
+            original.insert("viewCenterX", view.view_center.x());
+            original.insert("viewCenterY", view.view_center.y());
+            primitives[i] = original;
+        }
+        sheet.insert("primitives", primitives);
+        sheets[s] = sheet;
+    }
+    root.insert("sheets", sheets);
+    // Commit only after every projection succeeds; failed HLR leaves all
+    // previously saved views and their annotation references intact.
+    document.SetDraftingData(QJsonDocument(root).toJson(QJsonDocument::Compact).toStdString());
+    return true;
+}
+
+void DraftingWorkspace::RefreshViews() {
+    if (!document_) return;
+    SaveToDocument();
+    const int selected_sheet = sheets_->currentIndex();
+    QString error;
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    const bool refreshed = RefreshModelViews(*document_, error);
+    QApplication::restoreOverrideCursor();
+    if (!refreshed) {
+        QMessageBox::warning(this, QString::fromUtf8("Обновление видов"), error);
+        return;
+    }
+    ReloadFromDocument();
+    sheets_->setCurrentIndex(selected_sheet);
+}
+
+QByteArray DraftingWorkspace::ModelSignature() const {
+    QByteArray bytes;QDataStream stream(&bytes,QIODevice::WriteOnly);
+    if(document_)for(const auto& object:document_->GetObjects()) {
+        const auto* solid=object?dynamic_cast<const CSolid*>(object.get()):nullptr;
+        if(!solid)continue;
+        stream<<quint64(solid->m_id)<<solid->IsVisible();
+        if(solid->m_Shape.IsNull()){stream<<quint64(0);continue;}
+        stream<<quint64(reinterpret_cast<quintptr>(solid->m_Shape.TShape().get()));
+        const auto trsf=solid->m_Shape.Location().Transformation();
+        for(int row=1;row<=3;++row)for(int col=1;col<=4;++col)stream<<trsf.Value(row,col);
+        stream<<int(solid->m_Shape.Orientation());
+        for (const auto& line : solid->GetCenterlines()) {
+            stream << QString::fromStdString(line.id) << int(line.kind) << line.closed << quint64(line.points.size());
+            for (const auto& p : line.points) stream << p.X() << p.Y() << p.Z();
+        }
+    }
+    return bytes;
+}
+
+void DraftingWorkspace::showEvent(QShowEvent* event) {
+    QWidget::showEvent(event);
+    QTimer::singleShot(0,this,[this] {
+        if(!isVisible() || !document_ || !sheets_->count())return;
+        const QByteArray current=ModelSignature();
+        if(current==model_signature_)return;
+        // Geometry changed while the model workspace was active. Update the
+        // projection and its associative annotations together on returning.
+        model_signature_=current;
+        RefreshViews();
+    });
+}
+
 void DraftingWorkspace::SetDocument(CAlfaDoc* document) {
     document_ = document;
     ReloadFromDocument();
 }
 
 void DraftingWorkspace::ReloadFromDocument() {
+    model_signature_=ModelSignature();
     while (sheets_->count()) delete sheets_->widget(0);
     if (!document_ || document_->GetDraftingData().empty()) {
         UpdateActionState();

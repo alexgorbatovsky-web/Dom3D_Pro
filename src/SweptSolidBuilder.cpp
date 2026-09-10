@@ -1317,7 +1317,16 @@ TopoDS_Shape BuildFrameSolidShape(const CSmartLine& profile,
     }
 }
 
-TopoDS_Shape BuildWireSolidShape(const CPolyline& path, double radius) {
+TopoDS_Wire BuildSolidCenterPath(const CAlfaObject& path) {
+    if (const auto* polyline = dynamic_cast<const CPolyline*>(&path)) return build_rounded_polyline_wire(*polyline);
+    if (const auto* spline = dynamic_cast<const CBSpline*>(&path)) return build_bspline_wire(*spline);
+    TopoDS_Wire wire;
+    if (const auto* sketch = dynamic_cast<const CSmartLine*>(&path)) BuildSketchPathWire(*sketch, wire);
+    return wire;
+}
+
+TopoDS_Shape BuildWireSolidShape(const CPolyline& path, double radius, TopoDS_Wire* center_path) {
+    if (center_path) center_path->Nullify();
     if (radius <= kGeometryTolerance || path.GetPointCount() < 2) return {};
     const TopoDS_Wire spine = build_rounded_polyline_wire(path);
     if (spine.IsNull()) return {};
@@ -1339,15 +1348,17 @@ TopoDS_Shape BuildWireSolidShape(const CPolyline& path, double radius) {
         if (!sweep.IsReady()) return {};
         sweep.Build();
         if (!sweep.IsDone() || !sweep.MakeSolid()) return {};
+        if (center_path) *center_path = spine;
         return sweep.Shape();
     } catch (const Standard_Failure&) {
         return {};
     }
 }
 
-TopoDS_Shape BuildWireSolidShape(const CAlfaObject& path, double radius) {
+TopoDS_Shape BuildWireSolidShape(const CAlfaObject& path, double radius, TopoDS_Wire* center_path) {
+    if (center_path) center_path->Nullify();
     if (const auto* polyline = dynamic_cast<const CPolyline*>(&path)) {
-        return BuildWireSolidShape(*polyline, radius);
+        return BuildWireSolidShape(*polyline, radius, center_path);
     }
     if (radius <= kGeometryTolerance) return {};
 
@@ -1393,6 +1404,7 @@ TopoDS_Shape BuildWireSolidShape(const CAlfaObject& path, double radius) {
         if (!sweep.IsReady()) return {};
         sweep.Build();
         if (!sweep.IsDone() || !sweep.MakeSolid()) return {};
+        if (center_path) *center_path = spine;
         return sweep.Shape();
     } catch (const Standard_Failure&) {
         return {};

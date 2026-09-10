@@ -59,38 +59,158 @@ namespace {
 constexpr int kEntryIndexRole = Qt::UserRole + 1;
 constexpr int kDocumentIndexRole = Qt::UserRole + 2;
 
+// Named RGB palette from the original Dom material editor.
+struct NamedMaterialColor { const char* name; unsigned int rgb; };
+constexpr NamedMaterialColor kNamedMaterialColors[] = {
+    {"aliceblue", 0xF0F8FF},
+    {"antiquewhite", 0xFAEBD7},
+    {"aqua", 0x00FFFF},
+    {"aquamarine", 0x7FFFD4},
+    {"azure", 0xF0FFFF},
+    {"beige", 0xF5F5DC},
+    {"bisque", 0xFFE4C4},
+    {"black", 0x000000},
+    {"blanchedalmond", 0xFFEBCD},
+    {"blue", 0x0000FF},
+    {"blueviolet", 0x8A2BE2},
+    {"brown", 0xA52A2A},
+    {"burlywood", 0xDEB887},
+    {"cadetblue", 0x5F9EA0},
+    {"chartreuse", 0x7FFF00},
+    {"chocolate", 0xD2691E},
+    {"coral", 0xFF7F50},
+    {"cornflowerblue", 0x6495ED},
+    {"cornsilk", 0xFFF8DC},
+    {"crimson", 0xDC143C},
+    {"cyan", 0x00FFFF},
+    {"darkblue", 0x00008B},
+    {"darkcyan", 0x008B8B},
+    {"darkgoldenrod", 0xB8860B},
+    {"darkgray", 0xA9A9A9},
+    {"darkgreen", 0x006400},
+    {"darkkhaki", 0xBDB76B},
+    {"darkmagenta", 0x8B008B},
+    {"darkolivegreen", 0x556B2F},
+    {"darkorange", 0xFF8C00},
+    {"darkorchid", 0x9932CC},
+    {"darkred", 0x8B0000},
+    {"darksalmon", 0xE9967A},
+    {"darkseagreen", 0x8FBC8F},
+    {"darkslateblue", 0x483D8B},
+    {"darkslategray", 0x2F4F4F},
+    {"darkturquoise", 0x00CED1},
+    {"darkviolet", 0x9400D3},
+    {"deeppink", 0xFF1493},
+    {"deepskyblue", 0x00BFFF},
+    {"dimgray", 0x696969},
+    {"dodgerblue", 0x1E90FF},
+    {"firebrick", 0xB22222},
+    {"floralwhite", 0xFFFAF0},
+    {"forestgreen", 0x228B22},
+    {"fuchsia", 0xFF00FF},
+    {"gainsboro", 0xDCDCDC},
+    {"ghostwhite", 0xF8F8FF},
+    {"gold", 0xFFD700},
+    {"goldenrod", 0xDAA520},
+    {"gray", 0x808080},
+    {"green", 0x008000},
+    {"greenyellow", 0xADFF2F},
+    {"honeydew", 0xF0FFF0},
+    {"hotpink", 0xFF69B4},
+    {"indianred", 0xCD5C5C},
+    {"indigo", 0x4B0082},
+    {"ivory", 0xFFFFF0},
+    {"khaki", 0xF0E68C},
+    {"lavender", 0xE6E6FA},
+    {"lavenderblush", 0xFFF0F5},
+    {"lawngreen", 0x7CFC00},
+    {"lemonchiffon", 0xFFFACD},
+    {"lightblue", 0xADD8E6},
+    {"lightcoral", 0xF08080},
+    {"lightcyan", 0xE0FFFF},
+    {"lightgoldenrodyellow", 0xFAFAD2},
+    {"lightgreen", 0x90EE90},
+    {"lightgrey", 0xD3D3D3},
+    {"lightpink", 0xFFB6C1},
+    {"lightsalmon", 0xFFA07A},
+    {"lightseagreen", 0x20B2AA},
+    {"lightskyblue", 0x87CEFA},
+    {"lightslategray", 0x778899},
+    {"lightsteelblue", 0xB0C4DE},
+    {"lightyellow", 0xFFFFE0},
+    {"lime", 0x00FF00},
+    {"limegreen", 0x32CD32},
+    {"linen", 0xFAF0E6},
+    {"magenta", 0xFF00FF},
+    {"maroon", 0x800000},
+    {"mediumaquamarine", 0x66CDAA},
+    {"mediumblue", 0x0000CD},
+    {"mediumorchid", 0xBA55D3},
+    {"mediumpurple", 0x9370DB},
+    {"mediumseagreen", 0x3CB371},
+    {"mediumslateblue", 0x7B68EE},
+    {"mediumspringgreen", 0x00FA9A},
+    {"mediumturquoise", 0x48D1CC},
+    {"mediumvioletred", 0xC71585},
+    {"midnightblue", 0x191970},
+    {"mintcream", 0xF5FFFA},
+    {"mistyrose", 0xFFE4E1},
+    {"moccasin", 0xFFE4B5},
+    {"navajowhite", 0xFFDEAD},
+    {"navy", 0x000080},
+    {"oldlace", 0xFDF5E6},
+    {"olive", 0x808000},
+    {"olivedrab", 0x6B8E23},
+    {"orange", 0xFFA500},
+    {"orangered", 0xFF4500},
+    {"orchid", 0xDA70D6},
+    {"palegoldenrod", 0xEEE8AA},
+    {"palegreen", 0x98FB98},
+    {"paleturquoise", 0xAFEEEE},
+    {"palevioletred", 0xDB7093},
+    {"papayawhip", 0xFFEFD5},
+    {"peachpuff", 0xFFDAB9},
+    {"peru", 0xCD853F},
+    {"pink", 0xFFC0CB},
+    {"plum", 0xDDA0DD},
+    {"powderblue", 0xB0E0E6},
+    {"purple", 0x800080},
+    {"red", 0xFF0000},
+    {"rosybrown", 0xBC8F8F},
+    {"royalblue", 0x4169E1},
+    {"saddlebrown", 0x8B4513},
+    {"salmon", 0xFA8072},
+    {"sandybrown", 0xF4A460},
+    {"seagreen", 0x2E8B57},
+    {"seashell", 0xFFF5EE},
+    {"sienna", 0xA0522D},
+    {"silver", 0xC0C0C0},
+    {"skyblue", 0x87CEEB},
+    {"slateblue", 0x6A5ACD},
+    {"slategray", 0x708090},
+    {"snow", 0xFFFAFA},
+    {"springgreen", 0x00FF7F},
+    {"steelblue", 0x4682B4},
+    {"tan", 0xD2B48C},
+    {"teal", 0x008080},
+    {"thistle", 0xD8BFD8},
+    {"tomato", 0xFF6347},
+    {"turquoise", 0x40E0D0},
+    {"violet", 0xEE82EE},
+    {"wheat", 0xF5DEB3},
+    {"white", 0xFFFFFF},
+    {"whitesmoke", 0xF5F5F5},
+    {"yellow", 0xFFFF00},
+    {"yellowgreen", 0x9ACD32},
+};
+
 struct RalColor {
     const char* code;
     const char* name;
     Color color;
 };
 
-constexpr RalColor kRalColors[] = {
-    {"1003", "Signal Yellow", {0.9765f, 0.6627f, 0.0000f}},
-    {"1013", "Oyster White", {0.9137f, 0.8980f, 0.8078f}},
-    {"2004", "Pure Orange", {0.9059f, 0.3569f, 0.0706f}},
-    {"3000", "Flame Red", {0.6549f, 0.1608f, 0.1255f}},
-    {"3002", "Carmine Red", {0.6353f, 0.1373f, 0.1137f}},
-    {"3020", "Traffic Red", {0.8000f, 0.0235f, 0.0196f}},
-    {"4005", "Blue Lilac", {0.5137f, 0.3882f, 0.6157f}},
-    {"5002", "Ultramarine Blue", {0.1255f, 0.1294f, 0.3098f}},
-    {"5005", "Signal Blue", {0.0824f, 0.2824f, 0.5373f}},
-    {"5017", "Traffic Blue", {0.0000f, 0.3569f, 0.5490f}},
-    {"5018", "Turquoise Blue", {0.0196f, 0.5451f, 0.5490f}},
-    {"6002", "Leaf Green", {0.1529f, 0.3843f, 0.1882f}},
-    {"6005", "Moss Green", {0.0588f, 0.2627f, 0.2118f}},
-    {"6018", "Yellow Green", {0.3412f, 0.6510f, 0.2235f}},
-    {"7015", "Slate Grey", {0.3059f, 0.3294f, 0.3216f}},
-    {"7016", "Anthracite Grey", {0.2196f, 0.2431f, 0.2588f}},
-    {"7024", "Graphite Grey", {0.2706f, 0.2863f, 0.3059f}},
-    {"7035", "Light Grey", {0.8431f, 0.8431f, 0.8431f}},
-    {"7040", "Window Grey", {0.6157f, 0.6392f, 0.6510f}},
-    {"8017", "Chocolate Brown", {0.2706f, 0.1961f, 0.1804f}},
-    {"9001", "Cream", {0.9137f, 0.8784f, 0.8235f}},
-    {"9003", "Signal White", {0.9569f, 0.9569f, 0.9569f}},
-    {"9005", "Jet Black", {0.0392f, 0.0392f, 0.0510f}},
-    {"9010", "Pure White", {0.9686f, 0.9765f, 0.9373f}},
-};
+#include "RalClassicColors.inc"
 
 int closest_ral_index(Color color) {
     int result = 0;
@@ -309,6 +429,12 @@ MaterialEditorDialog::MaterialEditorDialog(const QString& library_path,
     apply_button_ = new QPushButton("Apply to Selection", action_buttons_row);
     auto* brush_button = new QPushButton(action_buttons_row);
     auto* color_button = new QPushButton("Color...", action_buttons_row);
+    auto* ral_button = new QPushButton("RAL...", action_buttons_row);
+    color_button->setObjectName("NamedMaterialColorButton");
+    ral_button->setObjectName("RalMaterialColorButton");
+    for (auto* button : {color_button, ral_button})
+        button->setFixedWidth(button->fontMetrics().horizontalAdvance("Color...") + 24);
+    ral_button->setToolTip("RAL Classic color chart");
     auto* pipette_button = new QPushButton(action_buttons_row);
     brush_button->setIcon(brush_icon());
     brush_button->setIconSize(QSize(42, 28));
@@ -320,6 +446,7 @@ MaterialEditorDialog::MaterialEditorDialog(const QString& library_path,
     action_buttons_layout->addWidget(apply_button_);
     action_buttons_layout->addWidget(brush_button);
     action_buttons_layout->addWidget(color_button);
+    action_buttons_layout->addWidget(ral_button);
     action_buttons_layout->addWidget(pipette_button);
     browser_layout->addWidget(action_buttons_row);
 
@@ -638,8 +765,122 @@ MaterialEditorDialog::MaterialEditorDialog(const QString& library_path,
     connect(save_button, &QPushButton::clicked, this, [this]() { SaveCurrentMaterial(); });
     connect(apply_button_, &QPushButton::clicked, this, [this]() { ApplyCurrentMaterial(); });
     connect(brush_button, &QPushButton::clicked, this, [this]() { emit RequestPaintMaterial(EditorMaterial()); });
+    connect(ral_button, &QPushButton::clicked, this, [this]() {
+        QDialog dialog(this);
+        dialog.setObjectName("RalMaterialColorDialog");
+        dialog.setWindowTitle("RAL Classic");
+        dialog.resize(820,650);dialog.setMinimumSize(460,360);
+        auto* layout=new QVBoxLayout(&dialog);
+        layout->addWidget(new QLabel("<b>RAL Classic</b> &nbsp; 216 colors",&dialog));
+        auto* filters=new QHBoxLayout;
+        auto* search=new QLineEdit(&dialog);search->setObjectName("RalColorSearch");
+        search->setPlaceholderText("Search RAL number, name or HEX");search->setClearButtonEnabled(true);
+        auto* series=new QComboBox(&dialog);series->setObjectName("RalColorSeries");
+        series->addItems({"All series","1 — Yellow / beige","2 — Orange","3 — Red","4 — Violet",
+            "5 — Blue","6 — Green","7 — Grey","8 — Brown","9 — White / black"});
+        filters->addWidget(search,1);filters->addWidget(series);layout->addLayout(filters);
+        auto* list=new QListWidget(&dialog);list->setObjectName("RalColorGrid");
+        list->setViewMode(QListView::IconMode);list->setMovement(QListView::Static);
+        list->setResizeMode(QListView::Adjust);list->setWrapping(true);
+        list->setIconSize(QSize(82,46));list->setGridSize(QSize(96,78));
+        list->setSpacing(2);list->setUniformItemSizes(true);
+        list->setStyleSheet("QListWidget { background: #f4f5f7; border: 1px solid #c8cdd3; }"
+            "QListWidget::item { color: #20252b; border: 2px solid transparent; border-radius: 4px; }"
+            "QListWidget::item:hover { background: #e0eafa; }"
+            "QListWidget::item:selected { background: #dbeaff; border-color: #2874c8; }");
+        layout->addWidget(list,1);
+        auto* selection=new QLabel("Select a color",&dialog);selection->setWordWrap(true);
+        layout->addWidget(selection);
+        auto* note=new QLabel("Screen colors are approximate. Use a physical RAL sample for paint matching.",&dialog);
+        note->setWordWrap(true);layout->addWidget(note);
+        auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);
+        layout->addWidget(buttons);
+        const QColor current=to_qcolor(ButtonColor(diffuse_button_));
+        for(int i=0;i<int(std::size(kRalColors));++i) {
+            const auto& entry=kRalColors[i];const QColor color=to_qcolor(entry.color);
+            QPixmap swatch(82,46);swatch.fill(color);
+            QPainter painter(&swatch);painter.setPen(QColor(0,0,0,45));painter.drawRect(0,0,81,45);painter.end();
+            auto* item=new QListWidgetItem(QIcon(swatch),QString("RAL %1").arg(entry.code),list);
+            item->setData(Qt::UserRole,i);
+            item->setToolTip(QString("RAL %1 — %2\n%3").arg(entry.code,entry.name,color.name().toUpper()));
+            if(color.rgb()==current.rgb()&&!list->currentItem())list->setCurrentItem(item);
+        }
+        const auto refresh=[=]() {
+            auto* item=list->currentItem();const bool selected=item&&!item->isHidden();
+            buttons->button(QDialogButtonBox::Ok)->setEnabled(selected);
+            selection->setText(selected?item->toolTip().replace('\n',"   "):"Select a color");
+        };
+        const auto filter=[=]() {
+            for(int i=0;i<list->count();++i) {
+                auto* item=list->item(i);const auto& entry=kRalColors[item->data(Qt::UserRole).toInt()];
+                item->setHidden((series->currentIndex()>0&&entry.code[0]-'0'!=series->currentIndex())
+                    ||!item->toolTip().contains(search->text().trimmed(),Qt::CaseInsensitive));
+            }
+            refresh();
+        };
+        connect(search,&QLineEdit::textChanged,&dialog,[=](){filter();});
+        connect(series,qOverload<int>(&QComboBox::currentIndexChanged),&dialog,[=](){filter();});
+        connect(list,&QListWidget::currentItemChanged,&dialog,[=](){refresh();});
+        connect(list,&QListWidget::itemDoubleClicked,&dialog,[&dialog](){dialog.accept();});
+        connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);
+        connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+        refresh();if(list->currentItem())list->scrollToItem(list->currentItem());
+        if(dialog.exec()!=QDialog::Accepted||!list->currentItem()||list->currentItem()->isHidden())return;
+        const int index=list->currentItem()->data(Qt::UserRole).toInt();
+        {const QSignalBlocker blocker(ral_combo_);ral_combo_->setCurrentIndex(index);}
+        SetColorButton(diffuse_button_,kRalColors[index].color);
+        CommitEditorChanges();
+    });
     connect(color_button, &QPushButton::clicked, this, [this]() {
-        QMessageBox::information(this, "Material Color", "Color dialog will be connected in the next step.");
+        QDialog dialog(this);
+        dialog.setObjectName("NamedMaterialColorDialog");
+        dialog.setWindowTitle("Color Material");
+        dialog.resize(380, 560);
+        auto* layout = new QVBoxLayout(&dialog);
+        auto* search = new QLineEdit(&dialog);
+        search->setPlaceholderText("Search color name or #RRGGBB");
+        search->setClearButtonEnabled(true);
+        layout->addWidget(search);
+        auto* list = new QListWidget(&dialog);
+        list->setIconSize(QSize(48, 24));
+        list->setUniformItemSizes(true);
+        layout->addWidget(list);
+        const QColor current = to_qcolor(ButtonColor(diffuse_button_));
+        for (const auto& entry : kNamedMaterialColors) {
+            const QColor color = QColor::fromRgb(entry.rgb);
+            QPixmap swatch(48, 24); swatch.fill(color);
+            QPainter painter(&swatch);
+            painter.setPen(QColor(100,100,100)); painter.drawRect(0,0,47,23);
+            painter.end();
+            auto* item = new QListWidgetItem(QIcon(swatch), QString::fromLatin1(entry.name), list);
+            item->setData(Qt::UserRole, color);
+            item->setToolTip(color.name().toUpper());
+            item->setSizeHint(QSize(0, 30));
+            if (!list->currentItem() && color.rgb() == current.rgb()) list->setCurrentItem(item);
+        }
+        if (list->currentItem()) list->scrollToItem(list->currentItem());
+        auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+        layout->addWidget(buttons);
+        const auto update_ok = [=]() {
+            buttons->button(QDialogButtonBox::Ok)->setEnabled(list->currentItem() && !list->currentItem()->isHidden());
+        };
+        connect(list, &QListWidget::currentItemChanged, &dialog, [=]() { update_ok(); });
+        connect(search, &QLineEdit::textChanged, &dialog, [=](const QString& text) {
+            for (int i=0; i<list->count(); ++i) {
+                auto* item=list->item(i);
+                item->setHidden(!item->text().contains(text.trimmed(), Qt::CaseInsensitive)
+                    && !item->toolTip().contains(text.trimmed(), Qt::CaseInsensitive));
+            }
+            update_ok();
+        });
+        connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        connect(list, &QListWidget::itemDoubleClicked, &dialog, [&dialog]() { dialog.accept(); });
+        update_ok();
+        if (dialog.exec() != QDialog::Accepted || !list->currentItem() || list->currentItem()->isHidden()) return;
+        const QColor color = list->currentItem()->data(Qt::UserRole).value<QColor>();
+        SetColorButton(diffuse_button_, {float(color.redF()), float(color.greenF()), float(color.blueF())});
+        CommitEditorChanges();
     });
     connect(pipette_button, &QPushButton::clicked, this, [this]() { emit RequestPickObjectMaterial(); });
     connect(close_button, &QPushButton::clicked, this, &QDialog::accept);

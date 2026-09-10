@@ -40,9 +40,14 @@ StructuredBodyPlan PlanStructuredBody(const BoundarySnapshot& s,double density) 
         }
         p.cornerOccurrences.push_back(std::move(corners));p.splitCornerEdges.push_back(ids.size()==8);
     }
-    // Roll out the new consumer to closed rounded patch bodies first. Existing
-    // simple solids, holes, seams and general quilts keep their current path.
-    if(!hasEight) return p;
+    // Extend the rounded-patch consumer to closed annular four-sided quilts.
+    // Their through opening is formed by the body, not by a hole in a face:
+    // V-E+F=0 with the single-wire faces checked above. Independent face grids
+    // leave gaps at their mitres and cylindrical trims. Keep existing sampling
+    // for simple solids and spherical quilts outside this rollout.
+    const auto euler=static_cast<long long>(s.vertices().size())
+        -static_cast<long long>(s.edges().size())+static_cast<long long>(s.faces().size());
+    if(!hasEight&&euler!=0) return p;
     gp_Pnt lo=s.vertices().front().xyz,hi=lo;
     for(const auto& v:s.vertices())for(int k=1;k<=3;++k){lo.SetCoord(k,std::min(lo.Coord(k),v.xyz.Coord(k)));hi.SetCoord(k,std::max(hi.Coord(k),v.xyz.Coord(k)));}
     const double diagonal=lo.Distance(hi);

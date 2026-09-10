@@ -1,0 +1,76 @@
+--- a/raytrace/render.cpp
++++ b/raytrace/render.cpp
+@@ -320,40 +320,40 @@
+ Bgr
+ Render::renderPixel(Int x, Int y, Size & rayCount)
+ {
+-	Ray ray;
+-	Color c(0, 0, 0);
+-
+-	Int antiAliasLevel = *m_antiAliasLevel;
+-	Float dx = Float(1) / antiAliasLevel;
+-	Float sx = x - (Float(.5) - (dx / 2));
+-	Float fy = y - (Float(.5) - (dx / 2));
+-	for (Int iy=0; iy<antiAliasLevel; ++iy, fy+=dx) {
+-		
+-		Float fx = sx;
+-		for (Int ix=0; ix<antiAliasLevel; ++ix, fx+=dx) {
+-			
+-			Color ic;
+-			if (unproject(fx, fy, 0, ray.orig) &&
+-				unproject(fx, fy, Float(1.0), ray.dir)) {
+-				sub(ray.dir, ray.dir, ray.orig);
+-				ray.dir.normalize();
+-				traceRay(ray, 1, ic, 0, rayCount);
++	// Refine contrast within a pixel, not the finished image. In particular,
++	// four primary samples only provide five silhouette coverage levels.
++	Int level = std::max(Int(1), static_cast<Int>(*m_antiAliasLevel));
++	for (;;) {
++		Ray ray;
++		Color c(0, 0, 0);
++		Color low(MAX_DIST, MAX_DIST, MAX_DIST), high(-MAX_DIST, -MAX_DIST, -MAX_DIST);
++		const Float step = Float(1) / level;
++		for (Int iy=0; iy<level; ++iy) {
++			const Float fy = y-Float(.5)+(Float(iy)+Float(.5))*step;
++			for (Int ix=0; ix<level; ++ix) {
++				const Float fx = x-Float(.5)+(Float(ix)+Float(.5))*step;
++				Color sample(0, 0, 0);
++				if (unproject(fx, fy, 0, ray.orig) &&
++					unproject(fx, fy, Float(1), ray.dir)) {
++					sub(ray.dir, ray.dir, ray.orig);
++					ray.dir.normalize();
++					traceRay(ray, 1, sample, 0, rayCount);
++				}
++				c.r += sample.r; c.g += sample.g; c.b += sample.b;
++				low.r=std::min(low.r, sample.r); high.r=std::max(high.r, sample.r);
++				low.g=std::min(low.g, sample.g); high.g=std::max(high.g, sample.g);
++				low.b=std::min(low.b, sample.b); high.b=std::max(high.b, sample.b);
+ 			}
+-			else
+-				ic = Color(0, 0, 0);
+-			
+-			c.r += ic.r;
+-			c.g += ic.g;
+-			c.b += ic.b;
+-		}
+-	}
+-
+-	Size square = antiAliasLevel * antiAliasLevel;
+-	c.r /= square;
+-	c.g /= square;
+-	c.b /= square;
+-
+-	return c.bgr();
++		}
++		const Float contrast = std::max({high.r-low.r, high.g-low.g, high.b-low.b});
++		if (level > 1 && level < 8 && contrast > Float(.04)) {
++			level = 8;
++			continue;
++		}
++		const Float count = Float(level*level);
++		c.r /= count; c.g /= count; c.b /= count;
++		return c.bgr();
++	}
+ }
+ 
+ void

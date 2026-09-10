@@ -1,3 +1,5 @@
+#include "../SurfaceRevolveProfile.h"
+#include "KitchenLayout.h"
 #include "TileTool.h"
 #include "ToolRegistry.h"
 #include "../ExtrudeShapeBuilder.h"
@@ -29,6 +31,7 @@
 #include "../solid/TwoSketchSolidBuilder.h"
 #include "../solid/PlaneShapeBuilder.h"
 #include "../solid/PolyhedronShapeBuilder.h"
+#include "../solid/PolyhedronProfileAxis.h"
 #include "../solid/SketchFeatureShapeBuilder.h"
 #include "../solid/OffsetFaceShapeBuilder.h"
 #include "../solid/SheetBendShapeBuilder.h"
@@ -1578,7 +1581,7 @@ void assign_furniture_materials(
                                   && !is_round_handle_face)
             || name.find("Guide") != std::string::npos
             || (name.find("Leg") != std::string::npos
-                && (tool_id == "drawer_box" || is_kitchen));
+                && (tool_id == "drawer_box" || tool_id == "cabinet" || is_kitchen));
         const bool is_top = (tool_id == "table" && name == "Table Top")
             || (is_kitchen && name.find("Worktop") != std::string::npos);
         const Material* selected_material =
@@ -2234,7 +2237,7 @@ Vec3 hole_center_from_references(const std::vector<ToolParameter>& parameters) {
     return result;
 }
 
-bool apply_hole(CSolid& solid, const std::vector<ToolParameter>& parameters) {
+bool apply_hole(CSolid& solid, const std::vector<ToolParameter>& parameters, size_t operation_index) {
     if (solid.m_Shape.IsNull())
         return false;
     const double diameter = param(parameters, "diameter", 10.0);
@@ -2294,7 +2297,10 @@ bool apply_hole(CSolid& solid, const std::vector<ToolParameter>& parameters) {
     }
     solid.ClearSelectedEdge();
     solid.ClearSelectedFace();
-    return solid.ReBuldMesh();
+    if (!solid.ReBuldMesh()) return false;
+    solid.SetAxis("hole:" + std::to_string(operation_index), SolidCenterlineKind::HoleAxis,
+                  center, inward, 0.0, hole_type == 0 ? std::numeric_limits<double>::infinity() : requested_depth);
+    return true;
 }
 
 bool apply_sheet_bend(CSolid& solid,
@@ -2310,6 +2316,7 @@ bool apply_sheet_bend(CSolid& solid,
     bend.inner_radius = param(parameters, "radius", 2.0);
     bend.angle_degrees = param(parameters, "angle", 90.0);
     bend.clockwise = param(parameters, "direction", 0.0) < 0.5;
+    bend.reverse_side = param(parameters, "side", saved_param(saved_parameters, "side", 0.0)) > 0.5;
 
     TopoDS_Shape result;
     std::string error_message;
@@ -2460,7 +2467,8 @@ bool apply_thick_solid(CSolid& solid,
     return solid.ReBuldMesh();
 }
 
-bool apply_solid_shape_transform(CSolid& solid, const gp_Trsf& transform) {
+bool apply_solid_shape_transform(CSolid& solid, const gp_Trsf& transform, bool centerlines_only = false) {
+    if (centerlines_only) { solid.TransformCenterlines(transform); return true; }
     if (solid.m_Shape.IsNull()) {
         return false;
     }
@@ -2479,11 +2487,13 @@ bool apply_solid_shape_transform(CSolid& solid, const gp_Trsf& transform) {
         return false;
     }
     solid.ClearSelectedEdge();
+    solid.TransformCenterlines(transform);
     solid.ClearSelectedFace();
     return solid.ReBuldMesh();
 }
 
-bool apply_solid_shape_transform(CSolid& solid, const gp_GTrsf& transform) {
+bool apply_solid_shape_transform(CSolid& solid, const gp_GTrsf& transform, bool centerlines_only = false) {
+    if (centerlines_only) { solid.TransformCenterlines(transform); return true; }
     if (solid.m_Shape.IsNull()) {
         return false;
     }
@@ -2502,18 +2512,19 @@ bool apply_solid_shape_transform(CSolid& solid, const gp_GTrsf& transform) {
         return false;
     }
     solid.ClearSelectedEdge();
+    solid.TransformCenterlines(transform);
     solid.ClearSelectedFace();
     return solid.ReBuldMesh();
 }
 
-bool apply_solid_transform(CSolid& solid, const std::vector<ToolParameter>& parameters) {
-    const int type = std::clamp(static_cast<int>(param(parameters, "type", 0.0)), 0, 2);
+bool apply_solid_transform(CSolid& solid, const std::vector<ToolParameter>& parameters, bool centerlines_only = false) {
+    const int type = std::clamp(static_cast<int>(param(parameters, "type", 0.0)), 0, 3);
     if (type == 0) {
         gp_Trsf transform;
         transform.SetTranslation(gp_Vec(param(parameters, "dx", 0.0),
                                         param(parameters, "dy", 0.0),
                                         param(parameters, "dz", 0.0)));
-        return apply_solid_shape_transform(solid, transform);
+        return apply_solid_shape_transform(solid, transform, centerlines_only);
     }
 
     const Vec3 center{
@@ -2527,6 +2538,12 @@ bool apply_solid_transform(CSolid& solid, const std::vector<ToolParameter>& para
         static_cast<float>(param(parameters, "axis.z", 1.0))
     };
     const Vec3 unit_axis = normalize(axis);
+    if (type == 3) {
+        if (dot(unit_axis, unit_axis) <= 0.000001f) return false;
+        gp_Trsf transform;
+        transform.SetMirror(gp_Ax2(gp_Pnt(center.x,center.y,center.z), gp_Dir(unit_axis.x,unit_axis.y,unit_axis.z)));
+        return apply_solid_shape_transform(solid, transform, centerlines_only);
+    }
 
     if (type == 1) {
         const double angle = param(parameters, "angle", 0.0);
@@ -2537,7 +2554,7 @@ bool apply_solid_transform(CSolid& solid, const std::vector<ToolParameter>& para
         transform.SetRotation(gp_Ax1(gp_Pnt(center.x, center.y, center.z),
                                      gp_Dir(unit_axis.x, unit_axis.y, unit_axis.z)),
                               angle);
-        return apply_solid_shape_transform(solid, transform);
+        return apply_solid_shape_transform(solid, transform, centerlines_only);
     }
 
     const double factor = param(parameters, "factor", 1.0);
@@ -2547,7 +2564,7 @@ bool apply_solid_transform(CSolid& solid, const std::vector<ToolParameter>& para
     if (dot(unit_axis, unit_axis) <= 0.000001f) {
         gp_Trsf transform;
         transform.SetScale(gp_Pnt(center.x, center.y, center.z), factor);
-        return apply_solid_shape_transform(solid, transform);
+        return apply_solid_shape_transform(solid, transform, centerlines_only);
     }
 
     const double k = factor - 1.0;
@@ -2574,7 +2591,7 @@ bool apply_solid_transform(CSolid& solid, const std::vector<ToolParameter>& para
     transform.SetValue(3, 2, m21);
     transform.SetValue(3, 3, m22);
     transform.SetValue(3, 4, center.z - (m20 * center.x + m21 * center.y + m22 * center.z));
-    return apply_solid_shape_transform(solid, transform);
+    return apply_solid_shape_transform(solid, transform, centerlines_only);
 }
 
 enum class BooleanKind {
@@ -2641,6 +2658,8 @@ bool apply_boolean_tool(CSolid& solid, const std::vector<ToolParameter>& paramet
     }
 
     solid.m_Shape = result_shape;
+    solid.AppendCenterlinesFrom(*tool, "boolean:" + std::to_string(tool_index) + ":",
+        boolean_kind_from_parameter(param(parameters, "operation", 0.0)) == BooleanKind::Cut);
     solid.ClearSelectedEdge();
     solid.ClearSelectedFace();
     return solid.ReBuldMesh();
@@ -2942,17 +2961,15 @@ bool rebuild_polyhedron_base(
             static_cast<float>(point.y),
             static_cast<float>(point.z)});
     }
-    const SketchCoordinateSystem& system = profile->GetCoordinateSystem();
-    const Vec3 axis_origin{
-        static_cast<float>(system.origin.x),
-        static_cast<float>(system.origin.y),
-        static_cast<float>(system.origin.z)};
+    // X/Y/Z denote the visible world axes, not parallel axes through the sketch origin.
+    const Vec3 axis_origin{};
     const int axis_index = std::clamp(
         static_cast<int>(param(parameters, "axis", 2.0)), 0, 2);
     const int turns = std::max(
         3, static_cast<int>(param(parameters, "turns", 8.0)));
 
     const Vec3 axis_direction = revolve_axis_direction(axis_index);
+    if (!IsPolyhedronProfileAxisValid(*profile, axis_direction)) return false;
     TopoDS_Shape shape;
     bool shape_built = false;
     if (profile->IsClosed()) {
@@ -3017,6 +3034,7 @@ bool rebuild_polyhedron_base(
     }
 
     auto solid = std::make_unique<CSolid>(shape);
+    solid->SetAxis("base:rotation", SolidCenterlineKind::RotationAxis, axis_origin, axis_direction);
     solid->m_id = old_solid->m_id;
     solid->SetName(old_solid->GetName());
     solid->SetColor(old_solid->GetColor());
@@ -3111,7 +3129,8 @@ bool rebuild_revolve_base(CAlfaDoc& document,
     const auto* sketch = dynamic_cast<const CSmartLine*>(profile_object);
     const double angle_degrees = param(parameters, "angle", 360.0);
     const int axis_index = std::clamp(static_cast<int>(param(parameters, "axis", 2.0)), 0, 2);
-    if (!old_solid || (!profile && !sketch) || angle_degrees <= 0.0001) {
+    const bool surface = dynamic_cast<const CSurfaceSet*>(old_solid) != nullptr;
+    if (!old_solid || (!profile && !sketch && !(surface && dynamic_cast<const CBSpline*>(profile_object))) || angle_degrees <= 0.0001) {
         return false;
     }
 
@@ -3119,7 +3138,9 @@ bool rebuild_revolve_base(CAlfaDoc& document,
     Vec3 axis_origin{};
     Vec3 axis = revolve_axis_direction(axis_index);
     bool profile_built = false;
-    if (sketch) {
+    if (surface) {
+        profile_built = BuildSurfaceRevolveProfile(*profile_object, profile_shape, axis_origin);
+    } else if (sketch) {
         TopoDS_Face sketch_face;
         Vec3 sketch_normal{};
         const SketchCoordinateSystem& system =
@@ -3141,7 +3162,8 @@ bool rebuild_revolve_base(CAlfaDoc& document,
         profile_built = build_revolve_profile(
             *profile, axis_index, profile_shape, axis_origin);
     }
-    if (!profile_built || dot(axis, axis) <= 1.0e-12f) {
+    if (!profile_built || dot(axis, axis) <= 1.0e-12f
+        || (!surface && !SolidRevolveAxisInProfilePlane(profile_shape, axis))) {
         return false;
     }
 
@@ -3161,11 +3183,15 @@ bool rebuild_revolve_base(CAlfaDoc& document,
     } catch (const Standard_Failure&) {
         return false;
     }
-    if (shape.IsNull()) {
+    if (shape.IsNull() || !BRepCheck_Analyzer(shape).IsValid()
+        || (!surface && !TopExp_Explorer(shape, TopAbs_SOLID).More())) {
         return false;
     }
 
-    auto solid = std::make_unique<CSolid>(shape);
+    std::unique_ptr<CSolid> solid;
+    if (surface) solid = std::make_unique<CSurfaceSet>(shape);
+    else solid = std::make_unique<CSolid>(shape);
+    solid->SetAxis("base:rotation", SolidCenterlineKind::RotationAxis, axis_origin, axis);
     solid->m_id = old_solid->m_id;
     solid->SetName(old_solid->GetName());
     solid->SetColor(old_solid->GetColor());
@@ -3270,6 +3296,9 @@ bool rebuild_solid_operation_tree(const ToolRegistry& registry,
                                   parameters_for_operation(registry, base_operation))) {
             return false;
         }
+    } else if (base_operation.tool_id == "SolidPolyhedronTool") {
+        if (!rebuild_polyhedron_base(document, active_object.object_index,
+                parameters_for_operation(registry, base_operation))) return false;
     } else if (base_operation.tool_id == "SolidTwoSketches") {
         if (!rebuild_two_sketch_base(
                 document,
@@ -3277,7 +3306,7 @@ bool rebuild_solid_operation_tree(const ToolRegistry& registry,
                 parameters_for_operation(registry, base_operation))) {
             return false;
         }
-    } else if (base_operation.tool_id == "SurfaceOfRevolution") {
+    } else if ((base_operation.tool_id == "SurfaceOfRevolution" || base_operation.tool_id == "SurfaceRevolve")) {
         if (!rebuild_revolve_base(document,
                                   active_object.object_index,
                                   parameters_for_operation(registry, base_operation))) {
@@ -3378,7 +3407,7 @@ bool rebuild_solid_operation_tree(const ToolRegistry& registry,
         } else if (operation.tool_id == "SolidHole") {
             const std::vector<ToolParameter> parameters =
                 parameters_for_operation(registry, operation);
-            if (!apply_hole(*solid, parameters)) {
+            if (!apply_hole(*solid, parameters, i)) {
                 return false;
             }
         } else if (operation.tool_id == "SolidDraft") {
@@ -4163,8 +4192,15 @@ KitchenCabinetDefinition kitchen_cabinet_definition(
     definition.right_door_open_angle = std::clamp(
         param(parameters, "right_door_open_angle", definition.door_open_angle),
         0.0, 180.0);
+    definition.door_axis = static_cast<int>(param(parameters,"door_axis",0.0));
     definition.door_hinge_side = std::clamp(
         static_cast<int>(param(parameters, "door_hinge_side", 0.0)), 0, 1);
+    // SLX uses its own handle selector and replaces the generated handle later.
+    const bool slx_handles=std::any_of(parameters.begin(),parameters.end(),[](const ToolParameter& p){return p.id=="slx.handle.id";});
+    definition.handle_type = slx_handles?0:static_cast<int>(param(parameters,"handle_type",0));
+    definition.make_legs = param(parameters,"make_legs",0)>=0.5;
+    definition.leg_height = param(parameters,"leg_height",100);
+    definition.leg_inset = param(parameters,"leg_inset",20);
     definition.handle_orientation = std::clamp(
         static_cast<int>(param(parameters, "handle_orientation", 0.0)), 0, 1);
     definition.width = std::max(1.0, param(parameters, "width", 600.0));
@@ -4735,9 +4771,11 @@ bool rebuild_wire_base(CAlfaDoc& document,
         || dynamic_cast<const CBSpline*>(path);
     const double radius = param(parameters, "radius", 10.0);
     if (!old_solid || !path || !supported) return false;
-    TopoDS_Shape shape = BuildWireSolidShape(*path, radius);
+    TopoDS_Wire center_path;
+    TopoDS_Shape shape = BuildWireSolidShape(*path, radius, &center_path);
     if (shape.IsNull()) return false;
     auto solid = std::make_unique<CSolid>(shape);
+    solid->SetCenterlinePath("base:path", center_path);
     solid->m_id = old_solid->m_id;
     solid->SetName(old_solid->GetName());
     solid->SetColor(old_solid->GetColor());
@@ -5015,6 +5053,7 @@ DrawerBoxDefinition drawer_box_definition(
         const double fallback = drawer == 2 ? 400.0 : 200.0;
         result.drawer_heights.push_back(std::max(40.0, param(parameters, id.c_str(), fallback)));
     }
+    result.leg_inset = param(parameters,"leg_inset",20);
     result.make_legs = param(parameters, "make_legs", 1.0) >= 0.5;
     result.leg_height = std::clamp(
         param(parameters, "leg_height", 100.0), 20.0, 300.0);
@@ -6972,6 +7011,8 @@ void apply_boolean_to_selected_solids(CAlfaDoc& document, BooleanKind kind, cons
     }
 
     auto result = std::make_unique<CSolid>(result_shape);
+    result->CopyCenterlinesFrom(*first_solid);
+    result->AppendCenterlinesFrom(*second_solid, "boolean:", kind == BooleanKind::Cut);
     result->SetName(result_name);
     result->SetColor(kDefaultSolidObjectColor);
     result->ReBuldMesh();
@@ -7339,7 +7380,20 @@ ToolRegistry::ToolRegistry() {
 
     tools_.push_back({
         "SurfaceOfRevolution",
-        "Revolve",
+        "Solid Revolve",
+        {
+            {"angle", "Angle", 360.0, 0.0, 360.0, 1.0},
+            {"axis", "Axis", 2.0, 0.0, 2.0, 1.0, ToolParameterType::Combo, {"Axis X", "Axis Y", "Axis Z"}},
+            {"profile.id", "Profile ID", 0.0, 0.0, 1000000000.0, 1.0}
+        },
+        [](CAlfaDoc&, const std::vector<ToolParameter>&) {
+        },
+        [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {
+        }
+    });
+    tools_.push_back({
+        "SurfaceRevolve",
+        "Surface Revolve",
         {
             {"angle", "Angle", 360.0, 0.0, 360.0, 1.0},
             {"axis", "Axis", 2.0, 0.0, 2.0, 1.0, ToolParameterType::Combo, {"Axis X", "Axis Y", "Axis Z"}},
@@ -7611,7 +7665,7 @@ ToolRegistry::ToolRegistry() {
 
     tools_.push_back({
         "CurveLinkedBridge",
-        "Link Curves",
+        "Bridge Curves",
         {
             {"mode", "Connection", 1.0, 0.0, 1.0, 1.0,
                 ToolParameterType::Combo, {"Straight", "Smooth"}},
@@ -7635,6 +7689,7 @@ ToolRegistry::ToolRegistry() {
 
     for (const auto& curve_edit :
          std::vector<std::pair<std::string, std::string>>{
+              {"CurveEndpointLink", "Link Curves"},
               {"CurveJoin", "Join"},
               {"CurveSplit", "Split at Intersection"},
               {"CurveCutByCurve", "Cut Curve"},
@@ -8026,14 +8081,20 @@ ToolRegistry::ToolRegistry() {
                 ToolParameterType::Number, {}, ToolParameterUnit::Angle},
             {"right_door_open_angle", "Right Door Angle", 0.0, 0.0, 150.0, 5.0,
                 ToolParameterType::Number, {}, ToolParameterUnit::Angle},
+            {"door_axis", "Door Axis",0,0,1,1,ToolParameterType::Combo,{"Vertical","Horizontal"}},
             {"door_hinge_side", "Door Hinge", 0.0, 0.0, 1.0, 1.0,
                 ToolParameterType::Combo, {"Left", "Right"}},
+            {"handle_type", "Handle Type", 0,0,3,1,ToolParameterType::Combo,{"Modern","Classic","Knob","None"}},
+            {"make_legs", "Make Legs", 0,0,1,1,ToolParameterType::Checkbox},
+            {"leg_height", "Leg Height",100,20,300,10,ToolParameterType::Number,{},ToolParameterUnit::Length},
+            {"leg_inset", "Leg Inset",20,0,200,5,ToolParameterType::Number,{},ToolParameterUnit::Length},
             {"handle_orientation", "Handle", 0.0, 0.0, 1.0, 1.0,
                 ToolParameterType::Combo, {"Horizontal", "Vertical"}},
             {"body_material_id", "Body Material", 0.0, 0.0, 4294967295.0, 1.0,
                 ToolParameterType::Material},
             {"facade_material_id", "Facade Material", 0.0, 0.0, 4294967295.0, 1.0,
-                ToolParameterType::Material}
+                ToolParameterType::Material},
+            {"hardware_material_id", "Handles / Legs Material", 0.0, 0.0, 4294967295.0, 1.0,ToolParameterType::Material}
     };
 
     tools_.push_back({
@@ -8060,6 +8121,10 @@ ToolRegistry::ToolRegistry() {
             {"shelf_count", "Shelf Count", 2.0, 0.0, 20.0, 1.0},
             {"door_open_angle", "Door Open Angle", 0.0, 0.0, 150.0, 5.0,
                 ToolParameterType::Number, {}, ToolParameterUnit::Angle},
+            {"handle_type", "Handle Type", 0,0,3,1,ToolParameterType::Combo,{"Modern","Classic","Knob","None"}},
+            {"make_legs", "Make Legs", 0,0,1,1,ToolParameterType::Checkbox},
+            {"leg_height", "Leg Height",100,20,300,10,ToolParameterType::Number,{},ToolParameterUnit::Length},
+            {"leg_inset", "Leg Inset",20,0,200,5,ToolParameterType::Number,{},ToolParameterUnit::Length},
             {"handle_orientation", "Handle", 0.0, 0.0, 1.0, 1.0,
                 ToolParameterType::Combo, {"Horizontal", "Vertical"}},
             {"body_material_id", "Body Material", 0.0, 0.0, 4294967295.0, 1.0,
@@ -8133,7 +8198,10 @@ ToolRegistry::ToolRegistry() {
                 ToolParameterType::Number, {}, ToolParameterUnit::Angle},
             {"direction", "Direction", 0.0, 0.0, 1.0, 1.0,
                 ToolParameterType::Combo,
-                {"Clockwise", "Counterclockwise"}}
+                {"Clockwise", "Counterclockwise"}},
+            {"side", "Moving Side", 0.0, 0.0, 1.0, 1.0,
+                ToolParameterType::Combo,
+                {"Right of line", "Left of line"}}
         },
         [](CAlfaDoc&, const std::vector<ToolParameter>&) {
         },
@@ -8165,6 +8233,7 @@ ToolRegistry::ToolRegistry() {
     });
 
     std::vector<ToolParameter> cabinet_slx_parameters = cabinet_advanced_parameters;
+    cabinet_slx_parameters.erase(std::remove_if(cabinet_slx_parameters.begin(),cabinet_slx_parameters.end(),[](const ToolParameter& p){return p.id=="handle_type";}),cabinet_slx_parameters.end());
     cabinet_slx_parameters.insert(
         cabinet_slx_parameters.begin(),
         {
@@ -8233,6 +8302,7 @@ ToolRegistry::ToolRegistry() {
             {"shelf_count", "Shelf Count", 2.0, 0.0, 20.0, 1.0},
             {"door_open_angle", "Door Open Angle", 0.0, 0.0, 150.0, 5.0,
                 ToolParameterType::Number, {}, ToolParameterUnit::Angle},
+            {"door_axis", "Door Axis",0,0,1,1,ToolParameterType::Combo,{"Vertical","Horizontal"}},
             {"door_hinge_side", "Door Hinge", 0.0, 0.0, 1.0, 1.0,
                 ToolParameterType::Combo, {"Left", "Right"}},
             {"handle_orientation", "Handle", 0.0, 0.0, 1.0, 1.0,
@@ -8520,6 +8590,7 @@ ToolRegistry::ToolRegistry() {
                 ToolParameterType::Number, {}, ToolParameterUnit::Length},
             {"drawer_height_6", "Drawer 6 Height", 200.0, 50.0, 1000.0, 10.0,
                 ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"leg_inset", "Leg Inset",20,0,200,5,ToolParameterType::Number,{},ToolParameterUnit::Length},
             {"make_legs", "Make Legs", 1.0, 0.0, 1.0, 1.0,
                 ToolParameterType::Checkbox},
             {"leg_height", "Leg Height", 100.0, 20.0, 300.0, 10.0,
@@ -8545,6 +8616,8 @@ ToolRegistry::ToolRegistry() {
             rebuild_drawer_box(document, index, parameters);
         }
     });
+
+    tools_.push_back({"kitchen_layout", "Kitchen Layout", {}, {}, {}});
 
     tools_.push_back({
         "kitchen_nika_260",
@@ -9183,7 +9256,7 @@ ActiveParametricObject ToolRegistry::ApplyHole(
     }
 
     const TopoDS_Shape previous_shape = body->m_Shape;
-    if (!apply_hole(*body, parameters))
+    if (!apply_hole(*body, parameters, static_cast<size_t>(body->GetNumOperations())))
         return {};
     const size_t operation_index =
         static_cast<size_t>(body->GetNumOperations());
@@ -9272,7 +9345,38 @@ bool ToolRegistry::ApplyOffsetFaceOnce(CAlfaDoc& document,
     return applied;
 }
 
+bool ToolRegistry::TryRebuildPolyhedron(const ActiveParametricObject& active_object, CAlfaDoc& document) const {
+    auto& objects = document.GetObjects();
+    if (active_object.object_index >= objects.size() || !objects[active_object.object_index]) return false;
+    auto candidate = objects[active_object.object_index]->Clone();
+    if (!candidate) return false;
+    auto backup = std::move(objects[active_object.object_index]);
+    candidate->m_id = backup->m_id;
+    candidate->m_LayerID = backup->m_LayerID;
+    candidate->SetName(backup->GetName());
+    objects[active_object.object_index] = std::move(candidate);
+    if (!rebuild_solid_operation_tree(*this, active_object, document)) {
+        objects[active_object.object_index] = std::move(backup);
+        return false;
+    }
+    document.UpdateAttachedSketches();
+    return true;
+}
+
 void ToolRegistry::Rebuild(const ActiveParametricObject& active_object, CAlfaDoc& document) const {
+    if (active_object.tool_id == "SolidPolyhedronTool") {
+        TryRebuildPolyhedron(active_object, document);
+        return;
+    }
+    if(active_object.object_index<document.GetObjects().size()) {
+        auto* object=document.GetObjects()[active_object.object_index].get();
+        if(object && FindKitchenModuleObject(document,object->m_id)==object && FindKitchenLayout(document,object->m_id)) {
+            std::string error;
+            if(!UpdateKitchenModuleParameters(document,object->m_id,parameter_values(active_object.parameters),error))QMessageBox::warning(nullptr,"Kitchen Layout",QString::fromStdString(error));
+            return;
+        }
+    }
+
     if (active_object.transient
         && (active_object.tool_id == "TrimByPlane"
             || active_object.tool_id == "TrimBySketch"
@@ -9454,6 +9558,11 @@ bool ToolRegistry::ApplyFurnitureMaterialParameter(
         document.GetObjects()[active_object.object_index].get());
     if (!assembly) {
         return false;
+    }
+    if(FindKitchenModuleObject(document,assembly->m_id)==assembly && FindKitchenLayout(document,assembly->m_id)) {
+        std::string error;
+        if(!UpdateKitchenModuleParameters(document,assembly->m_id,parameter_values(active_object.parameters),error))QMessageBox::warning(nullptr,"Kitchen Layout",QString::fromStdString(error));
+        return true;
     }
     const Material* material = material_parameter(
         document, active_object.parameters, parameter_id.c_str());
@@ -9850,4 +9959,66 @@ ActiveParametricObject ToolRegistry::ActiveObjectFromDocument(
 std::string ToolRegistry::LabelFor(const std::string& id) const {
     const ToolDefinition* tool = Find(id);
     return tool ? tool->label : id;
+}
+
+void RestoreMissingSolidCenterlines(CAlfaDoc& document) {
+    // Use saved construction data; imported faces alone do not establish
+    // whether a cylinder represents a hole, a fillet, or a rotational body.
+    ToolRegistry registry;
+    for (const auto& object : document.GetObjects()) {
+        auto* solid = dynamic_cast<CSolid*>(object.get());
+        if (!solid || !solid->GetCenterlines().empty() || solid->m_Shape.IsNull()) continue;
+        CSolid metadata;
+        std::set<std::string> through_axes;
+        for (int i = 0; i < solid->GetNumOperations(); ++i) {
+            const auto* operation = solid->GetOperation(i);
+            if (!operation) continue;
+            StoredOperation saved{operation->ToolId, operation->Name, operation->Parameters, operation->CreatedSurfaceIndices};
+            const auto params = parameters_for_operation(registry, saved);
+            const auto& tool = operation->ToolId;
+            const auto seed_axis = [&](const std::string& id, SolidCenterlineKind kind, Vec3 o, Vec3 d, double length) {
+                d = normalize(d);
+                if (dot(d,d) > 1e-12f) metadata.SetCenterline({id, kind,
+                    {gp_Pnt(o.x,o.y,o.z), gp_Pnt(o.x+d.x*length,o.y+d.y*length,o.z+d.z*length)}, false});
+            };
+            if (i == 0 && tool == "SolidCylinder") {
+                seed_axis("base:rotation", SolidCenterlineKind::RotationAxis,
+                    {float(param(params,"origin.x",0)),float(param(params,"origin.y",0)),float(param(params,"origin.z",0))},
+                    {float(param(params,"axis.n.x",0)),float(param(params,"axis.n.y",0)),float(param(params,"axis.n.z",1))}, 1);
+            } else if (i == 0 && (tool == "SolidSphereTool" || tool == "SolidTorusTool")) {
+                seed_axis("base:rotation", SolidCenterlineKind::RotationAxis, {}, {0,0,1}, 1);
+            } else if (i == 0 && (tool == "SurfaceOfRevolution" || tool == "SolidPolyhedronTool")) {
+                const auto* profile = document.FindObjectById(static_cast<unsigned long>(param(params,"profile.id",0)));
+                const int axis = std::clamp(int(param(params,"axis",2)),0,2);
+                Vec3 origin{}; bool known = false;
+                if (const auto* sketch = dynamic_cast<const CSmartLine*>(profile)) {
+                    origin = point_to_vec3(sketch->GetCoordinateSystem().origin); known = true;
+                } else if (const auto* polyline = dynamic_cast<const CPolyline*>(profile)) {
+                    TopoDS_Shape unused;
+                    known = build_revolve_profile(*polyline, axis, unused, origin);
+                }
+                if (known) seed_axis("base:rotation", SolidCenterlineKind::RotationAxis, origin, revolve_axis_direction(axis), 1);
+            } else if (i == 0 && tool == "SolidWireTool") {
+                const auto* path = document.FindObjectById(static_cast<unsigned long>(param(params,"profile.id",0)));
+                if (path) metadata.SetCenterlinePath("base:path", BuildSolidCenterPath(*path));
+            } else if (tool == "SolidHole") {
+                const std::string id = "hole:" + std::to_string(i);
+                const bool through = param(params,"hole_type",0) == 0;
+                seed_axis(id, SolidCenterlineKind::HoleAxis, hole_center_from_references(params),
+                    {-float(param(params,"hole.normal.x",0)),-float(param(params,"hole.normal.y",0)),-float(param(params,"hole.normal.z",1))},
+                    through ? 1 : param(params,"depth",10));
+                if (through) through_axes.insert(id);
+            } else if (tool == "SolidTransform") {
+                apply_solid_transform(metadata, params, true);
+            }
+        }
+        for (const auto& line : metadata.GetCenterlines()) {
+            if (line.kind == SolidCenterlineKind::RotationAxis || through_axes.count(line.id)) {
+                const auto& p = line.points.front(); const gp_Vec d(p,line.points.back());
+                solid->SetAxis(line.id,line.kind,{float(p.X()),float(p.Y()),float(p.Z())},
+                    {float(d.X()),float(d.Y()),float(d.Z())},
+                    line.kind == SolidCenterlineKind::HoleAxis ? 0 : -std::numeric_limits<double>::infinity());
+            } else solid->SetCenterline(line);
+        }
+    }
 }

@@ -1,4 +1,6 @@
 #include "SmartLine.h"
+#include <sstream>
+#include <unordered_map>
 
 #include "BezierSpline.h"
 #include "ConstraintBezierTangent.h"
@@ -127,6 +129,7 @@ bool CSmartLine::AddBezierWorld(CPoint3d start,
                                 CPoint3d control2,
                                 CPoint3d end,
                                 bool connect_to_previous) {
+    return ExecuteEdit([&]() -> bool {
     CPoint3d local_start = WorldToLocal(start);
     CPoint3d local_control1 = WorldToLocal(control1);
     CPoint3d local_control2 = WorldToLocal(control2);
@@ -139,6 +142,7 @@ bool CSmartLine::AddBezierWorld(CPoint3d start,
         std::make_unique<CBezierSpline>(
             local_start, local_control1, local_control2, local_end),
         connect_to_previous);
+    }, SketchGeometryChanged);
 }
 
 CSmartLine::CSmartLine()
@@ -154,6 +158,7 @@ CSmartLine::CSmartLine(std::string name)
 CSmartLine::~CSmartLine() = default;
 
 bool CSmartLine::Create(const CPolyline& polyline) {
+    return ExecuteEdit([&]() -> bool {
     const std::vector<CPoint3d>& points = polyline.GetPoints();
     if (points.size() < 2) {
         return false;
@@ -226,6 +231,9 @@ bool CSmartLine::Create(const CPolyline& polyline) {
     local_points.reserve(points.size());
     for (const CPoint3d& point : points) {
         CPoint3d local = WorldToLocal(point);
+        if (!std::isfinite(local.z) || std::abs(local.z)>kAxisTolerance) {
+            last_geometry_error_="Input profile is not planar in the sketch coordinate system."; return false;
+        }
         local.z = 0.0;
         local_points.push_back(local);
     }
@@ -288,6 +296,7 @@ bool CSmartLine::Create(const CPolyline& polyline) {
         }
     }
     return true;
+    }, SketchGeometryChanged | SketchTopologyChanged);
 }
 
 bool CSmartLine::CreateFromWorldPoints(const std::vector<CPoint3d>& points,
@@ -295,6 +304,7 @@ bool CSmartLine::CreateFromWorldPoints(const std::vector<CPoint3d>& points,
                                        CPoint3d origin,
                                        CPoint3d x_axis,
                                        CPoint3d y_axis) {
+    return ExecuteEdit([&]() -> bool {
     if (points.size() < 2 || (closed && points.size() < 3)) {
         return false;
     }
@@ -313,6 +323,9 @@ bool CSmartLine::CreateFromWorldPoints(const std::vector<CPoint3d>& points,
     local_points.reserve(points.size());
     for (const CPoint3d& point : points) {
         CPoint3d local = WorldToLocal(point);
+        if (!std::isfinite(local.z) || std::abs(local.z)>kAxisTolerance) {
+            last_geometry_error_="Input profile is not planar in the sketch coordinate system."; return false;
+        }
         local.z = 0.0;
         local_points.push_back(local);
     }
@@ -341,11 +354,18 @@ bool CSmartLine::CreateFromWorldPoints(const std::vector<CPoint3d>& points,
         }
     }
     return true;
+    }, SketchGeometryChanged | SketchTopologyChanged);
 }
 
 bool CSmartLine::AddLine(std::unique_ptr<CLinkLine> line, bool connect_to_previous) {
+    return ExecuteEdit([&]() -> bool {
     if (!line || line->GetLength() <= kSketchEpsilon) {
         return false;
+    }
+    for (const auto& existing : lines_) {
+        if (line->GetID() && line->GetID()==existing->GetID()) return false;
+        for (const auto& a:line->points_) for(const auto& b:existing->points_)
+            if(a->id && a->id==b->id && std::hypot(a->point.u-b->point.u,a->point.v-b->point.v)>1e-10) return false;
     }
     if (connect_to_previous && !lines_.empty()) {
         line->SetStart(lines_.back()->GetEnd());
@@ -353,48 +373,58 @@ bool CSmartLine::AddLine(std::unique_ptr<CLinkLine> line, bool connect_to_previo
     if (line->GetLength() <= kSketchEpsilon) {
         return false;
     }
-    line->SetID(lines_.size());
+    if (!line->GetID()) line->SetID(next_line_id_++);
     lines_.push_back(std::move(line));
     if (closed_ && lines_.size() > 1) {
         lines_.back()->SetEnd(lines_.front()->GetStart());
     }
     return true;
+    }, SketchGeometryChanged | SketchTopologyChanged);
 }
 
 bool CSmartLine::Add(CLinkLine* line, BOOL assign_id) {
+    return ExecuteEdit([&]() -> bool {
     std::unique_ptr<CLinkLine> owned(line);
     if (!owned) {
         return false;
     }
     const bool result = AddLine(std::move(owned), true);
     if (result && !assign_id) {
-        lines_.back()->SetID(lines_.size() - 1);
+        // Identity is independent of the position in the list.
     }
     return result;
+    }, SketchGeometryChanged | SketchTopologyChanged);
 }
 
 bool CSmartLine::RemoveLine(std::size_t index) {
+    return ExecuteEdit([&]() -> bool {
     if (index >= lines_.size()) {
         return false;
     }
-    constraints_.erase(
-        std::remove_if(
-            constraints_.begin(),
-            constraints_.end(),
-            [index](const std::unique_ptr<CConstraint>& constraint) {
-                return constraint->GetLineIndex() >= index;
-            }),
-        constraints_.end());
-    fillets_.erase(
-        std::remove_if(
-            fillets_.begin(),
-            fillets_.end(),
-            [index](const CFillet& fillet) {
-                return fillet.GetFirstLineIndex() >= index ||
-                       fillet.GetSecondLineIndex() >= index;
-            }),
-        fillets_.end());
+    std::vector<std::unique_ptr<CConstraint>> remaining_constraints;
+    for (const auto& constraint:constraints_) {
+        const auto old=constraint->GetLineIndex(); if(old==index) continue;
+        if(constraint->GetType()==ConstraintType::TangentAtStart && (old==index+1 || (closed_ && old==0))) continue;
+        if(constraint->GetType()==ConstraintType::TangentAtEnd && (old+1==index || (closed_ && old+1==lines_.size()))) continue;
+        const auto mapped=old>index ? old-1 : old;
+        switch(constraint->GetType()) {
+        case ConstraintType::Horizontal: remaining_constraints.push_back(std::make_unique<CConstraintHorLine>(mapped)); break;
+        case ConstraintType::Vertical: remaining_constraints.push_back(std::make_unique<CConstraintVertLine>(mapped)); break;
+        case ConstraintType::TangentAtStart: remaining_constraints.push_back(std::make_unique<CConstraintBezierTangent>(mapped,true)); break;
+        case ConstraintType::TangentAtEnd: remaining_constraints.push_back(std::make_unique<CConstraintBezierTangent>(mapped,false)); break;
+        }
+    }
+    constraints_=std::move(remaining_constraints);
+    std::vector<CFillet> remaining_fillets;
+    for(const auto& fillet:fillets_) {
+        const auto first=fillet.GetFirstLineIndex(),second=fillet.GetSecondLineIndex();
+        if(first==index || second==index) continue;
+        remaining_fillets.emplace_back(first>index?first-1:first,second>index?second-1:second,fillet.GetRadius());
+    }
+    fillets_=std::move(remaining_fillets);
     lines_.erase(lines_.begin() + static_cast<std::ptrdiff_t>(index));
+    if(closed_ && !lines_.empty())
+        lines_.back()->points_[1]=std::make_shared<SketchNode>(SketchNode{lines_.back()->points_[1]->point});
     closed_ = false;
     RenumberLines();
     RemoveInvalidConstraintsAndFillets();
@@ -402,9 +432,11 @@ bool CSmartLine::RemoveLine(std::size_t index) {
         lines_[index]->SetStart(lines_[index - 1]->GetEnd());
     }
     return true;
+    }, SketchGeometryChanged | SketchTopologyChanged);
 }
 
 bool CSmartLine::SplitLine(std::size_t index, CPoint3d local_point) {
+    return ExecuteEdit([&]() -> bool {
     if (index >= lines_.size()) {
         return false;
     }
@@ -434,9 +466,11 @@ bool CSmartLine::SplitLine(std::size_t index, CPoint3d local_point) {
         index,
         make_part(start, local_point),
         make_part(local_point, end));
+    }, SketchGeometryChanged | SketchTopologyChanged);
 }
 
 bool CSmartLine::SplitBezierLine(std::size_t index, double parameter) {
+    return ExecuteEdit([&]() -> bool {
     if (index >= lines_.size()) {
         return false;
     }
@@ -462,12 +496,14 @@ bool CSmartLine::SplitBezierLine(std::size_t index, double parameter) {
         index,
         std::make_unique<CBezierSpline>(p0, p01, p012, split),
         std::make_unique<CBezierSpline>(split, p123, p23, p3));
+    }, SketchGeometryChanged | SketchTopologyChanged);
 }
 
 bool CSmartLine::ReplaceLineWithSplitParts(
     std::size_t index,
     std::unique_ptr<CLinkLine> first_part,
     std::unique_ptr<CLinkLine> second_part) {
+    return ExecuteEdit([&]() -> bool {
     if (index >= lines_.size() || !first_part || !second_part) {
         return false;
     }
@@ -495,6 +531,9 @@ bool CSmartLine::ReplaceLineWithSplitParts(
             fillet.GetRadius()});
     }
 
+    first_part->SetID(lines_[index]->GetID());
+    first_part->SetEndpointIds(lines_[index]->points_[0]->id,0);
+    second_part->SetEndpointIds(0,lines_[index]->points_[1]->id);
     lines_[index] = std::move(first_part);
     lines_.insert(
         lines_.begin() + static_cast<std::ptrdiff_t>(index + 1),
@@ -538,9 +577,11 @@ bool CSmartLine::ReplaceLineWithSplitParts(
     }
     RemoveInvalidConstraintsAndFillets();
     return true;
+    }, SketchGeometryChanged | SketchTopologyChanged);
 }
 
 bool CSmartLine::ConvertLineToBezier(std::size_t index) {
+    return ExecuteEdit([&]() -> bool {
     if (index >= lines_.size()
         || (lines_[index]->GetType() != LinkLineType::Segment
             && lines_[index]->GetType() != LinkLineType::Horizontal
@@ -555,7 +596,8 @@ bool CSmartLine::ConvertLineToBezier(std::size_t index) {
         add(start, multiply(delta, 1.0 / 3.0)),
         add(start, multiply(delta, 2.0 / 3.0)),
         end);
-    bezier->SetID(index);
+    bezier->SetID(lines_[index]->GetID());
+    bezier->SetEndpointIds(lines_[index]->points_[0]->id,lines_[index]->points_[1]->id);
     lines_[index] = std::move(bezier);
     constraints_.erase(
         std::remove_if(
@@ -567,9 +609,11 @@ bool CSmartLine::ConvertLineToBezier(std::size_t index) {
         constraints_.end());
     RemoveInvalidConstraintsAndFillets();
     return true;
+    }, SketchGeometryChanged | SketchTopologyChanged);
 }
 
 bool CSmartLine::ConvertLineToArc(std::size_t index, CPoint3d world_point) {
+    return ExecuteEdit([&]() -> bool {
     if (index >= lines_.size()
         || (lines_[index]->GetType() != LinkLineType::Segment
             && lines_[index]->GetType() != LinkLineType::Horizontal
@@ -583,7 +627,8 @@ bool CSmartLine::ConvertLineToArc(std::size_t index, CPoint3d world_point) {
     if (!arc->IsValid()) {
         return false;
     }
-    arc->SetID(index);
+    arc->SetID(lines_[index]->GetID());
+    arc->SetEndpointIds(lines_[index]->points_[0]->id,lines_[index]->points_[1]->id);
     lines_[index] = std::move(arc);
     constraints_.erase(
         std::remove_if(
@@ -604,6 +649,7 @@ bool CSmartLine::ConvertLineToArc(std::size_t index, CPoint3d world_point) {
         fillets_.end());
     RemoveInvalidConstraintsAndFillets();
     return true;
+    }, SketchGeometryChanged | SketchTopologyChanged);
 }
 
 std::size_t CSmartLine::GetNumLines() const {
@@ -627,6 +673,7 @@ CLinkLine* CSmartLine::GetLastLine() {
 }
 
 bool CSmartLine::MovePoint(std::size_t line_index, int endpoint, CPoint3d local_point) {
+    return ExecuteEdit([&]() -> bool {
     CLinkLine* line = GetLine(line_index);
     if (!line || (endpoint != 0 && endpoint != 1)) {
         return false;
@@ -644,27 +691,16 @@ bool CSmartLine::MovePoint(std::size_t line_index, int endpoint, CPoint3d local_
         ConnectAdjacentLines(line_index);
     }
     return ApplyConstraints();
+    }, SketchGeometryChanged);
 }
 
-std::size_t CSmartLine::GetNodeCount() const {
-    if (lines_.empty()) {
-        return 0;
-    }
-    return closed_ ? lines_.size() : lines_.size() + 1;
-}
-
-CPoint3d CSmartLine::GetNodeWorld(std::size_t node_index) const {
-    if (node_index >= GetNodeCount()) {
-        return {};
-    }
-    if (!closed_ && node_index == 0) {
-        return LocalToWorld(lines_.front()->GetStart());
-    }
-    const std::size_t line_index = closed_ ? node_index : node_index - 1;
-    return LocalToWorld(lines_[line_index]->GetEnd());
+std::size_t CSmartLine::GetNodeCount() const { return nodes_.size(); }
+CPoint3d CSmartLine::GetNodeWorld(std::size_t index) const {
+    return index<nodes_.size() ? LocalToWorld(nodes_[index]->point) : CPoint3d{};
 }
 
 bool CSmartLine::MoveNodeWorld(std::size_t node_index, CPoint3d world_point) {
+    return ExecuteEdit([&]() -> bool {
     if (node_index >= GetNodeCount()) {
         return false;
     }
@@ -678,15 +714,11 @@ bool CSmartLine::MoveNodeWorld(std::size_t node_index, CPoint3d world_point) {
         old_ends.push_back(line->GetEnd());
     }
 
-    std::vector<CPoint3d> nodes(GetNodeCount());
-    for (std::size_t index = 0; index < nodes.size(); ++index) {
-        if (!closed_ && index == 0) {
-            nodes[index] = lines_.front()->GetStart();
-        } else {
-            const std::size_t line_index = closed_ ? index : index - 1;
-            nodes[index] = lines_[line_index]->GetEnd();
-        }
-    }
+    std::vector<CPoint3d> nodes;
+    for(const auto& node:nodes_) nodes.push_back(node->point);
+    const auto node_index_for=[&](size_t line,int endpoint) {
+        return static_cast<size_t>(std::find(nodes_.begin(),nodes_.end(),lines_[line]->points_[endpoint])-nodes_.begin());
+    };
 
     CPoint3d local_point = WorldToLocal(world_point);
     local_point.z = 0.0;
@@ -699,10 +731,8 @@ bool CSmartLine::MoveNodeWorld(std::size_t node_index, CPoint3d world_point) {
     for (std::size_t pass = 0; pass < nodes.size(); ++pass) {
         bool changed = false;
         for (std::size_t line_index = 0; line_index < lines_.size(); ++line_index) {
-            const std::size_t start_node = closed_
-                ? (line_index == 0 ? nodes.size() - 1 : line_index - 1)
-                : line_index;
-            const std::size_t end_node = closed_ ? line_index : line_index + 1;
+            const std::size_t start_node = node_index_for(line_index,0);
+            const std::size_t end_node = node_index_for(line_index,1);
 
             LinkLineType type = lines_[line_index]->GetType();
             for (const auto& constraint : constraints_) {
@@ -743,10 +773,8 @@ bool CSmartLine::MoveNodeWorld(std::size_t node_index, CPoint3d world_point) {
     }
 
     for (std::size_t line_index = 0; line_index < lines_.size(); ++line_index) {
-        const std::size_t start_node = closed_
-            ? (line_index == 0 ? nodes.size() - 1 : line_index - 1)
-            : line_index;
-        const std::size_t end_node = closed_ ? line_index : line_index + 1;
+        const std::size_t start_node = node_index_for(line_index,0);
+        const std::size_t end_node = node_index_for(line_index,1);
         lines_[line_index]->SetStart(nodes[start_node]);
         lines_[line_index]->SetEnd(nodes[end_node]);
     }
@@ -771,6 +799,7 @@ bool CSmartLine::MoveNodeWorld(std::size_t node_index, CPoint3d world_point) {
         lines_[index]->SetEnd(old_ends[index]);
     }
     return false;
+    }, SketchGeometryChanged);
 }
 
 std::size_t CSmartLine::GetBezierControlPointCount() const {
@@ -797,6 +826,7 @@ CPoint3d CSmartLine::GetBezierControlPointWorld(std::size_t control_index) const
 
 bool CSmartLine::MoveBezierControlPointWorld(std::size_t control_index,
                                              CPoint3d world_point) {
+    return ExecuteEdit([&]() -> bool {
     CPoint3d local = WorldToLocal(world_point);
     local.z = 0.0;
     for (std::size_t line_index = 0; line_index < lines_.size(); ++line_index) {
@@ -867,6 +897,7 @@ bool CSmartLine::MoveBezierControlPointWorld(std::size_t control_index,
         control_index -= 2;
     }
     return false;
+    }, SketchGeometryChanged);
 }
 
 std::size_t CSmartLine::GetArcGripCount() const {
@@ -891,6 +922,7 @@ CPoint3d CSmartLine::GetArcGripWorld(std::size_t grip_index) const {
 }
 
 bool CSmartLine::MoveArcGripWorld(std::size_t grip_index, CPoint3d world_point) {
+    return ExecuteEdit([&]() -> bool {
     CPoint3d local = WorldToLocal(world_point);
     local.z = 0.0;
     for (auto& line : lines_) {
@@ -909,17 +941,22 @@ bool CSmartLine::MoveArcGripWorld(std::size_t grip_index, CPoint3d world_point) 
         --grip_index;
     }
     return false;
+    }, SketchGeometryChanged);
 }
 
 void CSmartLine::ConnectAdjacentLines(std::size_t changed_line_index) {
+    ExecuteEdit([&]() -> bool {
     if (changed_line_index >= lines_.size()) {
-        return;
+        return true;
     }
     if (changed_line_index + 1 < lines_.size()) {
         lines_[changed_line_index + 1]->SetStart(lines_[changed_line_index]->GetEnd());
     } else if (closed_ && lines_.size() > 1) {
         lines_.front()->SetStart(lines_.back()->GetEnd());
     }
+
+    return true;
+    }, SketchGeometryChanged);
 }
 
 bool CSmartLine::IsClosed() const {
@@ -927,17 +964,30 @@ bool CSmartLine::IsClosed() const {
 }
 
 bool CSmartLine::SetClosed(bool closed) {
+    return ExecuteEdit([&]() -> bool {
     if (closed && lines_.size() < 2) {
         return false;
+    }
+    if(closed_ && !closed && !lines_.empty()) {
+        lines_.back()->points_[1]=std::make_shared<SketchNode>(SketchNode{lines_.back()->points_[1]->point});
+        constraints_.erase(std::remove_if(constraints_.begin(),constraints_.end(),[&](const auto& constraint) {
+            return (constraint->GetType()==ConstraintType::TangentAtStart && constraint->GetLineIndex()==0)
+                || (constraint->GetType()==ConstraintType::TangentAtEnd && constraint->GetLineIndex()+1==lines_.size());
+        }),constraints_.end());
+        fillets_.erase(std::remove_if(fillets_.begin(),fillets_.end(),[&](const auto& fillet) {
+            return fillet.GetFirstLineIndex()+1==lines_.size() && fillet.GetSecondLineIndex()==0;
+        }),fillets_.end());
     }
     closed_ = closed;
     if (closed_) {
         lines_.back()->SetEnd(lines_.front()->GetStart());
     }
     return true;
+    }, SketchGeometryChanged | SketchTopologyChanged);
 }
 
 bool CSmartLine::AddConstraint(std::unique_ptr<CConstraint> constraint) {
+    return ExecuteEdit([&]() -> bool {
     if (!constraint || constraint->GetLineIndex() >= lines_.size()) {
         return false;
     }
@@ -952,6 +1002,7 @@ bool CSmartLine::AddConstraint(std::unique_ptr<CConstraint> constraint) {
     }
     constraints_.push_back(std::move(constraint));
     return true;
+    }, SketchGeometryChanged);
 }
 
 bool CSmartLine::ConstrainHorizontal(std::size_t line_index) {
@@ -973,11 +1024,13 @@ bool CSmartLine::ConstrainBezierTangentAtEnd(std::size_t line_index) {
 }
 
 bool CSmartLine::ApplyConstraints() {
+    return ExecuteEdit([&]() -> bool {
     bool success = true;
     for (const auto& constraint : constraints_) {
         success = constraint->Apply(*this) && success;
     }
     return success;
+    }, SketchGeometryChanged);
 }
 
 std::size_t CSmartLine::GetNumConstraints() const {
@@ -989,6 +1042,7 @@ const CConstraint* CSmartLine::GetConstraint(std::size_t index) const {
 }
 
 bool CSmartLine::AddFillet(std::size_t first_line_index, double radius) {
+    return ExecuteEdit([&]() -> bool {
     if (first_line_index >= lines_.size() || radius <= kSketchEpsilon) {
         return false;
     }
@@ -1008,9 +1062,11 @@ bool CSmartLine::AddFillet(std::size_t first_line_index, double radius) {
     }
     fillets_.push_back(candidate);
     return true;
+    }, SketchGeometryChanged);
 }
 
 bool CSmartLine::RemoveFillet(std::size_t first_line_index) {
+    return ExecuteEdit([&]() -> bool {
     const auto iterator = std::find_if(
         fillets_.begin(),
         fillets_.end(),
@@ -1022,14 +1078,11 @@ bool CSmartLine::RemoveFillet(std::size_t first_line_index) {
     }
     fillets_.erase(iterator);
     return true;
+    }, SketchGeometryChanged);
 }
 
 std::size_t CSmartLine::GetNumFillets() const {
     return fillets_.size();
-}
-
-CFillet* CSmartLine::GetFillet(std::size_t index) {
-    return index < fillets_.size() ? &fillets_[index] : nullptr;
 }
 
 const CFillet* CSmartLine::GetFillet(std::size_t index) const {
@@ -1051,7 +1104,8 @@ CPoint3d CSmartLine::GetFilletGripWorld(std::size_t fillet_index) const {
 }
 
 bool CSmartLine::SetFilletRadiusFromWorld(std::size_t fillet_index, CPoint3d world_point) {
-    CFillet* fillet = GetFillet(fillet_index);
+    return ExecuteEdit([&]() -> bool {
+    CFillet* fillet = fillet_index < fillets_.size() ? &fillets_[fillet_index] : nullptr;
     if (!fillet) {
         return false;
     }
@@ -1088,6 +1142,7 @@ bool CSmartLine::SetFilletRadiusFromWorld(std::size_t fillet_index, CPoint3d wor
         return false;
     }
     return fillet->SetRadius(radius);
+    }, SketchGeometryChanged);
 }
 
 const SketchCoordinateSystem& CSmartLine::GetCoordinateSystem() const {
@@ -1095,7 +1150,9 @@ const SketchCoordinateSystem& CSmartLine::GetCoordinateSystem() const {
 }
 
 bool CSmartLine::SetCoordinateSystem(CPoint3d origin, CPoint3d x_axis, CPoint3d normal) {
-    if (!normalize_point(x_axis) || !normalize_point(normal)) {
+    return ExecuteEdit([&]() -> bool {
+    const auto finite=[](CPoint3d p) { return std::isfinite(p.x)&&std::isfinite(p.y)&&std::isfinite(p.z); };
+    if (!finite(origin)||!finite(x_axis)||!finite(normal)||!normalize_point(x_axis) || !normalize_point(normal)) {
         return false;
     }
     x_axis = subtract(x_axis, multiply(normal, dot_product(x_axis, normal)));
@@ -1111,15 +1168,24 @@ bool CSmartLine::SetCoordinateSystem(CPoint3d origin, CPoint3d x_axis, CPoint3d 
     coordinate_system_.y_axis = y_axis;
     coordinate_system_.normal = normal;
     return true;
+    }, SketchPlacementChanged);
 }
 
 void CSmartLine::SetFaceAttachment(unsigned long body_id, int face_index) {
+    ExecuteEdit([&]() -> bool {
     face_attachment_.body_id = body_id;
     face_attachment_.face_index = body_id != 0 ? face_index : -1;
+
+    return true;
+    }, SketchPlacementChanged);
 }
 
 void CSmartLine::ClearFaceAttachment() {
+    ExecuteEdit([&]() -> bool {
     face_attachment_ = {};
+
+    return true;
+    }, SketchPlacementChanged);
 }
 
 bool CSmartLine::HasFaceAttachment() const {
@@ -1135,9 +1201,7 @@ CPoint3d CSmartLine::LocalToWorld(const CPoint3d& point) const {
         coordinate_system_.origin,
         add(
             multiply(coordinate_system_.x_axis, point.x),
-            add(
-                multiply(coordinate_system_.y_axis, point.y),
-                multiply(coordinate_system_.normal, point.z))));
+            multiply(coordinate_system_.y_axis, point.y)));
 }
 
 CPoint3d CSmartLine::WorldToLocal(const CPoint3d& point) const {
@@ -1196,6 +1260,7 @@ std::vector<CPoint3d> CSmartLine::GetProfilePointsWorld() const {
 }
 
 CSmartLine::DisplayGeometry CSmartLine::BuildDisplayGeometry() const {
+    if (display_generation_ == changes_->generation) return display_cache_;
     DisplayGeometry result;
     result.line_starts.reserve(lines_.size());
     result.line_ends.reserve(lines_.size());
@@ -1239,6 +1304,7 @@ CSmartLine::DisplayGeometry CSmartLine::BuildDisplayGeometry() const {
             curve.push_back(lines_[line_index]->GetPoint(parameter));
         }
     }
+    display_cache_ = result; display_generation_ = changes_->generation;
     return result;
 }
 
@@ -1479,6 +1545,11 @@ CSmartLine CSmartLine::MakeCopy() const {
         result.constraints_.push_back(constraint->Clone());
     }
     result.fillets_ = fillets_;
+    result.next_line_id_ = next_line_id_; result.next_node_id_ = next_node_id_;
+    result.changes_->revisions = changes_->revisions;
+    for (size_t i=0;i<lines_.size();++i) for(int e=0;e<2;++e)
+        result.lines_[i]->points_[e]->id = lines_[i]->points_[e]->id;
+    result.BindGeometry();
     result.SetGroupName(GetGroupName());
     result.SetVisible(IsVisible());
     result.SetColor(GetColor());
@@ -1492,12 +1563,17 @@ CSmartLine CSmartLine::MakeCopy() const {
 }
 
 void CSmartLine::Translate(Vec3 delta) {
+    ExecuteEdit([&]() -> bool {
     coordinate_system_.origin.x += delta.x;
     coordinate_system_.origin.y += delta.y;
     coordinate_system_.origin.z += delta.z;
+
+    return true;
+    }, SketchPlacementChanged);
 }
 
 void CSmartLine::Rotate(Vec3 center, Vec3 axis, float angle) {
+    ExecuteEdit([&]() -> bool {
     CPoint3d center_point(center.x, center.y, center.z);
     CPoint3d axis_point(axis.x, axis.y, axis.z);
     coordinate_system_.origin = add(
@@ -1506,25 +1582,34 @@ void CSmartLine::Rotate(Vec3 center, Vec3 axis, float angle) {
     coordinate_system_.x_axis = rotate_point(coordinate_system_.x_axis, axis_point, angle);
     coordinate_system_.y_axis = rotate_point(coordinate_system_.y_axis, axis_point, angle);
     coordinate_system_.normal = rotate_point(coordinate_system_.normal, axis_point, angle);
+
+    return true;
+    }, SketchPlacementChanged);
 }
 
 void CSmartLine::Scale(Vec3 center, Vec3, float factor) {
+    ExecuteEdit([&]() -> bool {
     if (std::abs(factor) <= kSketchEpsilon) {
-        return;
+        return true;
     }
     coordinate_system_.origin.x = center.x + (coordinate_system_.origin.x - center.x) * factor;
     coordinate_system_.origin.y = center.y + (coordinate_system_.origin.y - center.y) * factor;
     coordinate_system_.origin.z = center.z + (coordinate_system_.origin.z - center.z) * factor;
-    for (auto& line : lines_) {
-        const CPoint3d scaled_start = multiply(line->GetStart(), factor);
-        const CPoint3d scaled_end = multiply(line->GetEnd(), factor);
+    std::vector<std::unique_ptr<CLinkLine>> originals;
+    for (const auto& line : lines_) originals.push_back(line->Clone());
+    for (size_t line_index=0;line_index<lines_.size();++line_index) {
+        auto& line = lines_[line_index];
+        const auto& original = originals[line_index];
+        const auto* original_bezier=dynamic_cast<const CBezierSpline*>(original.get());
+        const CPoint3d scaled_start = multiply(original->GetStart(), factor);
+        const CPoint3d scaled_end = multiply(original->GetEnd(), factor);
         CBezierSpline* bezier = dynamic_cast<CBezierSpline*>(line.get());
         CSketchArcLine* arc = dynamic_cast<CSketchArcLine*>(line.get());
         const CPoint3d scaled_control1 = bezier
-            ? multiply(bezier->GetControl1(), factor)
+            ? multiply(original_bezier->GetControl1(), factor)
             : CPoint3d();
         const CPoint3d scaled_control2 = bezier
-            ? multiply(bezier->GetControl2(), factor)
+            ? multiply(original_bezier->GetControl2(), factor)
             : CPoint3d();
         const CPoint3d scaled_arc_point = arc
             ? multiply(arc->GetPointOnArc(), factor)
@@ -1542,29 +1627,38 @@ void CSmartLine::Scale(Vec3 center, Vec3, float factor) {
     for (CFillet& fillet : fillets_) {
         fillet.SetRadius(std::abs(fillet.GetRadius() * factor));
     }
+
+    return true;
+    }, SketchGeometryChanged | SketchPlacementChanged);
 }
 
 void CSmartLine::ScaleLocal(double x_factor, double y_factor) {
+    ExecuteEdit([&]() -> bool {
     if (std::abs(x_factor) <= kSketchEpsilon
         || std::abs(y_factor) <= kSketchEpsilon) {
-        return;
+        return true;
     }
     const auto scaled = [x_factor, y_factor](CPoint3d point) {
         point.x *= x_factor;
         point.y *= y_factor;
         return point;
     };
-    for (auto& line : lines_) {
+    std::vector<std::unique_ptr<CLinkLine>> originals;
+    for (const auto& line : lines_) originals.push_back(line->Clone());
+    for (size_t line_index=0;line_index<lines_.size();++line_index) {
+        auto& line = lines_[line_index];
+        const auto& original = originals[line_index];
+        const auto* original_bezier=dynamic_cast<const CBezierSpline*>(original.get());
         CBezierSpline* bezier = dynamic_cast<CBezierSpline*>(line.get());
         CSketchArcLine* arc = dynamic_cast<CSketchArcLine*>(line.get());
         const CPoint3d scaled_control1 = bezier
-            ? scaled(bezier->GetControl1()) : CPoint3d();
+            ? scaled(original_bezier->GetControl1()) : CPoint3d();
         const CPoint3d scaled_control2 = bezier
-            ? scaled(bezier->GetControl2()) : CPoint3d();
+            ? scaled(original_bezier->GetControl2()) : CPoint3d();
         const CPoint3d scaled_arc_point = arc
             ? scaled(arc->GetPointOnArc()) : CPoint3d();
-        line->SetStart(scaled(line->GetStart()));
-        line->SetEnd(scaled(line->GetEnd()));
+        line->SetStart(scaled(original->GetStart()));
+        line->SetEnd(scaled(original->GetEnd()));
         if (bezier) {
             bezier->SetControl1(scaled_control1);
             bezier->SetControl2(scaled_control2);
@@ -1578,6 +1672,9 @@ void CSmartLine::ScaleLocal(double x_factor, double y_factor) {
     for (CFillet& fillet : fillets_) {
         fillet.SetRadius(fillet.GetRadius() * fillet_scale);
     }
+
+    return true;
+    }, SketchGeometryChanged);
 }
 
 bool CSmartLine::GetBounds(Vec3& min_point, Vec3& max_point) const {
@@ -1621,7 +1718,7 @@ bool CSmartLine::GetBounds(Vec3& min_point, Vec3& max_point) const {
 
 void CSmartLine::RenumberLines() {
     for (std::size_t index = 0; index < lines_.size(); ++index) {
-        lines_[index]->SetID(index);
+        if (!lines_[index]->GetID()) lines_[index]->SetID(next_line_id_++);
     }
 }
 
@@ -1642,4 +1739,118 @@ void CSmartLine::RemoveInvalidConstraintsAndFillets() {
                 return fillet.GetSecondLineIndex() >= lines_.size();
             }),
         fillets_.end());
+}
+
+namespace {
+std::string sketch_state(const CSmartLine& sketch,unsigned aspect) {
+    std::ostringstream stream; stream.precision(17);
+    const auto point=[&](CPoint3d p) { stream<<p.x<<','<<p.y<<','<<p.z<<';'; };
+    if(aspect==SketchPlacementChanged) {
+        const auto& frame=sketch.GetCoordinateSystem();
+        point(frame.origin); point(frame.x_axis); point(frame.y_axis); point(frame.normal);
+        stream<<sketch.GetFaceAttachment().body_id<<':'<<sketch.GetFaceAttachment().face_index;
+    } else {
+        if(aspect==SketchTopologyChanged) stream<<sketch.IsClosed()<<';';
+        for(size_t i=0;i<sketch.GetNumLines();++i) {
+            const auto* line=sketch.GetLine(i);
+            if(aspect==SketchGeometryChanged) {
+                point(line->GetStart()); point(line->GetEnd());
+                if(const auto* b=dynamic_cast<const CBezierSpline*>(line)) { point(b->GetControl1()); point(b->GetControl2()); }
+                if(const auto* a=dynamic_cast<const CSketchArcLine*>(line)) point(a->GetPointOnArc());
+            } else stream<<line->GetID()<<':'<<int(line->GetType())<<':'<<sketch.GetEndpointId(i,0)<<':'<<sketch.GetEndpointId(i,1)<<';';
+        }
+        for(size_t i=0;i<sketch.GetNumFillets();++i) {
+            const auto* fillet=sketch.GetFillet(i);
+            if(aspect==SketchGeometryChanged) stream<<fillet->GetRadius()<<';';
+            else stream<<fillet->GetFirstLineIndex()<<':'<<fillet->GetSecondLineIndex()<<';';
+        }
+        if(aspect==SketchTopologyChanged) for(size_t i=0;i<sketch.GetNumConstraints();++i) {
+            const auto* constraint=sketch.GetConstraint(i);
+            stream<<constraint->GetLineIndex()<<':'<<int(constraint->GetType())<<';';
+        }
+    }
+    return stream.str();
+}
+}
+void CSmartLine::BindGeometry() {
+    nodes_.clear();
+    for (auto& line : lines_) {
+        line->changes_ = changes_;
+        if (!line->id_) line->id_ = next_line_id_++;
+        next_line_id_ = std::max(next_line_id_,line->id_+1);
+        for (auto& node : line->points_) {
+            if (!node->id) node->id = next_node_id_++;
+            next_node_id_ = std::max(next_node_id_,node->id+1);
+        }
+    }
+    const auto join = [](std::shared_ptr<SketchNode>& a, std::shared_ptr<SketchNode>& b) {
+        if (std::hypot(a->point.u-b->point.u,a->point.v-b->point.v)<=1e-10) b=a;
+    };
+    for(size_t i=1;i<lines_.size();++i) join(lines_[i-1]->points_[1],lines_[i]->points_[0]);
+    if(closed_ && lines_.size()>1) join(lines_.front()->points_[0],lines_.back()->points_[1]);
+    // Persisted shared IDs can also connect non-adjacent links. Do not weld
+    // unrelated crossings merely because they have the same coordinates.
+    std::unordered_map<size_t,std::shared_ptr<SketchNode>> identities;
+    for(auto& line:lines_) for(auto& node:line->points_) {
+        const auto [entry,inserted]=identities.emplace(node->id,node);
+        if(!inserted) node=entry->second;
+    }
+    const auto append=[&](const std::shared_ptr<SketchNode>& node) {
+        if(std::find(nodes_.begin(),nodes_.end(),node)==nodes_.end()) nodes_.push_back(node);
+    };
+    // Preserve existing handle ordering for a closed connected contour.
+    if(closed_) for(const auto& line:lines_) append(line->points_[1]);
+    for(const auto& line:lines_) for(const auto& node:line->points_) append(node);
+}
+std::size_t CSmartLine::GetEndpointId(std::size_t line,int endpoint) const {
+    return line<lines_.size() && endpoint>=0 && endpoint<2 ? lines_[line]->points_[endpoint]->id : 0;
+}
+void CSmartLine::BeginEdit() {
+    if (!changes_->depth) { edit_snapshot_=std::make_unique<CSmartLine>(MakeCopy()); edit_failed_=false; last_geometry_error_.clear(); }
+    ++changes_->depth;
+}
+void CSmartLine::RestoreGeometry(CSmartLine& source) {
+    coordinate_system_=source.coordinate_system_; face_attachment_=source.face_attachment_;
+    lines_=std::move(source.lines_); constraints_=std::move(source.constraints_);
+    fillets_=std::move(source.fillets_); closed_=source.closed_;
+    next_line_id_=source.next_line_id_; next_node_id_=source.next_node_id_;
+    BindGeometry(); ++changes_->generation;
+}
+void CSmartLine::CancelEdit() {
+    if(edit_snapshot_) RestoreGeometry(*edit_snapshot_);
+    edit_snapshot_.reset(); changes_->depth=0; changes_->pending=0; edit_failed_=false;
+}
+bool CSmartLine::RestoreFrom(const CSmartLine& source) {
+    return ExecuteEdit([&] { auto copy=source.MakeCopy(); RestoreGeometry(copy); return true; },
+                       SketchGeometryChanged|SketchTopologyChanged|SketchPlacementChanged);
+}
+bool CSmartLine::CommitEdit() {
+    if(!changes_->depth) return false;
+    if(changes_->depth>1) { --changes_->depth; return !edit_failed_; }
+    if(!edit_failed_ && (changes_->pending & (SketchGeometryChanged|SketchTopologyChanged))) {
+        for(const auto& constraint:constraints_) if(!constraint->Apply(*this)) { edit_failed_=true; break; }
+        for(const auto& line:lines_) {
+            const double length=line->GetLength();
+            const auto* arc=dynamic_cast<const CSketchArcLine*>(line.get());
+            if(!std::isfinite(length) || length<=kSketchEpsilon || (arc && !arc->IsValid())) {
+                last_geometry_error_="Sketch edit creates a degenerate curve."; edit_failed_=true; break;
+            }
+        }
+    }
+    if(edit_failed_) { CancelEdit(); return false; }
+    BindGeometry();
+    if(edit_snapshot_) {
+        changes_->pending=0;
+        for(unsigned aspect:{unsigned(SketchGeometryChanged),unsigned(SketchTopologyChanged),unsigned(SketchPlacementChanged)})
+            if(sketch_state(*this,aspect)!=sketch_state(*edit_snapshot_,aspect)) changes_->pending|=aspect;
+    }
+    edit_snapshot_.reset(); changes_->depth=0; changes_->Publish(); return true;
+}
+bool CSmartLine::ExecuteEdit(const std::function<bool()>& operation,unsigned kind) {
+    BeginEdit();
+    try {
+        const bool ok=operation();
+        if(ok) { BindGeometry(); changes_->Mark(kind); } else edit_failed_=true;
+        const bool committed=CommitEdit(); return ok && committed;
+    } catch(...) { CancelEdit(); throw; }
 }

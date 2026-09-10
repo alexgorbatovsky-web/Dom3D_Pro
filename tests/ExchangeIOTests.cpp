@@ -5,10 +5,13 @@
 #include "DrawingText.h"
 #include "ExchangeIO.h"
 #include "ObjIO.h"
+#include "GlbIO.h"
+#include "CFurnitureAssemblies.h"
 #include "SketchArcLine.h"
 #include "SmartLine.h"
 
 #include <QCoreApplication>
+#include <QApplication>
 #include <QDir>
 #include <QStringList>
 #include <QTemporaryDir>
@@ -34,13 +37,55 @@ void require(bool condition, const std::string& message)
 
 void TestThreeMfIO(const QString& directory);
 void TestFbxIO(const QString& directory);
+void TestGlbIO(const QString& directory);
+void TestGlbExport(const QString& directory);
 
 int main(int argc, char** argv)
 {
-    QCoreApplication application(argc, argv);
+    std::cout << std::unitbuf;
+    QApplication application(argc, argv);
     // Diagnostic entry point for checking real-world packages with the same
     // importer as the application, without adding private models to the suite.
     const auto arguments = application.arguments();
+    if (arguments.size()==3&&arguments[1]=="--export-kitchen-glb") {
+        CAlfaDoc kitchen;
+        for(auto& part:CNikaKitchenFurniture::BuildParts(NikaKitchenDefinition{})) {
+            Material material=part->GetMaterial();material.id=0;
+            material.diffuse=part->GetColor();material.name=part->GetName()+" material";
+            part->SetMaterial(kitchen.UpsertMaterial(material));
+            kitchen.AddObject(std::move(part));
+        }
+        std::string error;
+        require(GlbIO().Export(arguments[2].toStdString(),kitchen,error),error);
+        std::cout<<"Kitchen GLB exported: "<<kitchen.GetObjects().size()<<" source objects\n";
+        return EXIT_SUCCESS;
+    }
+    if (arguments.size()==4&&arguments[1]=="--roundtrip-glb") {
+        CAlfaDoc document;std::string error;std::vector<std::unique_ptr<CMesh3D>> meshes;
+        require(GlbIO().Import(arguments[2].toStdString(),meshes,error),error);
+        for(auto& mesh:meshes){mesh->SetMaterial(document.UpsertMaterial(mesh->GetMaterial()));document.AddMesh(std::move(mesh));}
+        require(GlbIO().Export(arguments[3].toStdString(),document,error),error);
+        return EXIT_SUCCESS;
+    }
+    if (arguments.size() == 3 && arguments[1] == "--import-glb") {
+        std::string error;
+        std::vector<std::unique_ptr<CMesh3D>> meshes;
+        require(GlbIO().Import(arguments[2].toStdString(), meshes, error), error);
+        std::cout << "GLB import succeeded: " << meshes.size() << " mesh(es)\n";
+        Vec3 total_low, total_high;
+        bool first=true;
+        for (const auto& mesh:meshes) {
+            Vec3 low,high;require(mesh->GetBounds(low,high),"Imported GLB mesh has no bounds");
+            if(first){total_low=low;total_high=high;first=false;}
+            else {
+                total_low.x=std::min(total_low.x,low.x);total_low.y=std::min(total_low.y,low.y);total_low.z=std::min(total_low.z,low.z);
+                total_high.x=std::max(total_high.x,high.x);total_high.y=std::max(total_high.y,high.y);total_high.z=std::max(total_high.z,high.z);
+            }
+        }
+        const auto size=total_high-total_low;
+        std::cout<<"Dimensions (mm): "<<size.x<<", "<<size.y<<", "<<size.z<<'\n';
+        return EXIT_SUCCESS;
+    }
     if (arguments.size() == 3 && arguments[1] == "--write-fbx-test") {
         QDir().mkpath(arguments[2]);
         TestFbxIO(arguments[2]);
@@ -64,6 +109,32 @@ int main(int argc, char** argv)
     }
     QTemporaryDir directory;
     require(directory.isValid(), "Could not create the temporary exchange directory.");
+    for (bool legacy : {false, true}) {
+        const std::string stem = directory.path().toStdString() + (legacy ? "/legacy" : "/standard");
+        {
+            std::ofstream mtl(stem + ".mtl");
+            if (legacy) mtl << "# Dom3D MTL File : 'legacy'\n";
+            mtl << "newmtl Bronze\nKd 0 0 0\nKs .69 .48 .29\nd 0\n"
+                   "newmtl Glass\nKd 0 0 0\nKs 0 0 0\nd .99\n";
+            std::ofstream obj(stem + ".obj");
+            obj << "mtllib " << (legacy ? "legacy.mtl" : "standard.mtl")
+                << "\nv 0 0 0\nv 1 0 0\nv 0 1 0\nusemtl Bronze\nf 1 2 3\nusemtl Glass\nf 1 3 2\n";
+        }
+        std::vector<std::unique_ptr<CMesh3D>> imported;
+        std::string error;
+        require(ObjIO().Import(stem + ".obj", imported, error), error);
+        require(imported.size() == 2, "MTL regression: missing material parts");
+        for (const auto& mesh : imported) {
+            const auto& m = mesh->GetMaterial();
+            if (m.name == "Bronze") {
+                require(std::abs(m.alpha - (legacy ? 1.f : 0.f)) < .001f, "MTL opacity convention changed");
+                require(std::abs(m.diffuse.r - (legacy ? .69f : 0.f)) < .001f, "Legacy Ks conversion leaked or failed");
+            } else {
+                require(std::abs(m.alpha - (legacy ? .01f : .99f)) < .001f, "MTL glass opacity incorrect");
+                require(m.diffuse.r == 0.f, "Black glass must stay black");
+            }
+        }
+    }
 
     CAlfaDoc document;
     auto curve = std::make_unique<CPolyline>("Round-trip curve");
@@ -623,6 +694,8 @@ int main(int argc, char** argv)
 
     TestThreeMfIO(directory.path());
     TestFbxIO(directory.path());
+    TestGlbIO(directory.path());
+    TestGlbExport(directory.path());
     std::cout << "DXF, EPS, HPGL, 3MF, and STL exchange round-trips passed.\n";
     return EXIT_SUCCESS;
 }

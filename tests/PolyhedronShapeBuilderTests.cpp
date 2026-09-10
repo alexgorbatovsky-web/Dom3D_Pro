@@ -37,6 +37,15 @@ int FaceCount(const TopoDS_Shape& shape) {
     }
     return count;
 }
+
+void RequireNoTriangularFaces(const TopoDS_Shape& shape) {
+    for (TopExp_Explorer face(shape, TopAbs_FACE); face.More(); face.Next()) {
+        int edges = 0;
+        for (TopExp_Explorer edge(face.Current(), TopAbs_EDGE); edge.More(); edge.Next())
+            ++edges;
+        Require(edges != 3, "Polyhedron side was split into triangular CAD faces.");
+    }
+}
 }
 
 int main() {
@@ -102,6 +111,18 @@ int main() {
             "Rounded polyhedron is invalid.");
     Require(Volume(rounded_result) > 1.0,
             "Rounded polyhedron has no volume.");
+    RequireNoTriangularFaces(rounded_result);
+
+    // Non-coplanarity must produce one four-sided surface, never a pair
+    // of triangles. Keep this profile off the axis to exclude true apices.
+    auto warped_profile = rounded_profile;
+    for (size_t i = 3; i + 1 < warped_profile.size(); ++i)
+        warped_profile[i].y = i % 2 == 0 ? 2.0e-5f : -2.0e-5f;
+    TopoDS_Shape warped_result;
+    Require(BuildPolyhedronShape(warped_profile, true, {}, {0, 0, 1}, 8, warped_result),
+            "Warped four-sided polyhedron failed.");
+    Require(BRepCheck_Analyzer(warped_result).IsValid(), "Warped polyhedron is invalid.");
+    RequireNoTriangularFaces(warped_result);
 
     rounded_profile.front().x = 0.0f;
     rounded_profile.back().x = 0.0f;

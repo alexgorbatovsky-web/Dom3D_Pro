@@ -18,6 +18,8 @@
 #include <iostream>
 #include <memory>
 #include <vector>
+#include <type_traits>
+#include <limits>
 
 // SmartLine::Create references these accessors, although this focused test
 // builds the sketch from its native segments and does not need CPolyline.cpp.
@@ -47,7 +49,74 @@ void require(bool condition, const char* message) {
 }
 }
 
-int main() {
+int main() try {
+    static_assert(sizeof(SketchPoint)==2*sizeof(double), "Sketch points must have only u,v");
+    static_assert(std::is_same_v<decltype(std::declval<CLinkLine&>().P(0)),const CPoint3d*>, "No writable point pointers");
+    {
+        CSmartLine planar;
+        require(planar.SetCoordinateSystem({1e6,-2e6,3e6},{1,2,3},{2,-1,0}),"Tilted sketch frame failed");
+        require(planar.AddLine(std::make_unique<CLinkLine>(CPoint3d(0,0,55),CPoint3d(10,0,-9))),"UV segment failed");
+        require(planar.AddLine(std::make_unique<CBezierSpline>(CPoint3d(10,0,8),CPoint3d(11,2,4),CPoint3d(15,4,-7),CPoint3d(20,5,11))),"UV Bezier failed");
+        require(planar.GetEndpointId(0,1)==planar.GetEndpointId(1,0),"Joined endpoints are separate nodes");
+        const auto line_id=planar.GetLine(1)->GetID();
+        const auto node_id=planar.GetEndpointId(0,1);
+        for(size_t i=0;i<planar.GetNumLines();++i) for(const auto& p:planar.GetLine(i)->Sample(16))
+            require(p.z==0,"Local curve left the sketch plane");
+        int events=0; planar.SetChangeCallback([&](unsigned,SketchRevisions){++events;});
+        const auto before=planar.GetRevisions();
+        planar.BeginEdit();
+        require(planar.MovePoint(0,1,{12,1,900}),"First transaction edit failed");
+        require(planar.MovePoint(0,1,{13,2,-900}),"Second transaction edit failed");
+        require(events==0,"Preview notified dependencies before commit");
+        require(planar.CommitEdit(),"Commit failed");
+        require(events==1 && planar.GetRevisions().geometry==before.geometry+1,"One edit did not produce one revision/event");
+        require(planar.GetLine(1)->GetStart().x==13 && planar.GetLine(1)->GetStart().z==0,"Shared node was not updated");
+        const auto* moved_bezier=dynamic_cast<const CBezierSpline*>(planar.GetLine(1));
+        require(moved_bezier && moved_bezier->GetControl1().x==14 && moved_bezier->GetControl1().y==4,"Shared anchor left its Bezier handle behind");
+        const auto committed=planar.GetLine(0)->GetEnd();
+        planar.BeginEdit(); planar.MovePoint(0,1,committed); require(planar.CommitEdit(),"No-op commit failed");
+        require(events==1,"No-op edit notified dependents");
+        planar.BeginEdit(); planar.MovePoint(0,1,{30,20,0}); planar.CancelEdit();
+        require(events==1 && planar.GetLine(0)->GetEnd().x==committed.x,"Cancel leaked preview changes");
+        require(planar.GetEndpointId(0,1)==node_id && planar.GetLine(1)->GetID()==line_id,"Cancel changed identities");
+        planar.BeginEdit(); planar.MovePoint(0,1,{20,20,0});
+        require(!planar.MovePoint(99,0,{1,1,0}),"Invalid edit accepted");
+        require(!planar.CommitEdit() && planar.GetLine(0)->GetEnd().x==committed.x,"Failed transaction was not rolled back");
+        bool protected_write=false;
+        try { planar.GetLine(0)->SetEnd({50,50,0}); } catch(const std::logic_error&) { protected_write=true; }
+        require(protected_write && planar.GetLine(0)->GetEnd().x==committed.x,"Untracked write escaped the owner");
+        const auto revisions=planar.GetRevisions();
+        planar.Translate({1,2,3});
+        require(planar.GetRevisions().geometry==revisions.geometry && planar.GetRevisions().placement==revisions.placement+1,"Placement invalidated local geometry");
+        for(int i=0;i<100;++i) planar.Rotate({},{1,2,3},0.01f);
+        const auto& frame=planar.GetCoordinateSystem();
+        for(const auto& p:planar.GetProfilePointsWorld()) {
+            const double d=(p.x-frame.origin.x)*frame.normal.x+(p.y-frame.origin.y)*frame.normal.y+(p.z-frame.origin.z)*frame.normal.z;
+            require(std::abs(d)<1e-7,"World profile lost planarity after repeated transforms");
+        }
+        const auto joint=planar.GetLine(0)->GetEnd(); planar.ScaleLocal(2,2);
+        require(std::abs(planar.GetLine(0)->GetEnd().x-joint.x*2)<1e-9,"Shared node was scaled twice");
+        auto copy=planar.MakeCopy(); copy.MovePoint(0,1,{3,4,0});
+        require(planar.GetLine(0)->GetEnd().x!=copy.GetLine(0)->GetEnd().x,"Copy shares mutable sketch nodes");
+        require(planar.SplitLine(0,{2,0,0}) && planar.GetLine(2)->GetID()==line_id,"Split renumbered unaffected line IDs");
+        CSmartLine imported;
+        require(!imported.CreateFromWorldPoints({{0,0,0},{10,0,0},{10,10,0.1}},false,{},{1,0,0},{0,1,0})
+                && !imported.GetLastGeometryError().empty(),"Nonplanar import was silently flattened");
+        require(imported.CreateFromWorldPoints({{0,0,0},{10,0,0},{10,10,1e-8}},false,{},{1,0,0},{0,1,0}),"Numerical plane residual was not accepted");
+        CSmartLine topology;
+        require(topology.CreateFromWorldPoints({{0,0,0},{10,0,0},{10,10,0},{0,10,0}},true,{},{1,0,0},{0,1,0}),"Topology sketch failed");
+        const auto survivor=topology.GetLine(2)->GetID();
+        require(topology.ConstrainHorizontal(2),"Topology constraint failed");
+        require(topology.SetClosed(false) && topology.GetEndpointId(0,0)!=topology.GetEndpointId(3,1),"Opening a contour kept its endpoints welded");
+        require(topology.RemoveLine(0) && topology.GetLine(1)->GetID()==survivor && topology.GetNumConstraints()==1
+                && topology.GetConstraint(0)->GetLineIndex()==1,"Deletion lost an unaffected constraint/identity");
+        CSmartLine separate;
+        require(separate.AddLine(std::make_unique<CLinkLine>(CPoint3d(0,0,0),CPoint3d(10,0,0)),false)
+                && separate.AddLine(std::make_unique<CLinkLine>(CPoint3d(30,0,0),CPoint3d(40,0,0)),false)
+                && separate.GetNodeCount()==4,"Disconnected links lost a node");
+        require(separate.MoveNodeWorld(2,separate.LocalToWorld({31,2,0}))
+                && separate.GetLine(1)->GetStart().x==31 && separate.GetLine(0)->GetEnd().x==10,"Moving a disconnected node altered the other link");
+    }
     CSmartLine sketch("Filleted arc profile");
     require(
         sketch.SetCoordinateSystem(
@@ -102,7 +171,9 @@ int main() {
         CPoint3d(18.0, 6.5, 0.0),
         CPoint3d(22.0, 5.0, 0.0)};
     for (const CPoint3d& arc_point : edited_arc_points) {
+        sketch.BeginEdit();
         edited_arc->SetPointOnArc(arc_point);
+        require(sketch.CommitEdit(), "Arc transaction failed");
         TopoDS_Face edited_profile;
         Vec3 edited_normal{};
         require(BuildSketchProfileFace(
@@ -305,4 +376,6 @@ int main() {
                      + left_tangent.y * right_tangent.y > 0.0,
             "Bezier smoothness did not remain bidirectional.");
     return EXIT_SUCCESS;
+} catch (const std::exception& error) {
+    std::cerr << error.what() << std::endl; return EXIT_FAILURE;
 }

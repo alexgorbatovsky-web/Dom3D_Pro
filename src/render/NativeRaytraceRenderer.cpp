@@ -21,21 +21,25 @@ QImage pixel_buffer_image(RtPixBuf pixels, double exposure_ev) {
                   QImage::Format_RGB32);
     const float exposure = std::pow(
         2.0f, static_cast<float>(std::clamp(exposure_ev, -4.0, 6.0)));
-    const auto tone_map = [exposure](int channel) {
+    const auto tone_scale = [exposure](int channel) {
         const float value = (channel / 255.0f) * exposure;
         const float mapped = std::clamp(
             value * (2.51f * value + 0.03f)
                 / (value * (2.43f * value + 0.59f) + 0.14f),
             0.0f, 1.0f);
-        return static_cast<int>(mapped * 255.0f + 0.5f);
+        return channel ? mapped * 255.0f / channel : 0.0f;
     };
     for (int y = 0; y < result.height(); ++y) {
         QRgb* row = reinterpret_cast<QRgb*>(result.scanLine(y));
         for (int x = 0; x < result.width(); ++x) {
             const RtBgr value = pixels->bits[y * result.width() + x];
-            row[x] = qRgb(tone_map((value >> 16) & 0xff),
-                          tone_map((value >> 8) & 0xff),
-                          tone_map(value & 0xff));
+            const int r = (value >> 16) & 0xff;
+            const int g = (value >> 8) & 0xff;
+            const int b = value & 0xff;
+            // The legacy buffer is already display RGB. A common scale keeps
+            // its hue; applying a filmic curve to each channel shifts RAL colors.
+            const float scale = tone_scale(std::max({r, g, b}));
+            row[x] = qRgb(qRound(r * scale), qRound(g * scale), qRound(b * scale));
         }
     }
     return result;
@@ -645,8 +649,10 @@ bool NativeRaytraceRenderer::Render(
         float ambient_weight = light_weight;
         float size_scale = 1.0f;
         float density_scale = 1.0f;
-        Color diffuse_tint{1.0f, 0.88f, 0.74f};
-        Color specular_tint{1.0f, 0.94f, 0.86f};
+        Color diffuse_tint = has_room
+            ? Color{1.0f, 0.88f, 0.74f} : Color{1.0f, 1.0f, 1.0f};
+        Color specular_tint = has_room
+            ? Color{1.0f, 0.94f, 0.86f} : Color{1.0f, 1.0f, 1.0f};
         const bool three_light_room = has_room && light_count == 3;
         if (three_light_room) {
             // Match the classic Dom3D three-light room setup while keeping
@@ -692,13 +698,14 @@ bool NativeRaytraceRenderer::Render(
                     120.0f, (maximum.z - minimum.z) * 0.08f)};
         } else {
             // A furniture-only scene has no empty ceiling volume. Put a
-            // compact studio rig on the camera side of the model; placing the
-            // old ceiling lights at the bounds center hid them inside cabinets.
+            // neutral studio rig on the camera side, far enough away that
+            // the light direction varies gently across the model. Nearby
+            // sources produced wide unlit bands even on smooth spheres.
             const float centered = light_count == 1 ? 0.0f
                 : (static_cast<float>(index) / (light_count - 1) - 0.5f);
             base_position = center
-                - camera.forward * (diagonal * 0.45f)
-                + camera.up * (diagonal * (0.22f + 0.08f * std::cos(angle)))
+                - camera.forward * (diagonal * 1.5f)
+                + camera.up * (diagonal * (0.35f + 0.25f * std::cos(angle)))
                 + camera.right * (diagonal * centered * 0.65f);
         }
         RtLight light = rtLight(context);
@@ -744,12 +751,15 @@ bool NativeRaytraceRenderer::Render(
     rtLoadModelView(context, view);
     const float aspect = static_cast<float>(settings.width)
         / std::max(1, settings.height);
+    // A fixed ten-million-unit far plane loses subpixel precision when
+    // unprojecting a small model through the legacy float matrices.
+    const float far_plane = std::max(2.0f,
+        length3(camera.position - center) + diagonal * 2.0f);
     if (camera.orthographic) {
         const float half_height = std::max(
             0.05f, camera.orthographic_scale_mm * 0.5f);
         const float half_width = half_height * aspect;
         constexpr float near_plane = 1.0f;
-        constexpr float far_plane = 10000000.0f;
         const float projection[16] = {
             1.0f / half_width, 0.0f, 0.0f, 0.0f,
             0.0f, 1.0f / half_height, 0.0f, 0.0f,
@@ -761,7 +771,7 @@ bool NativeRaytraceRenderer::Render(
         rtIdentity(rtProjection(context));
         rtuPerspective(rtProjection(context),
             camera.vertical_fov_degrees * 3.14159265358979323846f / 180.0f,
-            aspect, 1.0f, 10000000.0f);
+            aspect, 1.0f, far_plane);
     }
 
     if (!rtCompile(context, checkpoint, &checkpoint_data)

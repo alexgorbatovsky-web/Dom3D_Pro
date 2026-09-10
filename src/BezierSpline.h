@@ -17,14 +17,14 @@ public:
     double GetNearestParameter(const CPoint3d& point) const;
     std::vector<CPoint3d> Sample(std::size_t segments = 32) const override;
 
-    const CPoint3d& GetControl1() const;
-    const CPoint3d& GetControl2() const;
+    CPoint3d GetControl1() const;
+    CPoint3d GetControl2() const;
     void SetControl1(CPoint3d point);
     void SetControl2(CPoint3d point);
     void SetStart(CPoint3d point) override;
     void SetEnd(CPoint3d point) override;
 
 private:
-    CPoint3d control1_;
-    CPoint3d control2_;
+    SketchPoint control1_;
+    SketchPoint control2_;
 };

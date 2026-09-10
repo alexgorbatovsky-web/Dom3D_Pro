@@ -1,4 +1,5 @@
 #include "SurfaceFace.h"
+#include "CircularSplineBoundary.h"
 #include "../FillContour.h"
 #include "Solid.h"
 #include "SolidTool.h"
@@ -630,10 +631,9 @@ bool build_regular_uv_mesh(CSurfaceFace* surface, float deflection)
 	if (!surface || surface->m_Face.IsNull())
 		return false;
 	CNet net;
-	// The adaptive net controls both the visible silhouette and interpolation
-	// of highlights.  Use half of the general mesh deflection here so smooth
-	// standalone surfaces do not look faceted at the scene tessellation value.
-	if (net.Build(surface, static_cast<double>(deflection) * 0.5) != 0)
+	// Use the display tolerance supplied by the view without reducing its
+	// modeling-tolerance floor.
+	if (net.Build(surface, static_cast<double>(deflection)) != 0)
 		return false;
 	if (!surface->pMesh3D)
 		surface->pMesh3D = new CMesh3D;
@@ -2694,8 +2694,10 @@ bool CSurfaceFace::BuldMeshTriangle(float Deflection, float AngDeflection)
 	const bool spherical_surface =
 		analytic_surface.GetType() == GeomAbs_Sphere;
 	gp_Pnt spherical_center;
+	bool spherical_direct = true;
 	if (spherical_surface) {
 		spherical_center = analytic_surface.Sphere().Location();
+		spherical_direct = analytic_surface.Sphere().Position().Direct();
 	}
 	bool analytic_normals_valid = aTriangulation->HasUVNodes();
 	for (Standard_Integer nodeIndex = 1; nodeIndex <= aTriangulation->NbNodes(); ++nodeIndex) {
@@ -2717,6 +2719,11 @@ bool CSurfaceFace::BuldMeshTriangle(float Deflection, float AngDeflection)
 					// sideways vector and appear as a black dot in Cycles.  The exact
 					// analytic normal is radial everywhere, including poles and seam.
 					normal = gp_Vec(spherical_center, point);
+					// An indirect sphere parametrization has inward dU x dV.
+					// Preserve that sign before applying the topological face
+					// orientation below, just as the derivative-based path does.
+					if (!spherical_direct)
+						normal.Reverse();
 				} else {
 					gp_Pnt surface_point;
 					gp_Vec derivative_u;
@@ -5103,7 +5110,8 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 				continue;
 			BRepAdaptor_Curve curve(topo_edge);
 			if (curve.GetType() != GeomAbs_Circle
-				&& curve.GetType() != GeomAbs_Ellipse)
+				&& curve.GetType() != GeomAbs_Ellipse
+				&& !IsCircularSplineBoundary(topo_edge))
 				return false;
 			elliptical_boundary = elliptical_boundary
 				|| curve.GetType() == GeomAbs_Ellipse;

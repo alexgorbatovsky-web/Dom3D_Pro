@@ -1,5 +1,6 @@
 #include "materials/ProceduralMaterialIO.h"
 #include "Dom3DProjectSerializer.h"
+#include "ui/ToolRegistry.h"
 
 #include "CadCurve3D.h"
 #include "BezierSpline.h"
@@ -748,6 +749,7 @@ bool write_boolean_tools(QXmlStreamWriter& xml, const CSolid& solid, QString& er
             QByteArray geometry;
             if (!geometry_fingerprint_data({tool}, geometry, error)) return false;
             xml.writeTextElement("geometry", QString::fromLatin1(geometry.toBase64()));
+            tool->WriteCenterlines(xml);
         }
         xml.writeEndElement();
     }
@@ -935,6 +937,19 @@ bool Dom3DProjectSerializer::Write(QIODevice& device, const CAlfaDoc& document,
         xml.writeEndElement();
     }
 
+    xml.writeStartElement("curveEndpointLinks");
+    for (const auto& link : document.GetCurveEndpointLinks()) {
+        xml.writeStartElement("link");
+        xml.writeAttribute("first", QString::number(link.first_id));
+        xml.writeAttribute("second", QString::number(link.second_id));
+        xml.writeAttribute("firstEnd", link.first_end ? "1" : "0");
+        xml.writeAttribute("secondEnd", link.second_end ? "1" : "0");
+        xml.writeAttribute("x", QString::number(link.position.x, 'g', 17));
+        xml.writeAttribute("y", QString::number(link.position.y, 'g', 17));
+        xml.writeAttribute("z", QString::number(link.position.z, 'g', 17));
+        xml.writeEndElement();
+    }
+    xml.writeEndElement();
     xml.writeStartElement("materials");
     for (const Material& material : document.GetMaterials()) {
         write_material(xml, material);
@@ -1056,8 +1071,13 @@ bool Dom3DProjectSerializer::Write(QIODevice& device, const CAlfaDoc& document,
                     xml.writeAttribute("doorOpenAngle", QString::number(definition.door_open_angle, 'g', 17));
                     xml.writeAttribute("leftDoorOpenAngle", QString::number(definition.left_door_open_angle, 'g', 17));
                     xml.writeAttribute("rightDoorOpenAngle", QString::number(definition.right_door_open_angle, 'g', 17));
+                    xml.writeAttribute("doorAxis",QString::number(definition.door_axis));
                     xml.writeAttribute("doorHingeSide", QString::number(definition.door_hinge_side));
                     xml.writeAttribute("handleOrientation", QString::number(definition.handle_orientation));
+                    xml.writeAttribute("handleType",QString::number(definition.handle_type));
+                    xml.writeAttribute("makeLegs",definition.make_legs?"1":"0");
+                    xml.writeAttribute("legHeight",QString::number(definition.leg_height));
+                    xml.writeAttribute("legInset",QString::number(definition.leg_inset));
                 }
             }
             for (unsigned long id : group->GetElementIds()) {
@@ -1117,6 +1137,7 @@ bool Dom3DProjectSerializer::Write(QIODevice& device, const CAlfaDoc& document,
         } else if (const auto* sketch = dynamic_cast<const CSmartLine*>(&object)) {
             xml.writeStartElement("geometry");
             xml.writeAttribute("kind", "parametric-sketch");
+            xml.writeAttribute("coordinates", "uv");
             xml.writeAttribute("closed", sketch->IsClosed() ? "true" : "false");
 
             const SketchCoordinateSystem& system = sketch->GetCoordinateSystem();
@@ -1154,6 +1175,9 @@ bool Dom3DProjectSerializer::Write(QIODevice& device, const CAlfaDoc& document,
                     line_type = "arc";
                 }
                 xml.writeAttribute("type", line_type);
+                xml.writeAttribute("id", QString::number(line->GetID()));
+                xml.writeAttribute("startNode", QString::number(sketch->GetEndpointId(line_index,0)));
+                xml.writeAttribute("endNode", QString::number(sketch->GetEndpointId(line_index,1)));
                 xml.writeAttribute("x1", QString::number(line->GetStart().x, 'g', 17));
                 xml.writeAttribute("y1", QString::number(line->GetStart().y, 'g', 17));
                 xml.writeAttribute("x2", QString::number(line->GetEnd().x, 'g', 17));
@@ -1307,6 +1331,7 @@ bool Dom3DProjectSerializer::Write(QIODevice& device, const CAlfaDoc& document,
             xml.writeEmptyElement("geometry");
             xml.writeAttribute("kind", "brep-ref");
             xml.writeAttribute("index", QString::number(packed->second));
+            solid->WriteCenterlines(xml);
             write_surface_texture_transforms(xml, *solid, include_render_mesh);
             if (!write_boolean_tools(xml, *solid, error, include_render_mesh)) {
                 return false;
@@ -1604,6 +1629,7 @@ bool Dom3DProjectSerializer::Load(const QString& path,
                         return false;
                     }
                     bool hinge_ok = true;
+                    definition.door_axis = geometry.attribute("doorAxis","0").toInt();
                     definition.door_hinge_side = geometry.attribute("doorHingeSide", "0").toInt(&hinge_ok);
                     if (!hinge_ok) {
                         error = "Kitchen cabinet door hinge side is invalid.";
@@ -1616,6 +1642,10 @@ bool Dom3DProjectSerializer::Load(const QString& path,
                         error = "Kitchen cabinet handle orientation is invalid.";
                         return false;
                     }
+                    definition.handle_type=geometry.attribute("handleType","0").toInt();
+                    definition.make_legs=geometry.attribute("makeLegs","0")=="1";
+                    definition.leg_height=geometry.attribute("legHeight","100").toDouble();
+                    definition.leg_inset=geometry.attribute("legInset","20").toDouble();
                     if (!CKitchenCabinet::IsValid(definition)) {
                         error = "Kitchen cabinet parameters are invalid.";
                         return false;
@@ -1849,6 +1879,15 @@ bool Dom3DProjectSerializer::Load(const QString& path,
                     line = std::move(arc);
                 } else {
                     line = std::make_unique<CLinkLine>(start, end);
+                }
+                if (line_element.hasAttribute("id")) {
+                    bool a,b,c;
+                    const auto id=line_element.attribute("id").toULongLong(&a);
+                    const auto start_id=line_element.attribute("startNode").toULongLong(&b);
+                    const auto end_id=line_element.attribute("endNode").toULongLong(&c);
+                    if(!a||!b||!c||!id||!start_id||!end_id) { error="Invalid sketch identity."; return false; }
+                    line->SetID(static_cast<size_t>(id));
+                    line->SetEndpointIds(static_cast<size_t>(start_id),static_cast<size_t>(end_id));
                 }
                 if (!sketch->AddLine(std::move(line), false)) {
                     error = "Sketch contains an invalid line.";
@@ -2188,6 +2227,7 @@ bool Dom3DProjectSerializer::Load(const QString& path,
         }
 
         if (auto* solid = dynamic_cast<CSolid*>(object.get())) {
+            if (!solid->ReadCenterlines(object_element, error)) return false;
             if (!read_surface_texture_transforms(object_element, *solid, loaded_materials, error)) {
                 return false;
             }
@@ -2270,10 +2310,27 @@ bool Dom3DProjectSerializer::Load(const QString& path,
     document.GetObjects() = std::move(loaded_objects);
     document.SetDraftingData(std::move(loaded_drafting_data));
     document.EnsureObjectIds();
+    std::vector<CAlfaDoc::CurveEndpointLink> endpoint_links;
+    for (QDomElement item = root.firstChildElement("curveEndpointLinks").firstChildElement("link");
+         !item.isNull(); item = item.nextSiblingElement("link")) {
+        CAlfaDoc::CurveEndpointLink link;
+        link.first_id = item.attribute("first").toULong();
+        link.second_id = item.attribute("second").toULong();
+        link.first_end = item.attribute("firstEnd") == "1";
+        link.second_end = item.attribute("secondEnd") == "1";
+        link.position = CPoint3d(item.attribute("x").toDouble(),
+            item.attribute("y").toDouble(), item.attribute("z").toDouble());
+        if (link.first_id && link.second_id && link.first_id != link.second_id
+            && document.FindObjectById(link.first_id) && document.FindObjectById(link.second_id)
+            && std::isfinite(link.position.x) && std::isfinite(link.position.y)
+            && std::isfinite(link.position.z)) endpoint_links.push_back(link);
+    }
+    document.SetCurveEndpointLinks(std::move(endpoint_links));
     if (document.GetObjects().empty()) {
         document.CreatePolyline();
     }
     document.ClearSelection();
+    RestoreMissingSolidCenterlines(document);
     report(100, "Project opened");
     return true;
 }
@@ -2434,6 +2491,15 @@ bool Dom3DProjectSerializer::ImportPart(const QString& path,
         }
         std::vector<ParametricParameterValue> definition = object->GetParametricParameters();
         remap_parameters(definition, id_map);
+        for(auto& parameter:definition) {
+            const auto& key=parameter.id;
+            const bool materialParameter=(key.size()>=12&&key.compare(key.size()-12,12,"_material_id")==0)
+                || (object->GetParametricToolId()=="kitchen_layout" && (key.rfind("material_",0)==0||key.find("_material_")!=std::string::npos));
+            if(materialParameter&&parameter.value>0) {
+                auto mapped=material_map.find(static_cast<unsigned long>(parameter.value));
+                if(mapped!=material_map.end())parameter.value=double(mapped->second);
+            }
+        }
         object->SetParametricDefinition(object->GetParametricToolId(), std::move(definition));
         if (auto* solid = dynamic_cast<CSolid*>(object.get())) {
             for (int operation_index = 0;
@@ -2492,6 +2558,18 @@ bool Dom3DProjectSerializer::ImportPart(const QString& path,
         part_pointer->Scale(origin, {0.0f, 0.0f, 1.0f}, scale.z);
     }
     part_pointer->Translate(insertion_point);
+    auto merged_links = document.GetCurveEndpointLinks();
+    for (auto link : imported.GetCurveEndpointLinks()) {
+        const auto first = id_map.find(link.first_id), second = id_map.find(link.second_id);
+        if (first == id_map.end() || second == id_map.end()) continue;
+        link.first_id = first->second;
+        link.second_id = second->second;
+        link.position = CPoint3d(link.position.x * scale.x + insertion_point.x,
+            link.position.y * scale.y + insertion_point.y,
+            link.position.z * scale.z + insertion_point.z);
+        merged_links.push_back(link);
+    }
+    document.SetCurveEndpointLinks(std::move(merged_links));
     if (!wrap_as_part) {
         document.ClearSelection();
         const auto& ids = part_pointer->GetElementIds();
@@ -2579,6 +2657,12 @@ bool Dom3DProjectSerializer::SaveSelection(
         copy_object_identity(*objects[index], *copy);
         subset.GetObjects().push_back(std::move(copy));
     }
+    std::vector<CAlfaDoc::CurveEndpointLink> subset_links;
+    for (const auto& link : document.GetCurveEndpointLinks()) {
+        if (subset.FindObjectById(link.first_id) && subset.FindObjectById(link.second_id))
+            subset_links.push_back(link);
+    }
+    subset.SetCurveEndpointLinks(std::move(subset_links));
     const bool saved = Save(
         path, subset, active_room, view_state, thumbnail, error);
     SetAlfaDoc(&document);

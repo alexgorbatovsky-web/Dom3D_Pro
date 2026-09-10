@@ -1,5 +1,7 @@
+#include <QSettings>
 #include "IgesIO.h"
 #include "ThreeDSIO.h"
+#include "ObjIO.h"
 #include "CAlfaDoc.h"
 #include "CAssembled.h"
 #include "CFacadeFurniture.h"
@@ -35,6 +37,11 @@
 #include <QApplication>
 #include <QSurfaceFormat>
 #include "solid/Solid.h"
+#include "solid/CircularSplineBoundary.h"
+#include <GeomConvert.hxx>
+#include <Geom_Circle.hxx>
+#include <Geom_Ellipse.hxx>
+#include <Geom_BSplineCurve.hxx>
 #include "solid/SheetBendShapeBuilder.h"
 #include "solid/SurfaceSet.h"
 #include "StepIO.h"
@@ -92,6 +99,8 @@
 
 void TestHolePlacement();
 void TestPillowCadQuadro(const char* path, const char* outputPrefix);
+void TestFrameCadQuadro(const char* path);
+void TestFilletMeshNormals(const char* path);
 void TestHairdryerCadBoundary(const char* path);
 void DiagnoseHairdryerChartFill(const char* path,const char* output);
 
@@ -419,6 +428,94 @@ void TestFusionCylinderFrontGuard() {
     }
     require(rejection.empty() && quads == 8 && result_triangles == 0,
             "Metric cylinder development did not produce eight bounded quads.");
+}
+
+void TestWireCircularCaps(const char* path) {
+    for (double radius : {0.01, 10.0, 1000.0}) {
+        const gp_Ax2 frame(gp_Pnt(23, -17, 8), gp_Dir(1, 2, 3));
+        const Handle(Geom_BSplineCurve) circle = GeomConvert::CurveToBSplineCurve(
+            new Geom_Circle(gp_Circ(frame, radius)));
+        require(IsCircularSplineBoundary(BRepBuilderAPI_MakeEdge(circle).Edge()),
+                "A circular rational spline was not recognized.");
+        require(!IsCircularSplineBoundary(BRepBuilderAPI_MakeEdge(circle,
+                    circle->FirstParameter(),
+                    (circle->FirstParameter() + circle->LastParameter()) * 0.5).Edge()),
+                "An open circular arc was accepted as a full cap.");
+        const Handle(Geom_BSplineCurve) ellipse = GeomConvert::CurveToBSplineCurve(
+            new Geom_Ellipse(gp_Elips(frame, radius, radius * 0.8)));
+        require(!IsCircularSplineBoundary(BRepBuilderAPI_MakeEdge(ellipse).Edge()),
+                "A non-circular spline was accepted as a circle.");
+        const gp_Pnt pole = circle->Pole(2);
+        circle->SetPole(2, pole.Translated(gp_Vec(frame.Direction()) * radius * 0.1));
+        require(!IsCircularSplineBoundary(BRepBuilderAPI_MakeEdge(circle).Edge()),
+                "A non-planar spline was accepted as a circle.");
+    }
+    CAlfaDoc document;
+    Dom3DProjectSerializer serializer;
+    QString room, error;
+    ProjectViewState view;
+    require(serializer.Load(QString::fromLocal8Bit(path), document, room, view, error),
+            error.toLocal8Bit().constData());
+    size_t tested = 0;
+    for (const auto& object : document.GetObjects()) {
+        auto* solid = dynamic_cast<CSolid*>(object.get());
+        if (!solid || solid->GetName() != "Wire") continue;
+        solid->MeshQuadro = true;
+        solid->MeshQuadroHoleSLX = false;
+        for (float density : {0.30f, 0.50f, 0.80f}) {
+            require(solid->ReBuldMesh(1.0f / density), "Wire remeshing failed.");
+            std::vector<Vec3> side_vertices;
+            for (int index = 0; index < solid->GetNumSurfaces(); ++index) {
+                const auto* surface = solid->GetSurfaceFace(index);
+                if (BRepAdaptor_Surface(TopoDS::Face(surface->m_Face)).GetType() != GeomAbs_Plane) {
+                    const auto& vertices = surface->pMesh3D->GetVertices();
+                    side_vertices.insert(side_vertices.end(), vertices.begin(), vertices.end());
+                }
+            }
+            size_t caps = 0;
+            for (int index = 0; index < solid->GetNumSurfaces(); ++index) {
+                const auto* surface = solid->GetSurfaceFace(index);
+                if (BRepAdaptor_Surface(TopoDS::Face(surface->m_Face)).GetType() != GeomAbs_Plane)
+                    continue;
+                ++caps;
+                const auto& vertices = surface->pMesh3D->GetVertices();
+                std::map<std::pair<size_t, size_t>, int> edges;
+                size_t cells = 0;
+                for (const auto& face : surface->pMesh3D->GetFaces()) {
+                    if (face.deleted) continue;
+                    ++cells;
+                    require(face.corners.size() == 4, "Wire cap contains a non-quad cell.");
+                    for (size_t i = 0; i < face.corners.size(); ++i)
+                        ++edges[std::minmax(face.corners[i].v,
+                            face.corners[(i + 1) % face.corners.size()].v)];
+                }
+                std::set<size_t> boundary;
+                for (const auto& edge : edges) {
+                    require(edge.second <= 2, "Wire cap has a non-manifold edge.");
+                    if (edge.second == 1) {
+                        boundary.insert(edge.first.first);
+                        boundary.insert(edge.first.second);
+                    }
+                }
+                require(boundary.size() >= 6 && cells > boundary.size()
+                            && vertices.size() > boundary.size() * 2,
+                        "Wire cap fell back to strips instead of concentric rings.");
+                for (size_t id : boundary) {
+                    double nearest = std::numeric_limits<double>::max();
+                    for (Vec3 side : side_vertices) {
+                        const Vec3 delta = vertices[id] - side;
+                        nearest = std::min(nearest, static_cast<double>(dot(delta, delta)));
+                    }
+                    require(nearest < 1.0e-10, "Wire cap lost a side-wall boundary node.");
+                }
+                std::cout << "Wire density=" << density << " cap=" << index
+                          << " boundary=" << boundary.size() << " quads=" << cells << '\n';
+            }
+            require(caps == 2, "Wire fixture must contain two planar caps.");
+        }
+        ++tested;
+    }
+    require(tested == 1, "Wire fixture was not found.");
 }
 
 void TestSpherePoleQuadroProjection() {
@@ -5460,11 +5557,19 @@ void DiagnoseProjectFillets(const QString& path, double radius) {
 
 void TestToolsMesh3D(const char* boundary_path, const char* diagnostic_directory);
 int TestRepeatCommand(int argc, char** argv);
+int TestKitchenLayout(int argc, char** argv);
+int TestKitchenEditor(int argc, char** argv);
 int TestScenePersistence(int argc, char** argv);
+int TestSolidCenterlines(int argc, char** argv);
+int TestDraftingOutlines(int argc, char** argv);
+int TestDraftingDimensions(int argc, char** argv);
+int TestSheetBend(int argc, char** argv);
 int TestProjectOpenDialog(int argc, char** argv);
 int TestBooleanTool(int argc, char** argv);
 int TestSolidPrimitiveTool(int argc, char** argv);
 int TestTile(int argc, char** argv);
+int TestSurfaceDisplayNet();
+int TestCurveEndpointLinks(int argc, char** argv);
 int TestProceduralMaterial(int argc, char** argv);
 int TestFacePrimitiveCut(int argc, char** argv);
 
@@ -5616,7 +5721,29 @@ void TestCushionStageOneMesh() {
             "Cushion Hybrid patches were not sewn into a solid.");
 }
 
+int TestNativeColors();
+
 int main(int argc, char** argv) {
+    if (argc >= 2 && std::string(argv[1]) == "--test-solid-centerlines") return TestSolidCenterlines(argc,argv);
+    if(argc==4 && std::string(argv[1])=="--import-obj-project") {
+        QApplication application(argc,argv); ObjIO io; std::string error;
+        std::vector<std::unique_ptr<CMesh3D>> meshes;
+        require(io.Import(argv[2],meshes,error),error.c_str());CAlfaDoc document;
+        std::map<std::string, Material> imported_materials;
+        for(auto& mesh:meshes) {
+            auto material=mesh->GetMaterial();
+            auto found=imported_materials.find(material.name);
+            if(found==imported_materials.end()) {
+                material.id=0;
+                auto saved=document.UpsertMaterial(material);
+                found=imported_materials.emplace(material.name,saved).first;
+            }
+            mesh->SetMaterial(found->second);document.AddMesh(std::move(mesh));
+        }
+        Dom3DProjectSerializer serializer;QString save_error;ProjectViewState view;
+        require(serializer.Save(QString::fromLocal8Bit(argv[3]),document,"Mesh",view,{},save_error),save_error.toStdString().c_str());
+        return EXIT_SUCCESS;
+    }
     if(argc==5 && std::string(argv[1])=="--check-3ds-normals") {
         QApplication application(argc,argv); ThreeDSIO io; std::string error;
         std::vector<std::unique_ptr<CMesh3D>> meshes;
@@ -5658,6 +5785,8 @@ int main(int argc, char** argv) {
     }
     if(argc>=2 && std::string(argv[1])=="--test-procedural-material")return TestProceduralMaterial(argc,argv);
     if(argc>=2 && std::string(argv[1])=="--test-tile")return TestTile(argc,argv);
+    if(argc==2 && std::string(argv[1])=="--test-surface-display-net")return TestSurfaceDisplayNet();
+    if(argc>=2 && std::string(argv[1])=="--test-curve-endpoint-links")return TestCurveEndpointLinks(argc,argv);
     if (argc >= 2 && std::string(argv[1]) == "--test-project-open-dialog")
         return TestProjectOpenDialog(argc, argv);
     if (argc >= 2 && std::string(argv[1]) == "--test-face-primitive-cut")
@@ -5668,7 +5797,7 @@ int main(int argc, char** argv) {
         return TestBooleanTool(argc, argv);
     // Manual visual regression through the real viewport, including batched
     // shading and mesh edges. Keep it opt-in because it needs a native GL driver.
-    if ((argc == 4 || argc == 5) && (std::string(argv[1]) == "--render-project-quadro" || std::string(argv[1]) == "--render-project-native")) {
+    if ((argc >= 4 && argc <= 6) && (std::string(argv[1]) == "--render-project-quadro" || std::string(argv[1]) == "--render-project-native")) {
         QSurfaceFormat format;
         format.setRenderableType(QSurfaceFormat::OpenGL);
         format.setVersion(2, 1);
@@ -5699,14 +5828,14 @@ int main(int argc, char** argv) {
         application.processEvents();
         CSolid::SetDisplayMode(std::string(argv[1]) == "--render-project-native" ? SolidDisplayMode::SurfacesAndEdges : SolidDisplayMode::SurfacesAndRaisedMesh);
         CMesh3D::SetDisplayMode(std::string(argv[1]) == "--render-project-native" ? MeshDisplayMode::SurfaceMaterial : MeshDisplayMode::SurfaceColored);
-        const auto densities = argc == 5 ? std::vector<float>{std::stof(argv[4])}
+        const auto densities = argc >= 5 ? std::vector<float>{std::stof(argv[4])}
             : std::vector<float>{0.35f, 0.40f, 0.45f, 0.50f, 0.80f};
         for (float density : densities) {
             for (const auto& object : document.GetObjects()) {
                 if (auto* solid = dynamic_cast<CSolid*>(object.get())) {
                     if(std::string(argv[1]) == "--render-project-native")continue;
-                    solid->MeshQuadro = true;
-                    solid->MeshQuadroHoleSLX = true;
+                    solid->MeshQuadro = argc < 6 || std::string(argv[5]) != "--hybrid";
+                    solid->MeshQuadroHoleSLX = argc < 6 || std::string(argv[5]) != "--no-slx";
                     require(solid->ReBuldMesh(1.0f / density), "Rebuild failed");
                 }
             }
@@ -5728,11 +5857,80 @@ int main(int argc, char** argv) {
     if (argc >= 2 && std::string(argv[1]) == "--test-repeat-command") {
         return TestRepeatCommand(argc, argv);
     }
+    if (argc >= 3 && (std::string(argv[1]) == "--test-sheet-bend-detail"
+                      || std::string(argv[1]) == "--test-sheet-bend-third"
+                      || std::string(argv[1]) == "--test-sheet-bend-fourth")) {
+        return TestSheetBend(argc, argv);
+    }
+    if (argc >= 2 && std::string(argv[1]) == "--test-drafting-dimensions") return TestDraftingDimensions(argc, argv);
+    if (argc >= 3 && std::string(argv[1]) == "--test-drafting-outlines") {
+        return TestDraftingOutlines(argc, argv);
+    }
     if (argc >= 2 && std::string(argv[1]) == "--test-scene-persistence") {
         // UI regressions own their QApplication, just like RepeatCommand.
         return TestScenePersistence(argc, argv);
     }
+    if (argc >= 2 && std::string(argv[1]) == "--test-kitchen-editor") return TestKitchenEditor(argc, argv);
+    if (argc >= 2 && std::string(argv[1]) == "--test-kitchen-layout") return TestKitchenLayout(argc, argv);
     QCoreApplication application(argc, argv);
+    if (argc == 4 && std::string(argv[1]) == "--test-rebuild-polyhedron") {
+        CAlfaDoc document;
+        Dom3DProjectSerializer serializer;
+        QString room, error;
+        ProjectViewState view;
+        require(serializer.Load(QString::fromLocal8Bit(argv[2]), document, room, view, error),
+                error.toLocal8Bit().constData());
+        ToolRegistry registry;
+        size_t tested = 0;
+        for (size_t i = 0; i < document.GetObjects().size(); ++i) {
+            auto* solid = dynamic_cast<CSolid*>(document.GetObjects()[i].get());
+            if (!solid || !solid->GetOperation(0)
+                || solid->GetOperation(0)->ToolId != "SolidPolyhedronTool") continue;
+            ++tested;
+            const int operations = solid->GetNumOperations();
+            require(operations == 2 && solid->GetOperation(1)->ToolId == "fillet_edge",
+                    "Expected the Polyhedron fixture with its ledge fillet.");
+            GProp_GProps before_volume;
+            BRepGProp::VolumeProperties(solid->m_Shape, before_volume);
+            std::cout << "Polyhedron before faces=" << solid->GetNumSurfaces() << '\n';
+            // Fixture migration: the twelve edges of the horizontal ledge
+            // belonged to F6 in the old triangulated base, and F4 in the
+            // rebuilt base. Preserve the selected ledge, not the stale index.
+            for (auto& p : solid->GetOperation(1)->Parameters)
+                if (p.id.rfind("edge.", 0) == 0 && p.id.find(".surface") != std::string::npos)
+                    p.value = 4;
+            require(registry.ReplayOperations(i, document), "Polyhedron operation replay failed.");
+            solid = dynamic_cast<CSolid*>(document.GetObjects()[i].get());
+            require(solid && solid->GetNumOperations() == operations,
+                    "Polyhedron replay lost operations.");
+            require(BRepCheck_Analyzer(solid->m_Shape).IsValid(), "Rebuilt polyhedron is invalid.");
+            require(solid->GetNumSurfaces() == 44, "Polyhedron retained split side faces.");
+            GProp_GProps after_volume;
+            BRepGProp::VolumeProperties(solid->m_Shape, after_volume);
+            require(std::fabs(after_volume.Mass() - before_volume.Mass())
+                        < std::fabs(before_volume.Mass()) * 1.0e-5,
+                    "Polyhedron repair changed the volume or moved the fillet.");
+            std::cout << "Polyhedron after faces=" << solid->GetNumSurfaces() << '\n';
+            for (int f = 0; f < solid->GetNumSurfaces(); ++f) {
+                const auto* surface = solid->GetSurfaceFace(f);
+                int edges = 0;
+                for (TopExp_Explorer e(surface->m_Face, TopAbs_EDGE); e.More(); e.Next()) ++edges;
+                if (edges == 3) {
+                    GProp_GProps props;
+                    BRepGProp::SurfaceProperties(surface->m_Face, props);
+                    const auto p = props.CentreOfMass();
+                    // The profile ends on the axis below the bottom rim;
+                    // those six genuine apex facets are not split side panels.
+                    require(p.Z() < -27.0, "Polyhedron has a triangular side panel.");
+                    std::cout << "triangle=" << f << " center=" << p.X() << ',' << p.Y() << ',' << p.Z() << '\n';
+                }
+            }
+        }
+        require(tested > 0, "Missing polyhedron fixture.");
+        require(serializer.Save(QString::fromLocal8Bit(argv[3]), document, room, view, {}, error),
+                error.toLocal8Bit().constData());
+        return 0;
+    }
     if (argc == 3 && std::string(argv[1]) == "--test-shell-rim-quadro") {
         CAlfaDoc document;
         Dom3DProjectSerializer serializer;
@@ -5787,6 +5985,115 @@ int main(int argc, char** argv) {
         require(tested == 1, "Expected one Shell.");
         return 0;
     }
+    if (argc == 3 && std::string(argv[1]) == "--test-revolve-all-filleted") {
+        CAlfaDoc document;
+        Dom3DProjectSerializer serializer;
+        QString room, error;
+        ProjectViewState view;
+        require(serializer.Load(QString::fromLocal8Bit(argv[2]), document, room, view, error),
+                error.toLocal8Bit().constData());
+        size_t tested = 0;
+        for (const auto& object : document.GetObjects()) {
+            auto* solid = dynamic_cast<CSolid*>(object.get());
+            if (!solid) continue;
+            ++tested;
+            solid->MeshQuadro = true;
+            solid->MeshQuadroHoleSLX = false;
+            for (float density : {0.25f, 0.35f, 0.50f, 0.80f, 0.35f}) {
+                require(solid->ReBuldMesh(1.0f / density), "Revolve fillet rebuild failed.");
+                std::vector<const CMesh3D*> meshes;
+                size_t revolved = 0;
+                for (int i = 0; i < solid->GetNumSurfaces(); ++i) {
+                    auto* surface = solid->GetSurfaceFace(i);
+                    require(surface && surface->pMesh3D, "Missing revolve surface mesh.");
+                    const auto& mesh = *surface->pMesh3D;
+                    require(ActiveFaceEdgeComponentCount(mesh) == 1,
+                            "Revolve surface mesh is empty or disconnected.");
+                    meshes.push_back(&mesh);
+                    if (BRepAdaptor_Surface(TopoDS::Face(surface->m_Face)).GetType()
+                        != GeomAbs_SurfaceOfRevolution) continue;
+                    ++revolved;
+                    SurfaceUVMapping mapping(surface);
+                    for (int edge = 0; edge < surface->GetPreparedPolylineCount(); ++edge) {
+                        std::vector<CPoint3d> points;
+                        require(surface->GetPreparedPolylinePoints(edge, points), "Missing fillet boundary.");
+                        for (const auto& p : points) {
+                            SurfaceUVPoint uv;
+                            require(mapping.Project({float(p.x), float(p.y), float(p.z)}, uv),
+                                    "Fillet boundary projection failed.");
+                            CPoint8d restored;
+                            require(surface->GetPoint(uv.u, uv.v, &restored), "Fillet evaluation failed.");
+                            require(std::hypot(std::hypot(restored.x - p.x, restored.y - p.y),
+                                               restored.z - p.z) < 2.0e-4,
+                                    "Fillet projection jumped to another branch.");
+                        }
+                    }
+                    for (const auto& face : mesh.GetFaces()) {
+                        if (face.deleted) continue;
+                        require(face.corners.size() == 4, "Revolved fillet lost its quad strip.");
+                        for (size_t k = 0; k < face.corners.size(); ++k) {
+                            const Vec3 a = mesh.GetVertices().at(face.corners[k].v);
+                            const Vec3 b = mesh.GetVertices().at(face.corners[(k + 1) % 4].v);
+                            require(dot(b - a, b - a) < 400.0f, "Fillet edge crosses the body.");
+                        }
+                    }
+                }
+                require(revolved > 0, "Fixture lacks a revolved fillet.");
+                auto welded = CMesh3D::CreateWelded(meshes);
+                bool manifold = false;
+                require(welded && ClosedMeshBoundaryLoopCount(*welded, manifold) == 0 && manifold,
+                        "Revolve fillets retained open or non-manifold seams.");
+                std::cout << "Revolve all filleted density=" << density << " passed.\n";
+            }
+        }
+        require(tested == 1, "Expected one revolve solid.");
+        return 0;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--test-native-colors") return TestNativeColors();
+    if (argc == 4 && std::string(argv[1]) == "--render-native-project") {
+        CAlfaDoc doc;
+        Dom3DProjectSerializer serializer;
+        QString room, error;
+        ProjectViewState view;
+        require(serializer.Load(QString::fromLocal8Bit(argv[2]),
+                                doc, room, view, error), qPrintable(error));
+        for (const auto& object : doc.GetObjects()) {
+            if (auto* solid = dynamic_cast<CSolid*>(object.get()))
+                require(solid->ReBuldMesh(), "Cannot build render geometry");
+        }
+        const auto scene = BuildRenderScene(doc, view.camera,
+                                             view.orthographic_projection);
+        NativeRaytraceSettings settings;
+        settings.width = 640;
+        settings.height = 480;
+        settings.progressive_passes = 1;
+        settings.thread_count = 4;
+        QSettings saved("Dom3D", "Dom3D_Pro");
+        saved.beginGroup("render/native");
+        settings.light_strength = saved.value(
+            "lightStrength", settings.light_strength).toDouble();
+        settings.exposure_ev = saved.value("exposure", settings.exposure_ev).toDouble();
+        settings.ambient_strength = saved.value(
+            "ambient", settings.ambient_strength).toDouble();
+        settings.light_count = saved.value("interiorLights", settings.light_count).toInt();
+        settings.shadow_density = saved.value("shadowDensity", 100.0).toDouble() / 100.0;
+        settings.light_radius_fraction = saved.value("lightSize", 6.0).toDouble() / 100.0;
+        std::cout << "meshes=" << scene.meshes.size()
+                  << " triangles=" << scene.TriangleCount()
+                  << " light=" << settings.light_strength
+                  << " exposure=" << settings.exposure_ev
+                  << " ambient=" << settings.ambient_strength << std::endl;
+        for (const auto& material : scene.materials)
+            std::cout << material.name << " diffuse=" << material.diffuse.r
+                      << "," << material.diffuse.g << "," << material.diffuse.b << std::endl;
+        QImage image;
+        require(NativeRaytraceRenderer::Render(scene, settings, &image, &error),
+                qPrintable(error));
+        require(image.save(QString::fromLocal8Bit(argv[3])),
+                "Cannot save native diagnostic render");
+        return 0;
+    }
+
     if (argc == 2 && std::string(argv[1]) == "--test-visible-step-and-selection") {
         TestVisibleStepExportAndSelectAll();
         std::cout << "Visible STEP export and selection tests passed.\n";
@@ -5803,6 +6110,10 @@ int main(int argc, char** argv) {
     }
     if (argc == 3 && std::string(argv[1]) == "--test-six-hole-shared-zone") {
         TestSixHoleSharedZone(QString::fromLocal8Bit(argv[2]));
+        return 0;
+    }
+    if (argc == 3 && std::string(argv[1]) == "--test-wire-circular-caps") {
+        TestWireCircularCaps(argv[2]);
         return 0;
     }
     if (argc == 3 && std::string(argv[1]) == "--test-cylinder-box-windows") {
@@ -6104,6 +6415,14 @@ int main(int argc, char** argv) {
     if (argc == 4 && std::string(argv[1]) == "--diagnose-hairdryer-chart-fill") {
         try {DiagnoseHairdryerChartFill(argv[2],argv[3]);return 0;}
         catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
+    if (argc == 3 && std::string(argv[1]) == "--test-fillet-mesh-normals") {
+        TestFilletMeshNormals(argv[2]);
+        return 0;
+    }
+    if (argc == 3 && std::string(argv[1]) == "--test-frame-cad-quadro") {
+        TestFrameCadQuadro(argv[2]);
+        return 0;
     }
     if ((argc == 3 || argc == 4) && std::string(argv[1]) == "--test-pillow-cad-quadro") {
         TestPillowCadQuadro(argv[2], argc == 4 ? argv[3] : nullptr);
@@ -7111,7 +7430,7 @@ int main(int argc, char** argv) {
         *parametric_bend_document.GetObjects()[parametric_bend_index], 0,
         &parametric_bend_document);
     require(bend_edit.tool_id == "SolidSheetBend"
-                && bend_edit.parameters.size() == 3,
+                && bend_edit.parameters.size() == 4,
             "Sheet Bend parameters are not available for editing.");
     for (ToolParameter& parameter : bend_edit.parameters) {
         if (parameter.id == "angle") parameter.value = 45.0;

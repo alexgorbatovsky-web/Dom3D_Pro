@@ -1,0 +1,30 @@
+--- a/raytrace/render.cpp
++++ b/raytrace/render.cpp
+@@ -437,7 +437,7 @@
+ 				diffuse.b += lit->ambient.b * faceAmbient.b;
+ 			}
+ 
+-			if (isFrontLight(*lit, *hit.tri, ray)) {
++			{ // Visibility is evaluated per sample using the smooth shading normal.
+ 				const Size samples = ((lit->flags & DIR) == 0 && lit->size > 0)
+ 					? m_context->shadowAntiAliasLevel() : 1;
+ 				const Size sampleExtent = static_cast<Size>(ceil(sqrt(
+@@ -476,6 +476,9 @@
+ 					Color intensity(1, 1, 1);
+ 					const Float lightDist = calcLightRayIntens(
+ 						sampleLight, hit.point, lightRay, intensity);
++					const Float NL = std::max(Float(0), dot(normal, lightRay.dir)
++						* (dot(normal, ray.dir) <= 0 ? Float(1) : Float(-1)));
++					if (NL <= 0) continue;
+ 					const Color unshadowed(intensity);
+ 					if (!intensity.isBlack()
+ 						&& (sampleLight.flags & NOSHADOW) == 0) {
+@@ -516,7 +519,7 @@
+ 
+ 					if (intensity.isBlack()) continue;
+ 					const Float weight = Float(1)/Float(samples);
+-					Float NL = fabs(dot(normal, lightRay.dir));
++
+ 					if (face->pbr && NL > 0) {
+ 						Vector view, halfVector;
+ 						view.x=-ray.dir.x; view.y=-ray.dir.y; view.z=-ray.dir.z;

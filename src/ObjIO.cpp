@@ -378,8 +378,12 @@ bool load_mtl(const std::filesystem::path& path,
     }
 
     Material* current = nullptr;
+    bool legacy_dom3d = false;
+    std::map<std::string, Color> legacy_specular_colors;
+    std::set<std::string> loaded_names;
     std::string line;
     while (std::getline(file, line)) {
+        if (line.find("# Dom3D MTL File") == 0) legacy_dom3d = true;
         std::istringstream stream(line);
         std::string keyword;
         stream >> keyword;
@@ -390,6 +394,7 @@ bool load_mtl(const std::filesystem::path& path,
             material.name = name;
             material.source_file_path.clear();
             current = &materials.insert_or_assign(name, std::move(material)).first->second;
+            loaded_names.insert(name);
         } else if (current && (keyword == "Ka" || keyword == "Kd" || keyword == "Ke")) {
             Color color{};
             stream >> color.r >> color.g >> color.b;
@@ -402,13 +407,18 @@ bool load_mtl(const std::filesystem::path& path,
         } else if (current && keyword == "Ks") {
             Color color{};
             stream >> color.r >> color.g >> color.b;
-            if (stream) current->specular = std::max({color.r, color.g, color.b});
+            if (stream) {
+                current->specular = std::max({color.r, color.g, color.b});
+                if (legacy_dom3d) legacy_specular_colors[current->name] = color;
+            }
         } else if (current && keyword == "Ns") {
             float value = 0.0f;
             if (stream >> value) current->shininess = std::clamp(value, 1.0f, 256.0f);
         } else if (current && keyword == "d") {
             float value = 1.0f;
-            if (stream >> value) current->alpha = std::clamp(value, 0.0f, 1.0f);
+            if (stream >> value) current->alpha = legacy_dom3d
+                ? 1.0f - std::clamp(value, 0.0f, 1.0f)
+                : std::clamp(value, 0.0f, 1.0f);
         } else if (current && keyword == "Tr") {
             float value = 0.0f;
             if (stream >> value) current->alpha = 1.0f - std::clamp(value, 0.0f, 1.0f);
@@ -441,6 +451,22 @@ bool load_mtl(const std::filesystem::path& path,
             else if (keyword == "map_Pm") current->metallic_texture_path = resolved;
             else if (keyword == "disp") current->displacement_texture_path = resolved;
             else current->bump_texture_path = resolved;
+        }
+    }
+    if (legacy_dom3d) {
+        for (const auto& name : loaded_names) {
+            auto& material = materials.at(name);
+            const auto specular = legacy_specular_colors.find(name);
+            // Legacy reflective metals carry their tint in Ks, with no Kd.
+            // Approximate them using the renderer's metallic base-color model.
+            if (specular != legacy_specular_colors.end()
+                && std::max({material.diffuse.r, material.diffuse.g, material.diffuse.b}) < 0.001f
+                && material.alpha > 0.99f
+                && std::max({specular->second.r, specular->second.g, specular->second.b}) > 0.01f) {
+                material.diffuse = specular->second;
+                material.metallic = 1.0f;
+                material.roughness = 0.3f;
+            }
         }
     }
     return true;

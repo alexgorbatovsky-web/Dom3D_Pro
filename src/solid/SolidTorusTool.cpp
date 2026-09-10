@@ -75,6 +75,8 @@ bool SolidTorusTool::CreateTorus(CSolid& solid, float major_diameter, float tube
         return false;
     }
     solid.m_Shape = torus_builder.Shape();
+    solid.ClearCenterlines();
+    solid.SetAxis("base:rotation", SolidCenterlineKind::RotationAxis, {}, {0, 0, 1});
     if (solid.m_Shape.IsNull()) {
         return false;
     }

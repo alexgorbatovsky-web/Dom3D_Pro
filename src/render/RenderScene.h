@@ -19,6 +19,7 @@ struct RenderTriangle {
 
 struct RenderMesh {
     QString name;
+    QString group_name;
     int material_index = -1;
     // An imported SurfaceSet is tessellated as independent CAD patches.
     // Their UV frames do not form one continuous tangent space.

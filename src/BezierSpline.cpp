@@ -8,8 +8,8 @@ CBezierSpline::CBezierSpline(CPoint3d start,
                              CPoint3d control2,
                              CPoint3d end)
     : CLinkLine(start, end),
-      control1_(control1),
-      control2_(control2) {
+      control1_(control1-start),
+      control2_(control2-end) {
 }
 
 LinkLineType CBezierSpline::GetType() const {
@@ -18,7 +18,7 @@ LinkLineType CBezierSpline::GetType() const {
 
 std::unique_ptr<CLinkLine> CBezierSpline::Clone() const {
     auto result = std::make_unique<CBezierSpline>(
-        GetStart(), control1_, control2_, GetEnd());
+        GetStart(), GetControl1(), GetControl2(), GetEnd());
     result->SetID(GetID());
     return result;
 }
@@ -45,9 +45,9 @@ CPoint3d CBezierSpline::GetPoint(double parameter) const {
     const CPoint3d& start = GetStart();
     const CPoint3d& end = GetEnd();
     return {
-        b0 * start.x + b1 * control1_.x + b2 * control2_.x + b3 * end.x,
-        b0 * start.y + b1 * control1_.y + b2 * control2_.y + b3 * end.y,
-        b0 * start.z + b1 * control1_.z + b2 * control2_.z + b3 * end.z
+        b0 * start.x + b1 * GetControl1().x + b2 * GetControl2().x + b3 * end.x,
+        b0 * start.y + b1 * GetControl1().y + b2 * GetControl2().y + b3 * end.y,
+        b0 * start.z + b1 * 0.0 + b2 * 0.0 + b3 * end.z
     };
 }
 
@@ -57,15 +57,15 @@ CPoint3d CBezierSpline::GetTangent(double parameter) const {
     const CPoint3d& start = GetStart();
     const CPoint3d& end = GetEnd();
     return {
-        3.0 * u * u * (control1_.x - start.x)
-            + 6.0 * u * t * (control2_.x - control1_.x)
-            + 3.0 * t * t * (end.x - control2_.x),
-        3.0 * u * u * (control1_.y - start.y)
-            + 6.0 * u * t * (control2_.y - control1_.y)
-            + 3.0 * t * t * (end.y - control2_.y),
-        3.0 * u * u * (control1_.z - start.z)
-            + 6.0 * u * t * (control2_.z - control1_.z)
-            + 3.0 * t * t * (end.z - control2_.z)
+        3.0 * u * u * (GetControl1().x - start.x)
+            + 6.0 * u * t * (GetControl2().x - GetControl1().x)
+            + 3.0 * t * t * (end.x - GetControl2().x),
+        3.0 * u * u * (GetControl1().y - start.y)
+            + 6.0 * u * t * (GetControl2().y - GetControl1().y)
+            + 3.0 * t * t * (end.y - GetControl2().y),
+        3.0 * u * u * (0.0 - start.z)
+            + 6.0 * u * t * (0.0 - 0.0)
+            + 3.0 * t * t * (end.z - 0.0)
     };
 }
 
@@ -115,36 +115,25 @@ std::vector<CPoint3d> CBezierSpline::Sample(std::size_t segments) const {
     return points;
 }
 
-const CPoint3d& CBezierSpline::GetControl1() const {
-    return control1_;
+CPoint3d CBezierSpline::GetControl1() const {
+    return GetStart() + static_cast<CPoint3d>(control1_);
 }
 
-const CPoint3d& CBezierSpline::GetControl2() const {
-    return control2_;
+CPoint3d CBezierSpline::GetControl2() const {
+    return GetEnd() + static_cast<CPoint3d>(control2_);
 }
 
 void CBezierSpline::SetControl1(CPoint3d point) {
-    control1_ = point;
+    const SketchPoint value(point-GetStart());
+    if (value.u == control1_.u && value.v == control1_.v) return;
+    GeometryChanged(); control1_ = value;
 }
 
 void CBezierSpline::SetControl2(CPoint3d point) {
-    control2_ = point;
+    const SketchPoint value(point-GetEnd());
+    if (value.u == control2_.u && value.v == control2_.v) return;
+    GeometryChanged(); control2_ = value;
 }
 
-void CBezierSpline::SetStart(CPoint3d point) {
-    const CPoint3d delta(
-        point.x - GetStart().x,
-        point.y - GetStart().y,
-        point.z - GetStart().z);
-    CLinkLine::SetStart(point);
-    control1_ += delta;
-}
-
-void CBezierSpline::SetEnd(CPoint3d point) {
-    const CPoint3d delta(
-        point.x - GetEnd().x,
-        point.y - GetEnd().y,
-        point.z - GetEnd().z);
-    CLinkLine::SetEnd(point);
-    control2_ += delta;
-}
+void CBezierSpline::SetStart(CPoint3d point) { CLinkLine::SetStart(point); }
+void CBezierSpline::SetEnd(CPoint3d point) { CLinkLine::SetEnd(point); }

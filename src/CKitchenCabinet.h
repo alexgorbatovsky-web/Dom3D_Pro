@@ -45,11 +45,17 @@ struct KitchenCabinetDefinition {
     double left_door_open_angle = 0.0;
     double right_door_open_angle = 0.0;
     int door_hinge_side = 0;
+    int door_axis = 0; // 0: vertical; 1: horizontal (top/bottom hinges).
     int handle_orientation = 0;
+    int handle_type = 0;
+    bool make_legs = false;
+    double leg_height = 100.0;
+    double leg_inset = 20.0;
 };
 
 struct KitchenCabinetDoorAnimation {
     Vec3 hinge{0.0f, 0.0f, 0.0f};
+    Vec3 axis{0.0f, 0.0f, 1.0f};
     float angle_sign = 0.0f;
 };
 

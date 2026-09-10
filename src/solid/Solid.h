@@ -4,6 +4,8 @@
 #include <TopoDS_Shape.hxx>
 #include <TopoDS_Face.hxx>
 #include <AIS_Shape.hxx>
+#include <gp_Pnt.hxx>
+#include <limits>
 
 #include "SurfaceFace.h"
 
@@ -70,6 +72,14 @@ public:
 };
 
 class CDimens;
+enum class SolidCenterlineKind { RotationAxis, HoleAxis, Path };
+struct SolidCenterline {
+	std::string id;
+	SolidCenterlineKind kind = SolidCenterlineKind::RotationAxis;
+	std::vector<gp_Pnt> points;
+	bool closed = false;
+};
+class gp_GTrsf;
 class CSolid :public CAlfaObject {
 
 //	cList<CPolyline*> m_Edges;
@@ -78,9 +88,26 @@ class CSolid :public CAlfaObject {
 	std::vector<ParametricFunction*> m_OperatonTree;
 	std::vector<CSolid*> m_BooleanTools;//tools used for this solid
 	mutable std::unique_ptr<quadro::BoundaryCache> m_QuadroBoundaryCache;
+	std::vector<SolidCenterline> m_Centerlines;
+	std::vector<SolidCenterline> m_PreviewCenterlines;
 
 
 public:
+	const std::vector<SolidCenterline>& GetCenterlines() const { return m_Centerlines; }
+	const std::vector<SolidCenterline>& GetDisplayCenterlines() const { return m_PreviewCenterlines.empty() ? m_Centerlines : m_PreviewCenterlines; }
+	void PreviewCenterlines(const gp_GTrsf& transform);
+	void ClearCenterlines() { m_Centerlines.clear(); m_PreviewCenterlines.clear(); }
+	bool SetCenterline(SolidCenterline line);
+	bool SetAxis(std::string id, SolidCenterlineKind kind, Vec3 origin, Vec3 direction,
+	             double minimum = -std::numeric_limits<double>::infinity(),
+	             double maximum = std::numeric_limits<double>::infinity());
+	bool SetCenterlinePath(std::string id, const TopoDS_Shape& path);
+	void CopyCenterlinesFrom(const CSolid& source) { m_Centerlines = source.m_Centerlines; }
+	void AppendCenterlinesFrom(const CSolid& source, const std::string& prefix, bool holes = false);
+	void TransformCenterlines(const gp_Trsf& transform);
+	void TransformCenterlines(const gp_GTrsf& transform);
+	void WriteCenterlines(QXmlStreamWriter& xml) const;
+	bool ReadCenterlines(const QDomElement& object, QString& error);
 	virtual const char* GetID() { return "CSolid"; }
 	virtual const char* GetHint() { return "CSolid_HINT"; }
 	virtual bool			PresentInRetopoTools() { return true; }
@@ -103,6 +130,7 @@ public:
 
 	void Render3d(bool selected) const override;
 	void RenderHiddenLineDepth() const;
+	void RenderCenterlines(bool selected) const;
 	void RenderHiddenLineEdges(bool hidden) const;
 	void Render2d(float center_x, float center_y, float scale) const override;
 	bool HitTest(CurvePoint point, float tolerance) const override;

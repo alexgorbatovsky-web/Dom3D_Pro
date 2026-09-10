@@ -32,6 +32,8 @@ bool CAssociativeClone::RebuildFromSource(const CSolid& source) {
     }
     Clear();
     m_Shape = builder.Shape();
+    CopyCenterlinesFrom(source);
+    TransformCenterlines(placement_);
     InitSurfaces();
     ReBuldMesh();
     return true;
@@ -40,6 +42,7 @@ bool CAssociativeClone::RebuildFromSource(const CSolid& source) {
 std::unique_ptr<CAlfaObject> CAssociativeClone::Clone() const {
     auto copy = std::make_unique<CAssociativeClone>(m_Shape, source_id_);
     copy->placement_ = placement_;
+    copy->CopyCenterlinesFrom(*this);
     copy->SetName(GetName() + " Copy");
     copy->SetGroupName(GetGroupName());
     copy->SetVisible(IsVisible());

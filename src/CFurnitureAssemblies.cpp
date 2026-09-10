@@ -822,7 +822,7 @@ std::vector<std::unique_ptr<CAlfaObject>> CDrawerBoxFurniture::BuildParts(
 
     if (box.make_legs) {
         const double leg_size = std::min(45.0, t * 2.5);
-        const double inset = 20.0;
+        const double inset = std::clamp(box.leg_inset,0.0,(std::min(box.width,box.depth)-leg_size)/2);
         const double leg_left = left + inset;
         const double leg_right = left + box.width - inset - leg_size;
         const double leg_front = front + inset;

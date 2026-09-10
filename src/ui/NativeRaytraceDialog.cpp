@@ -98,6 +98,8 @@ NativeRaytraceDialog::NativeRaytraceDialog(
     depth_->setValue(4);
     anti_alias_ = new QSpinBox(this);
     anti_alias_->setRange(1, 8);
+    anti_alias_->setToolTip("1: disabled. 2-7: adaptive edge refinement up to 8 x 8 rays. "
+                            "8: 8 x 8 rays for every pixel.");
     anti_alias_->setValue(2);
     passes_ = new QSpinBox(this);
     passes_->setRange(1, 10);

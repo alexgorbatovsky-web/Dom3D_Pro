@@ -103,7 +103,7 @@ public:
     bool UpdateLiveExtrudeSelectedPolyline(double distance, bool reverse, double taper_angle_degrees);
     bool FinishLiveExtrudeSelectedPolyline();
     void CancelLiveExtrudeSelectedPolyline();
-    bool BeginLiveRevolveSelectedPolyline(double angle_degrees, int axis_index);
+    bool BeginLiveRevolveSelectedPolyline(double angle_degrees, int axis_index, bool surface = false);
     bool HasLivePolylineRevolve() const;
     bool UpdateLiveRevolveSelectedPolyline(double angle_degrees, int axis_index);
     bool FinishLiveRevolveSelectedPolyline();
@@ -361,6 +361,17 @@ public:
                                             double radius);
     bool GetSelectedPointPosition(CPoint3d& point) const;
     std::vector<CPoint3d> GetSelectedCurvePointPositions() const;
+    struct CurveEndpointLink {
+        unsigned long first_id = 0, second_id = 0;
+        bool first_end = false, second_end = false;
+        CPoint3d position;
+    };
+    std::vector<CurveEndpointLink> FindTouchingCurveEnds(double tolerance) const;
+    int LinkTouchingCurveEnds(double tolerance);
+    int UnlinkSelectedCurveEnds();
+    std::vector<unsigned long> SynchronizeCurveEndpointLinks();
+    const std::vector<CurveEndpointLink>& GetCurveEndpointLinks() const { return curve_endpoint_links_; }
+    void SetCurveEndpointLinks(std::vector<CurveEndpointLink> links) { curve_endpoint_links_ = std::move(links); }
     const std::vector<std::pair<size_t, size_t>>& GetSelectedCurvePoints() const;
     bool MoveSelectedObjects(Vec3 delta);
     bool RotateSelectedObjects(Vec3 center, Vec3 axis, float angle);
@@ -439,6 +450,7 @@ public:
     bool IsLayerVisible(int layer_id) const;
     bool IsLayerSelectable(int layer_id) const;
     bool IsObjectVisible(const CAlfaObject& object) const;
+    void SetObjectVisibility(unsigned long objectId, bool visible);
     bool IsObjectSelectable(const CAlfaObject& object) const;
     size_t ResolveGroupSelectionIndex(size_t object_index) const;
     void AssignObjectToWorkLayer(CAlfaObject& object) const;
@@ -475,6 +487,7 @@ private:
 
     ObjectList objects_;
     std::string drafting_data_;
+    std::vector<CurveEndpointLink> curve_endpoint_links_;
     std::vector<Material> materials_;
     unsigned long next_object_id_ = 1;
     size_t active_object_index_ = 0;

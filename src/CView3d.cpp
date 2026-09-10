@@ -254,6 +254,13 @@ void CView3d::DrawObjects(const CAlfaDoc& document,
         draw_pass(false);
     }
     draw_pass(true);
+    // Centerlines are construction geometry, visible through the solid in
+    // shaded and wireframe views alike. Draw after all occluding geometry.
+    for (size_t index = 0; index < objects.size(); ++index) {
+        if (!objects[index] || !document.IsObjectVisible(*objects[index])) continue;
+        if (const auto* solid = dynamic_cast<const CSolid*>(objects[index].get()))
+            solid->RenderCenterlines(document.IsObjectSelectionHighlighted(index));
+    }
 }
 
 void CView3d::DrawBox(float x, float y, float z, float w, float h, float d, float r, float g, float b) const {

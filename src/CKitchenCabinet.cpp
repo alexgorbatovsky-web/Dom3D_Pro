@@ -37,6 +37,7 @@
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepOffsetAPI_MakePipeShell.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakeHalfSpace.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
@@ -1478,7 +1479,7 @@ TopoDS_Shape planar_door_handle_shape(double facade_left,
                                       double facade_width,
                                       double facade_height,
                                       bool vertical,
-                                      bool free_edge_on_right) {
+                                      bool free_edge_on_right, int handle_type = 0) {
     constexpr double handle_depth = 12.0;
     constexpr double handle_gap = 2.0;
     constexpr double handle_thickness = 10.0;
@@ -1506,6 +1507,9 @@ TopoDS_Shape planar_door_handle_shape(double facade_left,
     const double z = vertical
         ? facade_bottom + facade_height - top_margin - handle_length * 0.5
         : facade_bottom + facade_height - top_margin - handle_thickness * 0.5;
+    if(handle_type==2) {
+        return BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(x+(vertical?5:handle_length/2),facade_front-handle_gap,z+(vertical?handle_length/2:5)),gp_Dir(0,-1,0)),10,18).Shape();
+    }
     return box_shape(
         x,
         facade_front - handle_gap - handle_depth,
@@ -2659,6 +2663,14 @@ bool CKitchenCabinet::GetDoorAnimation(
         static_cast<float>(hinge_x),
         static_cast<float>(hinge_y),
         0.0f};
+    animation->axis={0,0,1};
+    if(definition_.door_axis==1){
+        const bool bottom=double_door?right_door:definition_.door_hinge_side==1;
+        animation->hinge={0,static_cast<float>(hinge_y),static_cast<float>((definition_.make_legs?definition_.leg_height:0)+(bottom?gap:definition_.height-gap))};
+        animation->axis={1,0,0};
+        if(double_door&&right_door){animation->hinge.z=static_cast<float>((definition_.make_legs?definition_.leg_height:0)+definition_.height/2-gap/2);angle_sign=-1;}
+
+    }
     animation->angle_sign = static_cast<float>(angle_sign);
     return std::fabs(angle_sign) > 0.5;
 }
@@ -2671,6 +2683,35 @@ std::vector<std::unique_ptr<CAlfaObject>> CKitchenCabinet::BuildParts(
     const std::vector<const CSmartLine*>& milling_guides) {
     if (!IsValid(definition)) {
         return {};
+    }
+    if(definition.door_axis==1) {
+        auto upright=definition;upright.door_axis=0;
+        auto body=BuildParts(upright,frame_profile,panel_profile,milling_profile,milling_guides);
+        auto isDoor=[](const std::unique_ptr<CAlfaObject>& part){const auto& name=part->GetName();return name.find("Facade")!=std::string::npos||name.find("Handle")!=std::string::npos||name.find("Showcase")!=std::string::npos||name.find("Stained Glass")!=std::string::npos;};
+        body.erase(std::remove_if(body.begin(),body.end(),isDoor),body.end());
+        std::swap(upright.width,upright.height);upright.make_legs=false;upright.handle_orientation=definition.handle_orientation==0?1:0;
+        auto doors=BuildParts(upright,frame_profile,panel_profile,milling_profile,milling_guides);
+        if(body.empty()||doors.empty())return {};
+        gp_Trsf turn;turn.SetRotation(gp_Ax1(gp_Pnt(0,0,0),gp_Dir(0,1,0)),1.5707963267948966);
+        turn.SetTranslationPart(gp_Vec(-definition.width/2,0,definition.height/2+(definition.make_legs?definition.leg_height:0)));
+        for(auto& part:doors)if(isDoor(part)){
+            auto* solid=dynamic_cast<CSolid*>(part.get());if(!solid)return {};
+            auto source=solid->m_Shape;
+            if(part->GetName().find("Handle")!=std::string::npos){Vec3 lo,hi;part->GetBounds(lo,hi);
+                gp_Trsf center;center.SetTranslation(gp_Vec(0,0,definition.width/2-(lo.z+hi.z)/2));
+                source=BRepBuilderAPI_Transform(source,center,true).Shape();}
+            TopoDS_Shape shape=BRepBuilderAPI_Transform(source,turn,true).Shape();
+            // Both stacked flaps hinge at their top edge. The original right
+            // leaf maps to the lower flap, so reverse it within that opening.
+            if(definition.facade_type==KitchenCabinetFacadeType::DoubleDoor&&part->GetName().find("Right")!=std::string::npos){
+                const double gap=std::min(2.0,definition.panel_thickness*0.25);
+                gp_Trsf flip;flip.SetRotation(gp_Ax1(gp_Pnt(0,0,(definition.make_legs?definition.leg_height:0)+definition.height/4+gap/4),gp_Dir(0,1,0)),3.14159265358979323846);
+                shape=BRepBuilderAPI_Transform(shape,flip,true).Shape();}
+
+            auto transformed=make_solid(part->GetName(),shape,part->GetColor());if(!transformed)return {};
+            body.push_back(std::move(transformed));
+        }
+        return body;
     }
     const Color carcass_color{0.72f, 0.62f, 0.46f};
     const Color shelf_color{0.76f, 0.67f, 0.52f};
@@ -2811,6 +2852,7 @@ std::vector<std::unique_ptr<CAlfaObject>> CKitchenCabinet::BuildParts(
     };
     auto add = [&parts, reverse_corner_front, &definition](
                    const std::string& name, TopoDS_Shape shape, Color color) {
+        if(definition.handle_type==3 && name.find("Handle")!=std::string::npos)return;
         if (definition.facade_style == KitchenCabinetFacadeStyle::Screen
             && name.find("Handle") != std::string::npos
             && !shape.IsNull()) {
@@ -3548,7 +3590,7 @@ std::vector<std::unique_ptr<CAlfaObject>> CKitchenCabinet::BuildParts(
             facade_left, front - thickness, gap,
             facade_width, facade_height,
             definition.handle_orientation == 1,
-            !hinge_on_right);
+            !hinge_on_right, definition.handle_type);
         facade = rotate_about_z(
             facade,
             hinge_on_right ? left + width - gap : left + gap,
@@ -3575,7 +3617,7 @@ std::vector<std::unique_ptr<CAlfaObject>> CKitchenCabinet::BuildParts(
         TopoDS_Shape left_handle = planar_door_handle_shape(
             left_facade_x, front - thickness, gap,
             door_width, facade_height,
-            definition.handle_orientation == 1, true);
+            definition.handle_orientation == 1, true, definition.handle_type);
         left_facade = rotate_about_z(
             left_facade,
             left + gap,
@@ -3592,7 +3634,7 @@ std::vector<std::unique_ptr<CAlfaObject>> CKitchenCabinet::BuildParts(
         TopoDS_Shape right_handle = planar_door_handle_shape(
             right_facade_x, front - thickness, gap,
             door_width, facade_height,
-            definition.handle_orientation == 1, false);
+            definition.handle_orientation == 1, false, definition.handle_type);
         right_facade = rotate_about_z(
             right_facade,
             left + width - gap,
@@ -3652,6 +3694,19 @@ std::vector<std::unique_ptr<CAlfaObject>> CKitchenCabinet::BuildParts(
         }
     }
 
+    if(definition.make_legs) {
+        gp_Trsf move;move.SetTranslation(gp_Vec(0,0,definition.leg_height));
+        for(auto& part:parts) {
+            if(auto* solid=dynamic_cast<CSolid*>(part.get())) {
+                TopoDS_Shape shifted=BRepBuilderAPI_Transform(solid->m_Shape,move,true).Shape();
+                auto placed=make_solid(part->GetName(),shifted,part->GetColor());part=std::move(placed);
+            } else if(part)part->Translate({0,0,static_cast<float>(definition.leg_height)});
+        }
+        const double legSize=35;
+        const double inset=std::min(definition.leg_inset,(std::min(width,depth)-legSize)/2);
+        for(double x:{left+inset,left+width-inset-legSize})for(double y:{front+inset,front+depth-inset-legSize})
+            add("Cabinet Leg",box_shape(x,y,0,legSize,legSize,definition.leg_height),handle_color);
+    }
     if (std::any_of(parts.begin(), parts.end(),
                     [](const std::unique_ptr<CAlfaObject>& part) { return !part; })) {
         return {};
@@ -3743,8 +3798,13 @@ bool CKitchenCabinet::IsValid(const KitchenCabinetDefinition& definition) {
         && std::isfinite(definition.right_door_open_angle)
         && definition.right_door_open_angle >= 0.0
         && definition.right_door_open_angle <= 180.0
+        && definition.door_axis >= 0 && definition.door_axis <= 1
+        && (definition.door_axis==0 || definition.body_type==KitchenCabinetBodyType::Straight)
         && definition.door_hinge_side >= 0
         && definition.door_hinge_side <= 1
         && definition.handle_orientation >= 0
-        && definition.handle_orientation <= 1;
+        && definition.handle_orientation <= 1
+        && std::isfinite(definition.leg_inset) && definition.leg_inset>=0 && definition.leg_inset<=200
+        && definition.handle_type >= 0 && definition.handle_type <= 3
+        && std::isfinite(definition.leg_height) && definition.leg_height >= 20 && definition.leg_height <= 300;
 }

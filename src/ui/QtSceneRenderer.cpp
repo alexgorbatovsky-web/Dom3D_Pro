@@ -258,7 +258,24 @@ void QtSceneRenderer::Render(const CAlfaDoc& document,
         xy_plane_view, show_floor_grid,
         grid_size, grid_step, grid_subdivisions);
     if (show_coordinate_axes) {
+        // Axes are an overlay (depth testing is disabled below). Give them
+        // their own clipping range without reducing the scene depth precision.
+        // Orthographic zoom changes scale, not the actual eye position.
+        const float axis_far = std::sqrt(dot(view_eye, view_eye))
+            + std::max(1.0f, grid_size) * 2.0f + 1.0f;
+        glMatrixMode(GL_PROJECTION);
+        glPushMatrix();
+        glLoadIdentity();
+        if (orthographic) {
+            Orthographic(camera, aspect, -axis_far, axis_far);
+        } else {
+            Perspective(camera.vertical_fov_degrees, aspect, 0.01f, axis_far);
+        }
+        glMatrixMode(GL_MODELVIEW);
         DrawCoordinateAxes(xy_plane_view, grid_size);
+        glMatrixMode(GL_PROJECTION);
+        glPopMatrix();
+        glMatrixMode(GL_MODELVIEW);
     }
     if (tool == ToolMode::Transform) {
         DrawTransformGizmo(document,
@@ -483,13 +500,14 @@ void QtSceneRenderer::CalculateClipPlanes(const CAlfaDoc& document,
     const float near_floor = orthographic
         ? std::clamp(camera.distance * 0.0001f, 0.000001f, 0.02f)
         : std::clamp(camera.distance * 0.01f, 0.01f, 25.0f);
+    const float view_distance = dot(camera.target - eye, forward);
     const float grid_far = show_floor_grid
-        ? camera.distance + std::max(1.0f, grid_size) * 4.0f
+        ? std::sqrt(dot(eye, eye)) + std::max(1.0f, grid_size) * 4.0f
         : 0.0f;
     if (!has_scene_bounds) {
         z_near = near_floor;
         z_far = std::max(
-            {z_near * 1000.0f, camera.distance * 8.0f, grid_far});
+            {z_near * 1000.0f, view_distance * 8.0f, grid_far});
         return;
     }
 

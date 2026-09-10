@@ -1,5 +1,6 @@
 #include "../OpenGLCompat.h"
 #include "Solid.h"
+#include "CircularSplineBoundary.h"
 #include "QuadroBoundary.h"
 #include "QuadroBodyMesher.h"
 #include "SolidTool.h"
@@ -1114,6 +1115,27 @@ bool sync_four_sided_opposite_edge_counts(
 {
 	bool changed = false;
 	for (CSurfaceFace* surface : surfaces) {
+		// A collapsed B-spline fillet corner has no prepared fourth side.
+		// Give its three real sides a common budget so the regular corner
+		// grid cannot refine a side without informing the adjoining strip.
+		if (surface && surface->GetPreparedPolylineCount() == 3
+			&& !surface->m_Face.IsNull()
+			&& BRepAdaptor_Surface(TopoDS::Face(surface->m_Face)).GetType()
+				== GeomAbs_BSplineSurface) {
+			int edge_count = 0, degenerate_count = 0;
+			for (TopExp_Explorer e(surface->m_Face, TopAbs_EDGE); e.More(); e.Next()) {
+				++edge_count;
+				degenerate_count += BRep_Tool::Degenerated(TopoDS::Edge(e.Current()));
+			}
+			if (edge_count == 4 && degenerate_count == 1) {
+				int count = 0;
+				for (int i = 0; i < 3; ++i)
+					count = std::max(count, surface->GetPreparedPolylinePointCount(i));
+				for (int i = 0; i < 3; ++i)
+					if (surface->GetPreparedPolylinePointCount(i) != count)
+						changed = surface->SetPreparedPolylinePointCount(i, count) || changed;
+			}
+		}
 		if (!surface || surface->GetPreparedPolylineCount() != 4)
 			continue;
 
@@ -1494,6 +1516,16 @@ void sync_trim_lines_from_regular_mesh(const std::vector<CSurfaceFace*>& surface
 						std::reverse(receiver_points.begin(), receiver_points.end());
 				}
 				receiver->SetPreparedPolylinePoints(best_receiver_edge, receiver_points);
+				// A swept circular section may be a B-spline in CAD. Preserve the
+				// actual structured side-wall row as the Cap's outer ring, including
+				// its seam phase and non-uniform parameter spacing.
+				if (has_donor_topo_edge && receiver_has_shared_topo_edge
+					&& !receiver->m_Face.IsNull()
+					&& BRepAdaptor_Surface(TopoDS::Face(receiver->m_Face)).GetType()
+						== GeomAbs_Plane
+					&& IsCircularSplineBoundary(donor_topo_edge)) {
+					receiver->SetCircularCapMasterBoundary(receiver_points);
+				}
 				if (receiver->IsInitMesh && receiver->pMesh3D) {
 					// A compatibility BSpline donor is built before its trimmed
 					// neighbours, so their meshes already use this exact prepared
@@ -3177,23 +3209,9 @@ bool CSolid::BuildHybridRenderMesh(float Deflection)
 
 			for (size_t i = 0; i < m_Surfaces.size(); ++i) {
 				CSurfaceFace* surface = m_Surfaces[i];
-				bool supports_legacy_regular_mesh = false;
-				if (surface && surface->m_TypeMesh == REGULAR_MESH) {
-					try {
-						const GeomAbs_SurfaceType type = BRepAdaptor_Surface(
-							TopoDS::Face(surface->m_Face)).GetType();
-						// PipeShell lateral faces are commonly B-Spline surfaces.
-						// The legacy UV grid connects distant parameter rows on
-						// these faces and produces the large triangle fans visible
-						// in Swept Solid. OCCT triangulates them correctly.
-						supports_legacy_regular_mesh =
-							type != GeomAbs_BSplineSurface
-							&& type != GeomAbs_BezierSurface;
-					} catch (const Standard_Failure&) {
-						supports_legacy_regular_mesh = false;
-					}
-				}
-				if (supports_legacy_regular_mesh
+				// Natural UV bounds use the tolerance-driven CNet for every
+				// surface type, including B-splines and Bezier patches.
+				if (surface && surface->m_TypeMesh == REGULAR_MESH
 					&& surface->BuildTrimmingMesh(this, Deflection)) {
 					regular_mesh_built[i] = true;
 				}
@@ -3477,6 +3495,7 @@ bool CSolid::BuildQuadroMesh(float Deflection)
 
 void CSolid::Clear()
 {
+	ClearCenterlines();
 	InvalidateQuadroBoundary();
 //	for (int i = 0; i < m_Edges.Count(); i++)
 //		delete m_Edges[i];
@@ -3860,6 +3879,7 @@ bool CSolid::Save(QXmlStreamWriter& xml, QString& error) const
 	xml.writeAttribute("encoding", "base64-zlib");
 	xml.writeCharacters(QString::fromLatin1(qCompress(brep_data, 6).toBase64()));
 	xml.writeEndElement();
+	WriteCenterlines(xml);
 	return true;
 }
 
@@ -3962,14 +3982,18 @@ std::unique_ptr<CSolid> CSolid::Load(const QDomElement& object_element, QString&
 			error = "Native BRep data is empty or damaged.";
 			return {};
 		}
-		return load_solid_native_brep(brep_data, error);
+		auto solid = load_solid_native_brep(brep_data, error);
+		if (solid && !solid->ReadCenterlines(object_element, error)) return {};
+		return solid;
 	}
 	if (kind == "brep-step" && encoding == "base64") {
 		if (encoded.isEmpty()) {
 			error = "Solid STEP data is empty.";
 			return {};
 		}
-		return load_solid_step(encoded, error);
+		auto solid = load_solid_step(encoded, error);
+		if (solid && !solid->ReadCenterlines(object_element, error)) return {};
+		return solid;
 	}
 
 	error = "Unsupported solid geometry encoding.";
@@ -3987,6 +4011,7 @@ std::unique_ptr<CAlfaObject> CSolid::Clone() const
 	copy->SetMaterial(GetMaterial());
 	copy->SetMaterialId(GetMaterialId());
 	copy->SetParametricDefinition(GetParametricToolId(), GetParametricParameters());
+	copy->CopyCenterlinesFrom(*this);
 	if (GetNumOperations() > 0) {
 		copy->CopyOperationTreeFrom(*this);
 	}
@@ -4015,6 +4040,7 @@ void CSolid::Translate(Vec3 delta)
 	transform.SetTranslation(gp_Vec(delta.x, delta.y, delta.z));
 	if (!apply_shape_transform(m_Shape, transform))
 		return;
+	TransformCenterlines(transform);
 	ClearSelectedEdge();
 	ReBuldMesh();
 	if (!m_OperatonTree.empty()) {
@@ -4039,6 +4065,7 @@ void CSolid::Rotate(Vec3 center, Vec3 axis, float angle)
 		angle);
 	if (!apply_shape_transform(m_Shape, transform))
 		return;
+	TransformCenterlines(transform);
 	ClearSelectedEdge();
 	ReBuldMesh();
 	if (!m_OperatonTree.empty()) {
@@ -4060,6 +4087,7 @@ void CSolid::Scale(Vec3 center, Vec3 axis, float factor)
 		transform.SetScale(gp_Pnt(center.x, center.y, center.z), factor);
 		if (!apply_shape_transform(m_Shape, transform))
 			return;
+		TransformCenterlines(transform);
 	} else {
 		const float k = factor - 1.0f;
 		const float m00 = 1.0f + k * unit_axis.x * unit_axis.x;
@@ -4087,6 +4115,7 @@ void CSolid::Scale(Vec3 center, Vec3 axis, float factor)
 		transform.SetValue(3, 4, center.z - (m20 * center.x + m21 * center.y + m22 * center.z));
 		if (!apply_shape_transform(m_Shape, transform))
 			return;
+		TransformCenterlines(transform);
 	}
 
 	ClearSelectedEdge();
@@ -4111,6 +4140,7 @@ void CSolid::Mirror(Vec3 plane_point, Vec3 plane_normal)
 		gp_Dir(unit_normal.x, unit_normal.y, unit_normal.z)));
 	if (!apply_shape_transform(m_Shape, transform))
 		return;
+	TransformCenterlines(transform);
 
 	ClearSelectedEdge();
 	ReBuldMesh();
@@ -4240,6 +4270,38 @@ TopoDS_Shape CSolid::CopyShape(TopoDS_Shape& shape)
 	}
 }
 
+void CSolid::RenderCenterlines(bool selected) const
+{
+    if (GetCenterlines().empty()) return;
+    glPushAttrib(GL_ENABLE_BIT | GL_DEPTH_BUFFER_BIT | GL_LINE_BIT | GL_CURRENT_BIT);
+    glDisable(GL_LIGHTING);
+    glDisable(GL_TEXTURE_2D);
+    glDisable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
+    glEnable(GL_LINE_STIPPLE);
+    glLineStipple(1, 0x1C7F);
+    glLineWidth(1.0f);
+    const Color color = selected ? CAlfaObject::SelectedColor : GetColor();
+    glColor3f(color.r, color.g, color.b);
+    for (const auto& line : GetDisplayCenterlines()) {
+        if (line.points.size() < 2) continue;
+        double length = 0;
+        for (size_t i = 1; i < line.points.size(); ++i) length += line.points[i-1].Distance(line.points[i]);
+        glBegin(GL_LINE_STRIP);
+        for (size_t i = 0; i < line.points.size(); ++i) {
+            gp_Pnt p = line.points[i];
+            if (!line.closed && (i == 0 || i + 1 == line.points.size())) {
+                gp_Vec tangent(line.points[i == 0 ? 1 : i-1], p);
+                if (tangent.Magnitude() > 1e-9) p.Translate(tangent.Normalized() * (length * 0.05));
+            }
+            glVertex3d(p.X(),p.Y(),p.Z());
+        }
+        if (line.closed) { const auto& p = line.points.front(); glVertex3d(p.X(),p.Y(),p.Z()); }
+        glEnd();
+    }
+    glPopAttrib();
+}
+
 void CSolid::RenderHiddenLineDepth() const
 {
 	if (!EnsureRenderMesh())
@@ -4323,12 +4385,15 @@ bool CSolid::ApplyAffineTransform(const std::array<double, 16>& matrix)
 	}
 	if (!apply_shape_transform(m_Shape, transform))
 		return false;
+	TransformCenterlines(transform);
 	ClearSelectedEdge();
 	return ReBuldMesh();
 }
 
 void CSolid::PreviewTranslate(Vec3 delta)
 {
+    gp_Trsf transform; transform.SetTranslation(gp_Vec(delta.x,delta.y,delta.z));
+    PreviewCenterlines(gp_GTrsf(transform));
 	m_RenderBatchDirty = true;
 	for (CSurfaceFace* surface : m_Surfaces) {
 		if (surface)
@@ -4338,6 +4403,10 @@ void CSolid::PreviewTranslate(Vec3 delta)
 
 void CSolid::PreviewRotate(Vec3 center, Vec3 axis, float angle)
 {
+    if (dot(axis,axis) > 1e-12f) {
+        gp_Trsf transform; transform.SetRotation(gp_Ax1(gp_Pnt(center.x,center.y,center.z),gp_Dir(axis.x,axis.y,axis.z)),angle);
+        PreviewCenterlines(gp_GTrsf(transform));
+    }
 	m_RenderBatchDirty = true;
 	for (CSurfaceFace* surface : m_Surfaces) {
 		if (surface)
@@ -4352,6 +4421,7 @@ bool CSolid::CommitPreviewTranslate(Vec3 delta, bool record_operation)
 	transform.SetTranslation(gp_Vec(delta.x, delta.y, delta.z));
 	if (!apply_rigid_shape_transform(m_Shape, transform))
 		return false;
+	TransformCenterlines(transform);
 	for (CSurfaceFace* surface : m_Surfaces) {
 		if (surface && !surface->CommitPreviewTranslate(delta))
 			return false;
@@ -4404,6 +4474,7 @@ bool CSolid::CommitPreviewRotate(Vec3 center, Vec3 axis, float angle)
 		angle);
 	if (!apply_rigid_shape_transform(m_Shape, transform))
 		return false;
+	TransformCenterlines(transform);
 	for (CSurfaceFace* surface : m_Surfaces) {
 		if (surface && !surface->CommitPreviewRotate(center, unit_axis, angle))
 			return false;
@@ -4414,6 +4485,16 @@ bool CSolid::CommitPreviewRotate(Vec3 center, Vec3 axis, float angle)
 
 void CSolid::PreviewScale(Vec3 center, Vec3 axis, float factor)
 {
+    if (factor > 0.000001f) {
+        const auto unit = normalize(axis); const bool uniform = dot(unit,unit) <= 0.000001f;
+        const double sx = uniform || std::fabs(unit.x)>0.5f ? factor : 1;
+        const double sy = uniform || std::fabs(unit.y)>0.5f ? factor : 1;
+        const double sz = uniform || std::fabs(unit.z)>0.5f ? factor : 1;
+        gp_GTrsf transform;
+        transform.SetValue(1,1,sx); transform.SetValue(2,2,sy); transform.SetValue(3,3,sz);
+        transform.SetValue(1,4,center.x*(1-sx)); transform.SetValue(2,4,center.y*(1-sy)); transform.SetValue(3,4,center.z*(1-sz));
+        PreviewCenterlines(transform);
+    }
 	m_RenderBatchDirty = true;
 	for (CSurfaceFace* surface : m_Surfaces) {
 		if (surface)
@@ -4488,6 +4569,7 @@ bool CSolid::GetBounds(Vec3& min_point, Vec3& max_point) const
 
 bool CSolid::ReBuldMesh()
 {
+    m_PreviewCenterlines.clear();
 	// Keep approximately the same visual density for models expressed in
 	// millimetres, metres, or scene-sized coordinates. BuldMesh() converts
 	// this public value to the OCC linear deflection by dividing it by ten.
@@ -4631,6 +4713,7 @@ bool CSolid::RestoreRenderMeshFromStoredTriangulation()
 
 bool CSolid::ReBuldMesh(float Deflection)
 {
+    m_PreviewCenterlines.clear();
 	if (!std::isfinite(Deflection) || Deflection <= 0.0f)
 		return false;
 	if (!InitSurfaces())

@@ -14,6 +14,9 @@
 #include <QListView>
 #include <QListWidget>
 #include <QMenu>
+#include <QPainter>
+#include <QAbstractItemDelegate>
+#include <QStyleOptionViewItem>
 #include <QSettings>
 #include <QSortFilterProxyModel>
 #include <QSplitter>
@@ -168,6 +171,31 @@ int TestProjectOpenDialog(int argc, char** argv) {
         const QStringList selection = dialog.selectedFiles();
         for (int mode = 0; mode < view_actions.size(); ++mode) {
             view_actions[mode]->trigger();
+            if (mode <= 2) {
+                // Square folders and landscape previews must reserve a caption.
+                for (const QString& name : {QString("Kitchen"), QString("NoPreview"), QString("Scene.dom3d")}) {
+                    const QModelIndex index=proxy->mapFromSource(files->index(folder+'/'+name));
+                    require(index.isValid(),"Caption fixture index missing");
+                    QStyleOptionViewItem option;
+                    option.initFrom(list);
+                    option.state=QStyle::State_Enabled;
+                    option.widget=list;
+                    option.font=list->font();
+                    option.fontMetrics=QFontMetrics(option.font);
+                    option.decorationSize=list->iconSize();
+                    option.palette.setColor(QPalette::Text,Qt::black);
+                    option.palette.setColor(QPalette::Base,Qt::white);
+                    option.rect=QRect(QPoint(0,0),list->itemDelegate()->sizeHint(option,index));
+                    require(option.rect.height()<=list->gridSize().height(),"Thumbnail caption exceeds the grid cell");
+                    QImage painted(option.rect.size(),QImage::Format_RGB32);painted.fill(Qt::white);
+                    QPainter painter(&painted);list->itemDelegate()->paint(&painter,option,index);painter.end();
+                    bool has_text=false;
+                    for(int y=list->iconSize().height()+8;y<painted.height()-3;++y)
+                        for(int x=5;x<painted.width()-5;++x)
+                            if(qGray(painted.pixel(x,y))<100)has_text=true;
+                    require(has_text,"Folder/file name was clipped below its thumbnail");
+                }
+            }
             QCoreApplication::processEvents();
             require(view_actions[mode]->isChecked(), "Chosen view mode must be checked");
             require(dialog.viewMode() == (mode == 5 ? QFileDialog::Detail : QFileDialog::List),
@@ -256,6 +284,29 @@ int TestProjectOpenDialog(int argc, char** argv) {
         require(dialog.result() == QDialog::Accepted && dialog.selectedFiles().first() == project,
                 "Open must return the selected file");
     }
-    std::cout << "Project open dialog tests passed.\n";
+    {
+        ProjectOpenDialog dialog(folder, nullptr, QFileDialog::AcceptSave,
+                                 "Wavefront OBJ (*.obj);;Kitchen / Scene GLB (*.glb)");
+        dialog.SetExportPreview(thumbnail);
+        dialog.selectNameFilter("Kitchen / Scene GLB (*.glb)");
+        dialog.setDefaultSuffix("glb");
+        dialog.selectFile("New kitchen");
+        dialog.show();
+        QCoreApplication::processEvents();
+        require(dialog.acceptMode() == QFileDialog::AcceptSave && dialog.fileMode() == QFileDialog::AnyFile,
+                "Export must allow new files");
+        require(dialog.findChild<QSplitter*>("splitter") && dialog.findChild<QToolButton*>("ProjectViewButton"),
+                "Export browser controls missing");
+        dialog.currentChanged(project);
+        require(dialog.findChild<QLabel*>("ProjectPreviewName")->text() == "Current scene",
+                "File selection replaced export scene preview");
+        const QString screenshot = qEnvironmentVariable("DOM3D_EXPORT_DIALOG_SCREENSHOT");
+        if (!screenshot.isEmpty()) require(dialog.grab().save(screenshot), "Export screenshot failed");
+        QMetaObject::invokeMethod(&dialog, "accept", Qt::DirectConnection);
+        require(dialog.result() == QDialog::Accepted && dialog.selectedFiles().first() == folder + "/New kitchen.glb",
+                "Export must return new filename with the chosen suffix");
+        require(!QFileInfo::exists(folder + "/New kitchen.glb"), "Dialog must not write export files");
+    }
+    std::cout << "Project open/export dialog tests passed.\n";
     return 0;
 }

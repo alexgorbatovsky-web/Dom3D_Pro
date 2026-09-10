@@ -9,6 +9,9 @@
 
 #include <TopoDS_Shape.hxx>
 
+// Metadata-only migration of old parametric projects; never rebuilds the BRep.
+void RestoreMissingSolidCenterlines(CAlfaDoc& document);
+
 enum class ToolParameterType {
     Number,
     Checkbox,
@@ -90,6 +93,7 @@ public:
     ActiveParametricObject ApplyOffsetFaceToSelection(CAlfaDoc& document) const;
     bool ApplyOffsetFaceOnce(CAlfaDoc& document, double distance) const;
     void Rebuild(const ActiveParametricObject& active_object, CAlfaDoc& document) const;
+    bool TryRebuildPolyhedron(const ActiveParametricObject& active_object, CAlfaDoc& document) const;
     bool ApplyFurnitureMaterialParameter(
         const ActiveParametricObject& active_object,
         CAlfaDoc& document,

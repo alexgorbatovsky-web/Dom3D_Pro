@@ -34,6 +34,7 @@ struct DrawerBoxDefinition {
     std::vector<double> drawer_heights{200.0, 200.0, 400.0};
     bool make_legs = true;
     double leg_height = 100.0;
+    double leg_inset = 20.0;
     int open_drawer = 0;
     double pullout_distance = 300.0;
 };

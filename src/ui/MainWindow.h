@@ -10,6 +10,7 @@
 
 #include "../ObjIO.h"
 #include "../FbxIO.h"
+#include "../GlbIO.h"
 #include "../ThreeDSIO.h"
 #include "../ProjectIO.h"
 #include "../Dom3DProjectSerializer.h"
@@ -69,6 +70,7 @@ public:
 
 private:
     friend int TestScenePersistence(int argc, char** argv);
+    friend int TestSolidPrimitiveTool(int argc, char** argv);
     [[nodiscard]] QScopedValueRollback<bool> RememberCommand(std::function<void()> command);
     [[nodiscard]] QScopedValueRollback<bool> RememberCommand(void (MainWindow::*command)());
     void RepeatLastCommand();
@@ -194,6 +196,7 @@ private:
     bool OffsetSelectedCurves();
     bool MirrorSelectedCurves();
     bool LinkSelectedCurves();
+    bool BridgeSelectedCurves();
     bool CreateSmartHybridFromSelectedCurves();
     bool TrimSelectedCurveByPlane(CPoint3d keep_point);
     bool SimplifySelectedCurveByPoint(CPoint3d split_point);
@@ -226,6 +229,7 @@ private:
     void ShowTrimMeshTestTool();
     void ShowClassifyFaceCutTool();
     void EditSelectedParametricObject();
+    void EditKitchenLayout(unsigned long existing_id = 0, int module_uid = 0);
     void UpdateSolidBodyDimensions();
     bool ActiveParametricObjectIsAssembly() const;
     bool TryStartLiveEdgeToolFromSelection();
@@ -234,6 +238,7 @@ private:
     void InvalidateLiveFilletRebuild();
     bool TryStartLivePolylineExtrudeFromSelection();
     bool TryStartLivePolylineRevolveFromSelection();
+    bool TryStartProfileSolidFromSelection();
     void ClearActiveProperties();
     void RemovePendingFaceBooleanTools(unsigned long body_id);
     bool UpdateFacePrimitiveBooleanPreview();
@@ -276,6 +281,7 @@ private:
     bool ImportFileFromPath(const QString& path, bool catalog_sketch = false);
     void HandleDroppedFiles(const QStringList& paths);
     void ExportFile();
+    void ExportFileWithFilter(const QString& initial_filter);
     void DuplicateSelectedObject();
     void MirrorSelectedObject();
     void DeleteSelected();
@@ -426,6 +432,7 @@ private:
     ProjectIO project_io_;
     ObjIO obj_io_;
     FbxIO fbx_io_;
+    GlbIO glb_io_;
     ThreeDSIO three_ds_io_;
     IgesIO iges_io_;
     StepIO step_io_;

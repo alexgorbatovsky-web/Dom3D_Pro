@@ -4,6 +4,9 @@
 #include "MeasurementUnits.h"
 
 #include <QCheckBox>
+#include <QApplication>
+#include <QKeyEvent>
+#include <QPointer>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QDialog>
@@ -495,7 +498,7 @@ bool IsSliderParameter(const ActiveParametricObject& active,
         || tool_id == "fillet_all_edges"
         || tool_id == "ChamferSolid"
         || tool_id == "ThickSolidTool"
-        || tool_id == "SurfaceOfRevolution"
+        || (tool_id == "SurfaceOfRevolution" || tool_id == "SurfaceRevolve")
         || tool_id == "SurfaceRuled"
         || tool_id == "SolidShell"
         || tool_id == "cabinet"
@@ -541,6 +544,41 @@ double SliderPositionToValue(int position, double minimum, double maximum) {
 }
 }
 
+namespace {
+class PrimitiveEnterFilter final : public QObject {
+public:
+    explicit PrimitiveEnterFilter(PropertyPanel* panel) : QObject(panel), panel_(panel) {
+        qApp->installEventFilter(this);
+    }
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override {
+        if (event->type() != QEvent::KeyPress && event->type() != QEvent::ShortcutOverride) return false;
+        const auto* key = static_cast<QKeyEvent*>(event);
+        const auto& id = panel_->ActiveObject().tool_id;
+        if (!panel_->isVisible() || (id != "SolidBox" && id != "SolidCylinder")
+            || (key->key() != Qt::Key_Return && key->key() != Qt::Key_Enter)
+            || (key->modifiers() & ~Qt::KeypadModifier) != Qt::NoModifier
+            || QApplication::activeModalWidget() || QApplication::activePopupWidget()) return false;
+        auto* widget = qobject_cast<QWidget*>(watched);
+        if (!widget) return false;
+        const bool editor = widget == panel_ || panel_->isAncestorOf(widget);
+        if (!editor && !widget->inherits("OpenGLViewport")) return false;
+        const auto root = [](QWidget* w) { while (w->parentWidget()) w = w->parentWidget(); return w; };
+        if (root(widget) != root(panel_)) return false;
+        event->accept();
+        if (event->type() == QEvent::ShortcutOverride || key->isAutoRepeat()) return true;
+        // Commit the text still being edited before the normal OK handler runs.
+        QList<QPointer<QAbstractSpinBox>> editors;
+        for (auto* spin : panel_->findChildren<QAbstractSpinBox*>()) editors.append(spin);
+        for (const auto& spin : editors) if (spin) spin->interpretText();
+        emit panel_->Accepted();
+        return true;
+    }
+private:
+    PropertyPanel* panel_;
+};
+}
+
 PropertyPanel::PropertyPanel(QWidget* parent, bool additional_parameters)
     : QWidget(parent),
       form_(new QFormLayout(this)),
@@ -548,6 +586,7 @@ PropertyPanel::PropertyPanel(QWidget* parent, bool additional_parameters)
     form_->setContentsMargins(10, 8, 10, 8);
     form_->setHorizontalSpacing(16);
     Clear();
+    if (!additional_parameters_) new PrimitiveEnterFilter(this);
 }
 
 void PropertyPanel::Clear() {
@@ -1111,6 +1150,9 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
     button_layout->addStretch();
 
     auto* ok = new QPushButton("OK", buttons);
+    const bool primitive = active_object_.tool_id == "SolidBox" || active_object_.tool_id == "SolidCylinder";
+    ok->setDefault(primitive);
+    ok->setAutoDefault(primitive);
     QPushButton* apply = nullptr;
     if (!additional_parameters_
         && (active_object_.tool_id == "cabinet"

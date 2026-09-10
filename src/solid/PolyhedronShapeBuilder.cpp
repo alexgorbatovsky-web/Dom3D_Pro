@@ -1,6 +1,7 @@
 #include "PolyhedronShapeBuilder.h"
 
 #include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
@@ -104,18 +105,22 @@ bool AddSideFace(BRepBuilderAPI_Sewing& sewing,
         return true;
     }
 
-    // A fillet or Bezier sample can make the four vertices very slightly
-    // non-planar after conversion to world coordinates. Two triangles still
-    // describe the intended ruled facet without requiring a perfect plane.
-    const std::vector<Vec3> first_triangle = {
-        points[0], points[1], points[2]};
-    const std::vector<Vec3> second_triangle = {
-        points[0], points[2], points[3]};
-    if (!AddFace(sewing, first_triangle)
-        || !AddFace(sewing, second_triangle)) {
+    // Rounded coordinates (or a non-planar profile) can prevent plane
+    // recognition. Preserve the four boundary edges with one ruled surface;
+    // a diagonal here would become a real CAD edge and split later fillets.
+    const auto point = [&](size_t i) {
+        return gp_Pnt(points[i].x, points[i].y, points[i].z);
+    };
+    BRepBuilderAPI_MakeEdge first(point(0), point(1));
+    BRepBuilderAPI_MakeEdge opposite(point(3), point(2));
+    if (!first.IsDone() || !opposite.IsDone()) {
         return false;
     }
-    face_count += 2;
+    const TopoDS_Face face = BRepFill::Face(first.Edge(), opposite.Edge());
+    if (face.IsNull() || !BRepCheck_Analyzer(face).IsValid())
+        return false;
+    sewing.Add(face);
+    ++face_count;
     return true;
 }
 

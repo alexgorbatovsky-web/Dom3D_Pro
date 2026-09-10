@@ -33,6 +33,15 @@ public:
     CSmartLine(CSmartLine&&) noexcept = default;
     CSmartLine& operator=(CSmartLine&&) noexcept = default;
     ~CSmartLine() override;
+    const SketchRevisions& GetRevisions() const { return changes_->revisions; }
+    void SetChangeCallback(std::function<void(unsigned,SketchRevisions)> callback) { changes_->notify = std::move(callback); }
+    void BeginEdit();
+    bool CommitEdit();
+    void CancelEdit();
+    bool RestoreFrom(const CSmartLine& source);
+    bool IsEditing() const { return changes_->depth != 0; }
+    const std::string& GetLastGeometryError() const { return last_geometry_error_; }
+    std::size_t GetEndpointId(std::size_t line, int endpoint) const;
 
     // Deep value copy intended for temporary/debug sketches. The returned
     // object has no document id and can safely be passed to AddObject after
@@ -90,7 +99,6 @@ public:
     bool AddFillet(std::size_t first_line_index, double radius);
     bool RemoveFillet(std::size_t first_line_index);
     std::size_t GetNumFillets() const;
-    CFillet* GetFillet(std::size_t index);
     const CFillet* GetFillet(std::size_t index) const;
     CPoint3d GetFilletGripWorld(std::size_t fillet_index) const;
     bool SetFilletRadiusFromWorld(std::size_t fillet_index, CPoint3d world_point);
@@ -121,6 +129,15 @@ public:
     bool GetBounds(Vec3& min_point, Vec3& max_point) const override;
 
 private:
+    bool ExecuteEdit(const std::function<bool()>& operation, unsigned kind);
+    void BindGeometry();
+    void RestoreGeometry(CSmartLine& source);
+    std::shared_ptr<SketchChanges> changes_ = std::make_shared<SketchChanges>();
+    std::unique_ptr<CSmartLine> edit_snapshot_;
+    std::vector<std::shared_ptr<SketchNode>> nodes_;
+    std::size_t next_line_id_ = 1, next_node_id_ = 1;
+    bool edit_failed_ = false;
+    std::string last_geometry_error_;
     struct DisplayGeometry {
         std::vector<CPoint3d> line_starts;
         std::vector<CPoint3d> line_ends;
@@ -129,6 +146,8 @@ private:
     };
 
     DisplayGeometry BuildDisplayGeometry() const;
+    mutable DisplayGeometry display_cache_;
+    mutable std::uint64_t display_generation_ = ~std::uint64_t(0);
     bool ReplaceLineWithSplitParts(
         std::size_t index,
         std::unique_ptr<CLinkLine> first,

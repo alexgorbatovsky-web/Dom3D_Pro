@@ -126,6 +126,9 @@ bool SolidCylinderTool::CreateCylinder(CSolid& solid,
             return false;
         }
         solid.m_Shape = builder.Shape();
+        solid.ClearCenterlines();
+        solid.SetCenterline({"base:rotation", SolidCenterlineKind::RotationAxis,
+            {origin, origin.Translated(gp_Vec(extrusion_direction) * std::fabs(height))}, false});
         return !solid.m_Shape.IsNull() && solid.ReBuldMesh();
     } catch (...) {
         return false;

@@ -1,3 +1,4 @@
+#include "SurfaceRevolveProfile.h"
 #include "CAlfaDoc.h"
 
 #include "CGroup.h"
@@ -17,6 +18,7 @@
 #include "solid/AssociativeClone.h"
 #include "solid/TwoSketchSolidBuilder.h"
 #include "solid/PolyhedronShapeBuilder.h"
+#include "solid/PolyhedronProfileAxis.h"
 #include "solid/SurfaceSet.h"
 
 #include <BRepAlgoAPI_Common.hxx>
@@ -103,6 +105,11 @@
 #include <vector>
 
 namespace {
+struct CurveEndpointLinkUpdate {
+    CAlfaDoc* document;
+    ~CurveEndpointLinkUpdate() { document->SynchronizeCurveEndpointLinks(); }
+};
+
 CAlfaDoc* g_current_alfa_doc = nullptr;
 
 struct ScreenRectBounds {
@@ -330,6 +337,7 @@ bool rebuild_solid_from_shape(CAlfaDoc::ObjectList& objects, size_t solid_index,
 
     TopoDS_Shape shape_copy = result_shape;
     auto result = std::make_unique<CSolid>(shape_copy);
+    result->CopyCenterlinesFrom(*source_solid);
     result->m_id = source_solid->m_id;
     result->SetName(source_solid->GetName());
     result->SetColor(source_solid->GetColor());
@@ -2030,6 +2038,7 @@ struct CAlfaDoc::Snapshot {
     };
 
     ObjectList objects;
+    std::vector<CurveEndpointLink> curve_endpoint_links;
     std::vector<Material> materials;
     std::vector<LayerState> layers;
     unsigned long next_object_id = 1;
@@ -2088,6 +2097,7 @@ struct CAlfaDoc::LivePolylineExtrudeData {
 };
 
 struct CAlfaDoc::LivePolylineRevolveData {
+    bool surface = false;
     TopoDS_Shape profile_shape;
     Vec3 axis_origin{};
     Vec3 axis_direction{0.0f, 0.0f, 1.0f};
@@ -2158,6 +2168,7 @@ CAlfaDoc::~CAlfaDoc() {
 void CAlfaDoc::Clear() {
     objects_.clear();
     drafting_data_.clear();
+    curve_endpoint_links_.clear();
     ResetDefaultMaterials();
     for (CLayer* layer : m_Layers) {
         delete layer;
@@ -2372,9 +2383,11 @@ bool CAlfaDoc::CreateWireSolid(unsigned long path_id, double radius) {
         || dynamic_cast<const CSmartLine*>(path)
         || dynamic_cast<const CBSpline*>(path);
     if (!path || !supported || radius <= 0.0) return false;
-    TopoDS_Shape shape = BuildWireSolidShape(*path, radius);
+    TopoDS_Wire center_path;
+    TopoDS_Shape shape = BuildWireSolidShape(*path, radius, &center_path);
     if (shape.IsNull()) return false;
     auto solid = std::make_unique<CSolid>(shape);
+    solid->SetCenterlinePath("base:path", center_path);
     solid->SetName("Wire");
     solid->SetParametricOperation(0, "SolidWireTool", "Wire",
                                   {{"radius", radius}, {"profile.id", static_cast<double>(path_id)}});
@@ -2403,15 +2416,13 @@ bool CAlfaDoc::CreatePolyhedronSolid(unsigned long profile_id,
             static_cast<float>(point.y),
             static_cast<float>(point.z)});
     }
-    const SketchCoordinateSystem& system = profile->GetCoordinateSystem();
-    const Vec3 axis_origin{
-        static_cast<float>(system.origin.x),
-        static_cast<float>(system.origin.y),
-        static_cast<float>(system.origin.z)};
+    // X/Y/Z denote the visible world axes, not parallel axes through the sketch origin.
+    const Vec3 axis_origin{};
     axis_index = std::clamp(axis_index, 0, 2);
     turns = std::max(3, turns);
 
     const Vec3 axis_direction = revolve_axis_direction(axis_index);
+    if (!IsPolyhedronProfileAxisValid(*profile, axis_direction)) return false;
     TopoDS_Shape shape;
     bool shape_built = false;
     if (profile->IsClosed()) {
@@ -2476,6 +2487,7 @@ bool CAlfaDoc::CreatePolyhedronSolid(unsigned long profile_id,
     }
 
     auto solid = std::make_unique<CSolid>(shape);
+    solid->SetAxis("base:rotation", SolidCenterlineKind::RotationAxis, axis_origin, axis_direction);
     solid->SetName("Polyhedron");
     AssignDefaultMaterial(*solid);
     AssignObjectToWorkLayer(*solid);
@@ -2817,18 +2829,20 @@ void CAlfaDoc::CancelLiveExtrudeSelectedPolyline() {
     }
 }
 
-bool CAlfaDoc::BeginLiveRevolveSelectedPolyline(double angle_degrees, int axis_index) {
+bool CAlfaDoc::BeginLiveRevolveSelectedPolyline(double angle_degrees, int axis_index, bool surface) {
     CPolyline* polyline = GetSelectedPolyline();
     CSmartLine* sketch = GetSelectedSketch();
     CAlfaObject* profile = polyline
         ? static_cast<CAlfaObject*>(polyline)
         : static_cast<CAlfaObject*>(sketch);
+    if (!profile && surface) profile = dynamic_cast<CBSpline*>(GetSelectedObject());
     if (!profile) {
         return false;
     }
     EnsureObjectId(*profile);
 
     live_polyline_revolve_ = std::make_unique<LivePolylineRevolveData>();
+    live_polyline_revolve_->surface = surface;
     live_polyline_revolve_->profile_id = profile->m_id;
     live_polyline_revolve_->polyline_index = selected_object_index_;
     live_polyline_revolve_->solid_index = objects_.size();
@@ -2877,14 +2891,16 @@ bool CAlfaDoc::UpdateLiveRevolveSelectedPolyline(double angle_degrees, int axis_
             objects_[live_polyline_revolve_->polyline_index].get();
         const auto* polyline = dynamic_cast<const CPolyline*>(profile);
         const auto* sketch = dynamic_cast<const CSmartLine*>(profile);
-        if (!polyline && !sketch) {
+        if (!polyline && !sketch && !(live_polyline_revolve_->surface && dynamic_cast<const CBSpline*>(profile))) {
             return false;
         }
 
         TopoDS_Shape profile_shape;
         Vec3 axis_origin{};
         Vec3 axis_direction = revolve_axis_direction(axis_index);
-        const bool built = sketch
+        const bool built = live_polyline_revolve_->surface
+            ? BuildSurfaceRevolveProfile(*profile, profile_shape, axis_origin)
+            : sketch
             ? build_revolve_profile_from_sketch(
                 *sketch,
                 axis_index,
@@ -2893,7 +2909,8 @@ bool CAlfaDoc::UpdateLiveRevolveSelectedPolyline(double angle_degrees, int axis_
                 axis_direction)
             : build_revolve_profile_from_polyline(
                 *polyline, axis_index, profile_shape, axis_origin);
-        if (!built) {
+        if (!built || (!live_polyline_revolve_->surface
+            && !SolidRevolveAxisInProfilePlane(profile_shape, axis_direction))) {
             return false;
         }
 
@@ -2905,12 +2922,16 @@ bool CAlfaDoc::UpdateLiveRevolveSelectedPolyline(double angle_degrees, int axis_
                                                          live_polyline_revolve_->axis_origin,
                                                          live_polyline_revolve_->axis_direction,
                                                          angle_degrees);
-        if (shape.IsNull()) {
+        if (shape.IsNull() || !BRepCheck_Analyzer(shape).IsValid()
+            || (!live_polyline_revolve_->surface && !TopExp_Explorer(shape, TopAbs_SOLID).More())) {
             return false;
         }
 
-        auto solid = std::make_unique<CSolid>(shape);
-        solid->SetName("Revolve Solid");
+        std::unique_ptr<CSolid> solid;
+        if (live_polyline_revolve_->surface) solid = std::make_unique<CSurfaceSet>(shape);
+        else solid = std::make_unique<CSolid>(shape);
+        solid->SetName(live_polyline_revolve_->surface ? "Revolve Surface" : "Revolve Solid");
+        solid->SetAxis("base:rotation", SolidCenterlineKind::RotationAxis, axis_origin, axis_direction);
         if (live_polyline_revolve_->has_solid
             && live_polyline_revolve_->solid_index < objects_.size()
             && objects_[live_polyline_revolve_->solid_index]) {
@@ -2957,12 +2978,13 @@ bool CAlfaDoc::FinishLiveRevolveSelectedPolyline() {
     const unsigned long profile_id = live_polyline_revolve_->profile_id;
     const double angle_degrees = live_polyline_revolve_->angle_degrees;
     const int axis_index = live_polyline_revolve_->axis_index;
+    const bool surface = live_polyline_revolve_->surface;
     live_polyline_revolve_.reset();
     if (solid_index < objects_.size()) {
         if (auto* solid = dynamic_cast<CSolid*>(objects_[solid_index].get())) {
             solid->SetParametricOperation(0,
-                                          "SurfaceOfRevolution",
-                                          "Revolve",
+                                          surface ? "SurfaceRevolve" : "SurfaceOfRevolution",
+                                          surface ? "Surface Revolve" : "Solid Revolve",
                                           {
                                               {"angle", angle_degrees},
                                               {"axis", static_cast<double>(axis_index)},
@@ -3254,6 +3276,13 @@ bool CAlfaDoc::FindRotationAxisLineAtScreen(
         const auto* solid = dynamic_cast<const CSolid*>(object.get());
         if (!solid) {
             continue;
+        }
+        for (const auto& axis : solid->GetCenterlines()) {
+            // A sampled curved path is not a straight rotation axis.
+            if (axis.points.size() != 2 || axis.closed) continue;
+            const auto& a = axis.points.front(); const auto& b = axis.points.back();
+            consider_segment({float(a.X()),float(a.Y()),float(a.Z())},
+                             {float(b.X()),float(b.Y()),float(b.Z())});
         }
         for (int surface_index = 0;
              surface_index < solid->GetNumSurfaces();
@@ -7262,6 +7291,7 @@ int CAlfaDoc::RebuildVisibleObjectMeshes(float mesh_deflection) {
 }
 
 bool CAlfaDoc::DeleteSelectedObject() {
+    CurveEndpointLinkUpdate link_update{this};
     if (!HasSelection()) {
         return false;
     }
@@ -7334,6 +7364,7 @@ bool CAlfaDoc::DeleteSelectedPoint() {
 }
 
 bool CAlfaDoc::MoveSelectedPoint(CurvePoint point) {
+    CurveEndpointLinkUpdate link_update{this};
     if (!HasSelectedPoint()) {
         return false;
     }
@@ -7343,6 +7374,7 @@ bool CAlfaDoc::MoveSelectedPoint(CurvePoint point) {
 }
 
 bool CAlfaDoc::MoveSelectedPoint(CPoint3d point) {
+    CurveEndpointLinkUpdate link_update{this};
     if (!HasSelectedPoint()) {
         return false;
     }
@@ -7359,6 +7391,7 @@ bool CAlfaDoc::MoveSelectedPoint(CPoint3d point) {
 }
 
 bool CAlfaDoc::MoveSelectedCurvePoints(Vec3 delta, bool constrain_to_xy) {
+    CurveEndpointLinkUpdate link_update{this};
     if (selected_curve_points_.empty()) {
         return false;
     }
@@ -7421,6 +7454,7 @@ bool CAlfaDoc::MoveSelectedCurvePoints(Vec3 delta, bool constrain_to_xy) {
 }
 
 bool CAlfaDoc::RotateSelectedCurvePoints(Vec3 center, Vec3 axis, float angle) {
+    CurveEndpointLinkUpdate link_update{this};
     if (selected_curve_points_.empty() || dot(axis, axis) <= 0.000001f) return false;
     const auto point_is_selected = [this](size_t object_index, size_t point_index) {
         return std::find(selected_curve_points_.begin(), selected_curve_points_.end(),
@@ -7473,6 +7507,7 @@ bool CAlfaDoc::RotateSelectedCurvePoints(Vec3 center, Vec3 axis, float angle) {
 }
 
 bool CAlfaDoc::ScaleSelectedCurvePoints(Vec3 center, Vec3 axis, float factor) {
+    CurveEndpointLinkUpdate link_update{this};
     if (selected_curve_points_.empty() || factor <= 0.0001f) return false;
     const bool uniform = dot(axis, axis) <= 0.000001f;
     const auto point_is_selected = [this](size_t object_index, size_t point_index) {
@@ -7682,6 +7717,7 @@ CAlfaDoc::GetSelectedCurvePoints() const {
 }
 
 bool CAlfaDoc::MoveSelectedObjects(Vec3 delta) {
+    CurveEndpointLinkUpdate link_update{this};
     if (!HasSelection()) {
         return false;
     }
@@ -7701,6 +7737,7 @@ bool CAlfaDoc::MoveSelectedObjects(Vec3 delta) {
 }
 
 bool CAlfaDoc::RotateSelectedObjects(Vec3 center, Vec3 axis, float angle) {
+    CurveEndpointLinkUpdate link_update{this};
     if (!HasSelection()) {
         return false;
     }
@@ -7720,6 +7757,7 @@ bool CAlfaDoc::RotateSelectedObjects(Vec3 center, Vec3 axis, float angle) {
 }
 
 bool CAlfaDoc::ScaleSelectedObjects(Vec3 center, Vec3 axis, float factor) {
+    CurveEndpointLinkUpdate link_update{this};
     if (!HasSelection() || factor <= 0.0001f) {
         return false;
     }
@@ -7739,6 +7777,7 @@ bool CAlfaDoc::ScaleSelectedObjects(Vec3 center, Vec3 axis, float factor) {
 }
 
 bool CAlfaDoc::UniformScaleSelectedObjects(Vec3 center, float factor) {
+    CurveEndpointLinkUpdate link_update{this};
     if (!HasSelection() || factor <= 0.0001f) {
         return false;
     }
@@ -7816,6 +7855,7 @@ std::vector<size_t> CAlfaDoc::GetSelectedTransformRootIndices() const {
 }
 
 bool CAlfaDoc::PreviewMoveSelectedObjects(Vec3 delta) {
+    CurveEndpointLinkUpdate link_update{this};
     if (!HasSelection()) {
         return false;
     }
@@ -7838,6 +7878,7 @@ bool CAlfaDoc::PreviewMoveSelectedObjects(Vec3 delta) {
 }
 
 bool CAlfaDoc::PreviewRotateSelectedObjects(Vec3 center, Vec3 axis, float angle) {
+    CurveEndpointLinkUpdate link_update{this};
     if (!HasSelection()) {
         return false;
     }
@@ -7860,6 +7901,7 @@ bool CAlfaDoc::PreviewRotateSelectedObjects(Vec3 center, Vec3 axis, float angle)
 }
 
 bool CAlfaDoc::PreviewScaleSelectedObjects(Vec3 center, Vec3 axis, float factor) {
+    CurveEndpointLinkUpdate link_update{this};
     if (!HasSelection() || factor <= 0.0001f) {
         return false;
     }
@@ -7893,6 +7935,9 @@ bool CAlfaDoc::CommitMoveSelectedSolids(Vec3 delta) {
                 moved = group->CommitTranslate(delta) || moved;
             } else if (auto* solid = dynamic_cast<CSolid*>(objects_[index].get())) {
                 moved = solid->CommitPreviewTranslate(delta) || moved;
+            } else if (objects_[index]) {
+                // Curves already changed during preview; only finalize the command.
+                moved = true;
             }
         }
     }
@@ -7921,6 +7966,8 @@ bool CAlfaDoc::CommitRotateSelectedSolids(Vec3 center, Vec3 axis, float angle) {
             } else if (auto* solid = dynamic_cast<CSolid*>(objects_[index].get())) {
                 solid->Rotate(center, axis, angle);
                 rotated = true;
+            } else if (objects_[index]) {
+                rotated = true;
             }
         }
     }
@@ -7942,6 +7989,8 @@ bool CAlfaDoc::CommitScaleSelectedSolids(Vec3 center, Vec3 axis, float factor) {
                 scaled = group->CommitScale(center, axis, factor) || scaled;
             } else if (auto* solid = dynamic_cast<CSolid*>(objects_[index].get())) {
                 solid->Scale(center, axis, factor);
+                scaled = true;
+            } else if (objects_[index]) {
                 scaled = true;
             }
         }
@@ -7983,6 +8032,9 @@ bool CAlfaDoc::ApplyBooleanToSolids(size_t body_index, size_t tool_index, Boolea
     result->m_LayerID = body->m_LayerID;
     result->CopyOperationTreeFrom(*body);
     const size_t boolean_tool_index = result->AddBooleanToolCopy(*tool);
+    result->CopyCenterlinesFrom(*body);
+    result->AppendCenterlinesFrom(*tool, "boolean:" + std::to_string(boolean_tool_index) + ":",
+                                  operation == BooleanOperation::Cut);
     if (result->GetNumOperations() > 0) {
         result->SetParametricOperation(result->GetOperationTree().size(),
                                       "boolean",
@@ -8895,6 +8947,17 @@ bool CAlfaDoc::IsLayerSelectable(int layer_id) const {
     return !layer || layer->Selectable;
 }
 
+void CAlfaDoc::SetObjectVisibility(unsigned long objectId,bool visible) {
+    std::set<unsigned long> visited;
+    std::function<void(unsigned long)> apply=[&](unsigned long id) {
+        if(!visited.insert(id).second)return;
+        auto* object=FindObjectById(id);if(!object)return;
+        object->CAlfaObject::SetVisible(visible);
+        if(auto* group=dynamic_cast<CGroup*>(object))for(auto child:group->GetElementIds())apply(child);
+    };
+    apply(objectId);
+}
+
 bool CAlfaDoc::IsObjectVisible(const CAlfaObject& object) const {
     return object.IsVisible() && IsLayerVisible(object.m_LayerID);
 }
@@ -9037,6 +9100,9 @@ bool CAlfaDoc::RebuildTwoSketchSolid(size_t object_index) {
 }
 
 size_t CAlfaDoc::ResolveGroupSelectionIndex(size_t object_index) const {
+    // A generated plan item opens its source module, rather than the entire kitchen.
+    if(object_index<objects_.size()&&objects_[object_index]&&objects_[object_index]->GetParametricToolId()=="kitchen_plan_item")return object_index;
+
     if (!group_interaction_enabled_
         || object_index >= objects_.size() || !objects_[object_index]) {
         return object_index;
@@ -9192,6 +9258,7 @@ size_t CAlfaDoc::GetTotalPointCount() const {
 
 std::shared_ptr<const CAlfaDoc::Snapshot> CAlfaDoc::CreateSnapshot() const {
     auto snapshot = std::make_shared<Snapshot>();
+    snapshot->curve_endpoint_links = curve_endpoint_links_;
     snapshot->objects.reserve(objects_.size());
     for (const ObjectPtr& object : objects_) {
         if (!object) {
@@ -9273,6 +9340,7 @@ bool CAlfaDoc::RestoreSnapshot(const Snapshot& snapshot) {
     }
 
     objects_ = std::move(restored);
+    curve_endpoint_links_ = snapshot.curve_endpoint_links;
     materials_ = snapshot.materials;
     for (CLayer* layer : m_Layers) {
         delete layer;

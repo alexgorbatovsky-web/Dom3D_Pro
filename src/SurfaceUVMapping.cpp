@@ -4,6 +4,8 @@
 #include "solid/SurfaceFace.h"
 
 #include <BRep_Tool.hxx>
+#include <BRepAdaptor_Surface.hxx>
+#include <BRepTools.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <Geom_Surface.hxx>
 #include <Standard_Failure.hxx>
@@ -28,6 +30,8 @@ public:
     bool v_periodic = false;
     double u_period = 0.0;
     double v_period = 0.0;
+    bool bounded_projection = false;
+    double u_min = 0.0, u_max = 0.0, v_min = 0.0, v_max = 0.0;
 };
 
 namespace {
@@ -58,6 +62,14 @@ SurfaceUVMapping::SurfaceUVMapping(const CSurfaceFace* surface)
         impl_->v_periodic = impl_->surface->IsVPeriodic();
         impl_->u_period = impl_->u_periodic ? impl_->surface->UPeriod() : 0.0;
         impl_->v_period = impl_->v_periodic ? impl_->surface->VPeriod() : 0.0;
+        // A revolved fillet can have several stationary projections on its
+        // supporting surface. Search the actual face domain: an unrestricted
+        // projector can return the opposite side of the generating arc.
+        impl_->bounded_projection = BRepAdaptor_Surface(face).GetType()
+            == GeomAbs_SurfaceOfRevolution;
+        if (impl_->bounded_projection)
+            BRepTools::UVBounds(face, impl_->u_min, impl_->u_max,
+                               impl_->v_min, impl_->v_max);
         impl_->valid = true;
     } catch (const Standard_Failure&) {
     }
@@ -84,7 +96,15 @@ bool SurfaceUVMapping::Project(Vec3 point, SurfaceUVPoint& uv) const {
         static std::mutex projector_mutex;
         const std::lock_guard<std::mutex> lock(projector_mutex);
         gp_Pnt dummy(0, 0, 0);
-        projector->Init(dummy, impl_->surface);
+        if (impl_->bounded_projection)
+            // Float boundary samples can lie just beyond a parameter bound.
+            // Tree search also avoids the wrong stationary solution returned
+            // by the gradient solver for revolved, trimmed generating curves.
+            projector->Init(impl_->surface, impl_->u_min - 1.0e-5, impl_->u_max + 1.0e-5,
+                            impl_->v_min - 1.0e-5, impl_->v_max + 1.0e-5,
+                            1.0e-9, Extrema_ExtAlgo_Tree);
+        else
+            projector->Init(dummy, impl_->surface);
         projector->Perform(projected_point);
         if (projector->NbPoints() < 1) {
             return false;

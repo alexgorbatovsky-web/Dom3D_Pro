@@ -10,6 +10,7 @@
 #include <QOpenGLWidget>
 #include <QColor>
 #include <QRectF>
+#include <QPolygonF>
 #include <QString>
 #include <QStringList>
 
@@ -18,9 +19,12 @@
 
 class QKeyEvent;
 class QLabel;
+class QVariantAnimation;
+class CSmartLine;
 
 class OpenGLViewport : public QOpenGLWidget {
     Q_OBJECT
+    friend int TestScenePersistence(int argc, char** argv);
 
 public:
     enum class SpatialCurvePreviewKind {
@@ -122,6 +126,7 @@ public:
     void BeginSolidCylinderCircle(SketchPlane plane);
     void BeginSolidCylinderFaceSelection();
     void SetSolidPrimitivePlacement(SketchPlane plane, bool on_face);
+    void SetReferencePlaneSelection(bool enabled);
     void SetSolidDimensionEdit(
         const ActiveParametricObject& active_object,
         const QString& primary_parameter = {});
@@ -136,6 +141,9 @@ public:
     void SetSpatialCurvePreviewObject(unsigned long object_id);
     void SetSpatialCurvePreviewPoints(const std::vector<CPoint3d>& points);
     void EndSpatialCurvePreview();
+    void BeginPickSolidSurface(unsigned long object_id);
+    void CancelSolidSurfacePick();
+    void SetSheetBendGuide(const std::vector<CPoint3d>& arc);
     void BeginPick3DPointOnObject(unsigned long object_id, const QString& prompt = {});
     void BeginPick3DPointOnPlane(CPoint3d plane_origin,
                                  Vec3 plane_normal,
@@ -144,7 +152,9 @@ public:
     void CancelArchitectureWallPick();
     void SetPointPickMarkers(const std::vector<CPoint3d>& points);
     void ClearPointPickMarkers();
+    bool TakeSketchEditChange(unsigned long& id, std::shared_ptr<CSmartLine>& before, std::shared_ptr<CSmartLine>& after);
     void BeginPickRotationAxis();
+    void SetCoordinateAxisSelection(bool enabled);
     void BeginMovePointToPoint(bool repeat = false);
     void BeginMeasurePointToPoint();
     void EndSketch();
@@ -187,8 +197,12 @@ signals:
     void ArchitectureWallPicked(unsigned long wall_id, CPoint3d point);
     void ArchitectureWallPickCanceled();
     void RotationAxisPicked(CPoint3d start, CPoint3d end);
+    void CoordinateAxisSelected(int axis);
     void RotationAxisPickCanceled();
     void SolidBoxRectangleFinished(std::vector<ToolParameter> parameters);
+    void ReferencePlaneSelected(int plane);
+    void ReferenceBodyFaceSelected();
+    void ReferencePlaneSelectionCanceled();
     void SolidCylinderCircleFinished(std::vector<ToolParameter> parameters);
     void SketchFaceSelectionFinished(bool selected);
     void SolidDimensionEditRequested(int operation_index, QString parameter_id, double current_value);
@@ -210,6 +224,7 @@ protected:
     void mousePressEvent(QMouseEvent* event) override;
     void mouseDoubleClickEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
+    void leaveEvent(QEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
     void keyReleaseEvent(QKeyEvent* event) override;
@@ -220,6 +235,21 @@ protected:
     void dropEvent(QDropEvent* event) override;
 
 private:
+    void AnimateSketchCamera(const Camera& start, bool was_orthographic);
+    void StopCameraAnimation(bool finish);
+    void UpdateReferenceFaceHover(const QPoint& point);
+    void DrawReferenceFaceHover();
+    QVariantAnimation* sketch_camera_animation_ = nullptr;
+    Camera sketch_camera_destination_;
+    unsigned long reference_hover_body_ = 0;
+    int reference_hover_face_ = -1;
+    bool ReferencePlanesVisible() const;
+    QPolygonF ReferencePlanePolygon(int plane) const;
+    int HitReferencePlane(const QPoint& point) const;
+    void DrawReferencePlanes();
+    bool reference_plane_pending_ = false;
+    bool reference_plane_dialog_ = false;
+    int hovered_reference_plane_ = -1;
     enum class NavigationDrag {
         None,
         Orbit,
@@ -238,7 +268,8 @@ private:
     void SelectAt(const QPoint& point, SelectionAction action);
     NavigationDrag NavigationDragFor(const QMouseEvent& event) const;
     bool UsesAltNavigationModifier() const;
-    void DrawCurveAt(const QPoint& point);
+    void DrawCurveAt(const QPoint& point, Qt::KeyboardModifiers modifiers);
+    void ConstrainPolylinePoint(CPoint3d& point, Qt::KeyboardModifiers modifiers) const;
     void DrawBSplineAt(const QPoint& point);
     void BeginDrawSplineStroke(const QPoint& point);
     void AppendDrawSplineStroke(const QPoint& point);
@@ -394,6 +425,8 @@ private:
     unsigned long direct_curve_edit_object_id_ = 0;
     bool dragging_sketch_handle_ = false;
     bool sketch_drag_changed_ = false;
+    unsigned long sketch_change_id_ = 0;
+    std::shared_ptr<CSmartLine> sketch_before_, sketch_after_;
     SketchHandleKind active_sketch_handle_kind_ = SketchHandleKind::None;
     size_t active_sketch_handle_index_ = 0;
     SketchHandleKind highlighted_sketch_handle_kind_ = SketchHandleKind::None;
@@ -420,6 +453,10 @@ private:
     bool zoom_rect_active_ = false;
     bool selection_confirmation_mode_ = false;
     bool picking_xy_point_ = false;
+    bool picking_solid_surface_ = false;
+    std::vector<CPoint3d> sheet_bend_guide_;
+    bool PickSolidSurface(const QPoint& point, CPoint3d& result) const;
+    void DrawSheetBendGuide();
     bool picking_3d_point_ = false;
     bool point_pick_plane_enabled_ = false;
     Vec3 point_pick_plane_origin_{};
@@ -427,6 +464,7 @@ private:
     bool picking_architecture_wall_ = false;
     unsigned long point_pick_object_id_ = 0;
     bool picking_rotation_axis_ = false;
+    bool coordinate_axis_selection_ = false;
     bool rotation_axis_hover_valid_ = false;
     Vec3 rotation_axis_hover_start_{};
     Vec3 rotation_axis_hover_end_{};
