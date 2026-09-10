@@ -1267,6 +1267,35 @@ bool snap_structured_mesh_to_prepared_edges(CSurfaceFace* surface)
 			continue;
 		}
 
+		// Closed boundaries have identical endpoints. Match their phase and
+		// winding against the whole ring before pairing nodes; endpoint-only
+		// orientation can turn a narrow shell rim into strips across its opening.
+		const auto distance2 = [](const CPoint3d& a, const CPoint3d& b) {
+			const double x = a.x-b.x, y = a.y-b.y, z = a.z-b.z;
+			return x*x+y*y+z*z;
+		};
+		if (distance2(mesh_boundary.front(), mesh_boundary.back()) < 1.e-10
+			&& distance2(prepared_boundary.front(), prepared_boundary.back()) < 1.e-10) {
+			const size_t n = mesh_boundary.size()-1;
+			double best = std::numeric_limits<double>::max();
+			size_t best_shift = 0;
+			bool best_reverse = false;
+			for (size_t shift = 0; shift < n; ++shift) {
+				for (bool reverse : {false, true}) {
+					double score = 0.0;
+					for (size_t i = 0; i < n; ++i)
+						score += distance2(mesh_boundary[i], prepared_boundary[
+							(shift + (reverse ? n-i : i)) % n]);
+					if (score < best) { best = score; best_shift = shift; best_reverse = reverse; }
+				}
+			}
+			const auto original = prepared_boundary;
+			for (size_t i = 0; i <= n; ++i)
+				prepared_boundary[i] = original[(best_shift + (best_reverse ? n-i : i)) % n];
+		}
+		// Resolve all indices against the unmodified mesh. A moved point must
+		// not become the nearest candidate for a subsequent source point.
+		const auto original_vertices = vertices;
 		for (size_t point_index = 0;
 			point_index < mesh_boundary.size(); ++point_index) {
 			const Vec3 source{
@@ -1277,7 +1306,7 @@ bool snap_structured_mesh_to_prepared_edges(CSurfaceFace* surface)
 			float nearest_distance_sq = std::numeric_limits<float>::max();
 			for (size_t vertex_index = 0;
 				vertex_index < vertices.size(); ++vertex_index) {
-				const Vec3 delta = vertices[vertex_index] - source;
+				const Vec3 delta = original_vertices[vertex_index] - source;
 				const float distance_sq = dot(delta, delta);
 				if (distance_sq < nearest_distance_sq) {
 					nearest_distance_sq = distance_sq;

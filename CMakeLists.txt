@@ -824,6 +824,10 @@ if(BUILD_TESTING)
     add_test(NAME BoxMinBoxFilledQuadro
         COMMAND CatalogImportTests --test-box-min-box-filled
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Box_Min_Box_Filled.dom3d")
+    add_test(NAME ShellRimQuadro
+        COMMAND CatalogImportTests --test-shell-rim-quadro
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Shell_Bag.dom3d")
+    set_tests_properties(ShellRimQuadro PROPERTIES TIMEOUT 60)
     add_test(NAME ChamferAndFilletsQuadro
         COMMAND CatalogImportTests --test-chamfer-and-fillets
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/ChamferAndFillets.dom3d")

@@ -5733,6 +5733,60 @@ int main(int argc, char** argv) {
         return TestScenePersistence(argc, argv);
     }
     QCoreApplication application(argc, argv);
+    if (argc == 3 && std::string(argv[1]) == "--test-shell-rim-quadro") {
+        CAlfaDoc document;
+        Dom3DProjectSerializer serializer;
+        QString room, error;
+        ProjectViewState view;
+        require(serializer.Load(QString::fromLocal8Bit(argv[2]), document, room, view, error),
+                error.toLocal8Bit().constData());
+        size_t tested = 0;
+        for (const auto& object : document.GetObjects()) {
+            auto* solid = dynamic_cast<CSolid*>(object.get());
+            if (!solid || solid->GetName() != "Shell") continue;
+            ++tested;
+            solid->MeshQuadro = true;
+            solid->MeshQuadroHoleSLX = false;
+            for (float density : {0.25f, 0.50f, 0.70f, 1.0f, 0.50f}) {
+                require(solid->ReBuldMesh(1.0f / density), "Shell rebuild failed.");
+                std::vector<const CMesh3D*> meshes;
+                size_t rims = 0;
+                for (int i = 0; i < solid->GetNumSurfaces(); ++i) {
+                    auto* surface = solid->GetSurfaceFace(i);
+                    require(surface && surface->pMesh3D, "Missing shell mesh.");
+                    const auto& mesh = *surface->pMesh3D;
+                    meshes.push_back(&mesh);
+                    require(ActiveFaceEdgeComponentCount(mesh) == 1, "Disconnected shell face.");
+                    if (BRepAdaptor_Surface(TopoDS::Face(surface->m_Face)).GetType()
+                        != GeomAbs_BSplineSurface) continue;
+                    ++rims;
+                    // Both rims have radius above 125. A reversed boundary
+                    // produces chords through the opening despite a watertight mesh.
+                    for (const auto& face : mesh.GetFaces()) {
+                        if (face.deleted) continue;
+                        require(face.corners.size() == 4, "Shell rim lost its quads.");
+                        Vec3 center{};
+                        for (size_t k = 0; k < 4; ++k) {
+                            const auto a = mesh.GetVertices().at(face.corners[k].v);
+                            const auto b = mesh.GetVertices().at(face.corners[(k+1)%4].v);
+                            require(dot(b-a,b-a) < 6400.0f, "Shell rim crosses its opening.");
+                            center = center + a * 0.25f;
+                        }
+                        require(center.x*center.x + center.y*center.y > 120.0f*120.0f,
+                                "Shell rim fills the central opening.");
+                    }
+                }
+                require(rims == 2, "Expected two shell rims.");
+                auto welded = CMesh3D::CreateWelded(meshes);
+                bool manifold = false;
+                require(welded && ClosedMeshBoundaryLoopCount(*welded, manifold) == 0 && manifold,
+                        "Shell has open or non-manifold seams.");
+                std::cout << "Shell rim density=" << density << " passed.\n";
+            }
+        }
+        require(tested == 1, "Expected one Shell.");
+        return 0;
+    }
     if (argc == 2 && std::string(argv[1]) == "--test-visible-step-and-selection") {
         TestVisibleStepExportAndSelectAll();
         std::cout << "Visible STEP export and selection tests passed.\n";

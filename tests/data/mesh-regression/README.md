@@ -1,5 +1,14 @@
 # Mesh regression corpus
 
+## Shell_Bag: полосы через отверстие оболочки
+
+`Shell_Bag.dom3d`, SHA256
+`DA21F0480F74C11291FF2670B8C7710644407C19E13023E5E6D9D8FD25742BC1`.
+`ShellRimQuadro` проверяет отсутствие ложного дна, связность и замкнутые
+стыки на плотностях 0.25, 0.50, 0.70, 1.00 и повторной 0.50.
+[Причина и ограничения](../../../docs/knowledge/mesh/shell-rim-quadro.md).
+
+
 ## Box_Min_Hole_And_Min_Box: тонкая перемычка над угловым вырезом
 
 Сохранён диагностический fixture `Box_Min_Hole_And_Min_Box.dom3d`:
