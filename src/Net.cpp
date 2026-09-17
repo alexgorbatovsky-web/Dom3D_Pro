@@ -9,6 +9,8 @@
 #include <Geom_BSplineSurface.hxx>
 #include <GeomLProp_SLProps.hxx>
 #include <Geom_Surface.hxx>
+#include <Geom2d_Curve.hxx>
+#include <TopExp_Explorer.hxx>
 #include <Standard_Failure.hxx>
 #include <TopAbs_Orientation.hxx>
 #include <TopLoc_Location.hxx>
@@ -111,7 +113,16 @@ bool normal_from_near_points(const Handle(Geom_Surface)& surface,
             if (second_vec.SquareMagnitude() <= 1.0e-20)
                 continue;
 
+            // Chords may be visited in either order (and may be clamped at
+            // a parameter boundary). Orient their cross product as dU x dV;
+            // selecting only its magnitude can flip a collapsed corner normal.
+            const double uv_area = (first_u - u) * (second_v - v)
+                - (first_v - v) * (second_u - u);
+            if (std::abs(uv_area) <= 1.0e-30)
+                continue;
             gp_Vec candidate = first_vec.Crossed(second_vec);
+            if (uv_area < 0.0)
+                candidate.Reverse();
             const double square = candidate.SquareMagnitude();
             if (square > best_square) {
                 best_square = square;
@@ -147,6 +158,41 @@ bool normal_from_near_points(const Handle(Geom_Surface)& surface,
     best_normal.Normalize();
     normal = best_normal;
     return true;
+}
+
+bool normal_inside_degenerate_boundary(const TopoDS_Face& face,
+                                      const Handle(Geom_Surface)& surface,
+                                      double u, double v, gp_Vec& normal)
+{
+    if (!surface->IsKind(STANDARD_TYPE(Geom_BSplineSurface))) return false;
+    double u0,u1,v0,v1;
+    surface->Bounds(u0,u1,v0,v1);
+    const double ue=(u1-u0)*1.e-7, ve=(v1-v0)*1.e-7;
+    if (!(ue>0 && ve>0)
+        || (std::min(std::abs(u-u0),std::abs(u-u1))>ue
+            && std::min(std::abs(v-v0),std::abs(v-v1))>ve)) return false;
+    for(TopExp_Explorer it(face,TopAbs_EDGE);it.More();it.Next()) {
+        const auto edge=TopoDS::Edge(it.Current());
+        if(!BRep_Tool::Degenerated(edge))continue;
+        double first,last;
+        const auto pc=BRep_Tool::CurveOnSurface(edge,face,first,last);
+        if(pc.IsNull())continue;
+        const auto a=pc->Value(first), b=pc->Value(last);
+        double sample_u=u, sample_v=v;
+        if(std::abs(a.X()-b.X())<=ue && std::abs(u-a.X())<=ue)
+            sample_u=u+(u<u0+(u1-u0)*0.5 ? 1 : -1)*(u1-u0)*1.e-4;
+        else if(std::abs(a.Y()-b.Y())<=ve && std::abs(v-a.Y())<=ve)
+            sample_v=v+(v<v0+(v1-v0)*0.5 ? 1 : -1)*(v1-v0)*1.e-4;
+        else continue;
+        gp_Pnt p; gp_Vec du,dv;
+        surface->D1(sample_u,sample_v,p,du,dv);
+        const gp_Vec candidate=du.Crossed(dv);
+        if(is_finite_vec(candidate) && candidate.SquareMagnitude()>1.e-20) {
+            normal=candidate.Normalized();
+            return true;
+        }
+    }
+    return false;
 }
 
 double point_segment_distance(const CPoint8d& point,
@@ -273,6 +319,11 @@ bool CSurfaceFace::GetPoint(double U, double V, CPoint8d* pnt)
         d1v.Transform(transform);
 
         gp_Vec normal = d1u.Crossed(d1v);
+        // A topologically collapsed spline side can retain tiny, noisy
+        // derivatives in CAD. Their cross product (or SLProps normal) is not
+        // the limiting normal. Sample just inside that side without moving XYZ.
+        if (normal_inside_degenerate_boundary(face,surface,U,V,normal))
+            normal.Transform(transform);
         if (normal.SquareMagnitude() > 1.0e-20 && is_finite_vec(normal)) {
             normal.Normalize();
         } else {

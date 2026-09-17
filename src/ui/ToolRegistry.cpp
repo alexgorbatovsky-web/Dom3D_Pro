@@ -20,6 +20,7 @@
 #include "../SketchProfileBuilder.h"
 #include "../SweptSolidBuilder.h"
 #include "../solid/Solid.h"
+#include "../solid/DraftFaceAxis.h"
 #include "../solid/HolePlacement.h"
 #include "../solid/SolidBeamTool.h"
 #include "../solid/SolidBoxTool.h"
@@ -37,6 +38,7 @@
 #include "../solid/SheetBendShapeBuilder.h"
 #include "../solid/SurfaceSet.h"
 #include "../solid/TrimShapeBuilder.h"
+#include "../solid/PanelContourShapeBuilder.h"
 
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
@@ -85,6 +87,9 @@
 #include <TColgp_Array1OfPnt2d.hxx>
 #include <Standard_Failure.hxx>
 #include <ShapeFix_Solid.hxx>
+#include <ShapeFix_Shell.hxx>
+#include <BRepLib.hxx>
+#include <TopoDS_Iterator.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
@@ -825,7 +830,7 @@ bool set_linked_curve_geometry(CBSpline& target,
 
     CPoint3d control1 = first_point + chord * (1.0f / 3.0f);
     CPoint3d control2 = first_point + chord * (2.0f / 3.0f);
-    if (mode != 0) {
+    if (mode == 1) {
         control1 = first_point
             + first_tangent * static_cast<float>(handle);
         control2 = second_point
@@ -856,6 +861,19 @@ bool rebuild_linked_curve(CAlfaDoc& document,
         || first == objects[object_index].get()
         || second == objects[object_index].get()) {
         return false;
+    }
+    if (static_cast<int>(param(parameters, "mode", 1.0)) == 2) {
+        auto* spline = dynamic_cast<CBSpline*>(objects[object_index].get());
+        CPoint3d start, end, tangent;
+        if (!spline || spline->GetPointCount() < 2
+            || !linked_curve_endpoint(*first, param(parameters, "curve1.end", 0.0) >= 0.5, start, tangent)
+            || !linked_curve_endpoint(*second, param(parameters, "curve2.end", 0.0) >= 0.5, end, tangent))
+            return false;
+        // Keep the editable curve, including its poles, weights and knots.
+        // Only the two attachment points belong to the source curves.
+        spline->SetPointDirect(0, start);
+        spline->SetPointDirect(spline->GetPointCount() - 1, end);
+        return true;
     }
     auto replacement = std::make_unique<CBSpline>(
         objects[object_index]->GetName());
@@ -901,6 +919,168 @@ void create_linked_curve(CAlfaDoc& document,
     document.AddObject(std::move(result));
 }
 
+// An open shell has no topological inside. Choose one global side from the
+// area-weighted outward flux around the whole frame, never flip faces individually.
+// Flat sheets use a deterministic positive dominant-axis normal instead.
+void orient_open_hybrid_shell(TopoDS_Shape& shape, const gp_Pnt& center) {
+    double flux = 0.0, absolute_flux = 0.0;
+    gp_Vec area_normal(0, 0, 0);
+    for (TopExp_Explorer faces(shape, TopAbs_FACE); faces.More(); faces.Next()) {
+        const TopoDS_Face face = TopoDS::Face(faces.Current());
+        BRepAdaptor_Surface surface(face);
+        double u0, u1, v0, v1;
+        BRepTools::UVBounds(face, u0, u1, v0, v1);
+        const double weight = (u1 - u0) * (v1 - v0) / 25.0
+            * (face.Orientation() == TopAbs_REVERSED ? -1.0 : 1.0);
+        for (int u = 0; u < 5; ++u) {
+            for (int v = 0; v < 5; ++v) {
+                gp_Pnt point;
+                gp_Vec du, dv;
+                surface.D1(u0 + (u + 0.5) * (u1 - u0) / 5.0,
+                           v0 + (v + 0.5) * (v1 - v0) / 5.0, point, du, dv);
+                const gp_Vec normal = du.Crossed(dv) * weight;
+                const double contribution = gp_Vec(center, point).Dot(normal);
+                flux += contribution;
+                absolute_flux += std::abs(contribution);
+                area_normal += normal;
+            }
+        }
+    }
+    double side = flux;
+    if (std::abs(flux) <= std::max(1.0e-12, absolute_flux * 1.0e-8)) {
+        side = area_normal.Z();
+        if (std::abs(area_normal.Y()) > std::abs(side)) side = area_normal.Y();
+        if (std::abs(area_normal.X()) > std::abs(side)) side = area_normal.X();
+    }
+    if (side < 0.0) shape.Reverse();
+}
+
+TopoDS_Shape orient_hybrid_shells(const TopoDS_Shape& shape, const gp_Pnt& center) {
+    if (shape.IsNull()) return {};
+    if (shape.ShapeType() == TopAbs_SHELL) {
+        ShapeFix_Shell fixer;
+        fixer.FixFaceOrientation(TopoDS::Shell(shape));
+        // Do not silently discard a non-orientable part of the frame.
+        if (TopExp_Explorer(fixer.ErrorFaces(), TopAbs_FACE).More()) return {};
+        const TopoDS_Shape fixed = fixer.Shape();
+        if (fixed.IsNull()) return {};
+        if (fixed.ShapeType() != TopAbs_SHELL) return orient_hybrid_shells(fixed, center);
+        TopoDS_Shape oriented = fixed;
+        if (fixed.Closed()) {
+            BRepBuilderAPI_MakeSolid builder(TopoDS::Shell(fixed));
+            if (builder.IsDone()) {
+                TopoDS_Solid solid = builder.Solid();
+                if (BRepLib::OrientClosedSolid(solid)) {
+                    TopExp_Explorer shells(solid, TopAbs_SHELL);
+                    if (shells.More()) return shells.Current();
+                }
+            }
+        }
+        orient_open_hybrid_shell(oriented, center);
+        return oriented;
+    }
+    if (shape.ShapeType() == TopAbs_COMPOUND) {
+        BRep_Builder builder;
+        TopoDS_Compound compound;
+        builder.MakeCompound(compound);
+        for (TopoDS_Iterator child(shape); child.More(); child.Next()) {
+            const TopoDS_Shape oriented = orient_hybrid_shells(child.Value(), center);
+            if (oriented.IsNull()) return {};
+            builder.Add(compound, oriented);
+        }
+        return compound;
+    }
+    TopoDS_Shape oriented = shape;
+    orient_open_hybrid_shell(oriented, center);
+    return oriented;
+}
+
+std::unique_ptr<CAlfaObject> panel_contour_object(CAlfaDoc& document,
+        const std::vector<ToolParameter>& parameters) {
+    const auto* source = dynamic_cast<const CSolid*>(document.FindObjectById(
+        static_cast<unsigned long>(param(parameters, "surface.id", 0))));
+    if (!source) return {};
+    const int index = static_cast<int>(param(parameters, "face.index", 0));
+    TopoDS_Face face;
+    int current = 0;
+    for (TopExp_Explorer it(source->m_Shape, TopAbs_FACE); it.More(); it.Next(), ++current)
+        if (current == index) { face = TopoDS::Face(it.Current()); break; }
+    const gp_Vec direction(param(parameters, "projection.x", 0),
+        param(parameters, "projection.y", 0), param(parameters, "projection.z", 1));
+    if (direction.SquareMagnitude() < 1.e-12) return {};
+    PanelContourResult result;
+    std::string error;
+    if (!BuildPanelContourShape(source->m_Shape, face,
+            document.BuildCurveWire(static_cast<unsigned long>(param(parameters, "profile.id", 0))),
+            gp_Dir(direction), param(parameters, "larger_region", 0) > 0.5,
+            param(parameters, "gap", 0), param(parameters, "depth", 0), result, error,
+            param(parameters,"thickness",0))) return {};
+    const bool remainder = param(parameters, "output", 0) > 0.5;
+    TopoDS_Shape shape = remainder ? result.remainder : result.panel;
+    std::unique_ptr<CSolid> object;
+    if (!remainder && param(parameters,"thickness",0)>0) object=std::make_unique<CSolid>(shape);
+    else object=std::make_unique<CSurfaceSet>(shape);
+    object->SetName(remainder ? "Panel Surround" : "Contour Panel");
+    object->SetMaterial(source->GetMaterial());
+    object->SetMaterialId(source->GetMaterialId());
+    object->SetColor(source->GetColor());
+    if (!object->ReBuldMesh()) return {};
+    return object;
+}
+
+std::unique_ptr<CSolid> bulged_panel_object(CAlfaDoc& document,
+        const std::vector<ToolParameter>& parameters) {
+    const auto* source=dynamic_cast<const CSolid*>(document.FindObjectById(
+        static_cast<unsigned long>(param(parameters,"surface.id",0))));
+    if (!source) return {};
+    const bool body=TopExp_Explorer(source->m_Shape,TopAbs_SOLID).More();
+    double thickness=param(parameters,"thickness",0);
+    if(body && thickness<=0) {
+        const CAlfaObject* thickness_source=source;
+        for(size_t level=0;thickness_source && level<document.GetObjects().size() && thickness<=0;++level) {
+            unsigned long parent=0;
+            for(const auto& p:thickness_source->GetParametricParameters()) {
+                if(p.id=="thickness") thickness=std::abs(p.value);
+                if(p.id=="distance" && thickness_source->GetParametricToolId()=="SolidShell") thickness=std::abs(p.value);
+                if(p.id=="surface.id") parent=static_cast<unsigned long>(p.value);
+            }
+            thickness_source=thickness_source->GetParametricToolId()=="SurfaceBulge"
+                ? document.FindObjectById(parent) : nullptr;
+        }
+    }
+    int index=0;
+    for (TopExp_Explorer it(source->m_Shape,TopAbs_FACE); it.More(); it.Next(),++index) {
+        if (index!=static_cast<int>(param(parameters,"face.index",0))) continue;
+        TopoDS_Shape shape; std::string error;
+        const double height=param(parameters,"height",0);
+        if (!BuildBulgedPanelFace(TopoDS::Face(it.Current()),height,shape,error,param(parameters,"profile",0))) {
+            qWarning() << "Panel Bulge:" << QString::fromStdString(error);
+            return {};
+        }
+        if(body) {
+            if(std::abs(height)<1.e-7) shape=source->m_Shape;
+            else {
+                TopoDS_Shape thick;
+                if(thickness<=0 || !BuildThickenedPanel(shape,thickness,thick,error)) {
+                    qWarning() << "Panel Bulge thickness" << thickness << QString::fromStdString(error);return {};
+                }
+                shape=thick;
+            }
+        }
+        std::unique_ptr<CSolid> result;
+        if(body) result=std::make_unique<CSolid>(shape);
+        else result=std::make_unique<CSurfaceSet>(shape);
+        result->SetName("Bulged Panel");
+        result->SetMaterial(source->GetMaterial()); result->SetMaterialId(source->GetMaterialId());
+        result->SetColor(source->GetColor());
+        if (!result->ReBuldMesh()) {
+            qWarning() << "Panel Bulge: display mesh failed"; return {};
+        }
+        return result;
+    }
+    return {};
+}
+
 struct SmartHybridBuildResult {
     TopoDS_Shape shape;
     bool solid = false;
@@ -911,8 +1091,12 @@ SmartHybridBuildResult build_smart_hybrid(
         CAlfaDoc& document,
         const std::vector<ToolParameter>& parameters) {
     SmartHybridBuildResult result;
-    const int curve_count = std::clamp(
-        static_cast<int>(param(parameters, "curve.count", 0.0)), 0, 32);
+    // Curve references are stored dynamically. Bound malformed counts by the
+    // available parameter records instead of silently truncating the network.
+    const double requested_count = param(parameters, "curve.count", 0.0);
+    if (!std::isfinite(requested_count) || requested_count < 4.0
+        || requested_count > static_cast<double>(parameters.size())) return result;
+    const size_t curve_count = static_cast<size_t>(requested_count);
     if (curve_count < 4) return result;
 
     struct NetworkEdge {
@@ -925,7 +1109,7 @@ SmartHybridBuildResult build_smart_hybrid(
     CPoint3d minimum;
     CPoint3d maximum;
     bool have_bounds = false;
-    for (int index = 1; index <= curve_count; ++index) {
+    for (size_t index = 1; index <= curve_count; ++index) {
         const std::string parameter_id =
             "curve" + std::to_string(index) + ".id";
         const unsigned long curve_id = static_cast<unsigned long>(
@@ -975,50 +1159,61 @@ SmartHybridBuildResult build_smart_hybrid(
     TopoDS_Compound compound;
     compound_builder.MakeCompound(compound);
     std::vector<TopoDS_Shape> patches;
-    const size_t edge_count = edges.size();
-    for (size_t a = 0; a + 3 < edge_count; ++a) {
-        for (size_t b = a + 1; b + 2 < edge_count; ++b) {
-            for (size_t c = b + 1; c + 1 < edge_count; ++c) {
-                for (size_t d = c + 1; d < edge_count; ++d) {
-                    const std::array<size_t, 4> selected{a, b, c, d};
-                    std::map<int, int> degree;
-                    std::map<int, std::vector<int>> adjacency;
-                    for (size_t edge_index : selected) {
-                        const NetworkEdge& edge = edges[edge_index];
-                        ++degree[edge.first_vertex];
-                        ++degree[edge.second_vertex];
-                        adjacency[edge.first_vertex].push_back(edge.second_vertex);
-                        adjacency[edge.second_vertex].push_back(edge.first_vertex);
-                    }
-                    if (degree.size() != 4
-                        || std::any_of(
-                            degree.begin(), degree.end(), [](const auto& item) {
-                                return item.second != 2;
-                            })) {
-                        continue;
-                    }
-                    std::set<int> visited;
-                    std::vector<int> pending{degree.begin()->first};
-                    while (!pending.empty()) {
-                        const int vertex = pending.back();
-                        pending.pop_back();
-                        if (!visited.insert(vertex).second) continue;
-                        const auto found = adjacency.find(vertex);
-                        if (found == adjacency.end()) continue;
-                        pending.insert(
-                            pending.end(), found->second.begin(), found->second.end());
-                    }
-                    if (visited.size() != 4) continue;
-
-                    TopoDS_Shape patch = BuildFourSplineSurfaceShape(
-                        edges[a].samples, edges[b].samples,
-                        edges[c].samples, edges[d].samples);
-                    if (patch.IsNull()) continue;
-                    patches.push_back(patch);
-                    compound_builder.Add(compound, patch);
+    // Enumerate simple four-edge cycles through endpoint adjacency. The old
+    // all-combinations search grew as O(E^4), even for a sparse frame.
+    std::vector<std::vector<size_t>> incident(vertices.size());
+    for (size_t index = 0; index < edges.size(); ++index) {
+        incident[edges[index].first_vertex].push_back(index);
+        incident[edges[index].second_vertex].push_back(index);
+    }
+    const auto other_vertex = [&](size_t edge, int vertex) {
+        return edges[edge].first_vertex == vertex
+            ? edges[edge].second_vertex : edges[edge].first_vertex;
+    };
+    std::set<std::array<size_t, 4>> cycles;
+    for (size_t a = 0; a < edges.size(); ++a) {
+        const int v0 = edges[a].first_vertex;
+        const int v1 = edges[a].second_vertex;
+        for (size_t b : incident[v1]) {
+            if (b <= a) continue;
+            const int v2 = other_vertex(b, v1);
+            if (v2 == v0) continue;
+            for (size_t c : incident[v2]) {
+                if (c <= a || c == b) continue;
+                const int v3 = other_vertex(c, v2);
+                if (v3 == v0 || v3 == v1) continue;
+                for (size_t d : incident[v3]) {
+                    if (d <= a || d == b || d == c
+                        || other_vertex(d, v3) != v0) continue;
+                    std::array<size_t, 4> selected{a, b, c, d};
+                    std::sort(selected.begin(), selected.end());
+                    cycles.insert(selected);
                 }
             }
         }
+    }
+    // A four-edge loop can be an internal partition (e.g. across a car's
+    // cabin), not an exterior patch. Its entire boundary is already shared
+    // by other patches. Keeping it creates three-face, non-manifold seams.
+    std::vector<size_t> uses(edges.size(), 0);
+    for (const auto& cycle : cycles)
+        for (size_t edge : cycle) ++uses[edge];
+    for (auto cycle = cycles.begin(); cycle != cycles.end();) {
+        if (std::all_of(cycle->begin(), cycle->end(),
+                [&](size_t edge) { return uses[edge] > 2; })) {
+            for (size_t edge : *cycle) --uses[edge];
+            cycle = cycles.erase(cycle);
+        } else {
+            ++cycle;
+        }
+    }
+    for (const auto& selected : cycles) {
+        TopoDS_Shape patch = BuildFourSplineSurfaceShape(
+            edges[selected[0]].samples, edges[selected[1]].samples,
+            edges[selected[2]].samples, edges[selected[3]].samples);
+        if (patch.IsNull()) continue;
+        patches.push_back(patch);
+        compound_builder.Add(compound, patch);
     }
     result.patch_count = patches.size();
     if (patches.empty()) return result;
@@ -1030,7 +1225,11 @@ SmartHybridBuildResult build_smart_hybrid(
         Standard_True, Standard_False);
     for (const TopoDS_Shape& patch : patches) sewing.Add(patch);
     sewing.Perform();
-    const TopoDS_Shape sewed = sewing.SewedShape();
+    const gp_Pnt frame_center((minimum.x + maximum.x) * 0.5,
+                              (minimum.y + maximum.y) * 0.5,
+                              (minimum.z + maximum.z) * 0.5);
+    const TopoDS_Shape sewed = orient_hybrid_shells(sewing.SewedShape(), frame_center);
+    if (sewed.IsNull()) return result;
     const bool request_solid = param(parameters, "make_solid", 1.0) >= 0.5;
     if (request_solid && !sewed.IsNull()
         && sewing.NbFreeEdges() == 0 && sewing.NbMultipleEdges() == 0) {
@@ -1778,7 +1977,8 @@ std::vector<ToolParameter> merge_saved_parameters(const std::vector<ToolParamete
     // Face placement metadata is not part of the visible primitive defaults.
     // Preserve it when replaying history, including the captured screen margin.
     for (const auto& item : saved) {
-        if ((item.id == "boolean.body_id" || item.id == "boolean.overlap")
+        if ((item.id == "boolean.body_id" || item.id == "boolean.overlap"
+             || is_geometry_reference_parameter(item.id))
             && std::none_of(parameters.begin(), parameters.end(), [&](const auto& p) { return p.id == item.id; }))
             parameters.push_back({item.id, item.id, item.value, 0.0, 4294967295.0, 0.01});
     }
@@ -2359,9 +2559,12 @@ bool apply_draft_face(CSolid& solid,
     const int face_index = static_cast<int>(saved_param(saved_parameters, "face.index", -1.0));
     const int edge_index = static_cast<int>(saved_param(saved_parameters, "axis.edge", -1.0));
     const double angle_degrees = param(parameters, "angle", 0.0);
-    if (face_index < 0 || edge_index < 0 || std::fabs(angle_degrees) <= 0.0001 || solid.m_Shape.IsNull()) {
+    if (face_index < 0 || edge_index < 0 || !std::isfinite(angle_degrees) || solid.m_Shape.IsNull()) {
         return false;
     }
+    // Zero temporarily disables the draft without removing its editable
+    // history entry. It must not send replay down the failure/fallback path.
+    if (std::fabs(angle_degrees) <= 0.0001) return true;
 
     const TopoDS_Face face = solid.GetTopoFace(face_index);
     const CSurfaceFace* surface = solid.GetSurfaceFace(face_index);
@@ -2371,7 +2574,7 @@ bool apply_draft_face(CSolid& solid,
     Vec3 edge_end{};
     if (face.IsNull() || !surface
         || !solid.GetFaceCenterAndNormal(face_index, face_center, face_normal)
-        || !surface->GetEdgeEndpoints(edge_index, edge_start, edge_end)) {
+        || !DraftFaceEdgeEndpoints(*surface, edge_index, edge_start, edge_end)) {
         return false;
     }
 
@@ -3208,7 +3411,7 @@ bool rebuild_revolve_base(CAlfaDoc& document,
     return true;
 }
 
-bool rebuild_solid_operation_tree(const ToolRegistry& registry,
+bool rebuild_solid_operation_tree_in_place(const ToolRegistry& registry,
                                   const ActiveParametricObject& active_object,
                                   CAlfaDoc& document) {
     auto& objects = document.GetObjects();
@@ -3498,6 +3701,40 @@ bool rebuild_solid_operation_tree(const ToolRegistry& registry,
             }
         }
     }
+    return true;
+}
+
+bool has_draft_history(const CSolid* solid) {
+    if (!solid) return false;
+    for (const auto* operation : solid->GetOperationTree())
+        if (operation && operation->ToolId == "SolidDraft") return true;
+    return false;
+}
+
+bool rebuild_solid_operation_tree(const ToolRegistry& registry,
+                                 const ActiveParametricObject& active_object,
+                                 CAlfaDoc& document) {
+    auto& objects = document.GetObjects();
+    if (active_object.object_index >= objects.size()) return false;
+    if (!has_draft_history(dynamic_cast<CSolid*>(objects[active_object.object_index].get())))
+        return rebuild_solid_operation_tree_in_place(registry,active_object,document);
+
+    // Replaying a base feature can replace the body before a later draft
+    // fails. Keep the complete original until every operation has succeeded.
+    auto candidate = objects[active_object.object_index]->Clone();
+    if (!candidate) return false;
+    candidate->m_id = objects[active_object.object_index]->m_id;
+    candidate->m_LayerID = objects[active_object.object_index]->m_LayerID;
+    candidate->SetName(objects[active_object.object_index]->GetName());
+    struct Restore {
+        CAlfaDoc& document;
+        size_t index;
+        std::unique_ptr<CAlfaObject> original;
+        ~Restore() { if (original) document.GetObjects()[index] = std::move(original); }
+    } restore{document,active_object.object_index,std::move(objects[active_object.object_index])};
+    objects[active_object.object_index] = std::move(candidate);
+    if (!rebuild_solid_operation_tree_in_place(registry,active_object,document)) return false;
+    restore.original.reset();
     return true;
 }
 
@@ -7539,7 +7776,7 @@ ToolRegistry::ToolRegistry() {
         "SolidShell",
         "Shell",
         {
-            {"distance", "Distance", 18.0, -1000.0, 1000.0, 0.1,
+            {"distance", "Distance", 2.0, -1000.0, 1000.0, 0.1,
                 ToolParameterType::Number, {}, ToolParameterUnit::Length},
             {"surface.id", "Surface ID", 0.0, 0.0, 4294967295.0, 1.0},
             {"face.index", "Face Index", 0.0, 0.0, 1000000.0, 1.0}
@@ -7549,7 +7786,7 @@ ToolRegistry::ToolRegistry() {
                 static_cast<unsigned long>(std::max(
                     0.0, param(parameters, "surface.id", 0.0))),
                 static_cast<int>(param(parameters, "face.index", 0.0)),
-                param(parameters, "distance", 18.0));
+                param(parameters, "distance", 2.0));
         },
         [](CAlfaDoc& document, size_t index,
            const std::vector<ToolParameter>& parameters) {
@@ -7558,7 +7795,7 @@ ToolRegistry::ToolRegistry() {
                 static_cast<unsigned long>(std::max(
                     0.0, param(parameters, "surface.id", 0.0))),
                 static_cast<int>(param(parameters, "face.index", 0.0)),
-                param(parameters, "distance", 18.0));
+                param(parameters, "distance", 2.0));
         }
     });
 
@@ -7577,7 +7814,8 @@ ToolRegistry::ToolRegistry() {
              {"PlaneIntersection", "Body Section by Plane"},
              {"SurfaceIntersection", "Surface Intersection"},
              {"ProjectCurveToSurface", "Project Curve"},
-             {"ExtractSurfaceEdge", "Extract Edge"}}) {
+             {"ExtractSurfaceEdge", "Extract Edge"},
+             {"ExtractFaceTool", "Extract Face"}}) {
         tools_.push_back({
             curve_construction.first,
             curve_construction.second,
@@ -7667,8 +7905,8 @@ ToolRegistry::ToolRegistry() {
         "CurveLinkedBridge",
         "Bridge Curves",
         {
-            {"mode", "Connection", 1.0, 0.0, 1.0, 1.0,
-                ToolParameterType::Combo, {"Straight", "Smooth"}},
+            {"mode", "Connection", 1.0, 0.0, 2.0, 1.0,
+                ToolParameterType::Combo, {"Straight", "Smooth", "Spline"}},
             {"handle_percent", "Handle Length", 33.0, 0.0, 200.0, 1.0,
                 ToolParameterType::Number},
             {"curve1.id", "Curve 1 ID", 0.0, 0.0, 4294967295.0, 1.0},
@@ -7719,6 +7957,9 @@ ToolRegistry::ToolRegistry() {
         "SolidSweepTwoRails",
         "Sweep Solid (2 Rails)",
         {
+            {"dx", "Delta X", 0.0, -1000000.0, 1000000.0, 0.1, ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"dy", "Delta Y", 0.0, -1000000.0, 1000000.0, 0.1, ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"angle", "Angle", 0.0, -360.0, 360.0, 1.0, ToolParameterType::Number, {}, ToolParameterUnit::Angle},
             {"profile.id", "Profile ID", 0.0, 0.0, 1000000000.0, 1.0},
             {"guide1.id", "Rail 1 ID", 0.0, 0.0, 1000000000.0, 1.0},
             {"guide2.id", "Rail 2 ID", 0.0, 0.0, 1000000000.0, 1.0}
@@ -7731,12 +7972,63 @@ ToolRegistry::ToolRegistry() {
                 index,
                 static_cast<unsigned long>(std::max(0.0, param(parameters, "profile.id", 0.0))),
                 static_cast<unsigned long>(std::max(0.0, param(parameters, "guide1.id", 0.0))),
-                static_cast<unsigned long>(std::max(0.0, param(parameters, "guide2.id", 0.0))));
+                static_cast<unsigned long>(std::max(0.0, param(parameters, "guide2.id", 0.0))),
+                param(parameters, "dx", 0.0), param(parameters, "dy", 0.0),
+                param(parameters, "angle", 0.0));
+        }
+    });
+
+    tools_.push_back({
+        "SurfaceBulge", "Panel Bulge",
+        {{"surface.id", "Source Surface", 0, 0, 4294967295.0, 1},
+         {"face.index", "Surface Index", 0, 0, 100000, 1},
+         {"height", "Bulge Height", 0, -10000, 10000, 0.1, ToolParameterType::Number, {}, ToolParameterUnit::Length},
+         {"profile", "Bulge Profile", 0.5, 0.25, 0.75, 0.05},
+         {"thickness", "Thickness T (0 = source)", 0, 0, 10000, 0.1, ToolParameterType::Number, {}, ToolParameterUnit::Length}},
+        [](CAlfaDoc& document, const std::vector<ToolParameter>& parameters) {
+            auto object=bulged_panel_object(document,parameters);
+            if (object) document.AddObject(std::move(object));
+        },
+        [](CAlfaDoc& document,size_t index,const std::vector<ToolParameter>& parameters) {
+            if (index>=document.GetObjects().size()) return;
+            auto object=bulged_panel_object(document,parameters);
+            auto* target=dynamic_cast<CSolid*>(document.GetObjects()[index].get());
+            if (!object || !target) return;
+            target->m_Shape=object->m_Shape;
+            target->ReBuldMesh();
+        }
+    });
+
+    tools_.push_back({
+        "SolidContourPanel", "Panel from Contour",
+        {{"surface.id", "Source Surface", 0, 0, 4294967295.0, 1},
+         {"profile.id", "Contour Curve", 0, 0, 4294967295.0, 1},
+         {"face.index", "Surface Index", 0, 0, 100000, 1},
+         {"projection.x", "Projection X", 0, -1, 1, 0.01},
+         {"projection.y", "Projection Y", 0, -1, 1, 0.01},
+         {"projection.z", "Projection Z", 1, -1, 1, 0.01},
+         {"larger_region", "Larger Region", 0, 0, 1, 1, ToolParameterType::Checkbox},
+         {"gap", "Gap", 0, 0, 10000, 0.1, ToolParameterType::Number, {}, ToolParameterUnit::Length},
+         {"depth", "Recess Depth", 0, -10000, 10000, 0.1, ToolParameterType::Number, {}, ToolParameterUnit::Length},
+         {"thickness", "Thickness T", 0, 0, 10000, 0.1, ToolParameterType::Number, {}, ToolParameterUnit::Length},
+         {"output", "Output", 0, 0, 1, 1}},
+        [](CAlfaDoc& document, const std::vector<ToolParameter>& parameters) {
+            auto object = panel_contour_object(document, parameters);
+            if (object) document.AddObject(std::move(object));
+        },
+        [](CAlfaDoc& document, size_t index, const std::vector<ToolParameter>& parameters) {
+            if (index >= document.GetObjects().size()) return;
+            auto replacement = panel_contour_object(document, parameters);
+            if (!replacement) return;
+            auto* target = dynamic_cast<CSolid*>(document.GetObjects()[index].get());
+            const auto* built = dynamic_cast<const CSolid*>(replacement.get());
+            if (target && built) { target->m_Shape = built->m_Shape; target->ReBuldMesh(); }
         }
     });
 
     std::vector<ToolParameter> smart_hybrid_parameters =
         loft_parameter_defaults();
+    smart_hybrid_parameters.front().maximum = 4294967295.0;
     smart_hybrid_parameters.insert(
         smart_hybrid_parameters.begin(),
         {"make_solid", "Create Solid When Closed", 1.0, 0.0, 1.0, 1.0,
@@ -7785,6 +8077,9 @@ ToolRegistry::ToolRegistry() {
         "SurfaceSweepTwoRails",
         "Sweep Surface (2 Rails)",
         {
+            {"dx", "Delta X", 0.0, -1000000.0, 1000000.0, 0.1, ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"dy", "Delta Y", 0.0, -1000000.0, 1000000.0, 0.1, ToolParameterType::Number, {}, ToolParameterUnit::Length},
+            {"angle", "Angle", 0.0, -360.0, 360.0, 1.0, ToolParameterType::Number, {}, ToolParameterUnit::Angle},
             {"profile.id", "Profile ID", 0.0, 0.0, 1000000000.0, 1.0},
             {"guide1.id", "Rail 1 ID", 0.0, 0.0, 1000000000.0, 1.0},
             {"guide2.id", "Rail 2 ID", 0.0, 0.0, 1000000000.0, 1.0}
@@ -7797,7 +8092,9 @@ ToolRegistry::ToolRegistry() {
                 index,
                 static_cast<unsigned long>(std::max(0.0, param(parameters, "profile.id", 0.0))),
                 static_cast<unsigned long>(std::max(0.0, param(parameters, "guide1.id", 0.0))),
-                static_cast<unsigned long>(std::max(0.0, param(parameters, "guide2.id", 0.0))));
+                static_cast<unsigned long>(std::max(0.0, param(parameters, "guide2.id", 0.0))),
+                param(parameters, "dx", 0.0), param(parameters, "dy", 0.0),
+                param(parameters, "angle", 0.0));
         }
     });
 
@@ -7879,6 +8176,12 @@ ToolRegistry::ToolRegistry() {
         },
         [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {
         }
+    });
+
+    tools_.push_back({
+        "MeshImageRelief", "Image Relief", {},
+        [](CAlfaDoc&, const std::vector<ToolParameter>&) {},
+        [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {}
     });
 
     tools_.push_back({
@@ -8789,7 +9092,8 @@ ActiveParametricObject ToolRegistry::Activate(const std::string& id, CAlfaDoc& d
     const size_t object_count_before = document.GetObjects().size();
     try { tool->create(document, parameters); }
     catch(const TileBuildError& error){QMessageBox::warning(nullptr,"Tile",error.what());return {};}
-    if (id == "SolidTwoSketches") {
+    if ((id == "SolidContourPanel" || id == "SurfaceBulge") && document.GetObjects().size() <= object_count_before) return {};
+    if (id == "SolidTwoSketches" || id == "SurfaceSweepTwoRails" || id == "SolidSweepTwoRails") {
         if (document.GetObjects().size() <= object_count_before) {
             return {};
         }
@@ -8888,7 +9192,8 @@ ActiveParametricObject ToolRegistry::CreateParametricObject(const std::string& i
     const size_t object_count_before = document.GetObjects().size();
     try { tool->create(document, prepared.parameters); }
     catch(const TileBuildError& error){QMessageBox::warning(nullptr,"Tile",error.what());return {};}
-    if (id == "SolidTwoSketches") {
+    if ((id == "SolidContourPanel" || id == "SurfaceBulge") && document.GetObjects().size() <= object_count_before) return {};
+    if (id == "SolidTwoSketches" || id == "SurfaceSweepTwoRails" || id == "SolidSweepTwoRails") {
         if (document.GetObjects().size() <= object_count_before) {
             return {};
         }
@@ -9364,6 +9669,15 @@ bool ToolRegistry::TryRebuildPolyhedron(const ActiveParametricObject& active_obj
 }
 
 void ToolRegistry::Rebuild(const ActiveParametricObject& active_object, CAlfaDoc& document) const {
+    if (active_object.tool_id == "SurfaceSweepTwoRails"
+        && (active_object.object_index >= document.GetObjects().size()
+            || !dynamic_cast<CSurfaceSet*>(document.GetObjects()[active_object.object_index].get()))) {
+        return; // A pending selection must not write sweep history onto a source curve.
+    }
+    if (active_object.tool_id == "SurfaceBulge") {
+        TryRebuildBulge(active_object, document);
+        return;
+    }
     if (active_object.tool_id == "SolidPolyhedronTool") {
         TryRebuildPolyhedron(active_object, document);
         return;
@@ -9420,10 +9734,20 @@ void ToolRegistry::Rebuild(const ActiveParametricObject& active_object, CAlfaDoc
             return;
         }
 
+        auto draft_backup = has_draft_history(parent) ? parent->Clone() : nullptr;
+        if (draft_backup) {
+            draft_backup->m_id = parent->m_id;
+            draft_backup->m_LayerID = parent->m_LayerID;
+            draft_backup->SetName(parent->GetName());
+        }
+
         const bool rebuilt = active_object.tool_id == "SolidBox"
             ? SolidBoxTool().RebuildShape(*box, active_object.parameters)
             : SolidCylinderTool().RebuildShape(*box, active_object.parameters);
-        if (!rebuilt) return;
+        if (!rebuilt) {
+            if (draft_backup) document.GetObjects()[active_object.object_index] = std::move(draft_backup);
+            return;
+        }
         std::vector<int> box_surfaces;
         box_surfaces.reserve(static_cast<size_t>(box->GetNumSurfaces()));
         for (int index = 0; index < box->GetNumSurfaces(); ++index) {
@@ -9467,6 +9791,8 @@ void ToolRegistry::Rebuild(const ActiveParametricObject& active_object, CAlfaDoc
         replay.object_index = active_object.object_index;
         if (rebuild_solid_operation_tree(*this, replay, document)) {
             document.UpdateAttachedSketches();
+        } else if (draft_backup) {
+            document.GetObjects()[active_object.object_index] = std::move(draft_backup);
         }
         return;
     }
@@ -9475,6 +9801,10 @@ void ToolRegistry::Rebuild(const ActiveParametricObject& active_object, CAlfaDoc
         document.UpdateAttachedSketches();
         return;
     }
+
+    if (active_object.object_index < document.GetObjects().size()
+        && has_draft_history(dynamic_cast<CSolid*>(document.GetObjects()[active_object.object_index].get())))
+        return; // Preserve the restored history instead of rebuilding only the selected primitive.
 
     const ToolDefinition* tool = Find(active_object.tool_id);
     if (tool && tool->rebuild) {
@@ -9537,6 +9867,19 @@ void ToolRegistry::Rebuild(const ActiveParametricObject& active_object, CAlfaDoc
         }
         document.UpdateAttachedSketches();
     }
+}
+
+bool ToolRegistry::TryRebuildBulge(const ActiveParametricObject& active, CAlfaDoc& document) const {
+    if (active.object_index>=document.GetObjects().size()) return false;
+    auto* target=dynamic_cast<CSolid*>(document.GetObjects()[active.object_index].get());
+    auto built=bulged_panel_object(document,active.parameters);
+    if (!target || !built) return false;
+    const auto before=target->m_Shape;
+    target->m_Shape=built->m_Shape;
+    if (!target->ReBuldMesh()) { target->m_Shape=before; target->ReBuldMesh(); return false; }
+    store_parametric_definition(document,active.object_index,active.tool_id,"Panel Bulge",
+        active.operation_index,active.parameters);
+    return true;
 }
 
 bool ToolRegistry::ApplyFurnitureMaterialParameter(
@@ -9689,7 +10032,8 @@ bool ToolRegistry::ReplayProfileDependents(unsigned long profile_id, CAlfaDoc& d
             && (objects[i]->GetParametricToolId() == "CurveOffset"
                 || objects[i]->GetParametricToolId() == "CurveMirrorCopy"
                 || objects[i]->GetParametricToolId() == "CurveLinkedBridge"
-                || objects[i]->GetParametricToolId() == "SurfaceSmartHybrid")) {
+                || objects[i]->GetParametricToolId() == "SurfaceSmartHybrid"
+                || objects[i]->GetParametricToolId() == "SolidContourPanel")) {
             const bool uses_profile = std::any_of(
                 objects[i]->GetParametricParameters().begin(),
                 objects[i]->GetParametricParameters().end(),
@@ -9775,7 +10119,8 @@ bool ToolRegistry::ReplayAllProfileDependents(CAlfaDoc& document) const {
             && (objects[i]->GetParametricToolId() == "CurveOffset"
                 || objects[i]->GetParametricToolId() == "CurveMirrorCopy"
                 || objects[i]->GetParametricToolId() == "CurveLinkedBridge"
-                || objects[i]->GetParametricToolId() == "SurfaceSmartHybrid")) {
+                || objects[i]->GetParametricToolId() == "SurfaceSmartHybrid"
+                || objects[i]->GetParametricToolId() == "SolidContourPanel")) {
             const ActiveParametricObject active = ActiveObjectFromDocument(
                 i, *objects[i], 0, &document);
             if (!active.tool_id.empty()) {

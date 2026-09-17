@@ -94,6 +94,7 @@ public:
     bool ApplyOffsetFaceOnce(CAlfaDoc& document, double distance) const;
     void Rebuild(const ActiveParametricObject& active_object, CAlfaDoc& document) const;
     bool TryRebuildPolyhedron(const ActiveParametricObject& active_object, CAlfaDoc& document) const;
+    bool TryRebuildBulge(const ActiveParametricObject& active_object, CAlfaDoc& document) const;
     bool ApplyFurnitureMaterialParameter(
         const ActiveParametricObject& active_object,
         CAlfaDoc& document,

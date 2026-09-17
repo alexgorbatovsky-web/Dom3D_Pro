@@ -1,6 +1,9 @@
+#include "DefaultDialogAccept.h"
+#include <BRepBuilderAPI_Copy.hxx>
 #include "RevolveToolHelp.h"
 #include "../KitchenLayout.h"
 #include "KitchenLayoutDialog.h"
+#include "ImageReliefDialog.h"
 #include "../materials/ProceduralMaterialIO.h"
 #include "MainWindow.h"
 
@@ -24,10 +27,14 @@
 #include "../solid/Solid.h"
 #include "../solid/SheetBendShapeBuilder.h"
 #include "../solid/SurfaceSet.h"
+#include "../solid/PanelContourShapeBuilder.h"
+#include <TopExp_Explorer.hxx>
+#include <TopoDS.hxx>
 #include "MaterialEditorDialog.h"
 #include "MaterialDrag.h"
 #include "MeasurementUnits.h"
 #include "PreferencesDialog.h"
+#include "ThemeManager.h"
 #include "ProjectOpenDialog.h"
 #include "LightingDialog.h"
 #include "BlenderCyclesDialog.h"
@@ -89,6 +96,7 @@
 #include <QListWidgetItem>
 #include <QMenu>
 #include <QMessageBox>
+#include "../solid/LowPolyCompletion.h"
 #include <QMimeData>
 #include <QMenuBar>
 #include <QMouseEvent>
@@ -374,8 +382,8 @@ std::unique_ptr<CMesh3D> CreateLowPolyMeshFromSolid(const CSolid& solid)
     std::vector<CMesh3D::Face> faces;
     for (int surface_index = 0; surface_index < solid.GetNumSurfaces(); ++surface_index) {
         const CSurfaceFace* surface = solid.GetSurfaceFace(surface_index);
-        if (!surface || !surface->pMesh3D) {
-            continue;
+        if (!lowpoly::HasMesh(surface)) {
+            return {};
         }
 
         const std::vector<Vec3>& source_vertices = surface->pMesh3D->GetVertices();
@@ -446,6 +454,10 @@ public:
         mesh_quadro_hole_slx_ = new QCheckBox("Mesh Quadro Hole SLX", this);
         form->addRow(mesh_quadro_hole_slx_);
         layout->addLayout(form);
+
+        mesh_summary_ = new QLabel(this);
+        mesh_summary_->setWordWrap(true);
+        layout->addWidget(mesh_summary_);
 
         auto* buttons = new QHBoxLayout();
         auto* create = new QPushButton("Create Low Poly", this);
@@ -549,6 +561,10 @@ private:
         const bool mesh_quadro_hole_slx =
             mesh_quadro_hole_slx_->isChecked();
         int rebuilt = 0;
+        fallback_faces_ = 0;
+        retained_faces_ = 0;
+        preview_complete_ = true;
+        QStringList fallback_details;
         QString first_fill_error;
 		QString first_quadrangulation_diagnostic;
         for (CSolid* solid : Solids()) {
@@ -558,7 +574,21 @@ private:
             // Low Poly density has legacy inverse semantics: increasing
             // Density creates more cells. Do not use the adaptive scene
             // tessellation overload here, because it ignores this control.
-            if (solid->ReBuldMesh(mesh_step)) {
+            bool built = solid->ReBuldMesh(mesh_step);
+            if (mesh_quadro) {
+                const auto completion = lowpoly::CompleteWithTriangles(*solid, mesh_step);
+                built = completion.complete();
+                retained_faces_ += completion.retained;
+                fallback_faces_ += static_cast<int>(completion.triangulated.size());
+                if (!completion.triangulated.empty()) {
+                    QStringList ids;
+                    for (int id : completion.triangulated) ids << QString::number(id + 1);
+                    fallback_details << QString("%1: %2").arg(
+                        QString::fromStdString(solid->GetName()), ids.join(", "));
+                }
+            }
+            preview_complete_ = preview_complete_ && built;
+            if (built) {
                 ++rebuilt;
 				if (first_quadrangulation_diagnostic.isEmpty()) {
 					for (int surface_index = 0;
@@ -587,6 +617,13 @@ private:
 				}
             }
         }
+        mesh_summary_->setText(!preview_complete_
+            ? "Some surfaces could not be meshed. Low Poly cannot be created."
+            : fallback_faces_ > 0
+            ? QString("Quadro: %1 surfaces. Triangle fallback: %2 surfaces.")
+                .arg(retained_faces_).arg(fallback_faces_)
+            : QString());
+        mesh_summary_->setToolTip(fallback_details.join("\n"));
         if (refresh_scene_) {
             refresh_scene_();
         }
@@ -608,6 +645,21 @@ private:
         // presses Create immediately after opening it (before any valueChanged
         // signal has rebuilt the selected solids).
         RebuildSolids();
+		if (!preview_complete_) {
+            QMessageBox::warning(this, "Low Poly",
+                "Some surfaces could not be meshed, even with triangles.\n"
+                "Change the density or mesh options and try again.");
+            return;
+        }
+		if (fallback_faces_ > 0) {
+            const auto answer = QMessageBox::question(this, "Mixed Low Poly mesh",
+                QString("Quadro succeeded on %1 surfaces.\n"
+                        "%2 surfaces required triangles.\n\n"
+                        "Create the mixed mesh shown in the preview?")
+                    .arg(retained_faces_).arg(fallback_faces_),
+                QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+            if (answer != QMessageBox::Yes) return;
+        }
 		std::vector<std::unique_ptr<CMesh3D>> meshes;
 		meshes.reserve(Solids().size());
         for (CSolid* solid : Solids()) {
@@ -643,6 +695,10 @@ private:
     QDoubleSpinBox* density_ = nullptr;
     QCheckBox* mesh_quadro_ = nullptr;
     QCheckBox* mesh_quadro_hole_slx_ = nullptr;
+    QLabel* mesh_summary_ = nullptr;
+    int retained_faces_ = 0;
+    int fallback_faces_ = 0;
+    bool preview_complete_ = false;
 };
 
 class MeshFillContourDialog : public QDialog {
@@ -2767,6 +2823,7 @@ SolidOperationsDialogResult ShowSolidOperationsDialog(QWidget* parent,
                      [update_operation_highlight](bool) {
         update_operation_highlight();
     });
+    SetDefaultDialogAccept(&dialog, ok_button);
     QObject::connect(ok_button, &QPushButton::clicked, &dialog, [&dialog, list, name_edit, &result]() {
         result.action = SolidOperationsDialogAction::Accept;
         result.object_name = name_edit->text().trimmed().toStdString();
@@ -2846,6 +2903,25 @@ std::vector<ParametricParameterValue> ToFilletEdgeSavedParameters(const std::vec
 bool IsEditableCurve(const CAlfaObject* object) {
     return dynamic_cast<const CPolyline*>(object)
         || dynamic_cast<const CBSpline*>(object);
+}
+
+void SetEdgeToolSelectionMode(OpenGLViewport& viewport, CAlfaDoc& document) {
+    struct Selection { unsigned long id; std::vector<int> faces; std::vector<std::pair<int,int>> edges; };
+    std::vector<Selection> selected;
+    for (size_t index:document.GetSelectedObjectIndices()) {
+        if (index>=document.GetObjects().size()) continue;
+        if (auto* solid=dynamic_cast<CSolid*>(document.GetObjects()[index].get()))
+            selected.push_back({solid->m_id,solid->GetSelectedFaceIndices(),solid->GetSelectedEdgeRefs()});
+    }
+    const QSignalBlocker blocker(&viewport);
+    viewport.SetSelectionMode(SelectionMode::Edge);
+    for (const auto& selection:selected) {
+        document.SelectObjectById(selection.id,SelectionAction::Add);
+        if (auto* solid=dynamic_cast<CSolid*>(document.FindObjectById(selection.id))) {
+            for (int face:selection.faces) solid->AddSelectedFace(face);
+            for (auto edge:selection.edges) solid->AddSelectedEdge(edge.first,edge.second);
+        }
+    }
 }
 
 double CurvePointDistanceSquared(const CPoint3d& first, const CPoint3d& second) {
@@ -3207,7 +3283,7 @@ int ShowPlaneDefinitionDialog(
         const QStringList values = factors_editor->text().split(
             QRegularExpression("\\s+"), Qt::SkipEmptyParts);
         if (values.size() != 4) {
-            factors_editor->setStyleSheet("QLineEdit { background: #ffd6d6; }");
+            factors_editor->setStyleSheet("QLineEdit { background: #ffd6d6; color: #641515; }");
             factors_editor->setToolTip("Enter four numbers: A B C D");
             factors_editor->setFocus();
             factors_editor->selectAll();
@@ -3219,7 +3295,7 @@ int ShowPlaneDefinitionDialog(
             parsed[static_cast<size_t>(index)] =
                 number_locale.toDouble(values[index], &ok);
             if (!ok) {
-                factors_editor->setStyleSheet("QLineEdit { background: #ffd6d6; }");
+                factors_editor->setStyleSheet("QLineEdit { background: #ffd6d6; color: #641515; }");
                 factors_editor->setToolTip("Enter four numbers: A B C D");
                 factors_editor->setFocus();
                 factors_editor->selectAll();
@@ -3247,6 +3323,7 @@ int ShowPlaneDefinitionDialog(
     layout->addSpacing(7);
     layout->addWidget(cancel, 0, Qt::AlignHCenter);
     QObject::connect(cancel, &QPushButton::clicked, &dialog, &QDialog::reject);
+    SetDefaultDialogAccept(&dialog, factors_ok);
     CenterDialogOnCursor(dialog);
     return dialog.exec();
 }
@@ -3270,6 +3347,7 @@ bool ShowPlaneValuesDialog(QWidget* parent, const QString& title,
     root->addLayout(form);
     auto* buttons = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    SetDefaultDialogAccept(&dialog, buttons);
     root->addWidget(buttons);
     QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
@@ -3371,6 +3449,34 @@ MainWindow::MainWindow(QWidget* parent)
             this, &MainWindow::AutoSaveProject);
     UpdateAutoSaveTimer();
 
+    connect(viewport_, &OpenGLViewport::SurfaceMaterialPainted, this,
+            [this](unsigned long object_id, unsigned long surface_id,
+                   bool before_enabled, unsigned long before_material_id,
+                   const Material& before, const Material& after) {
+        const auto apply = [object_id, surface_id](CAlfaDoc& document,
+                bool enabled, unsigned long material_id, const Material& material) {
+            auto* solid = dynamic_cast<CSolid*>(document.FindObjectById(object_id));
+            if (!solid) return false;
+            for (int i = 0; i < solid->GetNumSurfaces(); ++i) {
+                auto* surface = solid->GetSurfaceFace(i);
+                if (static_cast<unsigned long>(surface->m_ID) != surface_id) continue;
+                surface->MaterialOverride.enabled = enabled;
+                surface->MaterialOverride.material_id = material_id;
+                surface->MaterialOverride.material = material;
+                return true;
+            }
+            return false;
+        };
+        undo_redo_.RecordCommand("Paint surface material",
+            [apply, before_enabled, before_material_id, before](CAlfaDoc& document) {
+                return apply(document, before_enabled, before_material_id, before);
+            },
+            [apply, after](CAlfaDoc& document) {
+                return apply(document, true, after.id, after);
+            });
+        UpdateUndoRedoActions();
+        viewport_->update();
+    });
     connect(viewport_, &OpenGLViewport::DocumentChanged, this, [this]() {
         unsigned long sketch_id=0;
         std::shared_ptr<CSmartLine> sketch_before,sketch_after;
@@ -3396,7 +3502,40 @@ MainWindow::MainWindow(QWidget* parent)
         std::vector<CPoint3d> curve_points_after;
         if (viewport_->TakeCurvePointDragChange(
                 moved_curve_id, curve_points_before, curve_points_after)) {
-            const auto apply_curve_points = [this, moved_curve_id](
+            // Live dragging already synchronized linked endpoints. Follow only
+            // endpoints actually changed by this edit, not every link in the
+            // document (which can rebuild an entire unrelated CAD assembly).
+            std::vector<unsigned long> dependency_ids{moved_curve_id};
+            using LinkedEnd = std::pair<unsigned long,bool>;
+            std::vector<LinkedEnd> changed_ends;
+            if (!curve_points_before.empty() && curve_points_before.size()==curve_points_after.size()) {
+                for (bool end : {false,true}) {
+                    const size_t index=end?curve_points_before.size()-1:0;
+                    if (CurvePointDistanceSquared(curve_points_before[index],curve_points_after[index])>1.e-18)
+                        changed_ends.emplace_back(moved_curve_id,end);
+                }
+            }
+            for (size_t i=0;i<changed_ends.size();++i) {
+                for (const auto& link:document_.GetCurveEndpointLinks()) {
+                    const LinkedEnd a{link.first_id,link.first_end}, b{link.second_id,link.second_end};
+                    if (a!=changed_ends[i] && b!=changed_ends[i]) continue;
+                    const auto peer=a==changed_ends[i]?b:a;
+                    if (std::find(changed_ends.begin(),changed_ends.end(),peer)==changed_ends.end()) {
+                        changed_ends.push_back(peer);
+                        dependency_ids.push_back(peer.first);
+                    }
+                }
+            }
+            std::sort(dependency_ids.begin(),dependency_ids.end());
+            dependency_ids.erase(std::unique(dependency_ids.begin(),dependency_ids.end()),dependency_ids.end());
+            const auto rebuild_dependents = [this,dependency_ids](CAlfaDoc& document) {
+                for (unsigned long id:dependency_ids) {
+                    tool_registry_.ReplayProfileDependents(id,document);
+                    tool_registry_.ReplayAllTrimDependents(document,id);
+                    document.RebuildAssociativeClones(id);
+                }
+            };
+            const auto apply_curve_points = [moved_curve_id,rebuild_dependents](
                 CAlfaDoc& document, const std::vector<CPoint3d>& points) {
                 CAlfaObject* object = document.FindObjectById(moved_curve_id);
                 if (auto* polyline = dynamic_cast<CPolyline*>(object)) {
@@ -3409,35 +3548,12 @@ MainWindow::MainWindow(QWidget* parent)
                     return false;
                 }
                 document.SynchronizeCurveEndpointLinks();
-                for (const auto& link : document.GetCurveEndpointLinks()) {
-                    for (unsigned long id : {link.first_id, link.second_id}) {
-                        tool_registry_.ReplayProfileDependents(id, document);
-                        tool_registry_.ReplayAllTrimDependents(document, id);
-                        document.RebuildAssociativeClones(id);
-                    }
-                }
-                // Rebuild only objects that really reference this curve.
-                tool_registry_.ReplayProfileDependents(
-                    moved_curve_id, document);
-                tool_registry_.ReplayAllTrimDependents(
-                    document, moved_curve_id);
-                document.RebuildAssociativeClones(moved_curve_id);
+                rebuild_dependents(document);
                 return true;
             };
-            for (const auto& link : document_.GetCurveEndpointLinks()) {
-                for (unsigned long id : {link.first_id, link.second_id}) {
-                    tool_registry_.ReplayProfileDependents(id, document_);
-                    tool_registry_.ReplayAllTrimDependents(document_, id);
-                    document_.RebuildAssociativeClones(id);
-                }
-            }
             // The live drag already contains the final coordinates. Only its
             // actual dependents need updating now; no document snapshot.
-            tool_registry_.ReplayProfileDependents(
-                moved_curve_id, document_);
-            tool_registry_.ReplayAllTrimDependents(
-                document_, moved_curve_id);
-            document_.RebuildAssociativeClones(moved_curve_id);
+            rebuild_dependents(document_);
             undo_redo_.RecordCommand(
                 "Move curve nodes",
                 [curve_points_before, apply_curve_points](CAlfaDoc& document) {
@@ -3803,6 +3919,24 @@ MainWindow::MainWindow(QWidget* parent)
                 ShowLowPolyTool();
             });
         }
+        if(pending_group_command_==PendingGroupCommand::ShellPick && document_.HasSelectedSolidFace()) {
+            QTimer::singleShot(0,this,[this]() {
+                if(pending_group_command_!=PendingGroupCommand::ShellPick || !document_.HasSelectedSolidFace()) return;
+                pending_group_command_=PendingGroupCommand::ShellReady;
+                ActivateParametricTool("SolidShell");
+            });
+        }
+        if (pending_group_command_==PendingGroupCommand::ExtractFace && document_.HasSelectedSolidFace()) {
+            QTimer::singleShot(0,this,[this]() { ExtractPickedFace(); });
+        }
+        // Finish the explicitly requested pick after the selection event unwinds.
+        if (image_relief_pick_pending_ && document_.HasSelectedSolidFace()
+            && document_.GetSelectedFaceSolid()) {
+            image_relief_pick_pending_ = false;
+            QTimer::singleShot(0, this, [this]() {
+                if (active_tool_key_ == "MeshImageRelief") ShowImageReliefTool();
+            });
+        }
         if (mesh_island_boundary_pick_active_
             && document_.HasSelectedSolidFace()) {
             if (!mesh_island_boundary_generation_pending_) {
@@ -3831,7 +3965,8 @@ MainWindow::MainWindow(QWidget* parent)
                    || active_parametric_object_.tool_id == "SolidWireTool") {
             if (active_parametric_object_.transient) TryStartProfileSolidFromSelection();
         } else if (active_parametric_object_.tool_id == "SurfaceRuled"
-                   || active_parametric_object_.tool_id == "SolidShell") {
+                   || active_parametric_object_.tool_id == "SolidShell"
+                   || active_parametric_object_.tool_id == "SurfaceBulge") {
             // The generated surface/solid is the live preview. Keep its
             // parameter panel open while the user inspects the result.
         } else if (active_parametric_object_.tool_id != "ThickSolidTool"
@@ -3889,6 +4024,10 @@ MainWindow::MainWindow(QWidget* parent)
         } else if (pending_group_command_ == PendingGroupCommand::ExtractSurfaceEdge) {
             statusBar()->showMessage(
                 "Extract Edge: select a surface edge to extract as a curve");
+        } else if (pending_group_command_ == PendingGroupCommand::ExtractFace) {
+            statusBar()->showMessage(DomTranslate("Extract Face: click a surface of the body"));
+        } else if (pending_group_command_ == PendingGroupCommand::ShellPick) {
+            statusBar()->showMessage(DomTranslate("Shell: click a surface"));
         } else if (pending_group_command_ == PendingGroupCommand::FourSplineSurface) {
             statusBar()->showMessage("Surface by 4 Splines: select four splines forming a closed boundary, then confirm the selection");
         } else if (pending_group_command_ == PendingGroupCommand::TwoRailSweepSurface) {
@@ -4028,6 +4167,8 @@ MainWindow::MainWindow(QWidget* parent)
             ProjectCurveToSurface();
         } else if (pending_group_command_ == PendingGroupCommand::ExtractSurfaceEdge) {
             ExtractSurfaceEdge();
+        } else if (pending_group_command_ == PendingGroupCommand::ExtractFace) {
+            ExtractPickedFace();
         } else if (pending_group_command_ == PendingGroupCommand::FourSplineSurface) {
             CreateFourSplineSurface();
         } else if (pending_group_command_ == PendingGroupCommand::TwoRailSweepSurface) {
@@ -4065,6 +4206,10 @@ MainWindow::MainWindow(QWidget* parent)
             CancelPendingGroupCommand("Project Curve:operation canceled");
         } else if (pending_group_command_ == PendingGroupCommand::ExtractSurfaceEdge) {
             CancelPendingGroupCommand("Extract Edge:operation canceled");
+        } else if (pending_group_command_ == PendingGroupCommand::ExtractFace) {
+            CancelPendingGroupCommand("Extract Face: operation canceled");
+        } else if (pending_group_command_ == PendingGroupCommand::ShellPick) {
+            CancelPendingGroupCommand("Shell: operation canceled");
         } else if (pending_group_command_ == PendingGroupCommand::FourSplineSurface) {
             CancelPendingGroupCommand("Surface by 4 Splines:operation canceled");
         } else if (pending_group_command_ == PendingGroupCommand::TwoRailSweepSurface) {
@@ -4702,8 +4847,37 @@ MainWindow::MainWindow(QWidget* parent)
     connect(viewport_, &OpenGLViewport::BooleanFinished, this, [this]() {
         UpdateActiveToolUi("select");
     });
+    connect(property_panel_, &PropertyPanel::AllEdgesRequested, this, [this]() {
+        if (active_parametric_edit_existing_) {
+            statusBar()->showMessage("Finish editing this operation before choosing a new set of edges");
+            return;
+        }
+        const auto id=active_parametric_object_.tool_id;
+        if (id!="fillet_edge" && id!="fillet_all_edges" && id!="ChamferSolid") return;
+        auto* solid=document_.GetSelectedSolid();
+        if (!solid) {
+            statusBar()->showMessage("Select a body, face or edge, then press All Edges");
+            return;
+        }
+        InvalidateLiveFilletRebuild();
+        if (document_.HasLiveFillet()) { document_.CancelLiveFillet(); undo_redo_.CancelChange(); }
+        if (document_.HasLiveChamfer()) { document_.CancelLiveChamfer(); undo_redo_.CancelChange(); }
+        solid=document_.GetSelectedSolid();
+        if (!solid) return;
+        solid->ClearSelectedEdge();
+        solid->ClearSelectedFace();
+        for (int face=0;face<solid->GetNumSurfaces();++face)
+            for (int edge=0;edge<solid->GetSurfaceFace(face)->GetEdgeCount();++edge)
+                solid->AddSelectedEdge(face,edge);
+        active_parametric_object_.tool_id=id=="ChamferSolid"?id:"fillet_edge";
+        active_parametric_object_.object_index=document_.GetSelectedObjectIndex();
+        TryStartLiveEdgeToolFromSelection();
+    });
     connect(property_panel_, &PropertyPanel::ParametersChanged, this, [this]() {
+        const size_t live_edge_object_index=active_parametric_object_.object_index;
         active_parametric_object_ = property_panel_->ActiveObject();
+        if (!active_parametric_edit_existing_ && (document_.HasLiveFillet() || document_.HasLiveChamfer()))
+            active_parametric_object_.object_index=live_edge_object_index;
         if (active_parametric_object_.tool_id == "SolidHole") {
             QSettings settings;
             for (const auto& parameter : active_parametric_object_.parameters) {
@@ -4927,6 +5101,22 @@ MainWindow::MainWindow(QWidget* parent)
             return;
         }
 
+        if (active_parametric_object_.tool_id == "SurfaceBulge") {
+            const size_t index=active_parametric_object_.object_index;
+            if (!tool_registry_.TryRebuildBulge(active_parametric_object_,document_)) {
+                active_parametric_object_=tool_registry_.ActiveObjectFromDocument(
+                    index,*document_.GetObjects()[index],0,&document_);
+                QTimer::singleShot(0,this,[this] {
+                    if (active_parametric_object_.tool_id=="SurfaceBulge")
+                        property_panel_->SetActiveObject(active_parametric_object_);
+                });
+                statusBar()->showMessage("Cannot build this bulge. Previous shape and height restored.",4000);
+            } else {
+                tool_registry_.ReplayProfileDependents(document_.GetObjects()[index]->m_id,document_);
+            }
+            viewport_->update();
+            return;
+        }
         const bool rebuilding_assembly = ActiveParametricObjectIsAssembly();
         tool_registry_.Rebuild(active_parametric_object_, document_);
         if (!active_parametric_edit_existing_
@@ -6173,19 +6363,19 @@ void MainWindow::CreateActions() {
 
     tab_toolbar_->setStyleSheet(
         "QToolBar#ToolTabs {"
-        "  background: #111111;"
+        "  background: palette(window);"
         "  border: 0;"
-        "  border-bottom: 1px solid #2f2f2f;"
+        "  border-bottom: 1px solid palette(mid);"
         "  spacing: 0;"
         "  padding: 0 0 0 0;"
         "}"
         "QTabBar#Dom3DToolTabs {"
-        "  background: #111111;"
+        "  background: palette(window);"
         "}"
         "QTabBar#Dom3DToolTabs::tab {"
-        "  background: #1b1b1b;"
-        "  color: #cfcfcf;"
-        "  border: 1px solid #2b2b2b;"
+        "  background: palette(button);"
+        "  color: palette(text);"
+        "  border: 1px solid palette(mid);"
         "  border-bottom: 0;"
         "  min-width: 96px;"
         "  height: 26px;"
@@ -6193,13 +6383,13 @@ void MainWindow::CreateActions() {
         "  margin-right: 1px;"
         "}"
         "QTabBar#Dom3DToolTabs::tab:selected {"
-        "  background: #2d2d2d;"
-        "  color: #ffffff;"
-        "  border-color: #4c4c4c;"
+        "  background: palette(highlight);"
+        "  color: palette(highlighted-text);"
+        "  border-color: palette(mid);"
         "}"
         "QTabBar#Dom3DToolTabs::tab:hover:!selected {"
-        "  background: #242424;"
-        "  color: #ffffff;"
+        "  background: palette(midlight);"
+        "  color: palette(text);"
         "}"
     );
 
@@ -6238,6 +6428,8 @@ void MainWindow::CreateActions() {
     edit_menu->addAction(redo_action_);
     edit_menu->addSeparator();
     UpdateUndoRedoActions();
+    edit_menu->addAction(add_action("Themes...", {}, [this]() { Themes::ShowDialog(this); }));
+    edit_menu->addSeparator();
 
     file_menu->addAction(add_action("&New", QKeySequence::New, [this]() { NewProject(); }));
     file_menu->addAction(add_action("&Open...", QKeySequence::Open, [this]() { OpenProject(); }));
@@ -6473,6 +6665,16 @@ void MainWindow::CreateActions() {
     view_menu->addSeparator();
 
     auto* solid_display_menu = view_menu->addMenu("Solid Display");
+    auto* hidden_edges_action = view_menu->addAction("Show Hidden Edges");
+    hidden_edges_action->setObjectName("ShowHiddenEdgesAction");
+    hidden_edges_action->setCheckable(true);
+    hidden_edges_action->setChecked(QSettings().value("view/showHiddenEdges", false).toBool());
+    CSolid::SetHiddenEdgeDrawingEnabled(hidden_edges_action->isChecked());
+    connect(hidden_edges_action, &QAction::toggled, this, [this](bool enabled) {
+        CSolid::SetHiddenEdgeDrawingEnabled(enabled);
+        QSettings().setValue("view/showHiddenEdges", enabled);
+        viewport_->update();
+    });
     auto* solid_display_group = new QActionGroup(this);
     solid_display_group->setExclusive(true);
     const auto add_solid_display_action = [this, solid_display_menu, solid_display_group](const QString& text, SolidDisplayMode mode) {
@@ -6577,7 +6779,7 @@ void MainWindow::CreateActions() {
     projection_status_label_ = new QLabel(this);
     projection_status_label_->setMinimumWidth(108);
     projection_status_label_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    projection_status_label_->setStyleSheet("QLabel { color: #777777; padding-right: 4px; }");
+    projection_status_label_->setStyleSheet("QLabel { color: palette(text); padding-right: 4px; }");
     statusBar()->addPermanentWidget(projection_status_label_);
     camera_fov_spin_ = new QDoubleSpinBox(this);
     camera_fov_spin_->setRange(20.0, 100.0);
@@ -6782,12 +6984,12 @@ void MainWindow::CreateActions() {
         "SurfaceReverseNormals", "SurfaceJoin"};
     const std::set<std::string> mesh_tool_ids = {
         "TrimMeshTest", "ClassifyFaceCut", "MeshCushion", "SolidLowPoly", "MeshFillContour",
-        "MeshIslandBoundaries", "WeldingVertex", "MeshBoundaryLine"};
+        "MeshIslandBoundaries", "WeldingVertex", "MeshBoundaryLine", "MeshImageRelief"};
     const std::set<std::string> solid_edit_tool_ids = {
-        "SolidTransform", "TrimByPlane", "TrimBySketch", "TrimBySurface",
+        "ExtractFaceTool", "SolidTransform", "TrimByPlane", "TrimBySketch", "TrimBySurface",
         "boolean", "fillet_edge", "ChamferSolid", "SolidExtrudeFace",
         "SolidOffsetFace", "SolidSketchFeature", "SolidHole", "SolidDraft",
-        "SolidSheetBend", "ThickSolidTool", "SolidShell"};
+        "SolidSheetBend", "SolidContourPanel", "SurfaceBulge", "ThickSolidTool", "SolidShell"};
 
     for (const ToolDefinition& tool : tool_registry_.Tools()) {
         // Kept in the registry for reopening old documents. The public Fillet
@@ -6954,6 +7156,40 @@ void MainWindow::CreateActions() {
     add_selection_mode_action("Edge", "Select solid edges", SelectionMode::Edge);
     add_selection_mode_action("Pt", "Select curve points", SelectionMode::Point);
 
+    auto* snapping_button = new QToolButton(main_toolbar_);
+    snapping_button->setObjectName("SnappingTargets");
+    snapping_button->setText("Snapping to");
+    snapping_button->setPopupMode(QToolButton::InstantPopup);
+    auto* snapping_menu = new QMenu(snapping_button);
+    snapping_button->setMenu(snapping_menu);
+    using SnapTarget = OpenGLViewport::SnapTarget;
+    const auto add_snap_target = [this, snapping_menu](const char* label, SnapTarget target,
+                                                       const char* tooltip) {
+        auto* action = new QWidgetAction(snapping_menu);
+        auto* check = new QCheckBox(label, snapping_menu);
+        check->setObjectName(QString("SnapTarget%1").arg(static_cast<int>(target)));
+        check->setToolTip(tooltip);
+        check->setContentsMargins(8, 3, 12, 3);
+        check->setChecked(viewport_->IsSnapTargetEnabled(target));
+        action->setDefaultWidget(check);
+        snapping_menu->addAction(action);
+        connect(check, &QCheckBox::toggled, this, [this, target](bool enabled) {
+            viewport_->SetSnapTargetEnabled(target, enabled);
+        });
+        connect(snapping_menu, &QMenu::aboutToShow, check, [this, check, target]() {
+            const QSignalBlocker blocker(check);
+            check->setChecked(viewport_->IsSnapTargetEnabled(target));
+        });
+    };
+    add_snap_target("Grid", SnapTarget::Grid, "Snap to the drawing grid");
+    add_snap_target("Aux Line", SnapTarget::AuxLine, "Orthogonal guides from the last point and solid centerlines");
+    add_snap_target("Knot", SnapTarget::Knot, "Snap to curve nodes and vertices");
+    add_snap_target("Line", SnapTarget::Line, "Snap to existing curves and CAD surface edges");
+    add_snap_target("Aux Line 45", SnapTarget::AuxLine45, "45-degree guides from the last point");
+    add_snap_target("Work Plane", SnapTarget::WorkPlane, "Place spatial curve points on the current sketch plane");
+    add_snap_target("Surface", SnapTarget::Surface, "Place spatial curve points on the nearest visible CAD surface; Line snaps to nearby edges first");
+    main_toolbar_->addWidget(snapping_button);
+
     coordinate_axes_check_box_ = new QCheckBox("Axis", main_toolbar_);
     coordinate_axes_check_box_->setToolTip("Show coordinate axes");
     coordinate_axes_check_box_->setChecked(viewport_->IsCoordinateAxesVisible());
@@ -7050,6 +7286,15 @@ void MainWindow::CreateActions() {
             checked ? "Body edges: visible" : "Body edges: hidden", 1200);
     });
     main_toolbar_->addWidget(draw_edges_button);
+    auto* hidden_edges_button = new QPushButton("Hidden Edges", main_toolbar_);
+    hidden_edges_button->setToolTip("Show Hidden Edges");
+    hidden_edges_button->setCheckable(true);
+    if (auto* action = findChild<QAction*>("ShowHiddenEdgesAction")) {
+        hidden_edges_button->setChecked(action->isChecked());
+        connect(hidden_edges_button, &QPushButton::toggled, action, &QAction::setChecked);
+        connect(action, &QAction::toggled, hidden_edges_button, &QPushButton::setChecked);
+    }
+    main_toolbar_->addWidget(hidden_edges_button);
     auto* open_edges_button = new QPushButton("Mesh Open Edges", main_toolbar_);
     open_edges_button->setToolTip(
         "Highlight open Mesh3D edges independently of the active tool");
@@ -7172,8 +7417,7 @@ void MainWindow::CreateVerticalToolBar() {
     vertical_tools_dock_->setObjectName("VerticalToolsDock");
     vertical_tools_dock_->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
     vertical_tools_dock_->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
-    vertical_tools_dock_->setMinimumWidth(36);
-    vertical_tools_dock_->setMaximumWidth(46);
+    vertical_tools_dock_->setFixedWidth(36);
     vertical_tools_dock_->setTitleBarWidget(new QWidget(vertical_tools_dock_));
 
     vertical_toolbar_ = new QToolBar("Vertical Tools", vertical_tools_dock_);
@@ -7185,24 +7429,25 @@ void MainWindow::CreateVerticalToolBar() {
     vertical_toolbar_->setIconSize(QSize(22, 22));
     vertical_toolbar_->setStyleSheet(
         "QToolBar#VerticalTools {"
-        "  background: #d7d7d7;"
-        "  border: 1px solid #9a9a9a;"
+        "  background: palette(button);"
+        "  border: 1px solid palette(mid);"
         "  spacing: 2px;"
         "  padding: 2px;"
         "}"
         "QToolButton {"
-        "  background: #eeeeee;"
-        "  border: 1px solid #8f8f8f;"
+        "  background: palette(button);"
+        "  border: 1px solid palette(mid);"
         "  border-radius: 2px;"
         "  padding: 2px;"
         "}"
         "QToolButton:hover {"
-        "  background: #ffffff;"
-        "  border-color: #3f84d8;"
+        "  background: palette(midlight);"
+        "  border-color: palette(mid);"
         "}"
         "QToolButton:checked {"
-        "  background: #1f7ae0;"
-        "  border-color: #0f4f9a;"
+        "  color: palette(highlighted-text);"
+        "  background: palette(highlight);"
+        "  border-color: palette(mid);"
         "}"
         "QToolButton::menu-indicator {"
         "  image: none;"
@@ -7253,8 +7498,8 @@ void MainWindow::CreateVerticalToolBar() {
         auto* menu = new QMenu(button);
         menu->setStyleSheet(
             "QMenu {"
-            "  background: #ffffff;"
-            "  border: 1px solid #b6b6b6;"
+            "  background: palette(button);"
+            "  border: 1px solid palette(mid);"
             "  border-radius: 6px;"
             "  padding: 4px;"
             "}"
@@ -7337,7 +7582,7 @@ void MainWindow::CreateVerticalToolBar() {
 
         auto* menu = new QMenu(button);
         menu->setStyleSheet(
-            "QMenu { background: #ffffff; border: 1px solid #b6b6b6;"
+            "QMenu { background: palette(button); border: 1px solid palette(mid);"
             " border-radius: 6px; padding: 4px; }"
         );
         auto* action = new QWidgetAction(menu);
@@ -7613,14 +7858,16 @@ void MainWindow::CreateVerticalToolBar() {
     addDockWidget(Qt::LeftDockWidgetArea, vertical_tools_dock_);
     if (tools_dock_) {
         splitDockWidget(tools_dock_, vertical_tools_dock_, Qt::Horizontal);
-        resizeDocks({tools_dock_, vertical_tools_dock_}, {104, 40}, Qt::Horizontal);
+        resizeDocks({tools_dock_, vertical_tools_dock_}, {92, 36}, Qt::Horizontal);
     }
 }
 
 void MainWindow::CreateDocks() {
+    // Keep the vertical divider next to the viewport to one logical pixel.
+    setStyleSheet("QMainWindow::separator { width: 1px; }");
     tools_dock_ = new QDockWidget("Architecture", this);
     tools_dock_->setObjectName("ToolsDock");
-    tools_dock_->setMinimumWidth(104);
+    tools_dock_->setMinimumWidth(92);
     CreateToolsPanel(tools_dock_);
     addDockWidget(Qt::LeftDockWidgetArea, tools_dock_);
     CreateVerticalToolBar();
@@ -7664,12 +7911,12 @@ void MainWindow::CreateDocks() {
     scene_tree_->setColumnWidth(0, 92);
     scene_tree_->setStyleSheet(
         "QTreeWidget::item:selected {"
-        "  background: #2f78c4;"
-        "  color: #ffffff;"
+        "  background: palette(highlight);"
+        "  color: palette(highlighted-text);"
         "}"
         "QTreeWidget::item:selected:!active {"
-        "  background: #3d82c9;"
-        "  color: #ffffff;"
+        "  background: palette(highlight);"
+        "  color: palette(highlighted-text);"
         "}"
     );
     scene_tree_layout->addWidget(scene_tree_);
@@ -7772,22 +8019,22 @@ void MainWindow::CreateMaterialLibraryDock() {
     root_layout->addWidget(material_list, 1);
 
     panel->setStyleSheet(
-        "QWidget { background: #1f1f1f; color: #e5e5e5; }"
+        "QWidget { background: palette(window); color: palette(text); }"
         "QTabBar::tab {"
-        "  background: #1f1f1f;"
-        "  color: #9b9b9b;"
+        "  background: palette(window);"
+        "  color: palette(text);"
         "  min-width: 78px;"
         "  height: 30px;"
         "  padding: 0 8px;"
-        "  border-right: 1px solid #333333;"
+        "  border-right: 1px solid palette(mid);"
         "}"
-        "QTabBar::tab:selected { background: #2b2b2b; color: #ffffff; }"
-        "QComboBox, QLineEdit { background: #555555; color: #eeeeee; border: 1px solid #777777; padding: 2px 6px; }"
-        "QPushButton { background: #3f3f3f; color: #eeeeee; border: 1px solid #565656; }"
-        "QPushButton:hover { background: #505050; }"
-        "QListWidget { background: #1f1f1f; border: 0; outline: 0; }"
+        "QTabBar::tab:selected { background: palette(highlight); color: palette(highlighted-text); }"
+        "QComboBox, QLineEdit { background: palette(button); color: palette(text); border: 1px solid palette(mid); padding: 2px 6px; }"
+        "QPushButton { background: palette(button); color: palette(text); border: 1px solid palette(mid); }"
+        "QPushButton:hover { background: palette(midlight); }"
+        "QListWidget { background: palette(window); border: 0; outline: 0; }"
         "QListWidget::item { color: transparent; }"
-        "QListWidget::item:selected { background: #3b5f8f; }"
+        "QListWidget::item:selected { background: palette(highlight); }"
     );
 
     auto library = std::make_shared<MaterialLibrary>();
@@ -8097,28 +8344,28 @@ void MainWindow::CreateMaterialLibraryDock() {
 void MainWindow::CreateToolsPanel(QDockWidget* dock) {
     tools_panel_ = new QWidget(dock);
     tools_layout_ = new QGridLayout(tools_panel_);
-    tools_layout_->setContentsMargins(8, 8, 8, 8);
+    tools_layout_->setContentsMargins(2, 8, 2, 8);
     tools_layout_->setHorizontalSpacing(4);
     tools_layout_->setVerticalSpacing(4);
 
     tools_panel_->setStyleSheet(
         "QPushButton {"
-        "  background-color: #f6f6f6;"
-        "  border: 1px solid #b9b9b9;"
+        "  background-color: palette(button);"
+        "  border: 1px solid palette(mid);"
         "  border-radius: 2px;"
         "}"
         "QPushButton:hover:!disabled {"
-        "  background-color: #eaf2ff;"
-        "  border-color: #6ea0e8;"
+        "  background-color: palette(midlight);"
+        "  border-color: palette(mid);"
         "}"
         "QPushButton[placeholder=\"true\"] {"
-        "  background-color: #eeeeee;"
-        "  border-color: #b9b9b9;"
+        "  background-color: palette(button);"
+        "  border-color: palette(mid);"
         "}"
         "QPushButton:checked {"
-        "  background-color: #2f80ed;"
-        "  color: white;"
-        "  border: 1px solid #1f5fbf;"
+        "  background-color: palette(highlight);"
+        "  color: palette(highlighted-text);"
+        "  border: 1px solid palette(mid);"
         "  font-weight: 600;"
         "}"
     );
@@ -8140,6 +8387,7 @@ void MainWindow::AddToolButton(QGridLayout* layout, QWidget* parent, const std::
         button->setToolTip("Polyhedron: select one open or closed Sketch. Open ends are capped; choose the rotation axis and number of sides.");
     button->setFixedSize(42, 36);
     RegisterToolButton(button, key);
+    button->setIconSize(QSize(32, 32));
     if (key == "TrimMeshTest") {
         button->setIcon(QIcon());
         button->setText("Trim M");
@@ -8152,70 +8400,73 @@ void MainWindow::AddToolButton(QGridLayout* layout, QWidget* parent, const std::
     } else if (key == "MeshIslandBoundaries") {
         button->setIcon(QIcon());
         button->setText("Islands");
+    } else if (key == "MeshImageRelief") {
+        button->setIcon(QIcon());
+        button->setText("Relief");
     } else if (key == "WeldingVertex") {
         button->setIcon(QIcon());
         button->setText("Weld");
     } else if (key == "SolidHole") {
-        button->setIcon(QIcon());
-        button->setText("Hole");
+        button->setIcon(ToolIcon(key));
+        button->setText(QString());
     } else if (key == "MeshBoundaryLine") {
         button->setIcon(QIcon());
         button->setText("Bound");
-    } else if (key == "DrawSpline") {
-        button->setIcon(ToolIcon(key));
-        button->setText("Draw");
     } else if (key == "kitchen_layout") {
         button->setIcon(QIcon()); button->setText("Kitchen");
         button->setToolTip("Kitchen Layout - straight/corner rows and parametric modules");
     } else if (key == "CurveJoin") {
-        button->setIcon(QIcon()); button->setText("Join");
+        button->setIcon(ToolIcon(key)); button->setText(QString());
         button->setToolTip(
             "Join Curves — select two or more open curves; press Enter");
     } else if (key == "CurveSplit") {
-        button->setIcon(QIcon()); button->setText("Split");
+        button->setIcon(ToolIcon(key)); button->setText(QString());
         button->setToolTip(
             "Split at Intersection — select two intersecting curves; press Enter");
     } else if (key == "CurveCutByCurve") {
-        button->setIcon(QIcon()); button->setText("Cut C");
+        button->setIcon(ToolIcon(key)); button->setText(QString());
         button->setToolTip(
             "Cut Curve — select the curve to split, then select the cutting curve");
     } else if (key == "CurveExtend") {
-        button->setIcon(QIcon()); button->setText("Extend");
+        button->setIcon(ToolIcon(key)); button->setText(QString());
         button->setToolTip(
             "Extend — click one curve end, or preselect one curve to extend both ends");
     } else if (key == "CurveOffset") {
-        button->setIcon(QIcon()); button->setText("Offset");
+        button->setIcon(ToolIcon(key)); button->setText(QString());
         button->setToolTip(
             "Offset Curve — create a parametric parallel curve on the same plane");
     } else if (key == "CurveMirrorCopy") {
-        button->setIcon(QIcon()); button->setText("Mirror");
+        button->setIcon(ToolIcon(key)); button->setText(QString());
         button->setToolTip(
             "Mirror Copy — create a parametric mirrored copy of each selected curve");
     } else if (key == "CurveLinkedBridge") {
-        button->setIcon(QIcon()); button->setText("Bridge");
+        button->setIcon(ToolIcon(key)); button->setText(QString());
         button->setToolTip("Bridge Curves — create a connecting curve between two ends");
     } else if (key == "CurveEndpointLink") {
-        button->setIcon(QIcon()); button->setText("Link");
+        button->setIcon(ToolIcon(key)); button->setText(QString());
         button->setToolTip(
             "Link Curves — keep touching endpoints together");
+    } else if (key == "SolidContourPanel") {
+        button->setIcon(ToolIcon(key)); button->setText(QString());
+        button->setToolTip("Panel from Contour — select a surface and a curve; set gap and recess depth");
     } else if (key == "SurfaceSmartHybrid") {
-        button->setIcon(QIcon()); button->setText("Hybrid");
+        button->setIcon(ToolIcon(key)); button->setText(QString());
         button->setToolTip(
             "Smart Hybrid — build parametric patches from a selected curve network and create a Solid when closed");
     } else if (key == "CurveTrimByPlane") {
-        button->setIcon(QIcon()); button->setText("Trim P");
+        button->setIcon(ToolIcon(key)); button->setText(QString());
         button->setToolTip(
             "Trim by Plane — select a curve and define or select the cutting plane");
     } else if (key == "CurveSimplifyByPoint") {
-        button->setIcon(QIcon()); button->setText("Split P");
+        button->setIcon(ToolIcon(key)); button->setText(QString());
         button->setToolTip(
             "Split by Point — select one curve, press Enter, then click the split position");
     } else if (key == "CurveReverse") {
-        button->setIcon(QIcon()); button->setText("Reverse");
+        button->setIcon(ToolIcon(key)); button->setText(QString());
         button->setToolTip(
             "Reverse Curve — reverse the direction of every selected curve");
     } else if (key == "NurbsParametersTool") {
-        button->setIcon(QIcon()); button->setText("NURBS P");
+        button->setIcon(ToolIcon(key)); button->setText(QString());
         button->setToolTip(
             "NURBS Parameters — select one B-Spline or NURBS curve to edit degree and weights");
     }
@@ -8225,6 +8476,7 @@ void MainWindow::AddToolButton(QGridLayout* layout, QWidget* parent, const std::
 
 void MainWindow::AddPlaceholderButton(QGridLayout* layout, QWidget* parent, const QString& icon_key, const QString& title, int row, int column) {
     auto* button = new QPushButton(parent);
+    button->setProperty("toolKey", icon_key);
     button->setToolTip(title);
     button->setIcon(ToolIcon(icon_key.toStdString()));
     button->setIconSize(QSize(28, 28));
@@ -8863,6 +9115,7 @@ void MainWindow::BeginMeasurePointToPoint() {
 
 void MainWindow::SetTool(ToolMode tool, const QString& status_text) {
     low_poly_pick_pending_ = false;
+    image_relief_pick_pending_ = false;
     if (pending_group_command_ != PendingGroupCommand::None) {
         pending_group_command_ = PendingGroupCommand::None;
         viewport_->SetSelectionConfirmationMode(false);
@@ -9309,8 +9562,8 @@ void MainWindow::ShowLayerProperties() {
         "}"
         "QListWidget::item:selected,"
         "QListWidget::item:selected:!active {"
-        "  background: #0a84ff;"
-        "  color: #ffffff;"
+        "  background: palette(highlight);"
+        "  color: palette(highlighted-text);"
         "}"
     );
     root->addWidget(list);
@@ -9588,7 +9841,7 @@ void MainWindow::ShowFacadeManager() {
     auto* affected = new QLabel(
         QString("Editable furniture assemblies: %1").arg(target_ids.size()),
         dialog);
-    affected->setStyleSheet("QLabel { color: #666666; padding-top: 8px; }");
+    affected->setStyleSheet("QLabel { color: palette(text); padding-top: 8px; }");
     layout->addWidget(affected);
 
     auto* buttons = new QDialogButtonBox(
@@ -11443,8 +11696,33 @@ bool MainWindow::BridgeSelectedCurves() {
         return false;
     }
 
+    const double tolerance = std::clamp(QSettings("Dom3D", "Dom3D_Pro")
+        .value("preferences/modeling/tolerance", 0.02).toDouble(), 0.001, 10.0);
+    bool occupied[2][2]{};
+    for (size_t c=0;c<2;++c) for (size_t side=0;side<2;++side) {
+        const auto id=curves[c].object->m_id;
+        const auto& point=side ? curves[c].points->back() : curves[c].points->front();
+        for (const auto& link : document_.GetCurveEndpointLinks()) {
+            if ((link.first_id==id && link.first_end==bool(side) && document_.FindObjectById(link.second_id))
+                || (link.second_id==id && link.second_end==bool(side) && document_.FindObjectById(link.first_id)))
+                occupied[c][side]=true;
+        }
+        for (const auto& other : document_.GetObjects()) {
+            if (other.get()==curves[c].object) continue;
+            const auto* points=CurveControlPoints(other.get());
+            const auto* polyline=dynamic_cast<const CPolyline*>(other.get());
+            const auto* spline=dynamic_cast<const CBSpline*>(other.get());
+            if (!points || points->size()<2 || (polyline && polyline->IsClosed())
+                || (spline && spline->IsClosed())) continue;
+            // Include unselected/hidden bridges and imported touching curves.
+            for (const auto& end : {points->front(),points->back()})
+                if (std::hypot(std::hypot(point.x-end.x,point.y-end.y),point.z-end.z)<=tolerance)
+                    occupied[c][side]=true;
+        }
+    }
     size_t first_end = 0;
     size_t second_end = 0;
+    int fewest_occupied = 3;
     double nearest = std::numeric_limits<double>::max();
     for (size_t first_side = 0; first_side < 2; ++first_side) {
         const CPoint3d& first = first_side == 0
@@ -11456,7 +11734,9 @@ bool MainWindow::BridgeSelectedCurves() {
             const double dy = first.y - second.y;
             const double dz = first.z - second.z;
             const double distance_squared = dx * dx + dy * dy + dz * dz;
-            if (distance_squared < nearest) {
+            const int used=int(occupied[0][first_side])+int(occupied[1][second_side]);
+            if (used < fewest_occupied || (used == fewest_occupied && distance_squared < nearest)) {
+                fewest_occupied = used;
                 nearest = distance_squared;
                 first_end = first_side;
                 second_end = second_side;
@@ -11468,18 +11748,24 @@ bool MainWindow::BridgeSelectedCurves() {
     auto* layout = new QVBoxLayout(&dialog);
     auto* form = new QFormLayout;
     auto* mode = new QComboBox(&dialog);
-    mode->addItems({"Straight", "Smooth"});
-    mode->setCurrentIndex(1);
+    mode->addItems({"Straight", "Smooth", "Spline"});
+    mode->setToolTip("Spline: linked endpoints with freely editable intermediate control points.");
+    QSettings bridge_settings;
+    mode->setCurrentIndex(std::clamp(
+        bridge_settings.value("curves/bridge/connection", 1).toInt(), 0, 2));
     auto* handle = new QDoubleSpinBox(&dialog);
     handle->setRange(0.0, 200.0);
     handle->setDecimals(1);
     handle->setSuffix(" %");
     handle->setValue(33.0);
     handle->setSingleStep(1.0);
+    handle->setEnabled(mode->currentIndex() == 1);
     auto* first_endpoint = new QComboBox(&dialog);
+    first_endpoint->setObjectName("BridgeFirstEndpoint");
     first_endpoint->addItems({"Start", "End"});
     first_endpoint->setCurrentIndex(static_cast<int>(first_end));
     auto* second_endpoint = new QComboBox(&dialog);
+    second_endpoint->setObjectName("BridgeSecondEndpoint");
     second_endpoint->addItems({"Start", "End"});
     second_endpoint->setCurrentIndex(static_cast<int>(second_end));
     form->addRow("Connection", mode);
@@ -11492,7 +11778,7 @@ bool MainWindow::BridgeSelectedCurves() {
         second_endpoint);
     layout->addLayout(form);
     connect(mode, &QComboBox::currentIndexChanged, handle,
-            [handle](int index) { handle->setEnabled(index != 0); });
+            [handle](int index) { handle->setEnabled(index == 1); });
     auto* buttons = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
@@ -11500,13 +11786,14 @@ bool MainWindow::BridgeSelectedCurves() {
     layout->addWidget(buttons);
     if (dialog.exec() != QDialog::Accepted) return false;
 
+    bridge_settings.setValue("curves/bridge/connection", mode->currentIndex());
     undo_redo_.BeginChange();
     const size_t count_before = document_.GetObjects().size();
     tool_registry_.CreateParametricObject(
         "CurveLinkedBridge", document_,
         {{"mode", "Connection", static_cast<double>(mode->currentIndex()),
-             0.0, 1.0, 1.0, ToolParameterType::Combo,
-             {"Straight", "Smooth"}},
+             0.0, 2.0, 1.0, ToolParameterType::Combo,
+             {"Straight", "Smooth", "Spline"}},
          {"handle_percent", "Handle Length", handle->value(),
              0.0, 200.0, 1.0},
          {"curve1.id", "Curve 1 ID",
@@ -11534,10 +11821,137 @@ bool MainWindow::BridgeSelectedCurves() {
     RefreshSceneTree();
     viewport_->update();
     statusBar()->showMessage(
-        QString("Bridge Curves: nearest %1 points linked parametrically")
+        QString("Bridge Curves: selected %1 endpoints linked parametrically")
             .arg(mode->currentText().toLower()),
         2800);
     return true;
+}
+
+void MainWindow::CreatePanelFromContour() {
+    QDialog dialog(this);
+    dialog.setWindowTitle("Panel from Contour");
+    dialog.setObjectName("PanelFromContourDialog");
+    auto* layout = new QFormLayout(&dialog);
+    auto* bodies = new QComboBox(&dialog);
+    auto* curves = new QComboBox(&dialog);
+    auto* faces = new QComboBox(&dialog);
+    bodies->setObjectName("PanelSource"); curves->setObjectName("PanelCurve"); faces->setObjectName("PanelFace");
+    unsigned long selected_body = 0, selected_curve = 0;
+    const auto& selection = document_.GetSelectedObjectIndices();
+    for (size_t i = 0; i < document_.GetObjects().size(); ++i) {
+        auto* object = document_.GetObjects()[i].get();
+        if (!object || !document_.IsObjectVisible(*object)) continue;
+        document_.EnsureObjectId(*object);
+        const bool selected = std::find(selection.begin(), selection.end(), i) != selection.end();
+        if (const auto* solid = dynamic_cast<const CSolid*>(object)) {
+            if (solid->m_Shape.IsNull()) continue;
+            bodies->addItem(QString::fromStdString(object->GetName()), QVariant::fromValue(qulonglong(object->m_id)));
+            if (selected || solid->HasSelectedFace()) selected_body = object->m_id;
+        } else if (dynamic_cast<const CBSpline*>(object) || dynamic_cast<const CPolyline*>(object)
+                   || dynamic_cast<const CSmartLine*>(object)) {
+            if (document_.BuildCurveWire(object->m_id).IsNull()) continue;
+            curves->addItem(QString::fromStdString(object->GetName()), QVariant::fromValue(qulonglong(object->m_id)));
+            if (selected) selected_curve = object->m_id;
+        }
+    }
+    if (!bodies->count() || !curves->count()) {
+        statusBar()->showMessage("Panel: a CAD surface and a contour curve are required", 4000);
+        return;
+    }
+    if (selected_body) bodies->setCurrentIndex(bodies->findData(QVariant::fromValue(qulonglong(selected_body))));
+    if (selected_curve) curves->setCurrentIndex(curves->findData(QVariant::fromValue(qulonglong(selected_curve))));
+    Vec3 forward, right, up;
+    camera_basis(viewport_->GetCamera(), forward, right, up);
+    const gp_Dir direction(forward.x, forward.y, forward.z);
+    const auto source = [&]() {
+        return dynamic_cast<CSolid*>(document_.FindObjectById(static_cast<unsigned long>(bodies->currentData().toULongLong())));
+    };
+    std::vector<TopoDS_Face> source_faces;
+    const auto refresh_faces = [&]() {
+        faces->clear(); source_faces.clear();
+        auto* body = source();
+        if (!body) return;
+        for (TopExp_Explorer it(body->m_Shape, TopAbs_FACE); it.More(); it.Next()) {
+            source_faces.push_back(TopoDS::Face(it.Current()));
+            faces->addItem(QString("Surface %1").arg(source_faces.size()));
+        }
+        if (body->HasSelectedFace() && body->GetSelectedFaceIndex() < faces->count()) {
+            faces->setCurrentIndex(body->GetSelectedFaceIndex());
+        } else {
+            const auto wire = document_.BuildCurveWire(static_cast<unsigned long>(curves->currentData().toULongLong()));
+            for (size_t i = 0; i < source_faces.size(); ++i) {
+                PanelContourResult probe; std::string error;
+                if (BuildPanelContourShape(body->m_Shape, source_faces[i], wire, direction, false, 0, 0, probe, error)) {
+                    faces->setCurrentIndex(static_cast<int>(i)); break;
+                }
+            }
+        }
+    };
+    connect(bodies, qOverload<int>(&QComboBox::currentIndexChanged), &dialog, [&](int) { refresh_faces(); });
+    connect(curves, qOverload<int>(&QComboBox::currentIndexChanged), &dialog, [&](int) { refresh_faces(); });
+    refresh_faces();
+    auto* side = new QComboBox(&dialog);
+    side->addItems({"Smaller region", "Larger region"});
+    side->setObjectName("PanelRegion");
+    auto* gap = new QDoubleSpinBox(&dialog);
+    auto* depth = new QDoubleSpinBox(&dialog);
+    gap->setObjectName("PanelGap"); depth->setObjectName("PanelDepth");
+    auto* thickness = new QDoubleSpinBox(&dialog);
+    thickness->setObjectName("PanelThickness"); thickness->setRange(0.001,10000);
+    thickness->setDecimals(3); thickness->setSingleStep(0.1); thickness->setValue(1.0);
+    thickness->setToolTip("Thickness T extends inward from the panel surface");
+    for (auto* distance : {gap, depth}) { distance->setRange(0,10000); distance->setDecimals(3); distance->setSingleStep(0.1); }
+    depth->setMinimum(-10000);
+    gap->setToolTip("Panel border inset measured in the current view's projection plane");
+    depth->setToolTip("Positive depth moves the panel inward; negative depth moves it outward along the surface normal");
+    layout->addRow("Body", bodies); layout->addRow("Surface", faces); layout->addRow("Contour", curves);
+    layout->addRow("Panel", side); layout->addRow("Gap", gap); layout->addRow("Recess depth", depth);
+    layout->addRow("Thickness T", thickness);
+    auto* info = new QLabel("Projection follows the current view. Use a closed contour or an open curve crossing both boundaries. Both parts are kept; the original body is hidden.", &dialog);
+    info->setWordWrap(true); info->setMaximumWidth(430); layout->addRow(info);
+    auto* error_label = new QLabel(&dialog); error_label->setWordWrap(true); error_label->setMaximumWidth(430);
+    error_label->setStyleSheet("color: #c05040;"); layout->addRow(error_label);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addRow(buttons);
+    while (dialog.exec() == QDialog::Accepted) {
+        auto* body = source();
+        const int face_index = faces->currentIndex();
+        if (!body || face_index < 0 || face_index >= static_cast<int>(source_faces.size())) return;
+        const unsigned long curve_id = static_cast<unsigned long>(curves->currentData().toULongLong());
+        PanelContourResult built; std::string error;
+        if (!BuildPanelContourShape(body->m_Shape, source_faces[face_index], document_.BuildCurveWire(curve_id),
+                direction, side->currentIndex() == 1, gap->value(), depth->value(), built, error, thickness->value())) {
+            error_label->setText(QString::fromStdString(error)); continue;
+        }
+        auto panel = std::make_unique<CSolid>(built.panel);
+        std::unique_ptr<CSolid> surround = std::make_unique<CSurfaceSet>(built.remainder);
+        std::vector<ParametricParameterValue> parameters{
+            {"surface.id", double(body->m_id)}, {"profile.id", double(curve_id)},
+            {"face.index", double(face_index)}, {"projection.x", forward.x},
+            {"projection.y", forward.y}, {"projection.z", forward.z},
+            {"larger_region", double(side->currentIndex())}, {"gap", gap->value()},
+            {"depth", depth->value()}, {"thickness", thickness->value()}, {"output", 0}};
+        for (auto* output : {panel.get(), surround.get()}) {
+            output->SetMaterial(body->GetMaterial()); output->SetMaterialId(body->GetMaterialId());
+            output->SetColor(body->GetColor());
+        }
+        panel->SetName("Contour Panel"); surround->SetName("Panel Surround");
+        if (!panel->ReBuldMesh() || !surround->ReBuldMesh()) {
+            error_label->setText("Cannot build the panel display mesh."); continue;
+        }
+        panel->SetParametricOperation(0, "SolidContourPanel", "Panel from Contour", parameters);
+        parameters.back().value = 1;
+        surround->SetParametricOperation(0, "SolidContourPanel", "Panel from Contour", parameters);
+        undo_redo_.BeginChange();
+        body->SetVisible(false);
+        document_.AddObject(std::move(surround)); document_.AddObject(std::move(panel));
+        undo_redo_.CommitChange("Panel from Contour");
+        UpdateUndoRedoActions(); RefreshSceneTree(); viewport_->update();
+        statusBar()->showMessage("Panel and surrounding surfaces created. The original body is hidden.", 4500);
+        return;
+    }
 }
 
 bool MainWindow::CreateSmartHybridFromSelectedCurves() {
@@ -11554,9 +11968,9 @@ bool MainWindow::CreateSmartHybridFromSelectedCurves() {
         document_.EnsureObjectId(*object);
         curve_ids.push_back(object->m_id);
     }
-    if (curve_ids.size() < 4 || curve_ids.size() > 32) {
+    if (curve_ids.size() < 4) {
         statusBar()->showMessage(
-            "Smart Hybrid: select 4 to 32 open curves forming a connected frame",
+            "Smart Hybrid: select at least 4 open curves forming a connected frame",
             3200);
         return false;
     }
@@ -11602,8 +12016,15 @@ bool MainWindow::CreateSmartHybridFromSelectedCurves() {
     set_value("sewing_tolerance", tolerance->value());
     set_value("curve.count", static_cast<double>(curve_ids.size()));
     for (size_t index = 0; index < curve_ids.size(); ++index) {
-        set_value("curve" + std::to_string(index + 1) + ".id",
-                  static_cast<double>(curve_ids[index]));
+        const std::string id = "curve" + std::to_string(index + 1) + ".id";
+        const auto found = std::find_if(parameters.begin(), parameters.end(),
+            [&id](const ToolParameter& parameter) { return parameter.id == id; });
+        if (found != parameters.end()) {
+            found->value = static_cast<double>(curve_ids[index]);
+        } else {
+            parameters.push_back({id, id, static_cast<double>(curve_ids[index]),
+                                  0.0, 4294967295.0, 1.0});
+        }
     }
 
     undo_redo_.BeginChange();
@@ -12633,6 +13054,28 @@ void MainWindow::ExtractSurfaceEdge() {
         QString("Extract Edge:operation completed").arg(created), 1800);
 }
 
+void MainWindow::ExtractPickedFace() {
+    if(pending_group_command_!=PendingGroupCommand::ExtractFace) return;
+    auto* source=document_.GetSelectedFaceSolid();
+    auto* face=source ? source->GetSurfaceFace(source->GetSelectedFaceIndex()) : nullptr;
+    if(!face) return;
+    TopoDS_Shape shape=BRepBuilderAPI_Copy(face->m_Face).Shape();
+    auto extracted=std::make_unique<CSurfaceSet>(shape);
+    extracted->SetName("Extracted Face");
+    extracted->SetColor(source->GetColor());
+    if(!extracted->ReBuldMesh()) {
+        statusBar()->showMessage("Extract Face: cannot build this surface");return;
+    }
+    pending_group_command_=PendingGroupCommand::None;
+    viewport_->SetSelectionConfirmationMode(false);
+    viewport_->SetSelectionMode(SelectionMode::Object);
+    document_.AddObject(std::move(extracted));
+    RecordDocumentChange("Extract face");
+    UpdateActiveToolUi("select");
+    RefreshSceneTree();viewport_->update();
+    statusBar()->showMessage("Extract Face: surface created",1800);
+}
+
 void MainWindow::CreateFourSplineSurface() {
     if (!document_.CreateFourSplineSurfaceFromSelection()) {
         pending_group_command_ = PendingGroupCommand::FourSplineSurface;
@@ -12848,6 +13291,7 @@ void MainWindow::ShowSurfaceTextureEditor() {
         connect(fit_to_surface, &QCheckBox::toggled, &dialog, [apply_preview](bool) { apply_preview(); });
 
         auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+        SetDefaultDialogAccept(&dialog, buttons);
         connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
         connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
         layout->addWidget(buttons);
@@ -12971,6 +13415,7 @@ void MainWindow::ShowSurfaceTextureEditor() {
     connect(fit_to_surface, &QCheckBox::toggled, &dialog, [apply_preview](bool) { apply_preview(); });
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    SetDefaultDialogAccept(&dialog, buttons);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     layout->addWidget(buttons);
@@ -13325,6 +13770,7 @@ void MainWindow::ShowSurfaceFilmDialog(size_t object_index, int operation_index)
     layout->addWidget(note);
     auto* buttons = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    SetDefaultDialogAccept(&dialog, buttons);
     layout->addWidget(buttons);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
@@ -13675,11 +14121,11 @@ void MainWindow::ShowCurveQuickPalette() {
     palette->setAttribute(Qt::WA_DeleteOnClose, true);
     palette->setWindowTitle("Curves — Q");
     palette->setStyleSheet(
-        "QDialog#CurveQuickPalette { background: #292929; border: 1px solid #5b5b5b; }"
-        "QLabel { color: #d8d8d8; font-weight: 600; }"
-        "QToolButton { color: #dedede; background: #333333; border: 1px solid transparent; border-radius: 2px; }"
-        "QToolButton:hover { background: #484848; border-color: #777777; }"
-        "QToolButton:pressed { background: #1f6fb2; }"
+        "QDialog#CurveQuickPalette { background: palette(window); border: 1px solid palette(mid); }"
+        "QLabel { color: palette(text); font-weight: 600; }"
+        "QToolButton { color: palette(text); background: palette(button); border: 1px solid transparent; border-radius: 2px; }"
+        "QToolButton:hover { background: palette(button); border-color: palette(mid); }"
+        "QToolButton:pressed { background: palette(highlight); }"
     );
     connect(palette, &QObject::destroyed, this, [this]() {
         curve_quick_palette_ = nullptr;
@@ -13712,6 +14158,7 @@ void MainWindow::ShowCurveQuickPalette() {
         button->setToolButtonStyle(button->icon().isNull()
             ? Qt::ToolButtonTextOnly : Qt::ToolButtonIconOnly);
         button->setToolTip(label);
+        button->setProperty("toolKey", QString::fromStdString(icon_key));
         connect(button, &QToolButton::clicked, palette,
                 [palette, command = std::move(command)]() mutable {
             palette->close();
@@ -13908,16 +14355,7 @@ void MainWindow::ShowPreciseMoveDialog() {
     connect(cancel_button, &QPushButton::clicked,
             command_dialog, &QDialog::close);
 
-    const auto bind_enter_to_ok = [command_dialog, ok_button](int key) {
-        auto* shortcut = new QShortcut(QKeySequence(key), command_dialog);
-        shortcut->setContext(Qt::WidgetWithChildrenShortcut);
-        QObject::connect(shortcut, &QShortcut::activated,
-                         command_dialog, [ok_button]() {
-            ok_button->click();
-        });
-    };
-    bind_enter_to_ok(Qt::Key_Return);
-    bind_enter_to_ok(Qt::Key_Enter);
+    SetDefaultDialogAccept(command_dialog, ok_button);
     connect(command_dialog, &QObject::destroyed, this, [this]() {
         precise_move_dialog_ = nullptr;
         if (viewport_->CurrentTool() == ToolMode::MovePointToPoint) {
@@ -13988,7 +14426,7 @@ void MainWindow::ShowPreciseMoveDialog() {
     point_hint->setWordWrap(true);
     points_layout->addWidget(point_hint);
     auto* point_mode_label = new QLabel("3D snaps and visible object vertices are used.", points_page);
-    point_mode_label->setStyleSheet("QLabel { color: #707070; }");
+    point_mode_label->setStyleSheet("QLabel { color: palette(text); }");
     point_mode_label->setWordWrap(true);
     points_layout->addWidget(point_mode_label);
     points_layout->addStretch(1);
@@ -14131,6 +14569,7 @@ void MainWindow::BeginMoveTwoPointEntry() {
         cancel_button->setFixedWidth(82);
         root->addWidget(cancel_button, 0, Qt::AlignHCenter);
 
+        SetDefaultDialogAccept(dialog, ok_button);
         auto dialog_handled = std::make_shared<bool>(false);
         const auto complete_point = [this, dialog, state, dialog_handled](Vec3 point) {
             *dialog_handled = true;
@@ -14334,6 +14773,7 @@ void MainWindow::ShowPreciseRotateDialog() {
     root->addWidget(hint);
     auto* buttons = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel, dialog);
+    SetDefaultDialogAccept(dialog, buttons);
     root->addWidget(buttons);
     connect(buttons, &QDialogButtonBox::accepted, dialog,
             [this, dialog, angle, center, direction]() {
@@ -14453,6 +14893,7 @@ void MainWindow::ShowPreciseScaleDialog() {
     update_guide();
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    SetDefaultDialogAccept(&dlg, buttons);
     root->addWidget(buttons);
     connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
@@ -15053,9 +15494,9 @@ void MainWindow::ShowSketchPanel() {
         });
 
         panel->setStyleSheet(
-            "QPushButton { background: #f5f5f5; border: 1px solid #9b9b9b; color: #111; }"
-            "QPushButton:checked { border: 2px solid #d71920; }"
-            "QPushButton:disabled { color: #777; background: #eeeeee; }"
+            "QPushButton { background: palette(button); border: 1px solid palette(mid); color: palette(text); }"
+            "QPushButton:checked { border: 1px solid palette(mid); }"
+            "QPushButton:disabled { color: palette(text); background: palette(button); }"
         );
         sketch_dock_->setWidget(panel);
         addDockWidget(Qt::RightDockWidgetArea, sketch_dock_);
@@ -15281,6 +15722,7 @@ void MainWindow::ApplySheetBend() {
     auto* buttons = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
     auto* preview_button = buttons->addButton("Preview", QDialogButtonBox::ActionRole);
+    SetDefaultDialogAccept(&dialog, buttons);
     preview_button->setObjectName("sheetBendPreview");
     buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
     auto* preview_error = new QLabel(&dialog);
@@ -15581,6 +16023,21 @@ void MainWindow::CancelArchitectureOpeningPlacement() {
 }
 
 void MainWindow::ActivateParametricTool(const std::string& tool_id) {
+    if(tool_id=="SolidShell") {
+        if(pending_group_command_!=PendingGroupCommand::ShellReady) {
+            ClearActiveProperties();
+            document_.ClearSelection();
+            viewport_->SetTool(ToolMode::Select);
+            viewport_->SetSelectionMode(SelectionMode::Face);
+            viewport_->SetSelectionConfirmationMode(true);
+            pending_group_command_=PendingGroupCommand::ShellPick;
+            UpdateActiveToolUi(tool_id);
+            statusBar()->showMessage(DomTranslate("Shell: click a surface"));
+            viewport_->setFocus();return;
+        }
+        pending_group_command_=PendingGroupCommand::None;
+        viewport_->SetSelectionConfirmationMode(false);
+    }
     if (tool_id == "kitchen_layout") {
         auto* selected = document_.GetSelectedObject();
         auto* kitchen = selected ? FindKitchenLayout(document_, selected->m_id) : nullptr;
@@ -15610,6 +16067,9 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
     }
     if (tool_id != "SolidLowPoly") {
         low_poly_pick_pending_ = false;
+    }
+    if (tool_id != "MeshImageRelief") {
+        image_relief_pick_pending_ = false;
     }
     if (tool_id != "MeshIslandBoundaries") {
         mesh_island_boundary_pick_active_ = false;
@@ -15751,6 +16211,10 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         ShowLowPolyTool();
         return;
     }
+    if (tool_id == "MeshImageRelief") {
+        ShowImageReliefTool();
+        return;
+    }
     if (tool_id == "MeshFillContour") {
         ShowMeshFillContourTool();
         return;
@@ -15778,6 +16242,11 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
     if (tool_id == "SolidTwoSketches") {
         ClearActiveProperties();
         CreateBodyFromTwoSketches();
+        return;
+    }
+    if (tool_id == "SurfaceSweepTwoRails") {
+        ClearActiveProperties();
+        CreateTwoRailSweepSurface();
         return;
     }
     if (tool_id == "SolidSweepTwoRails") {
@@ -15897,6 +16366,18 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         ProjectCurveToSurface();
         return;
     }
+    if(tool_id=="ExtractFaceTool") {
+        ClearActiveProperties();
+        document_.ClearSelection();
+        viewport_->SetTool(ToolMode::Select);
+        viewport_->SetSelectionMode(SelectionMode::Face);
+        viewport_->SetSelectionConfirmationMode(true);
+        pending_group_command_=PendingGroupCommand::ExtractFace;
+        UpdateActiveToolUi(tool_id);
+        statusBar()->showMessage(DomTranslate("Extract Face: click a surface of the body"));
+        viewport_->setFocus();
+        return;
+    }
     if (tool_id == "ExtractSurfaceEdge") {
         ExtractSurfaceEdge();
         return;
@@ -15949,6 +16430,11 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
     }
     if (tool_id == "CurveEndpointLink") {
         LinkSelectedCurves();
+        UpdateActiveToolUi("select");
+        return;
+    }
+    if (tool_id == "SolidContourPanel") {
+        CreatePanelFromContour();
         UpdateActiveToolUi("select");
         return;
     }
@@ -16409,17 +16895,10 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         property_panel_->SetActiveObject(active_parametric_object_);
         ShowPropertyPanelAtCursor("Chamfer");
         viewport_->SetTool(ToolMode::Select);
-        viewport_->SetSelectionMode(SelectionMode::Edge);
+        SetEdgeToolSelectionMode(*viewport_,document_);
         UpdateActiveToolUi(tool_id);
 
-        if (document_.HasSelectedSolidEdge() && !TryStartLiveEdgeToolFromSelection()) {
-            document_.CancelLiveChamfer();
-            active_parametric_object_ = {};
-            UpdateActiveToolUi("select");
-            viewport_->SetTool(ToolMode::Select);
-            statusBar()->showMessage("Chamfer:operation failed; check the selected geometry and parameters");
-            return;
-        }
+        TryStartLiveEdgeToolFromSelection();
         RefreshSceneTree();
         viewport_->update();
         statusBar()->showMessage(document_.HasLiveChamfer()
@@ -16430,16 +16909,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
 
     if (tool_id == "fillet_edge" || tool_id == "fillet_all_edges") {
         ClearActiveProperties();
-        const bool selected_edge = document_.HasSelectedSolidEdge();
-        const bool selected_body = document_.GetSelectedSolid() != nullptr;
-        const bool all_edges = tool_id == "fillet_all_edges"
-            || (tool_id == "fillet_edge" && selected_body && !selected_edge);
-        if (!selected_edge && !selected_body) {
-            UpdateActiveToolUi("select");
-            viewport_->SetTool(ToolMode::Select);
-            statusBar()->showMessage("Fillet Solid: select an edge or a body");
-            return;
-        }
+        const bool all_edges = tool_id == "fillet_all_edges" && document_.GetSelectedSolid();
         const std::string operation_tool_id = all_edges
             ? "fillet_all_edges" : "fillet_edge";
         const ToolDefinition* definition = tool_registry_.Find("fillet_edge");
@@ -16462,7 +16932,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         ShowPropertyPanelAtCursor("Fillet Solid");
         viewport_->SetTool(ToolMode::SolidFillet);
         if (!all_edges) {
-            viewport_->SetSelectionMode(SelectionMode::Edge);
+            SetEdgeToolSelectionMode(*viewport_,document_);
         }
         UpdateActiveToolUi("fillet_edge");
 
@@ -16476,9 +16946,6 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         if (should_start_now && (!started || !document_.HasLiveFillet())) {
             document_.CancelLiveFillet();
             undo_redo_.CancelChange();
-            active_parametric_object_ = {};
-            UpdateActiveToolUi("select");
-            viewport_->SetTool(ToolMode::Select);
             statusBar()->showMessage("Fillet:operation failed; check the selected geometry and parameters");
             return;
         }
@@ -16618,7 +17085,7 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         active_parametric_object_ = tool_registry_.PrepareParametricObject(
             tool_id, document_, parameters);
         active_cabinet_parameters_dirty_ = true;
-    } else if (tool_id != "SurfaceRuled" && tool_id != "SolidShell") {
+    } else if (tool_id != "SurfaceRuled" && tool_id != "SolidShell" && tool_id != "SurfaceBulge") {
         if (IsFurnitureAssemblyTool(tool_id)) {
             undo_redo_.BeginChange();
         }
@@ -16629,11 +17096,6 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         }
     }
 
-    if (tool_id == "SurfaceSweepTwoRails") {
-        ClearActiveProperties();
-        CreateTwoRailSweepSurface();
-        return;
-    }
 
     if (tool_id == "SurfaceJoin") {
         ClearActiveProperties();
@@ -16677,7 +17139,8 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
             "Ruled Surface:adjust the required parameters and continue");
         return;
     }
-    if (tool_id == "SolidShell") {
+    if (tool_id == "SolidShell" || tool_id == "SurfaceBulge") {
+        const bool bulge = tool_id == "SurfaceBulge";
         ClearActiveProperties();
         CSolid* source = document_.HasSelectedSolidFace()
             ? document_.GetSelectedFaceSolid()
@@ -16687,10 +17150,19 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         if (source && face_index < 0 && source->GetNumSurfaces() == 1) {
             face_index = 0;
         }
+        if (bulge && source && face_index<0 && TopExp_Explorer(source->m_Shape,TopAbs_SOLID).More()) {
+            double largest=-1;
+            for(int i=0;i<source->GetNumSurfaces();++i) {
+                const auto* face=source->GetSurfaceFace(i);
+                if(!face) continue;
+                GProp_GProps properties; BRepGProp::SurfaceProperties(face->m_Face,properties);
+                if(properties.Mass()>largest) {largest=properties.Mass();face_index=i;}
+            }
+        }
         if (!source || face_index < 0 || !source->GetSurfaceFace(face_index)) {
             UpdateActiveToolUi("select");
             statusBar()->showMessage(
-                "Shell:select one surface face and continue", 2400);
+                bulge ? "Panel Bulge: select one surface face" : "Shell:select one surface face and continue", 2400);
             return;
         }
 
@@ -16703,6 +17175,10 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
                 parameter.value = static_cast<double>(source->m_id);
             } else if (parameter.id == "face.index") {
                 parameter.value = static_cast<double>(face_index);
+            } else if (!bulge && parameter.id=="distance") {
+                const double remembered=QSettings().value("tools/SolidShell/lastAcceptedDistance",2.0).toDouble();
+                parameter.value=std::isfinite(remembered) && std::abs(remembered)>1.e-7
+                    && std::abs(remembered)<=1000 ? remembered : 2.0;
             }
         }
         active_parametric_object_ = tool_registry_.CreateParametricObject(
@@ -16714,14 +17190,14 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
             return;
         }
         property_panel_->SetActiveObject(active_parametric_object_);
-        ShowPropertyPanelAtCursor("Shell");
+        ShowPropertyPanelAtCursor(bulge ? "Panel Bulge" : "Shell");
         viewport_->SetTool(ToolMode::Select);
         viewport_->SetSelectionMode(SelectionMode::Object);
         UpdateActiveToolUi(tool_id);
         RefreshSceneTree();
         viewport_->update();
         statusBar()->showMessage(
-            "Shell:adjust the distance and continue");
+            bulge ? "Panel Bulge: adjust Bulge Height; the boundary stays fixed" : "Shell:adjust the distance and continue");
         return;
     }
     if (!active_parametric_object_.tool_id.empty()) {
@@ -16757,6 +17233,40 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
     RefreshSceneTree();
     viewport_->update();
     statusBar()->showMessage(QString("%1 applied").arg(QString::fromStdString(tool_id)));
+}
+
+void MainWindow::ShowImageReliefTool() {
+    if (!document_.HasSelectedSolidFace() || !document_.GetSelectedFaceSolid()) {
+        ClearActiveProperties();
+        viewport_->SetTool(ToolMode::Select);
+        viewport_->SetSelectionMode(SelectionMode::Face);
+        image_relief_pick_pending_ = true;
+        UpdateActiveToolUi("MeshImageRelief");
+        statusBar()->showMessage(DomTranslate(
+            "Image Relief: click the face that will receive the ornament."));
+        return;
+    }
+    image_relief_pick_pending_ = false;
+    auto* solid = document_.GetSelectedFaceSolid();
+    const int face_index = solid->GetSelectedFaceIndex();
+    ClearActiveProperties();
+    viewport_->SetTool(ToolMode::Select);
+    UpdateActiveToolUi("MeshImageRelief");
+    ImageReliefDialog dialog(*solid, this, face_index);
+    if (dialog.exec() == QDialog::Accepted) {
+        auto mesh = dialog.TakeMesh();
+        if (mesh && undo_redo_.BeginChange()) {
+            const size_t count = mesh->GetFaces().size();
+            if (dialog.HideSource()) solid->SetVisible(false);
+            document_.AddMesh(std::move(mesh));
+            undo_redo_.CommitChange("Image Relief");
+            UpdateUndoRedoActions();
+            RefreshSceneTree();
+            statusBar()->showMessage(DomTranslate("Relief mesh created: %1 triangles").arg(count), 5000);
+        }
+    }
+    UpdateActiveToolUi("select");
+    viewport_->update();
 }
 
 void MainWindow::ShowLowPolyTool() {
@@ -17517,12 +18027,22 @@ bool MainWindow::ActiveParametricObjectIsAssembly() const {
 }
 
 bool MainWindow::TryStartLiveEdgeToolFromSelection() {
+    if (!active_parametric_edit_existing_
+        && (active_parametric_object_.tool_id=="fillet_edge" || active_parametric_object_.tool_id=="ChamferSolid")
+        && !document_.HasLiveFillet() && !document_.HasLiveChamfer()) {
+        if (auto* solid=document_.GetSelectedSolid(); solid && !solid->HasSelectedEdge() && solid->HasSelectedFace()) {
+            for (int face:solid->GetSelectedFaceIndices())
+                for (int edge=0;edge<solid->GetSurfaceFace(face)->GetEdgeCount();++edge)
+                    solid->AddSelectedEdge(face,edge);
+        }
+        if (document_.GetSelectedSolid()) active_parametric_object_.object_index=document_.GetSelectedObjectIndex();
+    }
     if (active_parametric_object_.tool_id == "fillet_edge") {
         if (document_.HasLiveFillet()) {
             return true;
         }
         if (!document_.HasSelectedSolidEdge()) {
-            statusBar()->showMessage("Fillet: select edges of one solid; set the radius and confirm");
+            statusBar()->showMessage("Fillet: select faces or edges; for a whole body press All Edges");
             return false;
         }
         undo_redo_.BeginChange();
@@ -17553,21 +18073,23 @@ bool MainWindow::TryStartLiveEdgeToolFromSelection() {
             return true;
         }
         if (!document_.HasSelectedSolidEdge()) {
-            statusBar()->showMessage("Chamfer: select edges of one solid; set the chamfer distance and confirm");
+            statusBar()->showMessage("Chamfer: select faces or edges; for a whole body press All Edges");
             return false;
         }
         const double distance = active_parametric_object_.parameters.empty() ? 1.0 : active_parametric_object_.parameters[0].value;
         undo_redo_.BeginChange();
-        if (!document_.BeginLiveChamferSelectedEdges() || !document_.UpdateLiveChamfer(distance)) {
+        if (!document_.BeginLiveChamferSelectedEdges()) {
             document_.CancelLiveChamfer();
             undo_redo_.CancelChange();
             statusBar()->showMessage("Chamfer:operation failed; check the selected geometry and parameters");
             return false;
         }
+        const bool valid=document_.UpdateLiveChamfer(distance);
         viewport_->SetSolidDimensionEdit(active_parametric_object_, "distance");
         RefreshSceneTree();
         viewport_->update();
-        statusBar()->showMessage("Chamfer:adjust the required parameters and continue");
+        statusBar()->showMessage(valid ? "Chamfer: adjust the distance and confirm"
+            : "Chamfer: reduce the distance; the selected edges are retained");
         return true;
     }
 
@@ -17670,7 +18192,7 @@ void MainWindow::StartPendingLiveFilletRebuild() {
                     } else if (current && !success) {
                         window->document_.RejectLiveFilletPreview();
                         window->statusBar()->showMessage(
-                            "Fillet: radius is too large; the last valid preview is preserved",
+                            "Fillet: cannot build this radius on the selected geometry; the last valid preview is preserved",
                             2600);
                     }
                     if (window->live_fillet_build_pending_
@@ -18160,7 +18682,8 @@ void MainWindow::AcceptActiveProperties() {
         && active_parametric_object_.tool_id == "SurfaceRuled";
     const bool created_shell =
         !active_parametric_edit_existing_
-        && active_parametric_object_.tool_id == "SolidShell";
+        && (active_parametric_object_.tool_id == "SolidShell"
+            || active_parametric_object_.tool_id == "SurfaceBulge");
     if (!active_parametric_edit_existing_
         && IsCabinetTool(active_parametric_object_.tool_id)
         && active_parametric_object_.object_index
@@ -18376,6 +18899,10 @@ void MainWindow::AcceptActiveProperties() {
             statusBar()->showMessage("Chamfer: select edges of one solid; set the chamfer distance and confirm", 1600);
             return;
         }
+        if (!document_.UpdateLiveChamfer(distance)) {
+            statusBar()->showMessage("Chamfer: reduce the distance until a valid preview is shown");
+            return;
+        }
         const std::vector<int> created_surface_indices = document_.GetLiveChamferCreatedSurfaceIndices();
         document_.FinishLiveChamfer();
         if (auto* solid = document_.GetSelectedSolid()) {
@@ -18479,7 +19006,11 @@ void MainWindow::AcceptActiveProperties() {
         RecordDocumentChange("Create ruled surface");
     }
     if (created_shell) {
-        RecordDocumentChange("Create shell");
+        RecordDocumentChange(active_parametric_object_.tool_id == "SurfaceBulge" ? "Create panel bulge" : "Create shell");
+    }
+    if(active_parametric_object_.tool_id=="SolidShell") {
+        for(const auto& parameter:active_parametric_object_.parameters)
+            if(parameter.id=="distance") QSettings().setValue("tools/SolidShell/lastAcceptedDistance",parameter.value);
     }
 
     active_parametric_object_ = {};
@@ -18748,38 +19279,32 @@ QIcon MainWindow::ToolIcon(const std::string& key) const {
         icon_key = "BooleanSolid";
     } else if (icon_key == "fillet_edge" || icon_key == "fillet_all_edges") {
         icon_key = "FilletSolid";
-    } else if (icon_key == "PolylineCurve" || icon_key == "BSplineCurve"
-               || icon_key == "DrawSpline"
-               || icon_key == "BezierCurve3D" || icon_key == "NurbsCurve3D") {
+    } else if (icon_key == "PolylineCurve") {
         icon_key = "curve";
-    } else if (icon_key == "EditPoint") {
-        icon_key = "select";
-    } else if (icon_key == "CurveFillets") {
-        return SketchFilletIcon();
     } else if (icon_key == "NewSketch") {
         return NewSketchIcon();
     } else if (icon_key == "SurfaceLoft") {
-        return LoftSurfaceIcon();
+        return QIcon(":/icons/SurfaceLoft.png");
     } else if (icon_key == "SurfaceTangentCap") {
-        return LoftSurfaceIcon();
+        return QIcon(":/icons/SurfaceTangentCap.png");
     } else if (icon_key == "SurfaceRuled") {
-        return LoftSurfaceIcon();
-    } else if (icon_key == "SolidShell") {
-        return QIcon(":/icons/ThickSolidTool.png");
+        return QIcon(":/icons/SurfaceRuled.png");
+    } else if (icon_key == "SurfaceBulge") {
+        return QIcon(":/icons/SurfaceBulge.png");
     } else if (icon_key == "SurfaceSweepTwoRails") {
         return QIcon(":/icons/SurfaceSweepTwoRails.png");
     } else if (icon_key == "SurfaceFourSplines") {
-        return QIcon(":/icons/SurfaceFourSplines.svg");
+        return QIcon(":/icons/SurfaceFourSplines.png");
     } else if (icon_key == "SurfaceJoin") {
-        return LoftSurfaceIcon();
+        return QIcon(":/icons/SurfaceJoin.png");
+    } else if (icon_key == "SurfaceSmartHybrid") {
+        return QIcon(":/icons/SmartHybrid.png");
     } else if (icon_key == "SolidSweepTwoRails") {
-        icon_key = "SolidSweptTool";
+        return QIcon(":/icons/SolidSweepTwoRails.png");
     } else if (icon_key == "SurfaceReverseNormals") {
         return ReverseNormalsIcon();
     } else if (icon_key == "SolidFrameTool") {
         return FrameSolidIcon();
-    } else if (icon_key == "SolidWireTool") {
-        icon_key = "SolidSweptTool";
     } else if (icon_key == "SolidTwoSketches") {
         return BodyByTwoSketchesIcon();
     } else if (icon_key == "chair" || icon_key == "chair_simple") {
@@ -18795,12 +19320,8 @@ QIcon MainWindow::ToolIcon(const std::string& key) const {
                || icon_key == "kitchen_nika_260"
                || icon_key == "kitchen_corner") {
         icon_key = "cabinet";
-    } else if (icon_key == "PlaneTool" || icon_key == "SurfaceRevolve") {
+    } else if (icon_key == "SurfaceRevolve") {
         icon_key = "SurfaceOfRevolution";
-    } else if (icon_key == "room") {
-        icon_key = "stair";
-    } else if (icon_key == "SolidOffsetFace") {
-        icon_key = "SolidExtrudeFace";
     }
     return QIcon(QString(":/icons/%1.png").arg(icon_key));
 }
@@ -19337,6 +19858,7 @@ bool MainWindow::ImportFileFromPath(const QString& path, bool catalog_sketch) {
         const std::string pbr_key = key + "\n"
             + material.source_file_path + "\n"
             + EncodePlaster(material).toStdString() + "\n"
+            + EncodePerforation(material).toStdString() + "\n"
             + EncodeFabric(material).toStdString() + "\n"
             + material.normal_texture_path + "\n"
             + material.roughness_texture_path + "\n"
@@ -20033,6 +20555,7 @@ void MainWindow::ShowLinearArrayDialog() {
     form->addRow("Spacing", spacing);
     auto* buttons = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    SetDefaultDialogAccept(&dialog, buttons);
     form->addRow(buttons);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
@@ -20115,6 +20638,7 @@ void MainWindow::ShowRadialArrayDialog() {
     form->addRow("Center Z", center[2]);
     auto* buttons = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    SetDefaultDialogAccept(&dialog, buttons);
     form->addRow(buttons);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
@@ -20217,6 +20741,7 @@ void MainWindow::ShowRectangularArrayDialog() {
     form->addRow("Plane", plane);
     auto* buttons = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    SetDefaultDialogAccept(&dialog, buttons);
     form->addRow(buttons);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
@@ -20302,6 +20827,7 @@ void MainWindow::MirrorSelectedObject() {
     form->addRow("Offset", offset);
     layout->addLayout(form);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    SetDefaultDialogAccept(&dialog, buttons);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     layout->addWidget(buttons);
@@ -20748,7 +21274,17 @@ void MainWindow::PopulateToolsPanelForTab(int tab_index) {
         delete item;
     }
 
+    // QGridLayout retains row constraints after its items are removed.
+    // A previous tab's bottom spacer must not stretch a tool row on this tab.
+    for (int row = 0; row < tools_layout_->rowCount(); ++row) {
+        tools_layout_->setRowStretch(row, 0);
+        tools_layout_->setRowMinimumHeight(row, 0);
+    }
+
     const QString tab = tool_tabs_->tabData(tab_index).toString();
+    // Two 42 px buttons, a 4 px gap, and 2 px on each side. Prevent the
+    // restored dock width from distributing extra space around tool buttons.
+    tools_dock_->setFixedWidth(92);
     tools_dock_->setWindowTitle(tool_tabs_->tabText(tab_index));
     tools_dock_->setVisible(tab == "Architecture" || tab == "Furniture" || tab == "Surfaces" || tab == "Solid" || tab == "Curves" || tab == "Mesh 3D");
 
@@ -20766,23 +21302,32 @@ void MainWindow::PopulateToolsPanelForTab(int tab_index) {
                 QSettings settings;
                 const bool expanded = settings.value(settings_key, true).toBool();
                 auto* header = new QToolButton(section);
-                header->setText(title);
+                const auto update_header_text = [header, title]() {
+                    const QString translated = DomTranslate(title);
+                    header->setToolTip(translated);
+                    QString wrapped = translated;
+                    wrapped.replace(' ', '\n');
+                    header->setText(wrapped);
+                };
+                update_header_text();
+                connect(&LanguageManager::Instance(), &LanguageManager::LanguageChanged,
+                        header, update_header_text);
                 header->setCheckable(true);
                 header->setChecked(expanded);
                 header->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
                 header->setArrowType(expanded ? Qt::DownArrow : Qt::RightArrow);
-                header->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+                header->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
                 header->setStyleSheet(
                     "QToolButton { text-align: left; font-weight: 600; padding: 3px; "
-                    "border: 1px solid #9b9b9b; background: #e9e9e9; }"
-                    "QToolButton:hover { background: #dceaff; }");
+                    "border: 1px solid palette(mid); background: palette(button); color: palette(button-text); }"
+                    "QToolButton:hover { background: palette(midlight); }");
                 section_layout->addWidget(header);
 
                 auto* content = new QWidget(section);
                 auto* grid = new QGridLayout(content);
-                grid->setContentsMargins(5, 3, 0, 4);
-                grid->setHorizontalSpacing(5);
-                grid->setVerticalSpacing(5);
+                grid->setContentsMargins(0, 3, 0, 4);
+                grid->setHorizontalSpacing(4);
+                grid->setVerticalSpacing(4);
                 for (size_t index = 0; index < ids.size(); ++index) {
                     AddToolButton(grid, content, ids[index],
                                   static_cast<int>(index / 2),
@@ -20827,44 +21372,45 @@ void MainWindow::PopulateToolsPanelForTab(int tab_index) {
                     "single_facade", "kitchen_layout", "kitchen_nika_260",
                     "kitchen_corner"};
     } else if (tab == "Mesh 3D") {
-        tool_ids = {"MeshCushion", "MeshFillContour", "MeshIslandBoundaries",
+        tool_ids = {"MeshImageRelief", "MeshCushion", "MeshFillContour", "MeshIslandBoundaries",
                     "WeldingVertex",
                     "MeshBoundaryLine", "SolidLowPoly",
                     "TrimMeshTest", "ClassifyFaceCut"};
     } else if (tab == "Surfaces") {
         tool_ids = {"PlaneTool", "SurfaceSmartHybrid", "SurfaceRuled", "SurfaceLoft", "SurfaceTangentCap", "SurfaceSweepTwoRails", "SurfaceFourSplines", "SurfaceJoin", "SurfaceReverseNormals", "SurfaceRevolve"};
     } else if (tab == "Solid") {
-        tool_ids = {"SolidBeamTool", "SolidBox", "SolidCylinder", "SolidSphereTool", "SolidTorusTool", "SolidPrismTool", "SolidExtrudeTool", "SolidTwoSketches", "SolidSketchFeature", "SolidHole", "SolidSweptTool", "SolidSweepTwoRails", "SolidFrameTool", "SolidWireTool", "SolidPolyhedronTool", "TrimByPlane", "TrimBySketch", "TrimBySurface", "SurfaceOfRevolution", "boolean", "fillet_edge", "ChamferSolid", "SolidExtrudeFace", "SolidOffsetFace", "SolidDraft", "SolidSheetBend", "ThickSolidTool", "SolidShell"};
+        // Row pairs follow the Solid palette: construction above, editing below.
+        // Empty entries preserve the intentional gaps at the end of each group.
+        tool_ids = {
+            "SolidBox",             "SolidCylinder",
+            "SolidExtrudeTool",     "SolidPrismTool",
+            "SurfaceOfRevolution",  "SolidTwoSketches",
+            "SolidBeamTool",        "SolidSweptTool",
+            "SewingFaceTool",       "SolidShell",
+            "SolidFrameTool",       "SolidWireTool",
+            "SolidPolyhedronTool",  "SolidSweepTwoRails",
+            "SolidTorusTool",       "SolidSphereTool",
+            "SolidContourPanel",    "",
+            "fillet_edge",          "ChamferSolid",
+            "boolean",              "SolidSketchFeature",
+            "TrimByPlane",          "TrimBySketch",
+            "TrimBySurface",        "SolidHole",
+            "SolidDraft",           "SolidSheetBend",
+            "ThickSolidTool",       "SurfaceBulge",
+            "SolidExtrudeFace",     "SolidOffsetFace",
+            "ExtractFaceTool",      ""
+        };
     }
 
     int index = 0;
     for (const std::string& tool_id : tool_ids) {
-        AddToolButton(tools_layout_, tools_panel_, tool_id, index / 2, index % 2);
+        if (!tool_id.empty()) {
+            AddToolButton(tools_layout_, tools_panel_, tool_id, index / 2, index % 2);
+        }
         ++index;
     }
 
-    if (tab == "Solid") {
-        const std::vector<std::pair<QString, QString>> placeholders = {
-            {"DeleteFaceOrEdge", "Delete Face or Edge"},
-            {"ExtractFaceTool", "Extract Face"},
-            {"SewingFaceTool", "Sew Faces"},
-            {"SplitRings", "Split Rings"},
-            {"SolidInSet", "Inset"},
-            {"SolidTransform", "Solid Transform"}
-        };
-        for (const auto& placeholder : placeholders) {
-            if (placeholder.first == "SewingFaceTool") {
-                AddToolButton(
-                    tools_layout_, tools_panel_,
-                    placeholder.first.toStdString(), index / 2, index % 2);
-            } else {
-                AddPlaceholderButton(
-                    tools_layout_, tools_panel_, placeholder.first,
-                    placeholder.second, index / 2, index % 2);
-            }
-            ++index;
-        }
-    } else if (tab == "Surfaces") {
+    if (tab == "Surfaces") {
         const std::vector<std::pair<QString, QString>> placeholders = {
             {"SurfaceSweep", "Sweep Surface"},
             {"SurfacePatch", "Patch Surface"},

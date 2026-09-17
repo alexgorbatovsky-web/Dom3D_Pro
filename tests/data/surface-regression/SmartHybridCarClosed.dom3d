@@ -1,0 +1,447 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<dom3dProject version="1">
+  <objects>
+    <object id="3" type="BSpline" name="NURBS 3D" room="Lines" materialId="1" objectColorR="1" objectColorG="0.262745112" objectColorB="0.572549045" visible="true" layerId="2" lineWidth="0.5" lineStyle="CONTINUOUS">
+      <transform>
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <geometry kind="b-spline" curveType="nurbs" degree="3" closed="false">
+        <point x="-626.898682" y="72.4792099" z="217.636444" weight="1" />
+        <point x="-519.984375" y="141.703339" z="217.636444" weight="1" />
+        <point x="-380.366852" y="180.695618" z="217.636444" weight="1" />
+        <point x="-219.36647" y="186.940399" z="217.636444" weight="1" />
+      </geometry>
+    </object>
+    <object id="4" type="BSpline" name="NURBS 3D" room="Lines" materialId="1" objectColorR="1" objectColorG="0.262745112" objectColorB="0.572549045" visible="true" layerId="2" lineWidth="0.5" lineStyle="CONTINUOUS">
+      <transform>
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <geometry kind="b-spline" curveType="nurbs" degree="2" closed="false">
+        <point x="-219.36647" y="186.940399" z="217.636444" weight="1" />
+        <point x="-147.671051" y="276.24527" z="217.636444" weight="1" />
+        <point x="-35.725441" y="347.940765" z="198.588989" weight="1" />
+      </geometry>
+    </object>
+    <object id="5" type="BSpline" name="NURBS 3D" room="Lines" materialId="1" objectColorR="1" objectColorG="0.262745112" objectColorB="0.572549045" visible="true" layerId="2" lineWidth="0.5" lineStyle="CONTINUOUS">
+      <transform>
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <geometry kind="b-spline" curveType="nurbs" degree="3" closed="false">
+        <point x="-35.725441" y="347.940765" z="198.588989" weight="1" />
+        <point x="115.212318" y="371.839233" z="198.588989" weight="1" />
+        <point x="256.087677" y="359.261108" z="198.588989" weight="1" />
+        <point x="396.963013" y="327.815704" z="198.588989" weight="1" />
+      </geometry>
+    </object>
+    <object id="7" type="BSpline" name="NURBS 3D" room="Lines" materialId="1" objectColorR="1" objectColorG="0.262745112" objectColorB="0.572549045" visible="true" layerId="2" lineWidth="0.5" lineStyle="CONTINUOUS">
+      <transform>
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <geometry kind="b-spline" curveType="nurbs" degree="2" closed="false">
+        <point x="396.963013" y="327.815704" z="198.588989" weight="1" />
+        <point x="430.924042" y="251.088974" z="217.636444" weight="1" />
+        <point x="453.564667" y="202.034164" z="217.636444" weight="1" />
+      </geometry>
+    </object>
+    <object id="8" type="BSpline" name="NURBS 3D" room="Lines" materialId="1" objectColorR="1" objectColorG="0.262745112" objectColorB="0.572549045" visible="true" layerId="2" lineWidth="0.5" lineStyle="CONTINUOUS">
+      <transform>
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <geometry kind="b-spline" curveType="nurbs" degree="2" closed="false">
+        <point x="453.564667" y="202.034164" z="217.636444" weight="1" />
+        <point x="590.666565" y="205.807632" z="217.636444" weight="1" />
+        <point x="731.541931" y="180.651321" z="217.636444" weight="1" />
+      </geometry>
+    </object>
+    <object id="11" type="BSpline" name="NURBS 3D Mirror" room="Lines" materialId="1" objectColorR="1" objectColorG="0.262745112" objectColorB="0.572549045" visible="true" layerId="2" lineWidth="0.5" lineStyle="CONTINUOUS">
+      <transform>
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <geometry kind="b-spline" curveType="nurbs" degree="3" closed="false">
+        <point x="-626.898682" y="72.4792099" z="-217.636444" weight="1" />
+        <point x="-519.984375" y="141.703339" z="-217.636444" weight="1" />
+        <point x="-380.366852" y="180.695618" z="-217.636444" weight="1" />
+        <point x="-219.36647" y="186.940399" z="-217.636444" weight="1" />
+      </geometry>
+    </object>
+    <object id="12" type="BSpline" name="NURBS 3D Mirror" room="Lines" materialId="1" objectColorR="1" objectColorG="0.262745112" objectColorB="0.572549045" visible="true" layerId="2" lineWidth="0.5" lineStyle="CONTINUOUS">
+      <transform>
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <geometry kind="b-spline" curveType="nurbs" degree="2" closed="false">
+        <point x="-219.36647" y="186.940399" z="-217.636444" weight="1" />
+        <point x="-147.671051" y="276.24527" z="-217.636444" weight="1" />
+        <point x="-35.725441" y="347.940765" z="-198.588989" weight="1" />
+      </geometry>
+    </object>
+    <object id="13" type="BSpline" name="NURBS 3D Mirror" room="Lines" materialId="1" objectColorR="1" objectColorG="0.262745112" objectColorB="0.572549045" visible="true" layerId="2" lineWidth="0.5" lineStyle="CONTINUOUS">
+      <transform>
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <geometry kind="b-spline" curveType="nurbs" degree="3" closed="false">
+        <point x="-35.725441" y="347.940765" z="-198.588989" weight="1" />
+        <point x="115.212318" y="371.839233" z="-198.588989" weight="1" />
+        <point x="256.087677" y="359.261108" z="-198.588989" weight="1" />
+        <point x="396.963013" y="327.815704" z="-198.588989" weight="1" />
+      </geometry>
+    </object>
+    <object id="15" type="BSpline" name="NURBS 3D Mirror" room="Lines" materialId="1" objectColorR="1" objectColorG="0.262745112" objectColorB="0.572549045" visible="true" layerId="2" lineWidth="0.5" lineStyle="CONTINUOUS">
+      <transform>
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <geometry kind="b-spline" curveType="nurbs" degree="2" closed="false">
+        <point x="396.963013" y="327.815704" z="-198.588989" weight="1" />
+        <point x="430.924042" y="251.088974" z="-217.636444" weight="1" />
+        <point x="453.564667" y="202.034164" z="-217.636444" weight="1" />
+      </geometry>
+    </object>
+    <object id="16" type="BSpline" name="NURBS 3D Mirror" room="Lines" materialId="1" objectColorR="1" objectColorG="0.262745112" objectColorB="0.572549045" visible="true" layerId="2" lineWidth="0.5" lineStyle="CONTINUOUS">
+      <transform>
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <geometry kind="b-spline" curveType="nurbs" degree="2" closed="false">
+        <point x="453.564667" y="202.034164" z="-217.636444" weight="1" />
+        <point x="590.666565" y="205.807632" z="-217.636444" weight="1" />
+        <point x="731.541931" y="180.651321" z="-217.636444" weight="1" />
+      </geometry>
+    </object>
+    <object id="19" type="BSpline" name="Linked Curve" room="Lines" materialId="1" objectColorR="1" objectColorG="0.262745112" objectColorB="0.572549045" visible="true" layerId="2" lineWidth="0.5" lineStyle="CONTINUOUS">
+      <transform>
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <geometry kind="b-spline" curveType="bezier" degree="3" closed="false">
+        <point x="-626.898682" y="72.4792099" z="-217.636444" />
+        <point x="-645.527771" y="97.3971252" z="-72.5454788" />
+        <point x="-645.527771" y="97.3971252" z="72.5454941" />
+        <point x="-626.898682" y="72.4792099" z="217.636444" />
+      </geometry>
+    </object>
+    <object id="20" type="BSpline" name="Linked Curve" room="Lines" materialId="1" objectColorR="1" objectColorG="0.262745112" objectColorB="0.572549045" visible="true" layerId="2" lineWidth="0.5" lineStyle="CONTINUOUS">
+      <transform>
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <geometry kind="b-spline" curveType="bezier" degree="3" closed="false">
+        <point x="-219.36647" y="186.940399" z="-217.636444" />
+        <point x="-226.281433" y="202.741318" z="-72.5454788" />
+        <point x="-226.281433" y="202.741318" z="72.5454865" />
+        <point x="-219.36647" y="186.940399" z="217.636444" />
+      </geometry>
+    </object>
+    <object id="21" type="BSpline" name="Linked Curve" room="Lines" materialId="1" objectColorR="1" objectColorG="0.262745112" objectColorB="0.572549045" visible="true" layerId="2" lineWidth="0.5" lineStyle="CONTINUOUS">
+      <transform>
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <geometry kind="b-spline" curveType="bezier" degree="3" closed="false">
+        <point x="-35.725441" y="347.940765" z="-198.588989" />
+        <point x="-35.725441" y="378.924255" z="-72.5454788" />
+        <point x="-35.725441" y="378.924255" z="53.4980278" />
+        <point x="-35.725441" y="347.940765" z="198.588989" />
+      </geometry>
+    </object>
+    <object id="22" type="BSpline" name="Linked Curve" room="Lines" materialId="1" objectColorR="1" objectColorG="0.262745112" objectColorB="0.572549045" visible="true" layerId="2" lineWidth="0.5" lineStyle="CONTINUOUS">
+      <transform>
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <geometry kind="b-spline" curveType="bezier" degree="3" closed="false">
+        <point x="396.963013" y="327.815704" z="-198.588989" />
+        <point x="396.963013" y="358.799194" z="-72.5454788" />
+        <point x="396.963013" y="358.799194" z="53.4980278" />
+        <point x="396.963013" y="327.815704" z="198.588989" />
+      </geometry>
+    </object>
+    <object id="23" type="BSpline" name="Linked Curve" room="Lines" materialId="1" objectColorR="1" objectColorG="0.262745112" objectColorB="0.572549045" visible="true" layerId="2" lineWidth="0.5" lineStyle="CONTINUOUS">
+      <transform>
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <geometry kind="b-spline" curveType="bezier" degree="3" closed="false">
+        <point x="453.564667" y="202.034164" z="217.636444" />
+        <point x="453.564667" y="202.034164" z="72.5454788" />
+        <point x="453.564667" y="202.034164" z="-72.5454865" />
+        <point x="453.564667" y="202.034164" z="-217.636444" />
+      </geometry>
+    </object>
+    <object id="25" type="BSpline" name="Linked Curve" room="Lines" materialId="1" objectColorR="1" objectColorG="0.262745112" objectColorB="0.572549045" visible="true" layerId="2" lineWidth="0.5" lineStyle="CONTINUOUS">
+      <transform>
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <geometry kind="b-spline" curveType="bezier" degree="3" closed="false">
+        <point x="731.541931" y="180.651321" z="217.636444" />
+        <point x="755.407227" y="198.152527" z="72.5454788" />
+        <point x="755.407227" y="198.152527" z="-72.5454865" />
+        <point x="731.541931" y="180.651321" z="-217.636444" />
+      </geometry>
+    </object>
+    <object id="27" type="BSpline" name="Linked Curve" room="Lines" materialId="1" objectColorR="1" objectColorG="0.262745112" objectColorB="0.572549045" visible="true" layerId="2" lineWidth="0.5" lineStyle="CONTINUOUS">
+      <transform>
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <geometry kind="b-spline" curveType="bezier" degree="3" closed="false">
+        <point x="-219.36647" y="186.940399" z="-217.636444" />
+        <point x="4.94391537" y="191.971649" z="-217.636444" />
+        <point x="229.254303" y="197.002914" z="-217.636444" />
+        <point x="453.564667" y="202.034164" z="-217.636444" />
+      </geometry>
+    </object>
+    <object id="28" type="BSpline" name="Linked Curve" room="Lines" materialId="1" objectColorR="1" objectColorG="0.262745112" objectColorB="0.572549045" visible="true" layerId="2" lineWidth="0.5" lineStyle="CONTINUOUS">
+      <transform>
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <geometry kind="b-spline" curveType="bezier" degree="3" closed="false">
+        <point x="-219.36647" y="186.940399" z="217.636444" />
+        <point x="4.94391537" y="191.971649" z="217.636444" />
+        <point x="229.254303" y="197.002914" z="217.636444" />
+        <point x="453.564667" y="202.034164" z="217.636444" />
+      </geometry>
+    </object>
+    <object id="33" type="BSpline" name="B-Spline 3D" room="Lines" materialId="1" objectColorR="1" objectColorG="0.262745112" objectColorB="0.572549045" visible="true" layerId="2" lineWidth="0.5" lineStyle="CONTINUOUS">
+      <transform>
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <geometry kind="b-spline" curveType="b-spline" degree="2" closed="false">
+        <point x="-614.044373" y="-15.6203899" z="225.486725" />
+        <point x="-394.913483" y="-20.0622158" z="225.486725" />
+        <point x="-218.720337" y="-18.5816193" z="225.486725" />
+      </geometry>
+    </object>
+    <object id="34" type="BSpline" name="B-Spline 3D" room="Lines" materialId="1" objectColorR="1" objectColorG="0.262745112" objectColorB="0.572549045" visible="true" layerId="2" lineWidth="0.5" lineStyle="CONTINUOUS">
+      <transform>
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <geometry kind="b-spline" curveType="b-spline" degree="2" closed="false">
+        <point x="-218.720337" y="-18.5816193" z="225.486725" />
+        <point x="126.262894" y="-24.5040779" z="225.486725" />
+        <point x="450.517517" y="-25.9846745" z="225.486725" />
+      </geometry>
+    </object>
+    <object id="35" type="BSpline" name="B-Spline 3D" room="Lines" materialId="1" objectColorR="1" objectColorG="0.262745112" objectColorB="0.572549045" visible="true" layerId="2" lineWidth="0.5" lineStyle="CONTINUOUS">
+      <transform>
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <geometry kind="b-spline" curveType="b-spline" degree="2" closed="false">
+        <point x="450.517517" y="-25.9846745" z="225.486725" />
+        <point x="632.633179" y="-15.6203899" z="225.486725" />
+        <point x="724.431274" y="-0.814243317" z="225.486725" />
+      </geometry>
+    </object>
+    <object id="36" type="BSpline" name="B-Spline 3D Mirror" room="Lines" materialId="1" objectColorR="1" objectColorG="0.262745112" objectColorB="0.572549045" visible="true" layerId="2" lineWidth="0.5" lineStyle="CONTINUOUS">
+      <transform>
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <geometry kind="b-spline" curveType="b-spline" degree="2" closed="false">
+        <point x="-614.044373" y="-15.6203899" z="-225.486725" />
+        <point x="-394.913483" y="-20.0622158" z="-225.486725" />
+        <point x="-218.720337" y="-18.5816193" z="-225.486725" />
+      </geometry>
+    </object>
+    <object id="37" type="BSpline" name="B-Spline 3D Mirror" room="Lines" materialId="1" objectColorR="1" objectColorG="0.262745112" objectColorB="0.572549045" visible="true" layerId="2" lineWidth="0.5" lineStyle="CONTINUOUS">
+      <transform>
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <geometry kind="b-spline" curveType="b-spline" degree="2" closed="false">
+        <point x="-218.720337" y="-18.5816193" z="-225.486725" />
+        <point x="126.262894" y="-24.5040779" z="-225.486725" />
+        <point x="450.517517" y="-25.9846745" z="-225.486725" />
+      </geometry>
+    </object>
+    <object id="38" type="BSpline" name="B-Spline 3D Mirror" room="Lines" materialId="1" objectColorR="1" objectColorG="0.262745112" objectColorB="0.572549045" visible="true" layerId="2" lineWidth="0.5" lineStyle="CONTINUOUS">
+      <transform>
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <geometry kind="b-spline" curveType="b-spline" degree="2" closed="false">
+        <point x="450.517517" y="-25.9846745" z="-225.486725" />
+        <point x="632.633179" y="-15.6203899" z="-225.486725" />
+        <point x="724.431274" y="-0.814243317" z="-225.486725" />
+      </geometry>
+    </object>
+    <object id="39" type="BSpline" name="Linked Curve" room="Lines" materialId="1" objectColorR="1" objectColorG="0.262745112" objectColorB="0.572549045" visible="true" layerId="2" lineWidth="0.5" lineStyle="CONTINUOUS">
+      <transform>
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <geometry kind="b-spline" curveType="bezier" degree="3" closed="false">
+        <point x="-614.044373" y="-15.6203899" z="225.486725" />
+        <point x="-645.725708" y="-15.6203899" z="75.1622391" />
+        <point x="-645.725708" y="-15.6203899" z="-75.1622467" />
+        <point x="-614.044373" y="-15.6203899" z="-225.486725" />
+      </geometry>
+    </object>
+    <object id="40" type="BSpline" name="Linked Curve" room="Lines" materialId="1" objectColorR="1" objectColorG="0.262745112" objectColorB="0.572549045" visible="true" layerId="2" lineWidth="0.5" lineStyle="CONTINUOUS">
+      <transform>
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <geometry kind="b-spline" curveType="bezier" degree="3" closed="false">
+        <point x="724.431274" y="-0.814243317" z="225.486725" />
+        <point x="748.29657" y="-0.814243317" z="75.1622391" />
+        <point x="748.29657" y="-0.814243317" z="-75.1622467" />
+        <point x="724.431274" y="-0.814243317" z="-225.486725" />
+      </geometry>
+    </object>
+    <object id="41" type="BSpline" name="Linked Curve" room="Lines" materialId="1" objectColorR="1" objectColorG="0.262745112" objectColorB="0.572549045" visible="true" layerId="2" lineWidth="0.5" lineStyle="CONTINUOUS">
+      <transform>
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <geometry kind="b-spline" curveType="bezier" degree="3" closed="false">
+        <point x="-614.044373" y="-15.6203899" z="225.486725" />
+        <point x="-630.933044" y="13.7461443" z="222.869965" />
+        <point x="-635.217773" y="43.1126785" z="220.253204" />
+        <point x="-626.898682" y="72.4792099" z="217.636444" />
+      </geometry>
+    </object>
+    <object id="43" type="BSpline" name="Linked Curve" room="Lines" materialId="1" objectColorR="1" objectColorG="0.262745112" objectColorB="0.572549045" visible="true" layerId="2" lineWidth="0.5" lineStyle="CONTINUOUS">
+      <transform>
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <geometry kind="b-spline" curveType="bezier" degree="3" closed="false">
+        <point x="724.431274" y="-0.814243317" z="225.486725" />
+        <point x="726.801514" y="59.6742783" z="222.869965" />
+        <point x="729.171692" y="120.162804" z="220.253204" />
+        <point x="731.541931" y="180.651321" z="217.636444" />
+      </geometry>
+    </object>
+    <object id="45" type="BSpline" name="Linked Curve" room="Lines" materialId="1" objectColorR="1" objectColorG="0.262745112" objectColorB="0.572549045" visible="true" layerId="2" lineWidth="0.5" lineStyle="CONTINUOUS">
+      <transform>
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <geometry kind="b-spline" curveType="bezier" degree="3" closed="false">
+        <point x="-218.720337" y="-18.5816193" z="225.486725" />
+        <point x="-218.935715" y="49.925724" z="222.869965" />
+        <point x="-219.151093" y="118.433067" z="220.253204" />
+        <point x="-219.36647" y="186.940399" z="217.636444" />
+      </geometry>
+    </object>
+    <object id="46" type="BSpline" name="Linked Curve" room="Lines" materialId="1" objectColorR="1" objectColorG="0.262745112" objectColorB="0.572549045" visible="true" layerId="2" lineWidth="0.5" lineStyle="CONTINUOUS">
+      <transform>
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <geometry kind="b-spline" curveType="bezier" degree="3" closed="false">
+        <point x="450.517517" y="-25.9846745" z="225.486725" />
+        <point x="451.533234" y="50.0216064" z="222.869965" />
+        <point x="452.54895" y="126.027885" z="220.253204" />
+        <point x="453.564667" y="202.034164" z="217.636444" />
+      </geometry>
+    </object>
+    <object id="49" type="BSpline" name="Linked Curve Mirror" room="Lines" materialId="1" objectColorR="1" objectColorG="0.262745112" objectColorB="0.572549045" visible="true" layerId="2" lineWidth="0.5" lineStyle="CONTINUOUS">
+      <transform>
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <geometry kind="b-spline" curveType="bezier" degree="3" closed="false">
+        <point x="-614.044373" y="-15.6203899" z="-225.486725" />
+        <point x="-630.933044" y="13.7461443" z="-222.869965" />
+        <point x="-635.217773" y="43.1126785" z="-220.253204" />
+        <point x="-626.898682" y="72.4792099" z="-217.636444" />
+      </geometry>
+    </object>
+    <object id="50" type="BSpline" name="Linked Curve Mirror" room="Lines" materialId="1" objectColorR="1" objectColorG="0.262745112" objectColorB="0.572549045" visible="true" layerId="2" lineWidth="0.5" lineStyle="CONTINUOUS">
+      <transform>
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <geometry kind="b-spline" curveType="bezier" degree="3" closed="false">
+        <point x="-218.720337" y="-18.5816193" z="-225.486725" />
+        <point x="-218.935715" y="49.925724" z="-222.869965" />
+        <point x="-219.151093" y="118.433067" z="-220.253204" />
+        <point x="-219.36647" y="186.940399" z="-217.636444" />
+      </geometry>
+    </object>
+    <object id="51" type="BSpline" name="Linked Curve Mirror" room="Lines" materialId="1" objectColorR="1" objectColorG="0.262745112" objectColorB="0.572549045" visible="true" layerId="2" lineWidth="0.5" lineStyle="CONTINUOUS">
+      <transform>
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <geometry kind="b-spline" curveType="bezier" degree="3" closed="false">
+        <point x="450.517517" y="-25.9846745" z="-225.486725" />
+        <point x="451.533234" y="50.0216064" z="-222.869965" />
+        <point x="452.54895" y="126.027893" z="-220.253204" />
+        <point x="453.564667" y="202.034164" z="-217.636444" />
+      </geometry>
+    </object>
+    <object id="52" type="BSpline" name="Linked Curve Mirror" room="Lines" materialId="1" objectColorR="1" objectColorG="0.262745112" objectColorB="0.572549045" visible="true" layerId="2" lineWidth="0.5" lineStyle="CONTINUOUS">
+      <transform>
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <geometry kind="b-spline" curveType="bezier" degree="3" closed="false">
+        <point x="724.431274" y="-0.814243317" z="-225.486725" />
+        <point x="726.801514" y="59.6742783" z="-222.869965" />
+        <point x="729.171692" y="120.162804" z="-220.253204" />
+        <point x="731.541931" y="180.651321" z="-217.636444" />
+      </geometry>
+    </object>
+    <object id="53" type="Curve" name="Floor cross curve" room="Lines" visible="true">
+      <geometry kind="polyline" closed="false">
+        <point x="-218.720337" y="-18.5816193" z="225.486725" />
+        <point x="-218.720337" y="-18.5816193" z="-225.486725" />
+      </geometry>
+    </object>
+    <object id="54" type="Curve" name="Floor cross curve" room="Lines" visible="true">
+      <geometry kind="polyline" closed="false">
+        <point x="450.517517" y="-25.9846745" z="225.486725" />
+        <point x="450.517517" y="-25.9846745" z="-225.486725" />
+      </geometry>
+    </object>
+  </objects>
+</dom3dProject>

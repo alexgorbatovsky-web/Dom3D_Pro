@@ -123,6 +123,8 @@ public:
 	static void SetDisplayMode(SolidDisplayMode mode);
 	static bool IsEdgeDrawingEnabled();
 	static void SetEdgeDrawingEnabled(bool enabled);
+	static bool IsHiddenEdgeDrawingEnabled();
+	static void SetHiddenEdgeDrawingEnabled(bool enabled);
 	static bool IsSurfaceTransparencyEnabled();
 	static void SetSurfaceTransparencyEnabled(bool enabled);
 	static void SetHiddenLineBackgroundColor(const Color& color);
@@ -280,6 +282,7 @@ public:
 static	int NumReadFile;
 	static SolidDisplayMode s_DisplayMode;
 	static bool s_EdgeDrawingEnabled;
+	static bool s_HiddenEdgeDrawingEnabled;
 	static bool s_SurfaceTransparencyEnabled;
 	static Color s_HiddenLineBackgroundColor;
 	bool MeshQuadroX;

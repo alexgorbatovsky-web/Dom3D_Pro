@@ -1305,9 +1305,9 @@ DraftingWorkspace::DraftingWorkspace(QWidget* parent) : QWidget(parent) {
     tools_toolbar_->setMovable(false);
     tools_toolbar_->setMinimumWidth(118);
     tools_toolbar_->setStyleSheet(
-        "QToolBar { background: #eeeeee; border-left: 1px solid #999; spacing: 3px; padding: 5px; }"
+        "QToolBar { background: palette(window); border-left: 1px solid palette(mid); spacing: 3px; padding: 5px; }"
         "QToolButton { min-width: 100px; min-height: 28px; text-align: left; padding-left: 8px; }"
-        "QToolButton:checked { background: #287bd1; color: white; }");
+        "QToolButton:checked { background: palette(highlight); color: palette(highlighted-text); }");
 
     auto* tools = new QActionGroup(this);
     tools->setExclusive(true);

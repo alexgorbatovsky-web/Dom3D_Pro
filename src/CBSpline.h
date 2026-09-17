@@ -40,6 +40,8 @@ public:
     bool IsClosed() const;
     bool CanClose() const;
     void SetClosed(bool closed);
+    bool UsesLegacyClosedInterpolation() const { return legacy_closed_interpolation_; }
+    void SetLegacyClosedInterpolation(bool legacy) { legacy_closed_interpolation_ = legacy; }
     bool Close();
     void Open();
     size_t GetPointCount() const;
@@ -100,4 +102,5 @@ private:
     SplineCurveType curve_type_ = SplineCurveType::BSpline;
     int degree_ = 3;
     bool closed_ = false;
+    bool legacy_closed_interpolation_ = false;
 };

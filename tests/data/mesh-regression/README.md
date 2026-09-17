@@ -1,5 +1,21 @@
 # Mesh regression corpus
 
+## Two_SL: нормали вырожденных углов
+
+`Two_SL.dom3d`, SHA256
+`AAF58211F188E7392D66BF93111AC47175FDEC373ED50E8F220C3DF150BF909C`.
+`TwoSketchCornerNormals` проверяет нормали B-spline-ячеек на Density
+0.20, 0.35, 0.50, 0.80 и повторной 0.20.
+[Причина и исправление](../../../docs/knowledge/mesh/two-sl-corner-normals.md).
+
+## Torus: обрезка плоскостью
+
+`Torus_PlaneCut.dom3d`, SHA256
+`160D70370796F3802A76D7A6863E23BCAFA04006E79AEDBCF6C14402391DE5CC`.
+`TorusPlaneCutQuadro` проверяет боковую сетку и замкнутые стыки на Density
+0.25, 0.50, 0.70, 1.00 и повторной 0.50.
+[Диагностика и ограничения](../../../docs/knowledge/mesh/torus-plane-cut.md).
+
 ## Shell_Bag: полосы через отверстие оболочки
 
 `Shell_Bag.dom3d`, SHA256
@@ -379,3 +395,59 @@ body has 146 edges. `DraftingDimensionHoleRecovery` reconstructs the preceding
 history in a separate document, maps the unchanged curves geometrically, checks
 all nine dimensions, and verifies that editing the diameter preserves the others.
 The source fixture is never overwritten.
+# Ball_And_Box
+
+`Ball_And_Box.dom3d` is the unchanged user fixture from Documents/Dom3D Pro.
+`BallAndBoxQuadro` checks the sphere / periodic B-spline fillet / plane seam
+and the fillet row budget. See `docs/knowledge/mesh/ball-and-box-quadro.md`.
+
+### Independent rectangular hole rows
+
+`Box_Min_5_Box.dom3d` and `Box_Min_12_Box.dom3d` are unchanged user fixtures.
+Together with `Box_Min_6_Boxex` and `Box_Min_14_Box`, the `Grouped*Holes`
+tests check one or two independent frames, native SLX selection, hole topology,
+area, unfolded quads and welded closure at densities 0.15–1.0 in both modes.
+`FrameSlxBoundary` separately checks actual snapping with a fixed exterior.
+See `docs/knowledge/mesh/grouped-hole-frames.md`.
+
+### Filleted square rim
+
+`Square_Filleted.dom3d` is the unchanged user fixture. `SquareFilletedQuadro`
+checks its Beam at densities 0.20–0.50 in both SLX modes, including repeated
+0.25, for intact rims, closed seams and stable inner/outer subdivision counts.
+See `docs/knowledge/mesh/square-filleted-density.md`.
+
+### Smart Hybrid Fillet crash
+
+`Frame-2.dom3d` is the unchanged user project with the legacy open shell.
+`Frame2HybridFillet` checks containment of its kernel failure and successful
+1 mm fillets after rebuilding the shared curve boundaries consistently.
+See `docs/knowledge/solid/smart-hybrid-fillet.md`.
+
+`Frame-2-solid.dom3d` is its rebuilt closed-solid counterpart.
+`Frame2FilletRenderSeams` checks exact shared edges in the default display mesh
+after Fillet. See `docs/knowledge/mesh/hybrid-render-seams.md`.
+# Car-2 bulged panel
+
+`Car-2-BulgedPanel.dom3d` is a copy of the user fixture from 2026-09-12.
+`CarBulgedPanelQuadro` checks complete mesh coverage of its `SurfaceBulge`
+at densities 0.25 and 0.5, with SLX enabled and disabled. The former surface
+projection lost about 43% of the face area; boundary pcurves preserve the
+complete contour.
+
+### Sphere union shared boundaries
+
+`Ball_Plus_4_Ball.dom3d` and `Bal_Plus_Ball.dom3d` are unchanged user fixtures
+for `SphereUnionQuadro` and `TwoSpheresQuadro`. The tests check exact oriented
+seam closure, area, cell quality, physical spacing and repeated rebuilds at
+multiple densities. See `docs/knowledge/mesh/sphere-union-quadro.md` for hashes
+and implementation scope.
+
+## Filleted sphere union
+
+`Ball_Plus_4_Ball_Filleted.dom3d` is an unchanged copy from the user's
+`Bags_Mesh` folder. SHA-256:
+`8E8B820549932925C2918FF60BA5180C87BA365F0084BA94124DB8C997730ABE`.
+It covers shared sphere/BSpline rims, closed spline seams, split fillet
+patches and small CAD arcs. Run `FilletedSphereUnionQuadro` for exact closure,
+CAD fidelity and density/rebuild regressions.

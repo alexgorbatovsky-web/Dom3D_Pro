@@ -9,6 +9,7 @@
 struct Material {
     ProceduralPlasterParameters plaster;
     ProceduralFabricParameters fabric;
+    ProceduralPerforationParameters perforation;
     Color diffuse{};
     Color ambient{0.18f, 0.18f, 0.18f};
     Color emission{0.0f, 0.0f, 0.0f};

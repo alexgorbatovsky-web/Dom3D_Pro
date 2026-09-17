@@ -25,6 +25,7 @@ public:
     const ActiveParametricObject& ActiveObject() const;
 
 signals:
+    void AllEdgesRequested();
     void ParametersChanged();
     void MaterialParameterChanged(const QString& parameter_id);
     void Applied();

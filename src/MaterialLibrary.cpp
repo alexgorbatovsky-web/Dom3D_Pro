@@ -143,7 +143,7 @@ QString MaterialLibrary::DefaultLibraryPath() {
 
 QStringList MaterialLibrary::DefaultCategories() {
     return {"Default", "Plastic", "Paint", "Powder Coating", "Oracal Film",
-            "Leather", "Fabric", "Metall", "Glass"};
+            "Leather", "Fabric", "Metall", "Glass", "Procedural"};
 }
 
 bool MaterialLibrary::Load(const QString& root_path) {
@@ -166,6 +166,14 @@ bool MaterialLibrary::Load(const QString& root_path) {
                 entries_.push_back({category, file_path, material});
             }
         }
+    }
+
+    for(int pattern=0;pattern<2;++pattern){
+        Material m=Material::DefaultSurface();m.id=0;m.name=pattern==0?"Perforation":"Honeycomb";
+        m.diffuse={.55f,.57f,.6f};m.metallic=.9f;m.roughness=.25f;
+        m.perforation.enabled=true;m.perforation.pattern=pattern;
+        if(pattern==1){m.perforation.holeSize=6;m.perforation.bridge=.6f;}
+        entries_.push_back({"Procedural",{},m});
     }
 
     QSet<QString> known_pbr_directories;
@@ -196,6 +204,7 @@ bool MaterialLibrary::SaveMaterial(const QString& file_path, const Material& mat
     xml.writeStartElement("material");
     xml.writeAttribute("proceduralPlaster", EncodePlaster(material));
     xml.writeAttribute("proceduralFabric", EncodeFabric(material));
+    xml.writeAttribute("proceduralPerforation", EncodePerforation(material));
     xml.writeAttribute("version", "1");
     xml.writeAttribute("id", QString::number(material.id));
     xml.writeAttribute("name", QString::fromStdString(material.name));
@@ -287,6 +296,8 @@ bool MaterialLibrary::LoadMaterial(const QString& file_path, Material& material,
         if(error)*error=QStringLiteral("Invalid procedural fabric parameters; using base material.");
         qWarning("Invalid procedural fabric parameters; using base material.");
     }
+    if(!DecodePerforation(root.attribute("proceduralPerforation"),material))
+        qWarning("Invalid procedural perforation parameters; using base material.");
     material.roughness = read_float_attr(root, "roughness", material.roughness);
     material.metallic = read_float_attr(root, "metallic", material.metallic);
     material.coat_weight = read_float_attr(root, "coatWeight", material.coat_weight);

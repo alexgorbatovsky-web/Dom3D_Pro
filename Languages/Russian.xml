@@ -10100,4 +10100,542 @@
     <ID>Auto_27CC776E2C1E8F</ID>
     <Text>Сцена Dom3D</Text>
   </TextItem>
+  <TextItem>
+    <ID>BSplineCurve</ID>
+    <Text>B-сплайн 3D</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BSplineCurve_HINT</ID>
+    <Text>Щёлкайте, чтобы задать управляющие точки в пространстве. Нажмите Enter для завершения.
+Для изменения формы готовой кривой используйте редактирование узлов.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>DrawSpline</ID>
+    <Text>Нарисовать сплайн</Text>
+  </TextItem>
+  <TextItem>
+    <ID>DrawSpline_HINT</ID>
+    <Text>Удерживайте кнопку мыши и рисуйте кривую от руки. Отпустите кнопку, чтобы создать упрощённый сплайн.
+Степень упрощения задаётся в настройках инструмента.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BezierCurve3D</ID>
+    <Text>Кривая Безье 3D</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BezierCurve3D_HINT</ID>
+    <Text>Щёлкайте, чтобы задать точки, через которые проходит кривая. Нажмите Enter для завершения.
+В режиме редактирования узлов можно менять точки и направляющие.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>NurbsCurve3D</ID>
+    <Text>Кривая NURBS 3D</Text>
+  </TextItem>
+  <TextItem>
+    <ID>NurbsCurve3D_HINT</ID>
+    <Text>Задайте управляющие точки щелчками мыши и нажмите Enter.
+В инструменте «Параметры NURBS» можно изменить степень кривой и веса управляющих точек.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>PolylineCurve</ID>
+    <Text>Ломаная 3D</Text>
+  </TextItem>
+  <TextItem>
+    <ID>PolylineCurve_HINT</ID>
+    <Text>Щёлкайте, чтобы задать вершины ломаной в пространстве. Нажмите Enter для завершения или C, чтобы замкнуть контур.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>EditPoint</ID>
+    <Text>Редактировать узлы</Text>
+  </TextItem>
+  <TextItem>
+    <ID>EditPoint_HINT</ID>
+    <Text>Выберите кривую и перетаскивайте её узлы или направляющие для изменения формы. Двойной щелчок по узлу удаляет его.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceSmartHybrid</ID>
+    <Text>Умный Гибрид</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceSmartHybrid_HINT</ID>
+    <Text>Выберите открытые кривые, образующие связанный каркас из четырёхсторонних областей.
+Умный Гибрид строит по ним поверхности. При включённом Make Solid замкнутый каркас превращается в тело; незамкнутый остаётся набором поверхностей.
+Изменение исходных кривых перестраивает параметрический результат.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>fillet_edge</ID>
+    <Text>Скругление</Text>
+  </TextItem>
+  <TextItem>
+    <ID>fillet_edge_HINT</ID>
+    <Text>Выберите рёбра одного тела и задайте радиус. Дождитесь предпросмотра и подтвердите операцию.
+Если скругление не строится, проверьте радиус и выбранную геометрию.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>fillet_all_edges</ID>
+    <Text>Скруглить все рёбра</Text>
+  </TextItem>
+  <TextItem>
+    <ID>fillet_all_edges_HINT</ID>
+    <Text>Выберите одно тело и задайте радиус скругления всех его рёбер. Перед подтверждением дождитесь корректного предпросмотра.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceFourSplines</ID>
+    <Text>Поверхность по четырём кривым</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceFourSplines_HINT</ID>
+    <Text>Выберите четыре открытые кривые, концы которых образуют замкнутый четырёхсторонний контур. Инструмент построит поверхность внутри этого контура.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ToolHintShortcut</ID>
+    <Text>Горячая клавиша: %1</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidBeamTool</ID>
+    <Text>Балка</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidBeamTool_HINT</ID>
+    <Text>Создаёт балку со стандартным сечением. Выберите тип сечения и задайте ширину, высоту, длину и толщину стенки.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidBox</ID>
+    <Text>Параллелепипед</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidBox_HINT</ID>
+    <Text>Создаёт прямоугольное тело. Задайте длину, ширину и высоту; положение тела настройте средствами размещения.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidCylinder</ID>
+    <Text>Цилиндр</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidCylinder_HINT</ID>
+    <Text>Создаёт цилиндр. Задайте диаметр и высоту, затем настройте положение тела средствами размещения.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidSphereTool</ID>
+    <Text>Сфера</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidSphereTool_HINT</ID>
+    <Text>Создаёт шар. Задайте диаметр и положение тела.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidTorusTool</ID>
+    <Text>Тор</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidTorusTool_HINT</ID>
+    <Text>Создаёт тело в форме кольца. Задайте основной диаметр и диаметр трубки, чтобы настроить размер и толщину кольца.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidPrismTool</ID>
+    <Text>Призма</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidPrismTool_HINT</ID>
+    <Text>Создаёт призму с правильным многоугольным сечением. Задайте число сторон, размер сечения, высоту и ось.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidExtrudeTool</ID>
+    <Text>Выдавливание</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidExtrudeTool_HINT</ID>
+    <Text>Выберите замкнутый эскиз или полилинию для выдавливания в тело. Задайте расстояние и угол уклона. Reverse меняет направление выдавливания.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidTwoSketches</ID>
+    <Text>Тело по двум эскизам</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidTwoSketches_HINT</ID>
+    <Text>Выберите два замкнутых эскиза, чтобы создать тело между их сечениями. Изменение исходных эскизов обновляет тело.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidSketchFeature</ID>
+    <Text>Выступ / Карман</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidSketchFeature_HINT</ID>
+    <Text>Выберите замкнутый эскиз, привязанный к грани тела. Выберите Boss для добавления материала или Pocket для выреза, затем задайте глубину и угол уклона.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidContourPanel</ID>
+    <Text>Панель по контуру</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidContourPanel_HINT</ID>
+    <Text>Выберите поверхность и замкнутый контур, задающий панель на ней. Настройте направление проекции, зазор и глубину углубления. Larger Region переключает выбранную область.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidHole</ID>
+    <Text>Отверстие</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidHole_HINT</ID>
+    <Text>Укажите положение отверстия на плоской грани тела. Задайте диаметр и выберите сквозное отверстие или заданную глубину. Расстояния до кромок позволяют уточнить положение.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidSweptTool</ID>
+    <Text>Тело по направляющей</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidSweptTool_HINT</ID>
+    <Text>Выберите замкнутое сечение и открытую направляющую, либо сначала выберите сечение, а затем укажите направляющую. Настройте смещение, поворот сечения и обработку углов. Графики масштаба меняют ширину и высоту вдоль пути.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidSweepTwoRails</ID>
+    <Text>Тело по двум направляющим</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidSweepTwoRails_HINT</ID>
+    <Text>Выберите замкнутый профиль и две открытые направляющие. Инструмент проводит профиль вдоль обеих направляющих и создаёт тело.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidFrameTool</ID>
+    <Text>Рамка</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidFrameTool_HINT</ID>
+    <Text>Выберите замкнутый эскиз для построения рамки вдоль его контура. Задайте ширину и высоту сечения рамки.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidWireTool</ID>
+    <Text>Проволока</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidWireTool_HINT</ID>
+    <Text>Выберите кривую пути, чтобы создать вдоль неё тело с круглым сечением. Радиус задаёт толщину проволоки.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidPolyhedronTool</ID>
+    <Text>Многогранник</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidPolyhedronTool_HINT</ID>
+    <Text>Выберите открытый или замкнутый эскиз. Задайте ось вращения в плоскости профиля и число сторон. Открытые торцы закрываются; ось не должна пересекать профиль.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>TrimByPlane</ID>
+    <Text>Обрезка плоскостью</Text>
+  </TextItem>
+  <TextItem>
+    <ID>TrimByPlane_HINT</ID>
+    <Text>Выберите тело и секущую плоскость, либо укажите тело и создайте плоскость по запросу инструмента. Параметром Direction выберите сохраняемую сторону и подтвердите результат.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>TrimBySketch</ID>
+    <Text>Обрезка эскизом</Text>
+  </TextItem>
+  <TextItem>
+    <ID>TrimBySketch_HINT</ID>
+    <Text>Выберите замкнутый эскиз для обрезки и целевое тело. Параметром Direction выберите внутреннюю или внешнюю сохраняемую часть.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>TrimBySurface</ID>
+    <Text>Обрезка поверхностью</Text>
+  </TextItem>
+  <TextItem>
+    <ID>TrimBySurface_HINT</ID>
+    <Text>Выберите тело и пересекающую его секущую поверхность. Параметром Direction выберите сохраняемую сторону и подтвердите результат.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceOfRevolution</ID>
+    <Text>Тело вращения</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceOfRevolution_HINT</ID>
+    <Text>Выберите открытый или замкнутый эскиз либо полилинию в плоскости XY. Задайте ось в плоскости профиля и угол вращения. Открытые концы замыкаются на ось; профиль не должен её пересекать.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>boolean</ID>
+    <Text>Булевы операции</Text>
+  </TextItem>
+  <TextItem>
+    <ID>boolean_HINT</ID>
+    <Text>Выберите Union для объединения тел, Cut для вычитания тела-инструмента из основного или Common для сохранения общей части. Укажите тела в диалоге операции и примените её.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ChamferSolid</ID>
+    <Text>Фаска</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ChamferSolid_HINT</ID>
+    <Text>Выберите рёбра одного тела и задайте размер фаски. Проверьте результат и подтвердите замену острых рёбер плоскими скосами.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidExtrudeFace</ID>
+    <Text>Выдавливание грани</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidExtrudeFace_HINT</ID>
+    <Text>Задайте угол уклона, затем выберите грань тела и настройте расстояние выдавливания. Подтвердите результат для добавления или удаления материала.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidOffsetFace</ID>
+    <Text>Смещение грани</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidOffsetFace_HINT</ID>
+    <Text>Выберите грань тела и задайте расстояние смещения. Грань смещается по нормали; знак расстояния меняет направление.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidDraft</ID>
+    <Text>Уклон грани</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidDraft_HINT</ID>
+    <Text>Выберите грань тела, затем прямое ребро в качестве оси наклона. Задайте угол уклона и подтвердите результат.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidSheetBend</ID>
+    <Text>Гибка листа</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidSheetBend_HINT</ID>
+    <Text>Выберите листовое тело и направленную линию из двух точек для сгиба. Задайте внутренний радиус и угол, выберите подвижную сторону и направление сгиба. Проверьте результат перед применением.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThickSolidTool</ID>
+    <Text>Полое тело</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThickSolidTool_HINT</ID>
+    <Text>Выберите тело и грани, которые нужно удалить. Задайте толщину стенки и подтвердите создание полого тела с отверстиями на месте выбранных граней.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidShell</ID>
+    <Text>Толщина поверхности</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidShell_HINT</ID>
+    <Text>Выберите одну грань поверхности и задайте расстояние, чтобы придать ей толщину и создать тело. Знак расстояния меняет направление утолщения.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SewingFaceTool</ID>
+    <Text>Сшить поверхности</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SewingFaceTool_HINT</ID>
+    <Text>Выберите поверхности, границы которых образуют замкнутую оболочку. Инструмент сшивает совпадающие кромки и создаёт тело.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>DeleteFaceOrEdge</ID>
+    <Text>Удалить грань или ребро</Text>
+  </TextItem>
+  <TextItem>
+    <ID>DeleteFaceOrEdge_HINT</ID>
+    <Text>Инструмент пока не подключён. Эта кнопка пока не изменяет модель.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ExtractFaceTool</ID>
+    <Text>Извлечь грань</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ExtractFaceTool_HINT</ID>
+    <Text>После запуска укажите поверхность тела. Она будет скопирована в отдельную поверхность; исходное тело сохраняется. Esc — отмена.</Text>
+  </TextItem>
+  <TextItem><ID>Extract Face: click a surface of the body</ID><Text>Извлечь грань: укажите поверхность тела</Text></TextItem>
+  <TextItem><ID>Shell: click a surface</ID><Text>Shell: укажите поверхность</Text></TextItem>
+  <TextItem>
+    <ID>SplitRings</ID>
+    <Text>Разделить кольца</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SplitRings_HINT</ID>
+    <Text>Инструмент пока не подключён. Эта кнопка пока не изменяет модель.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidInSet</ID>
+    <Text>Внутренний отступ</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidInSet_HINT</ID>
+    <Text>Инструмент пока не подключён. Эта кнопка пока не изменяет модель.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidTransform</ID>
+    <Text>Преобразование тела</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidTransform_HINT</ID>
+    <Text>Инструмент пока не подключён. Эта кнопка пока не изменяет модель.</Text>
+  </TextItem>
+  <TextItem><ID>SurfaceBulge</ID><Text>Выпуклость панели</Text></TextItem>
+  <TextItem><ID>SurfaceBulge_HINT</ID><Text>Выберите поверхность панели и задайте высоту выпуклости. Положительное значение поднимает середину по нормали, отрицательное создаёт впадину. Граница остаётся на месте. К полученной поверхности можно применить Shell и скругления.</Text></TextItem>
+  <TextItem><ID>BulgeHeightLabel</ID><Text>Высота выпуклости</Text></TextItem>
+  <TextItem><ID>MeshImageRelief</ID><Text>Рельеф по картинке</Text></TextItem>
+  <TextItem><ID>MeshImageRelief_HINT</ID><Text>Выберите одну грань вазы и загрузите развёрнутую картинку орнамента. Проверьте быстрый просмотр, затем постройте итоговую сетку с заданным шагом. Другие грани не получают рельеф. Открытая оболочка остаётся открытой.</Text></TextItem>
+  <TextItem><ID>ImageReliefHelp</ID><Text>Картинка оборачивается вокруг вазы: белое выступает, чёрное остаётся на поверхности. Используйте развёрнутый орнамент: тени на фотографии тоже станут рельефом.</Text></TextItem>
+  <TextItem><ID>ImageReliefOpen</ID><Text>Открыть картинку орнамента…</Text></TextItem>
+  <TextItem><ID>ImageReliefSpacing</ID><Text>Шаг сетки (мм)</Text></TextItem>
+  <TextItem><ID>ImageReliefSpacingHelp</ID><Text>Максимальное ребро треугольника до нанесения рельефа. Меньший шаг — более плотная сетка. Предел: 2 миллиона треугольников.</Text></TextItem>
+  <TextItem><ID>ImageReliefHeight</ID><Text>Высота рельефа (мм)</Text></TextItem>
+  <TextItem><ID>ImageReliefAxis</ID><Text>Ось вазы</Text></TextItem>
+  <TextItem><ID>ImageReliefRepeatU</ID><Text>Повторов по окружности</Text></TextItem>
+  <TextItem><ID>ImageReliefRepeatV</ID><Text>Повторов по высоте</Text></TextItem>
+  <TextItem><ID>ImageReliefRotation</ID><Text>Поворот узора (градусы)</Text></TextItem>
+  <TextItem><ID>ImageReliefStart</ID><Text>Начало рельефа по высоте (%)</Text></TextItem>
+  <TextItem><ID>ImageReliefEnd</ID><Text>Конец рельефа по высоте (%)</Text></TextItem>
+  <TextItem><ID>ImageReliefFade</ID><Text>Плавный переход у краёв (мм)</Text></TextItem>
+  <TextItem><ID>ImageReliefInvert</ID><Text>Инвертировать высоты картинки</Text></TextItem>
+  <TextItem><ID>ImageReliefHide</ID><Text>Скрыть исходный Solid после создания</Text></TextItem>
+  <TextItem><ID>ImageReliefNote</ID><Text>Ось проходит через центр тела. Рельеф добавляется на наружные боковые поверхности, полость сохраняется. Шаг сетки измеряется до смещения вершин.</Text></TextItem>
+  <TextItem><ID>ImageReliefCreate</ID><Text>Создать сетку с рельефом</Text></TextItem>
+  <TextItem><ID>ImageReliefTooLarge</ID><Text>Картинка слишком большая. Допускается до 64 миллионов пикселей.</Text></TextItem>
+  <TextItem><ID>ImageReliefRange</ID><Text>Начало рельефа должно быть ниже его конца.</Text></TextItem>
+  <TextItem><ID>ImageReliefCreating</ID><Text>Построение сетки с рельефом…</Text></TextItem>
+  <TextItem><ID>ImageReliefSelect</ID><Text>Выберите один Solid вазы, затем откройте «Рельеф по картинке».</Text></TextItem>
+  <TextItem><ID>ImageReliefCreated</ID><Text>Создана сетка с рельефом: %1 треугольников</Text></TextItem>
+  <TextItem><ID>ImageReliefMeshing</ID><Text>Построение сетки на копии Solid…</Text></TextItem>
+  <TextItem><ID>ImageReliefSeams</ID><Text>Соединение стыков поверхностей…</Text></TextItem>
+  <TextItem><ID>ImageReliefRefining</ID><Text>Уплотнение сетки до заданного шага…</Text></TextItem>
+  <TextItem><ID>ImageReliefApplying</ID><Text>Нанесение рельефа по картинке…</Text></TextItem>
+  <TextItem><ID>ImageReliefChecking</ID><Text>Проверка сетки с рельефом…</Text></TextItem>
+  <TextItem><ID>ImageReliefBudget</ID><Text>Превышен предел сетки. Увеличьте шаг сетки.</Text></TextItem>
+  <TextItem><ID>ImageReliefFold</ID><Text>Рельеф переворачивает треугольник. Уменьшите высоту рельефа или используйте картинку с более плавными переходами.</Text></TextItem>
+  <TextItem><ID>ImageReliefClosed</ID><Text>Сетка Solid не замкнута или ориентация граней несогласована.</Text></TextItem>
+  <TextItem><ID>ImageReliefInvalid</ID><Text>Геометрия исходного Solid некорректна.</Text></TextItem>
+  <TextItem><ID>ImageReliefPick</ID><Text>Рельеф: щёлкните по Solid вазы — откроется окно загрузки орнамента.</Text></TextItem>
+  <TextItem><ID>ImageReliefFacePick</ID><Text>Рельеф: щёлкните по грани, на которую нужно нанести орнамент.</Text></TextItem>
+  <TextItem><ID>ImageReliefFaceName</ID><Text>Грань %1</Text></TextItem>
+  <TextItem><ID>ImageReliefTwoStages</ID><Text>Рельеф наносится только на выбранную грань. Сначала посмотрите грубый эскиз, затем постройте итоговую сетку.</Text></TextItem>
+  <TextItem><ID>ImageReliefPreviewHelp</ID><Text>Постройте быстрый просмотр орнамента. Вращайте модель, перетаскивая её мышью.</Text></TextItem>
+  <TextItem><ID>ImageReliefOpenNote</ID><Text>Открытые оболочки остаются открытыми. Просмотр приблизительный. Итоговая сетка уплотняется до заданного шага только на выбранной грани.</Text></TextItem>
+  <TextItem><ID>ImageReliefPreviewButton</ID><Text>1. Быстрый просмотр</Text></TextItem>
+  <TextItem><ID>ImageReliefFinalButton</ID><Text>2. Построить итоговую сетку</Text></TextItem>
+  <TextItem><ID>ImageReliefStale</ID><Text>Параметры изменены — обновите предварительный просмотр.</Text></TextItem>
+  <TextItem><ID>ImageReliefPreviewSummary</ID><Text>Грубый просмотр: %1 треугольников; ребро грани до %2 мм. %3. Вращение — мышью.</Text></TextItem>
+  <TextItem><ID>ImageReliefClosedState</ID><Text>Замкнутая сетка</Text></TextItem>
+  <TextItem><ID>ImageReliefOpenState</ID><Text>Открытая оболочка</Text></TextItem>
+  <TextItem><ID>ImageReliefCancelling</ID><Text>Отмена расчёта…</Text></TextItem>
+  <TextItem><ID>ImageReliefRefinePass</ID><Text>Уплотнение %1: %2 треугольников, %3%</Text></TextItem>
+  <TextItem><ID>ImageReliefMissingImage</ID><Text>Последняя картинка орнамента недоступна. Откройте другую картинку.</Text></TextItem>
+  <TextItem><ID>ImageReliefSurfaceU</ID><Text>Повторы поперёк поверхности</Text></TextItem>
+  <TextItem><ID>ImageReliefSurfaceV</ID><Text>Повторы вдоль поверхности</Text></TextItem>
+  <TextItem><ID>ImageReliefSurfaceStart</ID><Text>Начало рельефа на поверхности (%)</Text></TextItem>
+  <TextItem><ID>ImageReliefSurfaceEnd</ID><Text>Конец рельефа на поверхности (%)</Text></TextItem>
+  <TextItem><ID>ImageReliefSurfaceHelp</ID><Text>Картинка накладывается по координатам выбранной поверхности. Ось вазы не используется.</Text></TextItem>
+  <TextItem><ID>ImageReliefDegenerateUV</ID><Text>Координаты выбранной поверхности вырождены.</Text></TextItem>
+  <TextItem><ID>ImageReliefUVFailure</ID><Text>Не удалось наложить картинку на выбранную грань.</Text></TextItem>
+  <TextItem><ID>PlaneTool_HINT</ID><Text>Создаёт опорную плоскость. В диалоге выберите способ задания: координатная плоскость, коэффициенты, точки или плоская грань тела. Укажите запрошенную геометрию и подтвердите параметры.</Text></TextItem>
+  <TextItem><ID>SurfaceRuled_HINT</ID><Text>Выберите один B-сплайн. Линейчатая поверхность вытягивает его вдоль выбранной оси X, Y или Z. Задайте длину Length, при необходимости включите Reverse Normal и нажмите OK.</Text></TextItem>
+  <TextItem><ID>SurfaceLoft_HINT</ID><Text>Выберите минимум два B-сплайна как последовательные поперечные сечения и запустите инструмент. Он построит поверхность через сечения; подходят открытые и замкнутые сплайны.</Text></TextItem>
+  <TextItem><ID>SurfaceTangentCap_HINT</ID><Text>Выберите замкнутый сплайн и примыкающую поверхность. Инструмент закроет контур поверхностью с касательным переходом на границе. Настройте параметры крышки и нажмите OK.</Text></TextItem>
+  <TextItem><ID>SurfaceSweepTwoRails_HINT</ID><Text>Выберите три кривые: один открытый или замкнутый профиль и две открытые направляющие. Подтвердите выбор. Профиль проходит вдоль обеих направляющих и образует поверхность; проверьте соответствие концов профиля направляющим.</Text></TextItem>
+  <TextItem><ID>SurfaceJoin_HINT</ID><Text>Выберите минимум две соприкасающиеся поверхности и подтвердите выбор. Инструмент объединит их в набор поверхностей. Их соединяемые границы должны совпадать.</Text></TextItem>
+  <TextItem><ID>SurfaceReverseNormals_HINT</ID><Text>Выберите поверхности и запустите инструмент, чтобы развернуть их нормали. Форма не меняется, лицевая и обратная стороны меняются местами. От нормали зависит направление смещения и толщины.</Text></TextItem>
+  <TextItem><ID>SurfaceRevolve_HINT</ID><Text>Выберите кривую профиля. Укажите ось и угол вращения, проверьте предварительный результат и нажмите OK. Кривая вращается вокруг оси и создаёт поверхность.</Text></TextItem>
+  <TextItem><ID>SurfaceSweep_HINT</ID><Text>Эта кнопка пока не подключена и не создаёт геометрию. Для поверхности по профилю и двум направляющим используйте Sweep Surface (2 Rails).</Text></TextItem>
+  <TextItem><ID>SurfacePatch_HINT</ID><Text>Эта кнопка пока не подключена и не создаёт геометрию. Для четырёхстороннего контура используйте Surface by 4 Splines, для замкнутого сплайна с примыкающей поверхностью — Tangent Cap.</Text></TextItem>
+  <TextItem><ID>SurfaceOffset_HINT</ID><Text>Эта кнопка пока не подключена и не смещает поверхности. Чтобы придать поверхности толщину, используйте Shell в комнате Solid.</Text></TextItem>
+  <TextItem><ID>PlaneIntersection_HINT</ID><Text>Выберите или укажите тело, затем задайте секущую плоскость одним из предложенных способов. Инструмент создаст кривые сечения в местах пересечения плоскости с телом.</Text></TextItem>
+  <TextItem><ID>SurfaceIntersection_HINT</ID><Text>Выберите две пересекающиеся поверхности и подтвердите выбор. Инструмент создаст кривые вдоль линии их пересечения. Для разнесённых поверхностей результата пересечения нет.</Text></TextItem>
+  <TextItem><ID>ProjectCurveToSurface_HINT</ID><Text>Выберите одну кривую и целевую поверхность, затем подтвердите выбор. Задайте вектор проекции X, Y, Z и нажмите OK. Проекция строится там, где лучи этого направления попадают на поверхность.</Text></TextItem>
+  <TextItem><ID>ExtractSurfaceEdge_HINT</ID><Text>Выберите ребро поверхности и подтвердите выбор. Оно будет извлечено в отдельную кривую для дальнейших построений; исходная поверхность сохраняется.</Text></TextItem>
+  <TextItem><ID>NurbsParametersTool_HINT</ID><Text>Выберите один B-сплайн или NURBS-кривую. В параметрах изменяйте степень и веса управляющих точек, проверяя форму кривой. OK принимает изменения, Cancel отменяет их.</Text></TextItem>
+  <TextItem><ID>CurveFillets_HINT</ID><Text>Задайте радиус скругления, затем щёлкните по углу ломаной или эскиза. Инструмент заменит угол скруглением. Можно последовательно скруглить несколько углов; Cancel завершает работу.</Text></TextItem>
+  <TextItem><ID>CurveJoin_HINT</ID><Text>Выберите минимум две открытые кривые и нажмите Enter. Инструмент объединит их в одну кривую. Перед объединением проверьте порядок кривых и положение их концов.</Text></TextItem>
+  <TextItem><ID>CurveSplit_HINT</ID><Text>Выберите две пересекающиеся кривые и нажмите Enter. Обе кривые будут разделены в точке пересечения. Если пересечений несколько, щёлкните рядом с нужным.</Text></TextItem>
+  <TextItem><ID>CurveCutByCurve_HINT</ID><Text>Сначала укажите разрезаемую кривую, затем кривую-резак. Их пересечение определяет место разделения первой кривой. При необходимости уточните пересечение по подсказке инструмента.</Text></TextItem>
+  <TextItem><ID>CurveExtend_HINT</ID><Text>Укажите конец кривой, который нужно продлить. Для предварительно выбранной кривой доступно продление обоих концов. Задайте продление по подсказкам инструмента.</Text></TextItem>
+  <TextItem><ID>CurveOffset_HINT</ID><Text>Выберите плоские кривые и подтвердите выбор. Задайте расстояние смещения в диалоге и нажмите OK. Результат — параметрическая параллельная кривая в той же плоскости.</Text></TextItem>
+  <TextItem><ID>CurveMirrorCopy_HINT</ID><Text>Выберите кривые. В диалоге укажите плоскость отражения XY, XZ или YZ и её смещение, затем нажмите OK. Инструмент создаст параметрические зеркальные копии и сохранит исходные кривые.</Text></TextItem>
+  <TextItem><ID>CurveEndpointLink_HINT</ID><Text>Выберите кривые с соприкасающимися концами и запустите инструмент. Совпадающие концы свяжутся: перемещение связанного конца изменяет и присоединённую кривую.</Text></TextItem>
+  <TextItem><ID>CurveLinkedBridge_HINT</ID><Text>Выберите две открытые кривые. Укажите соединяемые концы и тип перехода, при необходимости настройте длину направляющих и нажмите OK. Если на других концах уже есть мост, инструмент предпочтёт свободные концы.</Text></TextItem>
+  <TextItem><ID>CurveTrimByPlane_HINT</ID><Text>Выберите одну кривую и, при необходимости, секущую плоскость; нажмите Enter. Если плоскость не выбрана, задайте её в диалоге. Щёлкните по части кривой, которую нужно удалить.</Text></TextItem>
+  <TextItem><ID>CurveSimplifyByPoint_HINT</ID><Text>Выберите одну открытую кривую и нажмите Enter, затем укажите место разделения. Инструмент создаст две части кривой. Это разделение по точке, а не уменьшение числа управляющих точек.</Text></TextItem>
+  <TextItem><ID>CurveReverse_HINT</ID><Text>Выберите одну или несколько кривых и нажмите Enter. Начало и конец поменяются местами, форма сохранится. Стрелка направления покажет новое направление кривой.</Text></TextItem>
+  <TextItem>
+    <ID>ThemeSetting0</ID>
+    <Text>Темы...</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeSetting1</ID>
+    <Text>Темы</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeSetting2</ID>
+    <Text>Выберите цветовую схему или настройте её цвета. Изменения видны сразу.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeSetting3</ID>
+    <Text>Цветовая схема</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeSetting4</ID>
+    <Text>Светлая студия</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeSetting5</ID>
+    <Text>Графит</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeSetting6</ID>
+    <Text>Полночь</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeSetting7</ID>
+    <Text>Тёплый серый</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeSetting8</ID>
+    <Text>Панели</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeSetting9</ID>
+    <Text>Поля ввода</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeSetting10</ID>
+    <Text>Кнопки</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeSetting11</ID>
+    <Text>Текст</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeSetting12</ID>
+    <Text>Акцент</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeSetting13</ID>
+    <Text>Границы</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeSetting14</ID>
+    <Text>Сбросить цвета схемы</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeSaveFile</ID>
+    <Text>Сохранить тему в файл</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeLoadFile</ID>
+    <Text>Загрузить тему из файла</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeInvalidFile</ID>
+    <Text>Некорректный файл темы.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeSaveButton</ID>
+    <Text>Сохранить</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeLoadButton</ID>
+    <Text>Загрузить</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ViewShowHiddenEdges</ID>
+    <Text>Показывать скрытые кромки</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ToolbarHiddenEdges</ID>
+    <Text>Скрытые кромки</Text>
+  </TextItem>
 </ClassArray.TextItem>

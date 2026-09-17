@@ -1,6 +1,7 @@
 #include "GlbMaterialBaker.h"
 #include "ProceduralPlasterShader.h"
 #include "ProceduralFabricShader.h"
+#include "ProceduralPerforationShader.h"
 #include "../render/RenderScene.h"
 #include <QGuiApplication>
 #include <QOffscreenSurface>
@@ -52,11 +53,11 @@ eyePosition=materialPosition;bakeNormal=gl_Normal;textureUV=gl_MultiTexCoord1.xy
 materialNormalToEye=mat3(1.0);}
 )GLSL";
     std::string fragment="#version 120\nvarying vec3 eyePosition,bakeNormal;\nvarying vec2 textureUV;\n";
-    fragment+=PlasterShaderSource();fragment+=FabricShaderSource();
+    fragment+=PlasterShaderSource();fragment+=FabricShaderSource();fragment+=PerforationShaderSource();
     fragment+=R"GLSL(
 uniform vec3 bakeColor;uniform int bakePass;
 uniform sampler2D colorMap,normalMap,emissionMap;uniform bool hasColor,hasNormal;
-uniform float normalStrength;
+uniform float normalStrength,bakeRoughness,bakeMetallic;
 vec3 srgb(vec3 c){c=max(c,vec3(0));return mix(c*12.92,1.055*pow(c,vec3(1.0/2.4))-.055,step(vec3(.0031308),c));}
 void main(){vec3 n=normalize(bakeNormal);
 vec2 uv=MaterialMappedUV(textureUV);
@@ -68,7 +69,8 @@ if(hasNormal){
     n=normalize(t*map.x+b*map.y+n*map.z);
 }
 MaterialSample m;
-if(proceduralFabric)m=EvaluateFabric(n,source);else m=EvaluatePlaster(n,source);
+if(proceduralPerforation){m.normal=PerforationNormal(n);m.baseColor=source;m.roughness=bakeRoughness;m.metallic=bakeMetallic;m.ao=1.0;}
+else if(proceduralFabric)m=EvaluateFabric(n,source);else m=EvaluatePlaster(n,source);
 vec3 value;
 if(bakePass==0)value=srgb(clamp(m.baseColor,0.0,1.0));
 else if(bakePass==1){
@@ -78,7 +80,7 @@ else if(bakePass==1){
     value=vec3(dot(m.normal,t),dot(m.normal,b),dot(m.normal,base))*.5+.5;
 }else if(bakePass==2)value=vec3(m.ao,m.roughness,m.metallic);
 else value=texture2D(emissionMap,uv).rgb;
-gl_FragColor=vec4(value,1.0);}
+gl_FragColor=vec4(value,proceduralPerforation && bakePass==0 ? PerforationMask(n) : 1.0);}
 )GLSL";
     QOpenGLShaderProgram shader;
     ensure(shader.addShaderFromSourceCode(QOpenGLShader::Vertex,vertex)
@@ -100,6 +102,14 @@ gl_FragColor=vec4(value,1.0);}
     shader.setUniformValue("hasColor",!color.isNull());shader.setUniformValue("hasNormal",!normal.isNull());
     shader.setUniformValue("normalStrength",material.normal_strength);
     shader.setUniformValue("bakeColor",QVector3D(material.diffuse.r,material.diffuse.g,material.diffuse.b));
+    shader.setUniformValue("bakeRoughness",material.roughness);
+    shader.setUniformValue("bakeMetallic",material.metallic);
+    shader.setUniformValue("proceduralPerforation",material.perforation.enabled);
+    shader.setUniformValue("perforationUseUV",material.perforation.useUV);
+    shader.setUniformValue("perforationPattern",material.perforation.pattern);
+#define PERFORATION_UNIFORM(name,value,lo,hi,label) shader.setUniformValue("perforation_" #name,material.perforation.name);
+    DOM_PERFORATION_PARAMETERS(PERFORATION_UNIFORM)
+#undef PERFORATION_UNIFORM
     shader.setUniformValue("proceduralFabric",material.fabric.enabled);
     shader.setUniformValue("fabricUseUV",material.fabric.useUV);
     shader.setUniformValue("fabricWeave",material.fabric.weave);
@@ -142,7 +152,7 @@ gl_FragColor=vec4(value,1.0);}
                 gl->glVertex2f(2*(float(i%grid)+c.u)/grid-1,2*(float(i/grid)+c.v)/grid-1);
             }
         }
-        gl->glEnd();gl->glFinish();QImage image=target.toImage().convertToFormat(QImage::Format_RGB888);
+        gl->glEnd();gl->glFinish();QImage image=target.toImage().convertToFormat(QImage::Format_RGBA8888);
         ensure(!image.isNull()&&gl->glGetError()==GL_NO_ERROR,"GLB procedural texture readback failed.");
         if(pass==0)result.color=image;else if(pass==1)result.normal=image;else if(pass==2)result.orm=image;else result.emission=image;
     }

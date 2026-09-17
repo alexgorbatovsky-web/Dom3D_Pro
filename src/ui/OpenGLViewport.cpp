@@ -40,6 +40,9 @@
 #include <QWheelEvent>
 
 #include <BRep_Tool.hxx>
+#include <BRepAdaptor_Curve.hxx>
+#include <TopExp.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <IntCurvesFace_ShapeIntersector.hxx>
 #include <gp_Lin.hxx>
 #include <Standard_Failure.hxx>
@@ -1266,9 +1269,30 @@ void OpenGLViewport::FitToDocument() {
     update();
 }
 
+namespace {
+const char* snap_target_keys[] = {"grid", "auxLine", "knot", "line", "auxLine45", "workPlane", "surface"};
+}
+
+bool OpenGLViewport::IsSnapTargetEnabled(SnapTarget target) const {
+    const int index = static_cast<int>(target);
+    return snapping_enabled_ && index >= 0 && index < static_cast<int>(SnapTarget::Count)
+        && snap_targets_[index];
+}
+
+void OpenGLViewport::SetSnapTargetEnabled(SnapTarget target, bool enabled) {
+    const int index = static_cast<int>(target);
+    if (index < 0 || index >= static_cast<int>(SnapTarget::Count)) return;
+    QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Dom3D", "Dom3D_Pro");
+    settings.setValue(QString("preferences/modeling/snapTargets/%1").arg(snap_target_keys[index]), enabled);
+    if (enabled) settings.setValue("preferences/modeling/snappingEnabled", true);
+    ReloadModelingPreferences();
+    curve_preview_valid_ = false;
+    SetCreationSnapCursor(false);
+}
+
 void OpenGLViewport::ReloadModelingPreferences() {
     CMesh3D::ReloadLightingSettings();
-    QSettings settings("Dom3D", "Dom3D_Pro");
+    QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Dom3D", "Dom3D_Pro");
     const QString grid_mode = settings.value(
         "view/gridDensityMode", QStringLiteral("medium")).toString();
     grid_step_ = 100.0f;
@@ -1295,6 +1319,11 @@ void OpenGLViewport::ReloadModelingPreferences() {
         1.0f, 1000000.0f);
     snapping_enabled_ =
         settings.value("preferences/modeling/snappingEnabled", true).toBool();
+    for (int index = 0; index < static_cast<int>(SnapTarget::Count); ++index) {
+        snap_targets_[index] = settings.value(
+            QString("preferences/modeling/snapTargets/%1").arg(snap_target_keys[index]),
+            index < 4).toBool();
+    }
     capture_distance_pixels_ = std::clamp(
         settings.value("preferences/modeling/captureDistance", 6).toInt(),
         1,
@@ -1525,7 +1554,7 @@ void OpenGLViewport::BeginMaterialPaint(const Material& material) {
     zooming_ = false;
     dragging_transform_ = false;
     setCursor(Qt::CrossCursor);
-    emit StatusTextChanged(QString("Material brush: click object to paint with %1").arg(QString::fromStdString(material.name)));
+    emit StatusTextChanged(QString("Material brush: click a surface to paint with %1").arg(QString::fromStdString(material.name)));
 }
 
 void OpenGLViewport::BeginMaterialPick() {
@@ -2823,6 +2852,7 @@ void OpenGLViewport::BeginPick3DPoint(const QString& prompt) {
 
 void OpenGLViewport::BeginSpatialCurvePreview(
     SpatialCurvePreviewKind kind) {
+    spatial_curve_plane_valid_ = false;
     spatial_curve_preview_kind_ = kind;
     spatial_curve_preview_object_id_ = 0;
     spatial_curve_preview_points_.clear();
@@ -2838,11 +2868,20 @@ void OpenGLViewport::SetSpatialCurvePreviewObject(
 
 void OpenGLViewport::SetSpatialCurvePreviewPoints(
     const std::vector<CPoint3d>& points) {
+    if (points.empty()) spatial_curve_plane_valid_ = false;
+    if (!points.empty() && !spatial_curve_plane_valid_) {
+        Vec3 forward{}, right{}, up{};
+        viewport_camera_basis(camera_, forward, right, up);
+        spatial_curve_plane_origin_ = point_to_vec3(points.front());
+        spatial_curve_plane_normal_ = normalize(forward);
+        spatial_curve_plane_valid_ = true;
+    }
     spatial_curve_preview_points_ = points;
     update();
 }
 
 void OpenGLViewport::EndSpatialCurvePreview() {
+    spatial_curve_plane_valid_ = false;
     spatial_curve_preview_kind_ = SpatialCurvePreviewKind::None;
     spatial_curve_preview_object_id_ = 0;
     spatial_curve_preview_points_.clear();
@@ -3239,18 +3278,36 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
         CAlfaObject* object = FindObjectForMaterialAt(event->pos());
         if (!object) {
             emit StatusTextChanged(material_interaction_mode_ == MaterialInteractionMode::Paint
-                ? "Material brush: click object to paint"
+                ? "Material brush: click a surface to paint"
                 : "Material picker: click object");
             return;
         }
 
         if (material_interaction_mode_ == MaterialInteractionMode::Paint) {
-            const Material& document_material = document_->UpsertMaterial(active_paint_material_);
-            object->SetMaterial(document_material);
-            object->SetMaterialId(document_material.id);
+            auto* solid = dynamic_cast<CSolid*>(object);
+            int surface_index = -1;
+            float depth = 0.0f;
+            const auto project_world = [this](Vec3 world, DomPoint& screen, float& distance) {
+                Vec3 forward{}, right{}, up{};
+                viewport_camera_basis(camera_, forward, right, up);
+                distance = dot(world - camera_position(camera_, orthographic_projection_), forward);
+                return distance > 0.0f && renderer_.WorldToScreen(
+                    world, camera_, orthographic_projection_, width(), height(), screen);
+            };
+            if (!solid || !solid->HitTestFaceScreen(
+                    {event->pos().x(), event->pos().y()}, project_world, false, surface_index, depth)) {
+                emit StatusTextChanged("Material brush: click a body surface");
+                return;
+            }
+            const auto* surface = solid->GetSurfaceFace(surface_index);
+            const auto before = surface->MaterialOverride;
+            const unsigned long surface_id = static_cast<unsigned long>(surface->m_ID);
+            const Material document_material = document_->UpsertMaterial(active_paint_material_);
+            solid->SetSurfaceMaterial(surface_index, document_material);
             document_->ClearSelection();
             emit SelectionChanged();
-            emit DocumentChanged();
+            emit SurfaceMaterialPainted(solid->m_id, surface_id, before.enabled,
+                                       before.material_id, before.material, document_material);
             emit StatusTextChanged(QString("Material applied: %1").arg(QString::fromStdString(document_material.name)));
             update();
             return;
@@ -3305,6 +3362,7 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
         } else {
             emit StatusTextChanged(point_pick_plane_enabled_
                 ? "Point: current view ray is parallel to the selected face"
+                : IsSnapTargetEnabled(SnapTarget::Surface) ? "Surface: no visible surface under the cursor"
                 : "GetPoint3D: move the cursor to a visible vertex or curve point");
         }
         event->accept();
@@ -4451,7 +4509,9 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
     } else if ((tool_ == ToolMode::DrawCurve || tool_ == ToolMode::DrawBSpline)
         && document_) {
         CPoint3d snap_point{};
-        const bool valid = ScreenToCurvePlane(event->pos(), snap_point);
+        const bool valid = spatial_curve_preview_kind_ != SpatialCurvePreviewKind::None
+            ? PickModelingPoint(event->pos(), snap_point)
+            : ScreenToCurvePlane(event->pos(), snap_point);
         SetCreationSnapCursor(
             valid && SnapCreationPoint(event->pos(), snap_point, false));
     } else if ((tool_ == ToolMode::SketchRectangle
@@ -4624,7 +4684,7 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
         if (curve_point_drag_has_plane_) {
             has_point = ScreenToWorldPlane(event->pos(), curve_point_drag_plane_point_, curve_point_drag_plane_normal_, point);
         }
-        if (!has_point) {
+        if (!has_point && !curve_point_drag_has_plane_) {
             has_point = xy_plane_view_enabled_
                 ? ScreenToPlaneY(event->pos(), polyline_drag_plane_y_, point)
                 : ScreenToViewPlane(event->pos(), curve_point_drag_anchor_, point);
@@ -5865,6 +5925,7 @@ CAlfaObject* OpenGLViewport::FindObjectForMaterialAt(const QPoint& point) {
 }
 
 void OpenGLViewport::ConstrainPolylinePoint(CPoint3d& point, Qt::KeyboardModifiers modifiers) const {
+    if (IsSnapTargetEnabled(SnapTarget::Surface)) return;
     if (tool_ != ToolMode::DrawCurve || modifiers != Qt::ShiftModifier || !document_) return;
     const auto& points = spatial_curve_preview_kind_ == SpatialCurvePreviewKind::Polyline
         ? spatial_curve_preview_points_ : document_->GetActivePolyline().GetPoints();
@@ -6570,7 +6631,9 @@ void OpenGLViewport::BeginDrawSplineStroke(const QPoint& point) {
 
     CPoint3d world{};
     if (!ScreenToCurvePlane(point, world)) {
-        emit StatusTextChanged("Draw Spline: point is outside the drawing plane");
+        emit StatusTextChanged(IsSnapTargetEnabled(SnapTarget::Surface)
+            ? "Draw Spline: no visible surface under the cursor"
+            : "Draw Spline: point is outside the drawing plane");
         return;
     }
     document_->ClearSelection();
@@ -7253,7 +7316,7 @@ bool OpenGLViewport::IsNearSketchPolylineFirstPoint(const QPoint& point) const {
     }
     const float dx = static_cast<float>(point.x() - first_screen.x);
     const float dy = static_cast<float>(point.y() - first_screen.y);
-    return snapping_enabled_
+    return IsSnapTargetEnabled(SnapTarget::Knot)
         && std::sqrt(dx * dx + dy * dy) <= static_cast<float>(capture_distance_pixels_);
 }
 
@@ -7274,7 +7337,7 @@ bool OpenGLViewport::IsNearSelectedSketchFirstPoint(const QPoint& point) const {
     }
     const float dx = static_cast<float>(point.x() - first_screen.x);
     const float dy = static_cast<float>(point.y() - first_screen.y);
-    return snapping_enabled_
+    return IsSnapTargetEnabled(SnapTarget::Knot)
         && std::sqrt(dx * dx + dy * dy) <= static_cast<float>(capture_distance_pixels_);
 }
 
@@ -7852,19 +7915,115 @@ bool OpenGLViewport::SnapCreationPoint(const QPoint& point,
         return false;
     }
 
+    // CAD boundaries are line targets too. Resolve them before the surface
+    // fallback, otherwise a near-boundary click always lands inside the face.
+    if (IsSnapTargetEnabled(SnapTarget::Line)) {
+        Vec3 forward, right, up;
+        viewport_camera_basis(camera_, forward, right, up);
+        const Vec3 eye = camera_position(camera_, orthographic_projection_);
+        const auto component = [&](const gp_Pnt& p, Vec3 axis) {
+            return (p.X()-eye.x)*axis.x + (p.Y()-eye.y)*axis.y + (p.Z()-eye.z)*axis.z;
+        };
+        const auto screen_distance = [&](const gp_Pnt& p) {
+            const double z = component(p, forward);
+            if (z <= 0.0001) return std::numeric_limits<double>::infinity();
+            const double half = orthographic_projection_
+                ? std::max(kMinimumOrthographicHalfHeight, camera_.distance*0.42f)
+                : z*std::tan(deg_to_rad(camera_.vertical_fov_degrees)*0.5f);
+            const double scale = std::max(1, height())/(2*half);
+            return std::hypot(width()*0.5 + component(p,right)*scale-point.x(),
+                              height()*0.5 - component(p,up)*scale-point.y());
+        };
+        const auto visible = [&](const gp_Pnt& p) {
+            const gp_Vec toward = orthographic_projection_
+                ? gp_Vec(-forward.x,-forward.y,-forward.z)
+                : gp_Vec(p,gp_Pnt(eye.x,eye.y,eye.z));
+            const double reach = orthographic_projection_ ? component(p,forward) : toward.Magnitude();
+            if (reach <= 0.0001) return false;
+            for (const auto& item : document_->GetObjects()) {
+                const auto* body = dynamic_cast<const CSolid*>(item.get());
+                if (!body || body->m_Shape.IsNull() || !document_->IsObjectVisible(*body)) continue;
+                IntCurvesFace_ShapeIntersector hit;
+                hit.Load(body->m_Shape,1.e-7);
+                hit.Perform(gp_Lin(p,gp_Dir(toward)),1.e-4,reach);
+                if (hit.IsDone() && hit.NbPnt()>0) return false;
+            }
+            return true;
+        };
+        double best = capture_distance_pixels_;
+        bool found_edge = false;
+        const bool on_plane = require_sketch_plane || IsSnapTargetEnabled(SnapTarget::WorkPlane);
+        for (const auto& item : document_->GetObjects()) {
+            const auto* body = dynamic_cast<const CSolid*>(item.get());
+            if (!body || body->m_Shape.IsNull() || !document_->IsObjectVisible(*body)
+                || (point_pick_object_id_ && body->m_id != point_pick_object_id_)) continue;
+            TopTools_IndexedMapOfShape edges;
+            TopExp::MapShapes(body->m_Shape,TopAbs_EDGE,edges);
+            for (int i=1; i<=edges.Extent(); ++i) try {
+                const auto edge = TopoDS::Edge(edges(i));
+                if (BRep_Tool::Degenerated(edge)) continue;
+                BRepAdaptor_Curve curve(edge);
+                const double first=curve.FirstParameter(), last=curve.LastParameter();
+                if (!std::isfinite(first) || !std::isfinite(last) || last<=first) continue;
+                // Locate projected local minima, then evaluate the exact CAD
+                // curve, never a chord of the display tessellation.
+                constexpr int count=64;
+                double distances[count+1];
+                for (int j=0;j<=count;++j)
+                    distances[j]=screen_distance(curve.Value(first+(last-first)*j/count));
+                for (int j=0;j<=count;++j) {
+                    if ((j && distances[j]>distances[j-1]) || (j<count && distances[j]>distances[j+1])) continue;
+                    double lo=first+(last-first)*std::max(0,j-1)/count;
+                    double hi=first+(last-first)*std::min(count,j+1)/count;
+                    for (int iteration=0;iteration<40;++iteration) {
+                        const double a=lo+(hi-lo)/3, b=hi-(hi-lo)/3;
+                        if (screen_distance(curve.Value(a))<screen_distance(curve.Value(b))) hi=b;
+                        else lo=a;
+                    }
+                    gp_Pnt candidate=curve.Value((lo+hi)*0.5);
+                    // Preserve exact topological ends when they are closest.
+                    for (double t : {first,last})
+                        if (screen_distance(curve.Value(t))<screen_distance(candidate)) candidate=curve.Value(t);
+                    const double distance=screen_distance(candidate);
+                    if (distance>best) continue;
+                    const CPoint3d p(candidate.X(),candidate.Y(),candidate.Z());
+                    if (on_plane && std::abs(dot(point_to_vec3(p)-sketch_origin_,sketch_normal_))>0.001f) continue;
+                    if (!visible(candidate)) continue;
+                    best=distance; result=p; found_edge=true;
+                }
+            } catch (const Standard_Failure&) {
+                // Ignore an invalid imported edge, keeping other targets usable.
+            }
+        }
+        if (found_edge) return true;
+    }
+
+    if (!require_sketch_plane && IsSnapTargetEnabled(SnapTarget::Surface)) {
+        if (PickVisibleSurface(point, result, point_pick_object_id_)) return true;
+        if (point_pick_object_id_ != 0) return false;
+    }
+
+    require_sketch_plane = require_sketch_plane || IsSnapTargetEnabled(SnapTarget::WorkPlane);
     const DomPoint mouse{point.x(), point.y()};
     float best_distance = static_cast<float>(capture_distance_pixels_);
-    bool found = require_sketch_plane
-        && SnapSketchGridPoint(
-            point,
-            sketch_origin_,
-            sketch_u_,
-            sketch_v_,
-            result,
-            best_distance);
+    bool found = false;
+    CPoint3d grid_point = result;
+    if (require_sketch_plane) {
+        if (ScreenToSketchPlane(point, grid_point))
+            found = SnapSketchGridPoint(point, sketch_origin_, sketch_u_, sketch_v_, grid_point, best_distance);
+    } else if (xy_plane_view_enabled_) {
+        if (ScreenToWorldPlane(point, {}, {0,0,1}, grid_point))
+            found = SnapSketchGridPoint(point, {}, {1,0,0}, {0,1,0}, grid_point, best_distance);
+    } else if (ScreenToPlaneY(point, kCurvePlaneY, grid_point)) {
+        found = SnapSketchGridPoint(point, {0,float(kCurvePlaneY),0}, {1,0,0}, {0,0,1}, grid_point, best_distance);
+    }
+    if (found) result = grid_point;
     bool found_point_candidate = false;
     const CAlfaObject* active_curve = nullptr;
-    if (tool_ == ToolMode::DrawCurve) {
+    if (spatial_curve_preview_kind_ != SpatialCurvePreviewKind::None) {
+        active_curve = spatial_curve_preview_object_id_ != 0
+            ? document_->FindObjectById(spatial_curve_preview_object_id_) : nullptr;
+    } else if (tool_ == ToolMode::DrawCurve) {
         active_curve = &document_->GetActivePolyline();
     } else if (tool_ == ToolMode::DrawBSpline) {
         active_curve = &document_->GetActiveBSpline();
@@ -7926,8 +8085,8 @@ bool OpenGLViewport::SnapCreationPoint(const QPoint& point,
 
     const auto consider = [&](const CAlfaObject* object,
                               const CPoint3d& candidate,
-                              bool is_last_active_point) {
-        if (is_last_active_point || !object
+                              bool is_last_active_point, bool auxiliary = false) {
+        if (!IsSnapTargetEnabled(auxiliary ? SnapTarget::AuxLine : SnapTarget::Knot) || is_last_active_point || !object
             || !document_->IsObjectVisible(*object)) {
             return;
         }
@@ -7959,11 +8118,11 @@ bool OpenGLViewport::SnapCreationPoint(const QPoint& point,
     };
     const auto consider_segment = [&](const CAlfaObject* object,
                                       const CPoint3d& start,
-                                      const CPoint3d& end) {
+                                      const CPoint3d& end, bool auxiliary = false) {
         // An explicit node inside the capture radius has priority over a
         // sampled point on the adjacent curve.  This is essential when the
         // user clicks the first node to close a curve.
-        if (found_point_candidate || !object || moving_curve(object)
+        if (!IsSnapTargetEnabled(auxiliary ? SnapTarget::AuxLine : SnapTarget::Line) || found_point_candidate || !object || moving_curve(object)
             || !document_->IsObjectVisible(*object)) return;
         DomPoint start_screen{};
         DomPoint end_screen{};
@@ -8043,15 +8202,15 @@ bool OpenGLViewport::SnapCreationPoint(const QPoint& point,
                     CPoint3d(vertex.x, vertex.y, vertex.z), false);
             }
         } else if (const auto* solid = dynamic_cast<const CSolid*>(object)) {
-            for (const auto& axis : solid->GetCenterlines()) {
+            if (IsSnapTargetEnabled(SnapTarget::AuxLine)) for (const auto& axis : solid->GetCenterlines()) {
                 if (axis.points.size() < 2) continue;
                 const auto point3 = [](const gp_Pnt& p) { return CPoint3d(p.X(),p.Y(),p.Z()); };
-                consider(object, point3(axis.points.front()), false);
-                if (!axis.closed) consider(object, point3(axis.points.back()), false);
+                consider(object, point3(axis.points.front()), false, true);
+                if (!axis.closed) consider(object, point3(axis.points.back()), false, true);
                 if (axis.points.size() == 2)
-                    consider(object, point3(gp_Pnt((axis.points.front().XYZ()+axis.points.back().XYZ())*0.5)), false);
+                    consider(object, point3(gp_Pnt((axis.points.front().XYZ()+axis.points.back().XYZ())*0.5)), false, true);
                 for (size_t i = 1; i < axis.points.size(); ++i)
-                    consider_segment(object, point3(axis.points[i-1]), point3(axis.points[i]));
+                    consider_segment(object, point3(axis.points[i-1]), point3(axis.points[i]), true);
             }
             const std::string& name = object->GetName();
             const bool furniture_part = name.rfind("Nika ", 0) == 0
@@ -8079,18 +8238,66 @@ bool OpenGLViewport::SnapCreationPoint(const QPoint& point,
             }
         }
     }
+    if (!found && (IsSnapTargetEnabled(SnapTarget::AuxLine)
+                   || IsSnapTargetEnabled(SnapTarget::AuxLine45))) {
+        const CPoint3d* anchor = nullptr;
+        if (!spatial_curve_preview_points_.empty()) anchor = &spatial_curve_preview_points_.back();
+        else if (require_sketch_plane && !sketch_polyline_points_.empty()) anchor = &sketch_polyline_points_.back();
+        else if (const auto* polyline = dynamic_cast<const CPolyline*>(active_curve)) {
+            if (!polyline->GetPoints().empty()) anchor = &polyline->GetPoints().back();
+        } else if (const auto* spline = dynamic_cast<const CBSpline*>(active_curve)) {
+            if (!spline->GetPoints().empty()) anchor = &spline->GetPoints().back();
+        }
+        if (anchor) {
+            Vec3 forward, u, v;
+            viewport_camera_basis(camera_, forward, u, v);
+            if (require_sketch_plane || IsSnapTargetEnabled(SnapTarget::WorkPlane)) {
+                u = sketch_u_; v = sketch_v_;
+            }
+            Vec3 origin = point_to_vec3(*anchor);
+            if (!require_sketch_plane && spatial_curve_plane_valid_
+                && spatial_curve_preview_kind_ != SpatialCurvePreviewKind::None) {
+                forward = spatial_curve_plane_normal_;
+                // Synthetic guides must not inherit an off-plane geometry snap.
+                origin = origin - forward * dot(origin-spatial_curve_plane_origin_,forward);
+                u = u - forward * dot(u,forward);
+                if (dot(u,u)<1.e-6f) u = cross(v,forward);
+                u = normalize(u); v = normalize(cross(forward,u));
+            }
+            CPoint3d guide_point;
+            const bool valid_guide = ScreenToWorldPlane(point, origin,
+                require_sketch_plane ? sketch_normal_ : forward, guide_point);
+            const Vec3 delta = point_to_vec3(guide_point) - origin;
+            for (int axis = 0; valid_guide && axis < 4; ++axis) {
+                if (axis < 2 && !IsSnapTargetEnabled(SnapTarget::AuxLine)) continue;
+                if (axis >= 2 && !IsSnapTargetEnabled(SnapTarget::AuxLine45)) continue;
+                const Vec3 direction = axis == 0 ? u : axis == 1 ? v
+                    : normalize(axis == 2 ? u + v : u - v);
+                const Vec3 candidate = origin + direction * dot(delta, direction);
+                DomPoint screen;
+                if (!renderer_.WorldToScreen(candidate, camera_, orthographic_projection_, width(), height(), screen)) continue;
+                const double distance = std::hypot(double(screen.x - mouse.x), double(screen.y - mouse.y));
+                if (distance <= best_distance) {
+                    best_distance = static_cast<float>(distance);
+                    result = CPoint3d(candidate.x, candidate.y, candidate.z);
+                    found = true;
+                }
+            }
+        }
+    }
     if (found && xy_plane_view_enabled_ && !require_sketch_plane) {
         result.z = 0.0;
     }
     return found;
 }
 
-bool OpenGLViewport::PickSolidSurface(const QPoint& point, CPoint3d& result) const try {
+bool OpenGLViewport::PickSolidSurface(const QPoint& point, CPoint3d& result) const {
+    return point_pick_object_id_ != 0 && PickVisibleSurface(point, result, point_pick_object_id_);
+}
+
+bool OpenGLViewport::PickVisibleSurface(const QPoint& point, CPoint3d& result,
+                                        unsigned long object_id) const {
     if (!document_) return false;
-    const CSolid* solid = nullptr;
-    for (const auto& object : document_->GetObjects())
-        if (object && object->m_id == point_pick_object_id_) solid = dynamic_cast<const CSolid*>(object.get());
-    if (!solid || solid->m_Shape.IsNull()) return false;
     const int viewport_width = std::max(1, width());
     const int viewport_height = std::max(1, height());
     const float ndc_x = 2.0f * static_cast<float>(point.x()) / static_cast<float>(viewport_width) - 1.0f;
@@ -8116,29 +8323,41 @@ bool OpenGLViewport::PickSolidSurface(const QPoint& point, CPoint3d& result) con
         ray_direction = normalize(forward + right * (ndc_x * aspect * tan_half_fov) + up * (ndc_y * tan_half_fov));
     }
 
-    IntCurvesFace_ShapeIntersector hit;
-    hit.Load(solid->m_Shape, 1.e-6);
-    hit.Perform(gp_Lin(gp_Pnt(ray_origin.x, ray_origin.y, ray_origin.z),
-                       gp_Dir(ray_direction.x, ray_direction.y, ray_direction.z)), 0, 1.e10);
-    if (!hit.IsDone()) return false;
+    const gp_Lin ray(gp_Pnt(ray_origin.x, ray_origin.y, ray_origin.z),
+                     gp_Dir(ray_direction.x, ray_direction.y, ray_direction.z));
     double nearest = 1.e10;
-    for (int i = 1; i <= hit.NbPnt(); ++i) {
-        if (hit.WParameter(i) >= 0 && hit.WParameter(i) < nearest) {
-            nearest = hit.WParameter(i);
-            const auto p = hit.Pnt(i);
-            result = CPoint3d(p.X(), p.Y(), p.Z());
+    bool found = false;
+    for (const auto& object : document_->GetObjects()) {
+        const auto* solid = dynamic_cast<const CSolid*>(object.get());
+        if (!solid || solid->m_Shape.IsNull() || !document_->IsObjectVisible(*solid)
+            || (object_id != 0 && solid->m_id != object_id)) continue;
+        try {
+            IntCurvesFace_ShapeIntersector hit;
+            hit.Load(solid->m_Shape, 1.e-6);
+            hit.Perform(ray, 0.0, nearest);
+            if (!hit.IsDone()) continue;
+            for (int i = 1; i <= hit.NbPnt(); ++i) {
+                const double distance = hit.WParameter(i);
+                if (distance >= 0.0 && distance < nearest) {
+                    nearest = distance;
+                    const auto p = hit.Pnt(i);
+                    result = CPoint3d(p.X(), p.Y(), p.Z());
+                    found = true;
+                }
+            }
+        } catch (const Standard_Failure&) {
+            // A failed imported face must not hide a valid hit on another body.
         }
     }
-    return nearest < 1.e10;
-} catch (const Standard_Failure&) {
-    return false;
+    return found;
 }
 
 bool OpenGLViewport::PickModelingPoint(const QPoint& point,
                                        CPoint3d& result) const {
     if (picking_solid_surface_) return PickSolidSurface(point, result);
     if (SnapCreationPoint(point, result, false)) {
-        if (xy_plane_view_enabled_) result.z = 0.0;
+        if (xy_plane_view_enabled_ && !IsSnapTargetEnabled(SnapTarget::Surface)
+            && !IsSnapTargetEnabled(SnapTarget::Line)) result.z = 0.0;
         return true;
     }
     if (point_pick_object_id_ != 0) {
@@ -8150,6 +8369,12 @@ bool OpenGLViewport::PickModelingPoint(const QPoint& point,
             {0.0f, 0.0f, 0.0f},
             {0.0f, 0.0f, 1.0f},
             result);
+    }
+    if (IsSnapTargetEnabled(SnapTarget::WorkPlane)) return ScreenToSketchPlane(point, result);
+    if (spatial_curve_preview_kind_ != SpatialCurvePreviewKind::None
+        && spatial_curve_plane_valid_) {
+        return ScreenToWorldPlane(point, spatial_curve_plane_origin_,
+                                  spatial_curve_plane_normal_, result);
     }
     return ScreenToViewPlane(point, camera_.target, result);
 }
@@ -8259,7 +8484,7 @@ bool OpenGLViewport::SnapSketchGridPoint(const QPoint& point,
                                          float& best_distance) const {
     const float snap_step = grid_step_ / static_cast<float>(
         std::max(1, grid_subdivisions_));
-    if (!snapping_enabled_ || snap_step <= 0.0f) {
+    if (!show_floor_grid_ || !IsSnapTargetEnabled(SnapTarget::Grid) || snap_step <= 0.0f) {
         return false;
     }
 
@@ -8499,6 +8724,9 @@ bool OpenGLViewport::ScreenToWorldPlane(const QPoint& point, Vec3 plane_point, V
 }
 
 bool OpenGLViewport::ScreenToCurvePlane(const QPoint& point, CPoint3d& result) {
+    if ((IsSnapTargetEnabled(SnapTarget::Surface) || IsSnapTargetEnabled(SnapTarget::Line))
+        && SnapCreationPoint(point, result, false)) return true;
+    if (IsSnapTargetEnabled(SnapTarget::WorkPlane)) return ScreenToSketchPlane(point, result);
     if (xy_plane_view_enabled_) {
         return ScreenToWorldPlane(point, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, result);
     }

@@ -1,4 +1,14 @@
 #include "PlasterBaker.h"
+ProceduralPlasterParameters PlasterPreset(int type) {
+    ProceduralPlasterParameters p;p.enabled=true;p.highQuality=true;p.pattern=float(type);
+    if(type==1){p.patternSize=1.5f;p.patternDepth=.3f;p.patternStretch=4;p.patternDensity=.7f;p.grainStrength=.035f;}
+    if(type==2){p.patternSize=3;p.patternDepth=.5f;p.patternDensity=.55f;p.grainStrength=.05f;}
+    if(type==3){p.patternSize=6;p.patternDepth=.35f;p.patternDensity=.85f;p.grainStrength=.04f;}
+    if(type==4){p.patternSize=2;p.patternStretch=12;p.patternDepth=.3f;p.patternDensity=.8f;p.grainStrength=.04f;}
+    if(type==5){p.patternSize=4;p.patternDepth=.35f;p.grainStrength=.065f;}
+    if(type==6){p.patternSize=7;p.patternDepth=.7f;p.grainStrength=.03f;}
+    return p;
+}
 #include "ProceduralMaterialIO.h"
 #include "ProceduralPlasterShader.h"
 #include "../MaterialLibrary.h"
@@ -116,7 +126,7 @@ bool BakePlasterMaps(const Material& material, const PlasterBakeSettings& s,
     }
     const auto& p = material.plaster;
     const float amplitude = std::max(.000001f, (p.macroStrength+p.grainStrength
-        +(p.highQuality?p.microStrength:0.f)+p.poreDepth)*p.scale*p.relief);
+        +(p.highQuality?p.microStrength:0.f)+p.poreDepth+(p.pattern>.5f?p.patternDepth*2.f:0.f))*p.scale*p.relief);
     shader.setUniformValue("plasterSeed", QVector2D(float(p.seed&65535),float(p.seed>>16)));
     shader.setUniformValue("plasterHighQuality", p.highQuality);
 #define BAKE_UNIFORM(name,defaultValue,lo,hi,label) shader.setUniformValue("plaster_" #name,p.name);

@@ -543,8 +543,9 @@ TopoDS_Wire transform_exact_profile_wire(const TopoDS_Wire& source,
 
 TopoDS_Shape BuildTwoRailSweepSurfaceShape(const SweepCurveSamples& profile,
                                            const SweepCurveSamples& first_rail,
-                                           const SweepCurveSamples& second_rail) {
-    if (profile.points.size() < 2 || first_rail.closed || second_rail.closed
+                                           const SweepCurveSamples& second_rail, double delta_x, double delta_y, double angle_degrees) {
+    if (!std::isfinite(delta_x) || !std::isfinite(delta_y) || !std::isfinite(angle_degrees)
+        || profile.points.size() < 2 || first_rail.closed || second_rail.closed
         || first_rail.points.size() < 2 || second_rail.points.size() < 2) {
         return {};
     }
@@ -605,7 +606,7 @@ TopoDS_Shape BuildTwoRailSweepSurfaceShape(const SweepCurveSamples& profile,
             / static_cast<double>(kSectionCount - 1);
         const CPoint3d rail1 = sample_points(first_rail.points, parameter);
         const CPoint3d rail2 = sample_points(aligned_second.points, parameter);
-        const CPoint3d center = multiply(add(rail1, rail2), 0.5);
+        CPoint3d center = multiply(add(rail1, rail2), 0.5);
         CPoint3d target_u = subtract(rail2, rail1);
         const double target_diameter = std::sqrt(dot3(target_u, target_u));
         if (!normalize(target_u) || target_diameter <= kPointTolerance) {
@@ -635,6 +636,15 @@ TopoDS_Shape BuildTwoRailSweepSurfaceShape(const SweepCurveSamples& profile,
         }
         previous_v = target_v;
 
+        // Placement is applied after rail scaling. Offsets use the unrotated
+        // local frame, just as in Swept Solid; angle rotates the section.
+        center = add(center, add(multiply(target_u, delta_x), multiply(target_v, delta_y)));
+        const double angle = angle_degrees * 3.14159265358979323846 / 180.0;
+        const CPoint3d base_u = target_u;
+        const CPoint3d base_v = target_v;
+        target_u = add(multiply(base_u, std::cos(angle)), multiply(base_v, std::sin(angle)));
+        target_v = add(multiply(base_v, std::cos(angle)), multiply(base_u, -std::sin(angle)));
+
         const double scale = target_diameter / template_diameter;
         SweepCurveSamples transformed;
         transformed.closed = planar_profile.closed;
@@ -657,16 +667,17 @@ TopoDS_Shape BuildTwoRailSweepSurfaceShape(const SweepCurveSamples& profile,
 
 TopoDS_Shape BuildTwoRailSweepSolidShape(const SweepCurveSamples& profile,
                                          const SweepCurveSamples& first_rail,
-                                         const SweepCurveSamples& second_rail) {
+                                         const SweepCurveSamples& second_rail, double delta_x, double delta_y, double angle_degrees) {
     return BuildTwoRailSweepSolidShape(
-        profile, first_rail, second_rail, TopoDS_Wire{});
+        profile, first_rail, second_rail, TopoDS_Wire{}, delta_x, delta_y, angle_degrees);
 }
 
 TopoDS_Shape BuildTwoRailSweepSolidShape(const SweepCurveSamples& profile,
                                          const SweepCurveSamples& first_rail,
                                          const SweepCurveSamples& second_rail,
-                                         const TopoDS_Wire& exact_profile_wire) {
-    if (!profile.closed || profile.points.size() < 3
+                                         const TopoDS_Wire& exact_profile_wire, double delta_x, double delta_y, double angle_degrees) {
+    if (!std::isfinite(delta_x) || !std::isfinite(delta_y) || !std::isfinite(angle_degrees)
+        || !profile.closed || profile.points.size() < 3
         || first_rail.closed || second_rail.closed
         || first_rail.points.size() < 2 || second_rail.points.size() < 2) {
         return {};
@@ -737,7 +748,7 @@ TopoDS_Shape BuildTwoRailSweepSolidShape(const SweepCurveSamples& profile,
             sample_points_by_length(first_rail.points, parameter);
         const CPoint3d rail2 =
             sample_points_by_length(aligned_second.points, parameter);
-        const CPoint3d center = multiply(add(rail1, rail2), 0.5);
+        CPoint3d center = multiply(add(rail1, rail2), 0.5);
 
         const double before_parameter =
             std::max(0.0, parameter - frame_parameter_delta);
@@ -787,6 +798,15 @@ TopoDS_Shape BuildTwoRailSweepSolidShape(const SweepCurveSamples& profile,
             target_v = multiply(target_v, -1.0);
         }
         previous_v = target_v;
+
+        // Placement is applied after rail scaling. Offsets use the unrotated
+        // local frame, just as in Swept Solid; angle rotates the section.
+        center = add(center, add(multiply(target_u, delta_x), multiply(target_v, delta_y)));
+        const double angle = angle_degrees * 3.14159265358979323846 / 180.0;
+        const CPoint3d base_u = target_u;
+        const CPoint3d base_v = target_v;
+        target_u = add(multiply(base_u, std::cos(angle)), multiply(base_v, std::sin(angle)));
+        target_v = add(multiply(base_v, std::cos(angle)), multiply(base_u, -std::sin(angle)));
 
         const double scale_u = target_span / template_u_span;
         SweepCurveSamples transformed;

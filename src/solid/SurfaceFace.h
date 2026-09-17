@@ -86,7 +86,8 @@ public:
 	void RenderEdges(const Color& color,
 	                 const std::vector<int>& selected_edge_indices = {},
 	                 bool draw_regular_edges = true,
-	                 bool surface_selected = false) const;
+	                 bool surface_selected = false,
+	                 float line_width = 0.9f * 1.3f) const;
 	void RenderContour(const Color& color, bool surface_selected = false) const;
 	void RenderOutline(const Color& color,
 	                   const std::vector<int>& selected_edge_indices = {},
@@ -116,6 +117,7 @@ public:
 	bool SetPreparedPolylinePoints(int edge_index, const std::vector<CPoint3d>& points);
 	void SetCircularCapMasterBoundary(const std::vector<CPoint3d>& points);
 	void UpdateMeshTypeFromBoundary();
+	bool HasRectangularUVBoundary() const;
 	bool GetRegularMeshBoundaryPoints(int edge_index, std::vector<CPoint3d>& points) const;
 	void DumpPreparedPolylinesToScene() const;
 	bool BuildTrimmingMesh(CSolid* psol, float Deflection);
@@ -128,6 +130,7 @@ public:
 	bool BuildFilledMeshWhithHoles(float Deflection,
 		bool use_mesh_quadro_hole_slx = false);
 	float GetLastLowPolyDensity() const { return m_LastLowPolyDensity; }
+	bool UsedSlxHoleCut() const { return m_UsedSlxHoleCut; }
 	const std::string& GetLastIslandFillError() const {
 		return m_LastIslandFillError;
 	}
@@ -167,6 +170,7 @@ public:
 	SurfaceMaterialOverride MaterialOverride;
 	float m_LastLowPolyDensity = 0.0f;
 	std::vector<std::vector<CPoint3d>> m_LastIslandBoundariesUV;
+	bool m_UsedSlxHoleCut = false;
 	std::vector<std::vector<CPoint3d>> m_LastQuadrangulationBoundariesXY;
 	std::vector<CPoint3d> m_CircularCapMasterBoundary3D;
 	std::string m_LastIslandFillError;

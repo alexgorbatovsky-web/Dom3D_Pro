@@ -35,6 +35,10 @@ public:
         Nurbs
     };
 
+    enum class SnapTarget { Grid, AuxLine, Knot, Line, AuxLine45, WorkPlane, Surface, Count };
+    bool IsSnapTargetEnabled(SnapTarget target) const;
+    void SetSnapTargetEnabled(SnapTarget target, bool enabled);
+
     enum class SketchPlane {
         XY,
         XZ,
@@ -185,6 +189,9 @@ signals:
     void CursorWorldPositionChanged(double x, double y, double z, bool valid);
     void BooleanFinished();
     void MaterialPicked(const Material& material);
+    void SurfaceMaterialPainted(unsigned long object_id, unsigned long surface_id,
+                               bool before_enabled, unsigned long before_material_id,
+                               const Material& before, const Material& after);
     void ToolModeChanged(ToolMode tool);
     void CameraFieldOfViewChanged(float degrees);
     void XYPointPicked(CPoint3d point);
@@ -437,6 +444,9 @@ private:
         SpatialCurvePreviewKind::None;
     unsigned long spatial_curve_preview_object_id_ = 0;
     std::vector<CPoint3d> spatial_curve_preview_points_;
+    bool spatial_curve_plane_valid_ = false;
+    Vec3 spatial_curve_plane_origin_{};
+    Vec3 spatial_curve_plane_normal_{};
     bool drawing_spline_stroke_ = false;
     int draw_spline_simplification_ = 50;
     std::vector<QPoint> draw_spline_screen_points_;
@@ -456,6 +466,8 @@ private:
     bool picking_solid_surface_ = false;
     std::vector<CPoint3d> sheet_bend_guide_;
     bool PickSolidSurface(const QPoint& point, CPoint3d& result) const;
+    bool PickVisibleSurface(const QPoint& point, CPoint3d& result,
+                            unsigned long object_id = 0) const;
     void DrawSheetBendGuide();
     bool picking_3d_point_ = false;
     bool point_pick_plane_enabled_ = false;
@@ -538,6 +550,7 @@ private:
     bool highlighted_sketch_fillet_point_ = false;
     double sketch_alignment_angle_degrees_ = 7.0;
     bool snapping_enabled_ = true;
+    bool snap_targets_[static_cast<int>(SnapTarget::Count)] = {true, true, true, true, false, false, false};
     int capture_distance_pixels_ = 6;
     bool creation_snap_active_ = false;
     bool measurement_waiting_for_second_point_ = false;

@@ -406,6 +406,7 @@ void write_material(QXmlStreamWriter& xml, const Material& material) {
     xml.writeStartElement("material");
     xml.writeAttribute("proceduralPlaster", EncodePlaster(material));
     xml.writeAttribute("proceduralFabric", EncodeFabric(material));
+    xml.writeAttribute("proceduralPerforation", EncodePerforation(material));
     xml.writeAttribute("sourceFile", QString::fromStdString(material.source_file_path));
     xml.writeAttribute("id", QString::number(material.id));
     xml.writeAttribute("name", QString::fromStdString(material.name));
@@ -558,6 +559,8 @@ bool read_material_element(const QDomElement& material_element, Material& materi
         qWarning("Unsupported or invalid procedural plaster parameters; using base material.");
     if(!DecodeFabric(material_element.attribute("proceduralFabric"),material))
         qWarning("Invalid procedural fabric parameters; using base material.");
+    if(!DecodePerforation(material_element.attribute("proceduralPerforation"),material))
+        qWarning("Invalid procedural perforation parameters; using base material.");
     material.normal_texture_path = material_element.attribute("normalTexture", QString::fromStdString(material.normal_texture_path)).toStdString();
     material.roughness_texture_path = material_element.attribute("roughnessTexture", QString::fromStdString(material.roughness_texture_path)).toStdString();
     material.metallic_texture_path = material_element.attribute("metallicTexture", QString::fromStdString(material.metallic_texture_path)).toStdString();
@@ -1237,6 +1240,8 @@ bool Dom3DProjectSerializer::Write(QIODevice& device, const CAlfaDoc& document,
                 ? "bezier" : spline->GetCurveType() == SplineCurveType::Nurbs
                     ? "nurbs" : "b-spline";
             xml.writeAttribute("curveType", curve_type);
+            xml.writeAttribute("closedBSplineMode", spline->UsesLegacyClosedInterpolation()
+                ? "legacy-interpolating" : "periodic-control-points");
             xml.writeAttribute("degree", QString::number(spline->GetDegree()));
             xml.writeAttribute("closed", spline->IsClosed() ? "true" : "false");
             const std::vector<double>& weights = spline->GetWeights();
@@ -2006,6 +2011,10 @@ bool Dom3DProjectSerializer::Load(const QString& path,
                 return false;
             }
             spline->SetClosed(closed);
+            spline->SetLegacyClosedInterpolation(closed
+                && spline->GetCurveType() == SplineCurveType::BSpline
+                && spline->GetKnots().empty()
+                && geometry.attribute("closedBSplineMode", "legacy-interpolating") == "legacy-interpolating");
             object = std::move(spline);
         } else if (type == "CadCurve3D") {
             auto cad_curve = std::make_unique<CCadCurve3D>(object_element.attribute("name", "CAD Curve").toStdString());

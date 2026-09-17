@@ -2,72 +2,51 @@
 
 #include "OpenGLCompat.h"
 #include "Point3d.h"
-
-#include <algorithm>
 #include <cmath>
 
+// Screen-facing direction marker shared by polylines and splines. Its size
+// does not depend on curve length, camera zoom or rotation.
 inline void DrawCurveStartArrow(const CPoint3d& start,
                                 const CPoint3d& next,
                                 double curve_span) {
-    double dx = next.x - start.x;
-    double dy = next.y - start.y;
-    double dz = next.z - start.z;
-    const double tangent_length = std::sqrt(dx * dx + dy * dy + dz * dz);
-    if (tangent_length <= 1.0e-12 || curve_span <= 1.0e-12) return;
-    dx /= tangent_length;
-    dy /= tangent_length;
-    dz /= tangent_length;
-
-    const double size = curve_span * 0.045;
-    const CPoint3d tip(
-        start.x + dx * size,
-        start.y + dy * size,
-        start.z + dz * size);
-    const CPoint3d base(
-        tip.x - dx * size * 0.58,
-        tip.y - dy * size * 0.58,
-        tip.z - dz * size * 0.58);
-
-    double ax = std::abs(dx) < 0.8 ? 1.0 : 0.0;
-    double ay = std::abs(dx) < 0.8 ? 0.0 : 1.0;
-    double az = 0.0;
-    double px = dy * az - dz * ay;
-    double py = dz * ax - dx * az;
-    double pz = dx * ay - dy * ax;
-    const double perpendicular_length = std::sqrt(px * px + py * py + pz * pz);
-    if (perpendicular_length <= 1.0e-12) return;
-    px /= perpendicular_length;
-    py /= perpendicular_length;
-    pz /= perpendicular_length;
-    const double qx = dy * pz - dz * py;
-    const double qy = dz * px - dx * pz;
-    const double qz = dx * py - dy * px;
-    const double radius = size * 0.24;
-
-    const CPoint3d ring[4] = {
-        {base.x + px * radius, base.y + py * radius, base.z + pz * radius},
-        {base.x + qx * radius, base.y + qy * radius, base.z + qz * radius},
-        {base.x - px * radius, base.y - py * radius, base.z - pz * radius},
-        {base.x - qx * radius, base.y - qy * radius, base.z - qz * radius}};
-
-    glColor3f(1.0f, 0.82f, 0.05f);
+    if (curve_span <= 1.e-12) return;
+    GLdouble model[16], projection[16]; GLint viewport[4], matrix_mode;
+    glGetDoublev(GL_MODELVIEW_MATRIX,model);
+    glGetDoublev(GL_PROJECTION_MATRIX,projection);
+    glGetIntegerv(GL_VIEWPORT,viewport);
+    glGetIntegerv(GL_MATRIX_MODE,&matrix_mode);
+    if(viewport[2]<=0 || viewport[3]<=0) return;
+    auto project=[&](const CPoint3d& p,double& x,double& y) {
+        const double v[4]={p.x,p.y,p.z,1};double eye[4]={},clip[4]={};
+        for(int row=0;row<4;++row) for(int col=0;col<4;++col) eye[row]+=model[col*4+row]*v[col];
+        for(int row=0;row<4;++row) for(int col=0;col<4;++col) clip[row]+=projection[col*4+row]*eye[col];
+        if(clip[3]<=1.e-12 || clip[2]<-clip[3] || clip[2]>clip[3]) return false;
+        x=(clip[0]/clip[3]+1)*viewport[2]*0.5;
+        y=(clip[1]/clip[3]+1)*viewport[3]*0.5;
+        return std::isfinite(x) && std::isfinite(y);
+    };
+    double x,y,nx,ny;
+    if(!project(start,x,y) || !project(next,nx,ny)) return;
+    double dx=nx-x,dy=ny-y;
+    const double length=std::hypot(dx,dy);
+    if(length<1.e-6) return;
+    dx/=length;dy/=length;
+    const double tip_x=x+dx*22,tip_y=y+dy*22;
+    const double base_x=tip_x-dx*10,base_y=tip_y-dy*10;
+    glPushAttrib(GL_ENABLE_BIT|GL_CURRENT_BIT|GL_LINE_BIT|GL_POLYGON_BIT);
+    glDisable(GL_LIGHTING);glDisable(GL_TEXTURE_2D);glDisable(GL_CULL_FACE);
+    glDisable(GL_DEPTH_TEST);glPolygonMode(GL_FRONT_AND_BACK,GL_FILL);
+    glMatrixMode(GL_PROJECTION);glPushMatrix();glLoadIdentity();
+    glOrtho(0,viewport[2],0,viewport[3],-1,1);
+    glMatrixMode(GL_MODELVIEW);glPushMatrix();glLoadIdentity();
+    glColor3f(1.0f,0.82f,0.05f);
     glBegin(GL_TRIANGLES);
-    for (int index = 0; index < 4; ++index) {
-        const CPoint3d& first = ring[index];
-        const CPoint3d& second = ring[(index + 1) % 4];
-        glVertex3f(static_cast<float>(tip.x), static_cast<float>(tip.y),
-                   static_cast<float>(tip.z));
-        glVertex3f(static_cast<float>(first.x), static_cast<float>(first.y),
-                   static_cast<float>(first.z));
-        glVertex3f(static_cast<float>(second.x), static_cast<float>(second.y),
-                   static_cast<float>(second.z));
-    }
+    glVertex2d(tip_x,tip_y);
+    glVertex2d(base_x-dy*4,base_y+dx*4);
+    glVertex2d(base_x+dy*4,base_y-dx*4);
     glEnd();
-    glLineWidth(2.5f);
-    glBegin(GL_LINES);
-    glVertex3f(static_cast<float>(start.x), static_cast<float>(start.y),
-               static_cast<float>(start.z));
-    glVertex3f(static_cast<float>(tip.x), static_cast<float>(tip.y),
-               static_cast<float>(tip.z));
-    glEnd();
+    glLineWidth(2.0f);glBegin(GL_LINES);
+    glVertex2d(x,y);glVertex2d(base_x,base_y);glEnd();
+    glPopMatrix();glMatrixMode(GL_PROJECTION);glPopMatrix();
+    glMatrixMode(matrix_mode);glPopAttrib();
 }

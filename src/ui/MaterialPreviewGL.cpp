@@ -21,11 +21,12 @@ struct PreviewContext : QObject {
     PreviewContext():QObject(qApp){QSurfaceFormat f;f.setVersion(2,1);f.setProfile(QSurfaceFormat::CompatibilityProfile);f.setDepthBufferSize(24);surface.setFormat(f);surface.create();context.setFormat(surface.format());context.create();}
 };
 }
-QImage RenderMaterialSphereGL(const Material& material,int size) {
+QImage RenderMaterialSphereGL(const Material& material,int size,bool flat) {
     if(!qApp || size<1)return {};
     static PreviewContext* state=nullptr;if(!state)state=new PreviewContext;
     QByteArray payload=MaterialDrag::Encode(material);
     QDataStream cacheSettings(&payload,QIODevice::Append);
+    cacheSettings<<flat;
     const auto& light=CMesh3D::GetLightingSettings();
     cacheSettings<<size<<light.light_x<<light.light_y<<light.light_z<<light.ambient<<light.wrap_light<<light.diffuse
         <<light.specular<<light.shininess_scale<<light.rim<<light.gamma<<light.environment_enabled
@@ -34,12 +35,20 @@ QImage RenderMaterialSphereGL(const Material& material,int size) {
     if(auto* image=state->cache.object(key))return *image;
     QOpenGLContext* previous=QOpenGLContext::currentContext();QSurface* surface=previous?previous->surface():nullptr;
     if(!state->context.makeCurrent(&state->surface))return {};
+    const int output_size=size;
+    if(material.perforation.enabled)size*=2; // Supersample the cutout edges.
     QImage result;
     {
         QOpenGLFramebufferObjectFormat format;format.setAttachment(QOpenGLFramebufferObject::CombinedDepthStencil);
         QOpenGLFramebufferObject buffer(size,size,format);
         if(buffer.isValid()){
             buffer.bind();QtSceneRenderer renderer;renderer.Initialize();
+            // CGroup resolves its members through the current document. The
+            // temporary preview must not leave the editing document detached.
+            struct RestoreDocument {
+                CAlfaDoc* previous = GetAlfaDoc();
+                ~RestoreDocument() { SetAlfaDoc(previous); }
+            } restore_document;
             CAlfaDoc document;auto sphere=std::make_unique<CMesh3D>("Material preview");
             std::vector<Vec3> vertices,normals;std::vector<UV> uvs;std::vector<CMesh3D::Face> faces;
             constexpr int rows=48,cols=96;constexpr float radius=25;
@@ -58,6 +67,11 @@ QImage RenderMaterialSphereGL(const Material& material,int size) {
             for(int j=0;j<rows;++j)for(int i=0;i<cols;++i){size_t a=j*(cols+1)+i,b=a+cols+1;
                 if(j>0)add({a,b,a+1});if(j<rows-1)add({a+1,b,b+1});
             }
+            if(flat){
+                vertices={{-30,-30,0},{30,-30,0},{30,30,0},{-30,30,0}};
+                normals={{0,0,1}};uvs={{0,0},{1,0},{1,1},{0,1}};faces.clear();
+                CMesh3D::Face face;for(size_t i=0;i<4;++i)face.corners.push_back({i,0,i});faces.push_back(face);
+            }
             sphere->SetGeometry(std::move(vertices),std::move(faces),std::move(uvs),std::move(normals));
             Material resolved=material;
             auto resolve=[&](std::string& path){if(path.empty()||QFileInfo(QString::fromStdString(path)).isAbsolute()||material.source_file_path.empty())return;
@@ -66,6 +80,13 @@ QImage RenderMaterialSphereGL(const Material& material,int size) {
             resolve(resolved.color_texture_path);resolve(resolved.normal_texture_path);resolve(resolved.roughness_texture_path);resolve(resolved.metallic_texture_path);resolve(resolved.displacement_texture_path);
             resolved=document.UpsertMaterial(resolved);
             sphere->SetMaterial(resolved);sphere->SetColor(material.diffuse);document.AddObject(std::move(sphere),false);document.ClearSelection();
+            // Scene overlays must never be drawn into cached material icons.
+            // Restore the user's setting even if preview rendering throws.
+            struct RestoreHiddenEdges {
+                bool enabled = CSolid::IsHiddenEdgeDrawingEnabled();
+                RestoreHiddenEdges() { CSolid::SetHiddenEdgeDrawingEnabled(false); }
+                ~RestoreHiddenEdges() { CSolid::SetHiddenEdgeDrawingEnabled(enabled); }
+            } restore_hidden_edges;
             auto oldSolidMode=CSolid::GetDisplayMode();CSolid::SetDisplayMode(SolidDisplayMode::SurfacesAndEdges);
             auto oldMode=CMesh3D::GetDisplayMode();CMesh3D::SetDisplayMode(MeshDisplayMode::SurfaceMaterial);
             const bool oldOpenEdges=CMesh3D::IsOpenEdgeDisplayEnabled();CMesh3D::SetOpenEdgeDisplayEnabled(false);
@@ -77,5 +98,6 @@ QImage RenderMaterialSphereGL(const Material& material,int size) {
         }
     }
     state->context.doneCurrent();if(previous&&surface)previous->makeCurrent(surface);
+    if(!result.isNull() && size!=output_size)result=result.scaled(output_size,output_size,Qt::IgnoreAspectRatio,Qt::SmoothTransformation);
     if(!result.isNull())state->cache.insert(key,new QImage(result),int((result.sizeInBytes()+1023)/1024));return result;
 }

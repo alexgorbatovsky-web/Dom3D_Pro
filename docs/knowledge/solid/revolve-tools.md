@@ -8,6 +8,6 @@ The Solid and Surfaces panels previously shared `SurfaceOfRevolution`, which alw
 - Preview and parametric replay share `BuildSurfaceRevolveProfile`. Open splines use the existing sweep path conversion; closed splines use periodic interpolation of 128 evaluated points, so this conversion is approximate.
 - Polyhedron still accepts Sketch profiles only, open or closed. Open ends are capped.
 
-Selection prompts now identify required object types, closure and the next action instead of ìselect the required geometry and continueî. Revolve and Polyhedron also expose their requirements in button tooltips. An unsuccessful initial Solid Revolve keeps its parameter panel and selected profile, allowing an axis correction.
+Selection prompts now identify required object types, closure and the next action instead of ‚Äúselect the required geometry and continue‚Äù. Revolve and Polyhedron also expose their requirements in button tooltips. An unsuccessful initial Solid Revolve keeps its parameter panel and selected profile, allowing an axis correction.
 
 Regression: CTest `RevolveTools` covers UI entry, open/closed spline rotation, partial angles, sketch/3D-polyline input, parametric replay after source edits, serialization and legacy solid behavior. Existing sketch/profile/centerline tests cover shared functionality.

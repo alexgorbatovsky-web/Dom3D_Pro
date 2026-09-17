@@ -193,7 +193,7 @@ public:
     bool Save(std::ostream& stream) const override;
     bool Load(std::istream& stream);
     bool Create(CPolyline* pline, CVector3d dir, float dist);
-    bool TrimByPline(CPolyline* pLine, CPoint3d pc);
+    bool TrimByPline(CPolyline* pLine, CPoint3d pc, bool preserve_boundary = false);
     bool TrimByPlineTest(CPolyline* pLine, CPoint3d pc);
     bool KeepConnectedComponentAt(CPoint3d pc);
     bool SplitFaceByPoint(int face_index, int ind1, int ind2, const cVec2& pm);
@@ -202,8 +202,8 @@ public:
     int MakeFace(std::vector < size_t> indV);
     int MakeFace(size_t ind1, size_t ind2, size_t ind3);
 
-    bool PrepareAndMoveVertexToTrimLine(CPolyline* pLine, std::vector<DataToMoveVerts*>& Data);
-    bool FindVertexToMove(CPolyline* pLine, DataToMoveVerts* data);
+    bool PrepareAndMoveVertexToTrimLine(CPolyline* pLine, std::vector<DataToMoveVerts*>& Data, const std::vector<bool>* locked = nullptr);
+    bool FindVertexToMove(CPolyline* pLine, DataToMoveVerts* data, const std::vector<bool>* locked = nullptr);
     bool SplitFaceByVar5(int face_index, int v1, int edgeIndex, cVec2& pm);
     bool SplitFaceByVar6(int face_index, int v1, int v2, int edgeIndex, cVec2& pm);
     bool SplitFaceByVar7(int face_index, int v1, int edgeIndex);

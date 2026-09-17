@@ -71,6 +71,7 @@ public:
 private:
     friend int TestScenePersistence(int argc, char** argv);
     friend int TestSolidPrimitiveTool(int argc, char** argv);
+    friend int TestImageRelief();
     [[nodiscard]] QScopedValueRollback<bool> RememberCommand(std::function<void()> command);
     [[nodiscard]] QScopedValueRollback<bool> RememberCommand(void (MainWindow::*command)());
     void RepeatLastCommand();
@@ -135,6 +136,7 @@ private:
     void CreateSurfaceIntersection();
     void ProjectCurveToSurface();
     void ExtractSurfaceEdge();
+    void ExtractPickedFace();
     void CreateFourSplineSurface();
     void CreateTwoRailSweepSurface();
     void CreateTwoRailSweepSolid();
@@ -198,6 +200,7 @@ private:
     bool LinkSelectedCurves();
     bool BridgeSelectedCurves();
     bool CreateSmartHybridFromSelectedCurves();
+    void CreatePanelFromContour();
     bool TrimSelectedCurveByPlane(CPoint3d keep_point);
     bool SimplifySelectedCurveByPoint(CPoint3d split_point);
     bool ReverseSelectedCurves();
@@ -221,6 +224,7 @@ private:
     bool CompletePendingTrimWithCreatedPlane();
     void CancelPendingTrim(const QString& status_text = {});
     void ShowLowPolyTool();
+    void ShowImageReliefTool();
     void ShowMeshFillContourTool();
     void BeginMeshIslandBoundaryTool();
     void CreateSelectedSurfaceIslandBoundaries();
@@ -321,6 +325,9 @@ private:
         SurfaceIntersection,
         ProjectCurveToSurface,
         ExtractSurfaceEdge,
+        ExtractFace,
+        ShellPick,
+        ShellReady,
         FourSplineSurface,
         TwoRailSweepSurface,
         TwoRailSweepSolid,
@@ -482,6 +489,7 @@ private:
     unsigned long pending_trim_plane_curve_id_ = 0;
     bool object_color_pick_pending_ = false;
     bool low_poly_pick_pending_ = false;
+    bool image_relief_pick_pending_ = false;
     bool mesh_island_boundary_pick_active_ = false;
     bool mesh_island_boundary_generation_pending_ = false;
     enum class HolePickStage {

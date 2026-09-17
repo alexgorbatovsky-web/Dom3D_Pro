@@ -8,6 +8,17 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QTimer>
+#include <QKeyEvent>
+#include <QLineEdit>
+#include "ui/DefaultDialogAccept.h"
+
+// The standalone panel test uses the same Qt type boundary as the application
+// without linking the scene renderer or requiring an OpenGL context.
+class OpenGLViewport : public QWidget {
+    Q_OBJECT
+public:
+    using QWidget::QWidget;
+};
 
 #include <algorithm>
 #include <cstdlib>
@@ -24,6 +35,72 @@ void require(bool condition, const char* message) {
 
 int main(int argc, char** argv) {
     QApplication application(argc, argv);
+
+    {
+        QWidget main;
+        OpenGLViewport viewport(&main);
+        PropertyPanel editor(&main);
+        editor.move(150,0);
+        main.resize(600,500);
+        main.show(); viewport.show(); editor.show();
+        int accepted=0;
+        QObject::connect(&editor,&PropertyPanel::Accepted,[&] { ++accepted; });
+        const auto enter=[](QWidget* target,int key=Qt::Key_Return,Qt::KeyboardModifiers modifiers=Qt::NoModifier,bool repeat=false) {
+            QKeyEvent event(QEvent::KeyPress,key,modifiers,QString(),repeat);
+            QApplication::sendEvent(target,&event);
+        };
+        for(const char* tool: {"SolidBox","SolidCylinder","SolidSphereTool","SolidTorusTool",
+                "SolidPrismTool","SolidPolyhedronTool","SolidTwoSketches","SolidExtrudeTool",
+                "SolidSweptTool","SolidFrameTool","SurfaceOfRevolution","SolidShell",
+                "ThickSolidTool","SolidHole","fillet_edge","fillet_all_edges","ChamferSolid",
+                "SolidExtrudeFace","SolidOffsetFace","SolidDraft","SolidSheetBend"}) {
+            ActiveParametricObject active;
+            active.tool_id=tool;
+            ToolParameter p; p.id="length"; p.label="Length"; p.type=ToolParameterType::Number;
+            p.minimum=0; p.maximum=1000; p.value=10;
+            active.parameters.push_back(p);
+            editor.SetActiveObject(active); editor.show();
+            QApplication::processEvents();
+            QPushButton* ok=nullptr;
+            for(auto* b:editor.findChildren<QPushButton*>()) if(b->text()=="OK")ok=b;
+            require(ok&&ok->isDefault(),"Parameter OK must be default for every Solid tool");
+            auto* spin=editor.findChild<QDoubleSpinBox*>();
+            require(spin,"Missing parameter editor");
+            auto* text=spin->findChild<QLineEdit*>();
+            text->setText("23");
+            const int before=accepted;
+            enter(text);
+            require(accepted==before+1&&spin->value()==23,"Enter must commit typed value and accept once");
+            viewport.setFocus(); enter(&viewport,Qt::Key_Enter,Qt::KeypadModifier);
+            require(accepted==before+2,"Numpad Enter in viewport must accept Solid parameters");
+            enter(&viewport,Qt::Key_Return,Qt::ControlModifier);
+            enter(&viewport,Qt::Key_Return,Qt::NoModifier,true);
+            require(accepted==before+2,"Modifiers and auto-repeat must not confirm again");
+            ok->setEnabled(false); enter(&viewport);
+            require(accepted==before+2,"Disabled OK must not accept");
+            ok->setEnabled(true);
+            QDialog modal(&main); modal.setModal(true); modal.show();
+            QApplication::processEvents(); enter(&viewport);
+            require(accepted==before+2,"A nested modal must block parent confirmation");
+            modal.hide();
+            QWidget popup(&main,Qt::Popup); popup.show();
+            require(QApplication::activePopupWidget()==&popup,"Popup did not open");
+            enter(&viewport);
+            require(accepted==before+2,"Popup selection must not confirm the Solid");
+            popup.hide();
+            QWidget other; OpenGLViewport otherViewport(&other);
+            enter(&otherViewport);
+            require(accepted==before+2,"Another window must not confirm this Solid");
+            editor.hide(); enter(&viewport);
+            require(accepted==before+2,"A hidden panel must not accept");
+        }
+        // Standalone modeless editing dialogs use their real OK callback too.
+        QDialog dialog(&main); auto* ok=new QPushButton("OK",&dialog);
+        SetDefaultDialogAccept(&dialog,ok);
+        int clicks=0; QObject::connect(ok,&QPushButton::clicked,[&]{++clicks;});
+        dialog.show(); QApplication::processEvents(); enter(&viewport);
+        require(clicks==1,"Modeless edit dialog must accept from viewport");
+    }
 
     ActiveParametricObject active;
     active.tool_id = "cabinet";
@@ -181,3 +258,5 @@ int main(int argc, char** argv) {
 
     return EXIT_SUCCESS;
 }
+
+#include "PropertyPanelTests.moc"

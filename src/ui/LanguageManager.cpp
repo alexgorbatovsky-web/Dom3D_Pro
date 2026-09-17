@@ -4,6 +4,10 @@
 #include <QAbstractButton>
 #include <QActionEvent>
 #include <QApplication>
+#include <QBuffer>
+#include <QHelpEvent>
+#include <QToolButton>
+#include <QToolTip>
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDir>
@@ -102,6 +106,58 @@ void set_widget_text(QWidget* widget, const QString& text) {
         widget->setWindowTitle(text);
     }
 }
+
+bool show_tool_hint(QObject* watched, QEvent* event) {
+    if (event->type() != QEvent::ToolTip) return false;
+    auto* widget = qobject_cast<QWidget*>(watched);
+    if (!widget) return false;
+    auto* help = static_cast<QHelpEvent*>(event);
+    QAction* action = nullptr;
+    if (auto* menu = qobject_cast<QMenu*>(widget)) action = menu->actionAt(help->pos());
+    if (auto* button = qobject_cast<QToolButton*>(widget)) action = button->defaultAction();
+    QString key = widget->property("toolKey").toString();
+    if (key.isEmpty() && action) key = action->property("toolKey").toString();
+    if (key.isEmpty()) return false;
+    auto& language = LanguageManager::Instance();
+    const QString description = language.Text(key + "_HINT");
+    if (description.isEmpty()) return false; // Keep existing tooltips until an entry is authored.
+
+    QString fallback = action ? action->text() : widget->toolTip();
+    QIcon icon = action ? action->icon() : QIcon{};
+    if (auto* button = qobject_cast<QAbstractButton*>(widget)) {
+        if (fallback.isEmpty()) fallback = button->text();
+        if (icon.isNull()) icon = button->icon();
+    }
+    const QString title = language.Text(key, language.Translate(fallback)).remove('&');
+    QString html = "<table width=\"340\"><tr><td><b>" + title.toHtmlEscaped() + "</b></td></tr>";
+    if (!icon.isNull()) {
+        QByteArray png;
+        QBuffer buffer(&png);
+        buffer.open(QIODevice::WriteOnly);
+        icon.pixmap(64, 64).save(&buffer, "PNG");
+        html += "<tr><td><img width=\"64\" height=\"64\" src=\"data:image/png;base64,"
+            + QString::fromLatin1(png.toBase64()) + "\"></td></tr>";
+    }
+    html += "<tr><td>" + description.toHtmlEscaped().replace('\n', "<br>") + "</td></tr>";
+    QStringList shortcuts;
+    const auto collect = [&](QAction* candidate) {
+        if (!candidate || candidate->property("toolKey").toString() != key) return;
+        for (const auto& shortcut : candidate->shortcuts())
+            if (!shortcut.isEmpty()) shortcuts.append(shortcut.toString(QKeySequence::NativeText));
+    };
+    collect(action);
+    QWidget* owner = widget;
+    while (owner->parentWidget()) owner = owner->parentWidget();
+    for (auto* candidate : owner->findChildren<QAction*>()) collect(candidate);
+    shortcuts.removeDuplicates();
+    if (!shortcuts.isEmpty())
+        html += "<tr><td><br>" + language.Text("ToolHintShortcut", "Shortcut: %1")
+            .arg(shortcuts.join(", ")).toHtmlEscaped() + "</td></tr>";
+    html += "</table>";
+    QToolTip::showText(help->globalPos(), html, widget);
+    event->accept();
+    return true;
+}
 }
 
 LanguageManager& LanguageManager::Instance() {
@@ -151,7 +207,9 @@ bool LanguageManager::LoadFile(const QString& path,
 
 QString LanguageManager::Text(const QString& id, const QString& fallback) const {
     const auto found = values_.constFind(id);
-    return found == values_.constEnd() || found->isEmpty() ? fallback : *found;
+    if (found != values_.constEnd() && !found->isEmpty()) return *found;
+    const auto english = english_values_.constFind(id);
+    return english == english_values_.constEnd() || english->isEmpty() ? fallback : *english;
 }
 
 QString LanguageManager::Translate(const QString& source) const {
@@ -411,6 +469,7 @@ void LanguageManager::TranslateObject(QObject* object) const {
 
 bool LanguageManager::eventFilter(QObject* watched, QEvent* event) {
     if (!event || translating_) return QObject::eventFilter(watched, event);
+    if (show_tool_hint(watched, event)) return true;
     switch (event->type()) {
         case QEvent::Paint:
         case QEvent::Show:

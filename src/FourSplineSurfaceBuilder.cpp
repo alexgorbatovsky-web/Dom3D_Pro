@@ -208,9 +208,8 @@ TopoDS_Shape BuildFourSplineSurfaceShape(
         const double join_tolerance = std::max(1.0e-5, diagonal * 0.01);
         // Imported IGES curves are currently represented by 97 sampled
         // float points.  Fitting them more tightly than about 0.02% of the
-        // patch size merely reproduces sampling noise and explodes the
+        // curve size merely reproduces sampling noise and explodes the
         // compatible Coons knot vectors (for example, 192 x 192).
-        const double fit_tolerance = std::max(1.0e-3, diagonal * 2.0e-4);
         if (std::sqrt(best_maximum_gap) > join_tolerance) {
             return {};
         }
@@ -239,7 +238,20 @@ TopoDS_Shape BuildFourSplineSurfaceShape(
 
         std::array<Handle(Geom_BSplineCurve), 4> curves;
         for (size_t edge = 0; edge < curves.size(); ++edge) {
-            curves[edge] = approximate_curve(boundary[edge], fit_tolerance);
+            CPoint3d edge_min = boundary[edge].front(), edge_max = edge_min;
+            for (const auto& point : boundary[edge]) {
+                edge_min.x = std::min(edge_min.x, point.x);
+                edge_min.y = std::min(edge_min.y, point.y);
+                edge_min.z = std::min(edge_min.z, point.z);
+                edge_max.x = std::max(edge_max.x, point.x);
+                edge_max.y = std::max(edge_max.y, point.y);
+                edge_max.z = std::max(edge_max.z, point.z);
+            }
+            // A shared curve must be fitted identically on both incident
+            // patches, regardless of their different overall dimensions.
+            const double edge_tolerance = std::max(1.0e-3,
+                std::sqrt(squared_distance(edge_min, edge_max)) * 2.0e-4);
+            curves[edge] = approximate_curve(boundary[edge], edge_tolerance);
             if (curves[edge].IsNull()) {
                 return {};
             }

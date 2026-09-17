@@ -252,6 +252,26 @@ void CView3d::DrawObjects(const CAlfaDoc& document,
         }
     } else {
         draw_pass(false);
+        // All shaded bodies must have populated scene depth before hidden
+        // edges are drawn, including edges occluded by a different body.
+        if (CSolid::IsHiddenEdgeDrawingEnabled()
+            && !CMesh3D::IsZebraAnalysisEnabled()
+            && CSolid::GetDisplayMode() != SolidDisplayMode::Wireframe
+            && CSolid::GetDisplayMode() != SolidDisplayMode::MeshOnly) {
+            glPushAttrib(GL_ENABLE_BIT | GL_DEPTH_BUFFER_BIT | GL_LINE_BIT
+                         | GL_COLOR_BUFFER_BIT | GL_CURRENT_BIT);
+            for (const auto& object : objects) {
+                if (!object || !document.IsObjectVisible(*object)) continue;
+                if (const auto* solid = dynamic_cast<const CSolid*>(object.get())) {
+                    solid->RenderHiddenLineEdges(true);
+                } else if (const auto* mesh = dynamic_cast<const CMesh3D*>(object.get());
+                           mesh && !dynamic_cast<const CReferenceImage*>(mesh)
+                           && CMesh3D::GetDisplayMode() != MeshDisplayMode::Wire) {
+                    mesh->RenderHiddenLineEdges(true, CSolid::GetHiddenLineBackgroundColor());
+                }
+            }
+            glPopAttrib();
+        }
     }
     draw_pass(true);
     // Centerlines are construction geometry, visible through the solid in

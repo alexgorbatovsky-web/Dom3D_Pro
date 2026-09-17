@@ -226,6 +226,8 @@ set(DOM3D_SOURCES
     src/CMesh3D.cpp
     src/CatmullClarkSurfaceBuilder.cpp
     src/Tools_Mesh3D.cpp
+    src/mesh/ImageRelief.cpp
+    src/ui/ImageReliefDialog.cpp
     src/solid/HolePlacement.cpp
     src/ReferenceImage.cpp
     src/FillContour.cpp
@@ -269,6 +271,7 @@ set(DOM3D_SOURCES
     src/solid/TwoSketchSolidBuilder.cpp
     src/solid/SolidTool.cpp
     src/solid/TrimShapeBuilder.cpp
+    src/solid/PanelContourShapeBuilder.cpp
     src/ui/MainWindow.cpp
     src/ui/DraftingWorkspace.cpp
     src/ui/DraftingDimensions.cpp
@@ -279,6 +282,8 @@ set(DOM3D_SOURCES
     src/materials/PlasterBaker.cpp
     src/ui/MaterialSphereBrowser.cpp
     src/ui/OpenGLViewport.cpp
+    src/ui/ThemeManager.cpp
+    src/ui/ThemeManager.h
     src/ui/PreferencesDialog.cpp
     src/ui/LightingDialog.cpp
     src/ui/BlenderCyclesDialog.cpp
@@ -347,6 +352,8 @@ set(DOM3D_HEADERS
     src/CMesh3D.h
     src/CatmullClarkSurfaceBuilder.h
     src/Tools_Mesh3D.h
+    src/mesh/ImageRelief.h
+    src/ui/ImageReliefDialog.h
     src/solid/HolePlacement.h
     src/FillContour.h
     src/ContourQuadrangulator3DCoat.h
@@ -401,6 +408,7 @@ set(DOM3D_HEADERS
     src/ui/HotkeyManagerDialog.h
     src/ui/CommandSearchPopup.h
     src/ui/PropertyPanel.h
+    src/ui/DefaultDialogAccept.h
     src/ui/QtSceneRenderer.h
     src/ui/ToolRegistry.h
     src/ui/BooleanDialog.h
@@ -477,6 +485,11 @@ set(DOM3D_SKETCH_MIGRATION_FILES
     src/Spline.cpp
     src/Spline.h
 )
+
+if(MSVC)
+    # OCCT's worker-thread SEH translator requires asynchronous unwinding.
+    set_property(SOURCE src/CAlfaDoc.cpp APPEND PROPERTY COMPILE_OPTIONS /EHa)
+endif()
 
 set_source_files_properties(
     ${DOM3D_SKETCH_MIGRATION_FILES}
@@ -656,6 +669,14 @@ if(BUILD_TESTING)
     target_link_libraries(MeshContainerAdapterTests PRIVATE dom3d_mesh_adapter)
     add_test(NAME MeshContainerAdapterTests COMMAND MeshContainerAdapterTests)
 
+    add_executable(ThemeTests tests/ThemeTests.cpp src/ui/ThemeManager.cpp
+        src/ui/LanguageManager.cpp src/ui/LanguageManager.h)
+    target_compile_features(ThemeTests PRIVATE cxx_std_17)
+    target_include_directories(ThemeTests PRIVATE src)
+    target_link_libraries(ThemeTests PRIVATE Qt6::Widgets Qt6::Xml)
+    add_test(NAME Themes COMMAND ThemeTests)
+    set_tests_properties(Themes PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
     add_executable(PropertyPanelTests
         tests/PropertyPanelTests.cpp
         src/ui/PropertyPanel.cpp
@@ -665,6 +686,19 @@ if(BUILD_TESTING)
         src/ui/MeasurementUnits.cpp
         src/ui/MeasurementUnits.h
     )
+    add_executable(ToolHintTests tests/ToolHintTests.cpp
+        src/ui/LanguageManager.cpp src/ui/LanguageManager.h src/resources/icons.qrc)
+    target_compile_features(ToolHintTests PRIVATE cxx_std_17)
+    target_include_directories(ToolHintTests PRIVATE src)
+    target_link_libraries(ToolHintTests PRIVATE Qt6::Widgets Qt6::Xml)
+    if(MSVC)
+        target_compile_options(ToolHintTests PRIVATE /utf-8)
+    endif()
+    add_custom_command(TARGET ToolHintTests POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/Languages" "$<TARGET_FILE_DIR:ToolHintTests>/Languages")
+    add_test(NAME ToolHints COMMAND ToolHintTests)
+    set_tests_properties(ToolHints PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     target_compile_features(PropertyPanelTests PRIVATE cxx_std_17)
     target_include_directories(PropertyPanelTests PRIVATE
         src
@@ -679,6 +713,8 @@ if(BUILD_TESTING)
         )
     endif()
     add_test(NAME PropertyPanelTests COMMAND PropertyPanelTests)
+    # Popup focus must be deterministic while the user works in other windows.
+    set_tests_properties(PropertyPanelTests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
     add_executable(PbrMaterialLibraryTests
         tests/PbrMaterialLibraryTests.cpp
@@ -707,6 +743,7 @@ if(BUILD_TESTING)
         tests/SolidCenterlineTests.cpp
         tests/RepeatCommandTests.cpp
         tests/ScenePersistenceTests.cpp
+        tests/PanelContourTests.cpp
         tests/DraftingOutlineTests.cpp
         tests/DraftingDimensionTests.cpp
         tests/SheetBendTests.cpp
@@ -719,6 +756,12 @@ if(BUILD_TESTING)
         tests/CurveEndpointLinkTests.cpp
         tests/ProceduralMaterialTests.cpp
         tests/ToolsMesh3DTests.cpp
+        tests/ImageReliefTests.cpp
+        tests/BallCylinderTests.cpp
+        tests/SphereUnionTests.cpp
+        tests/PlasticityImportTests.cpp
+        tests/BoolAndFillTests.cpp
+        tests/DraftFaceTests.cpp
         tests/HolePlacementTests.cpp
         tests/QuadroPillowTests.cpp
         tests/QuadroHairdryerTests.cpp
@@ -753,9 +796,23 @@ if(BUILD_TESTING)
         )
     endif()
     target_sources(CatalogImportTests PRIVATE tests/NativeColorTests.cpp)
+    add_test(NAME PlasticityImport COMMAND CatalogImportTests --test-plasticity-import
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Plasticity-F1.stp")
+    set_tests_properties(PlasticityImport PROPERTIES TIMEOUT 120)
     add_test(NAME NativeColors COMMAND CatalogImportTests --test-native-colors)
+    add_test(NAME ImageRelief COMMAND CatalogImportTests --test-image-relief)
+    set_tests_properties(ImageRelief PROPERTIES TIMEOUT 180 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     add_test(NAME CatalogImportTests COMMAND CatalogImportTests)
     add_test(NAME SurfaceDisplayNet COMMAND CatalogImportTests --test-surface-display-net)
+    add_test(NAME CylinderPrismQuadroNormals COMMAND CatalogImportTests --test-cylinder-quadro-normals
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Cylinder_Min_Prizm_BAD_Quadro.dom3d")
+    set_tests_properties(CylinderPrismQuadroNormals PROPERTIES TIMEOUT 60)
+    add_test(NAME TwoRailSurfaceDocument COMMAND CatalogImportTests --test-two-rail-surface-document
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/surface-regression/Swept-2.dom3d")
+    set_tests_properties(TwoRailSurfaceDocument PROPERTIES TIMEOUT 120)
+    add_test(NAME PeriodicBSpline COMMAND CatalogImportTests --test-periodic-bspline
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/surface-regression/Swept-2.dom3d")
+    set_tests_properties(PeriodicBSpline PROPERTIES TIMEOUT 120)
     add_test(NAME KitchenLayout COMMAND CatalogImportTests --test-kitchen-layout -platform offscreen)
     add_test(NAME CurveEndpointLinks COMMAND CatalogImportTests --test-curve-endpoint-links -platform offscreen)
     add_test(NAME QuadroBodyBoundaryCache COMMAND CatalogImportTests --test-quadro-body-cache)
@@ -769,11 +826,86 @@ if(BUILD_TESTING)
     add_test(NAME HairdryerCadBoundary COMMAND CatalogImportTests --test-hairdryer-cad-boundary
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Hairdryer.dom3d")
     set_tests_properties(HairdryerCadBoundary PROPERTIES TIMEOUT 90)
+    add_test(NAME MixedLowPolyCompletion COMMAND CatalogImportTests --test-mixed-low-poly)
+    add_test(NAME MultirowHoleZone COMMAND CatalogImportTests --test-multirow-hole-zone
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Box_Min_14_Box.dom3d")
+    set_tests_properties(MultirowHoleZone PROPERTIES TIMEOUT 90 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    add_test(NAME FrameSlxBoundary COMMAND CatalogImportTests --test-frame-slx-boundary)
+    add_test(NAME SquareFilletedQuadro COMMAND CatalogImportTests --test-square-filleted-quadro
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Square_Filleted.dom3d)
+    add_test(NAME Frame2HybridFillet COMMAND CatalogImportTests --test-frame2-fillet
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Frame-2.dom3d)
+    set_tests_properties(Frame2HybridFillet PROPERTIES TIMEOUT 180)
+    add_test(NAME Frame2FilletRenderSeams COMMAND CatalogImportTests --test-frame2-render-seams
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Frame-2-solid.dom3d)
+    add_test(NAME GroupedSixHoles COMMAND CatalogImportTests --test-grouped-hole-zones
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Box_Min_6_Boxex.dom3d" 1)
+    add_test(NAME GroupedFiveHoles COMMAND CatalogImportTests --test-grouped-hole-zones
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Box_Min_5_Box.dom3d" 1)
+    add_test(NAME GroupedTwelveHoles COMMAND CatalogImportTests --test-grouped-hole-zones
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Box_Min_12_Box.dom3d" 2)
+    add_test(NAME GroupedFourteenHoles COMMAND CatalogImportTests --test-grouped-hole-zones
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Box_Min_14_Box.dom3d" 2)
+    set_tests_properties(FrameSlxBoundary GroupedSixHoles GroupedFiveHoles
+        GroupedTwelveHoles GroupedFourteenHoles PROPERTIES TIMEOUT 180
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    set_tests_properties(MixedLowPolyCompletion PROPERTIES TIMEOUT 30 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     add_test(NAME HairdryerCadChartConsumer COMMAND CatalogImportTests --diagnose-hairdryer-chart-fill
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Hairdryer.dom3d" "${CMAKE_CURRENT_BINARY_DIR}/hairdryer-chart-consumer")
     set_tests_properties(HairdryerCadChartConsumer PROPERTIES TIMEOUT 240)
     add_test(NAME RepeatCommand COMMAND CatalogImportTests --test-repeat-command -platform offscreen)
+    add_test(NAME PanelContour COMMAND CatalogImportTests --test-panel-contour)
+    add_test(NAME PanelContourSavedBoundary COMMAND CatalogImportTests --test-panel-contour)
+    set_tests_properties(PanelContourSavedBoundary PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;DOM3D_PANEL_CONTOUR_INPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/data/ui-regression/Panel-boundary.dom3d"
+        TIMEOUT 30)
+    add_test(NAME CarBulgedPanelQuadro COMMAND CatalogImportTests --test-panel-contour)
+    set_tests_properties(CarBulgedPanelQuadro PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;DOM3D_PANEL_MESH_FIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Car-2-BulgedPanel.dom3d"
+        TIMEOUT 60)
+    add_test(NAME PanelBulgeUI COMMAND CatalogImportTests --test-scene-persistence --bulge-only -platform offscreen)
+    set_tests_properties(PanelBulgeUI PROPERTIES TIMEOUT 30)
+    add_test(NAME PanelContourUI COMMAND CatalogImportTests --test-scene-persistence --panel-contour-only -platform offscreen)
+    add_test(NAME ExtractFaceUI COMMAND CatalogImportTests --test-scene-persistence --extract-face-only -platform offscreen)
+    set_tests_properties(ExtractFaceUI PROPERTIES TIMEOUT 30)
+    set_tests_properties(PanelContourUI PROPERTIES TIMEOUT 30)
     add_test(NAME ScenePersistence COMMAND CatalogImportTests --test-scene-persistence -platform offscreen)
+    add_test(NAME BallAndBoxQuadro COMMAND CatalogImportTests --test-ball-box-quadro
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Ball_And_Box.dom3d")
+    add_test(NAME BallAndCylinderQuadro COMMAND CatalogImportTests --test-ball-cylinder
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Ball_And_Cylinder.dom3d")
+    add_test(NAME SphereUnionQuadro COMMAND CatalogImportTests --test-sphere-union
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Ball_Plus_4_Ball.dom3d")
+    set_tests_properties(SphereUnionQuadro PROPERTIES TIMEOUT 180 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    add_test(NAME TwoSpheresQuadro COMMAND CatalogImportTests --test-sphere-union
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Bal_Plus_Ball.dom3d")
+    set_tests_properties(TwoSpheresQuadro PROPERTIES TIMEOUT 180 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    add_test(NAME FilletedSphereUnionQuadro COMMAND CatalogImportTests --test-sphere-union
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Ball_Plus_4_Ball_Filleted.dom3d")
+    set_tests_properties(FilletedSphereUnionQuadro PROPERTIES TIMEOUT 300 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    set_tests_properties(BallAndCylinderQuadro PROPERTIES TIMEOUT 120 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    add_test(NAME BoolAndFillQuadro COMMAND CatalogImportTests --test-bool-and-fill
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Bool_And_Fill.dom3d")
+    set_tests_properties(BoolAndFillQuadro PROPERTIES TIMEOUT 120 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    add_test(NAME BoxDraftsQuadro COMMAND CatalogImportTests --test-box-drafts-mesh
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Box_Min_Box_And_Drafts.dom3d")
+    set_tests_properties(BoxDraftsQuadro PROPERTIES TIMEOUT 120 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    add_test(NAME DraftFaceReplay COMMAND CatalogImportTests --test-draft-face
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Draft_Face.dom3d")
+    set_tests_properties(DraftFaceReplay PROPERTIES TIMEOUT 120 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    add_test(NAME RoundedOpeningCollar COMMAND CatalogImportTests --test-rounded-opening-collar
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Box_Min_Filleted_Box.dom3d")
+    add_test(NAME SurfaceSnapping COMMAND CatalogImportTests --test-scene-persistence --surface-snapping-only -platform offscreen)
+    add_test(NAME SpatialCurvePlane COMMAND CatalogImportTests --test-scene-persistence --curve-plane-only -platform offscreen)
+    add_test(NAME BridgeEndpointDefaults COMMAND CatalogImportTests --test-scene-persistence --bridge-defaults-only -platform offscreen)
+    add_test(NAME HiddenGridCurveSnapping COMMAND CatalogImportTests --test-scene-persistence --hidden-grid-only -platform offscreen)
+    add_test(NAME EdgeToolAllEdges COMMAND CatalogImportTests --test-scene-persistence --edge-tools-only -platform offscreen)
+    add_test(NAME CurveReleaseDependencies COMMAND CatalogImportTests --test-scene-persistence --curve-release-only
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/ui-regression/Car-2-CurveRelease.dom3d -platform offscreen)
+    add_test(NAME MaterialBrushFace COMMAND CatalogImportTests --test-scene-persistence --material-brush-only -platform offscreen)
+    add_test(NAME GroupTransformAfterMaterialPreview COMMAND CatalogImportTests --test-scene-persistence
+        --group-transform-only "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/ui-regression/Table_And_Chair.dom3d")
+    set_tests_properties(GroupTransformAfterMaterialPreview PROPERTIES TIMEOUT 60)
     if(WIN32)
         # QOpenGLWidget needs the Windows platform plugin for framebuffer tests.
         # The test window is placed outside the desktop.
@@ -820,6 +952,15 @@ if(BUILD_TESTING)
     set_tests_properties(SolidPrimitiveTool PROPERTIES TIMEOUT 30)
     add_test(NAME TileTool COMMAND CatalogImportTests --test-tile -platform offscreen)
     add_test(NAME ProceduralMaterial COMMAND CatalogImportTests --test-procedural-material -platform offscreen)
+    add_test(NAME MaterialPreviewHiddenEdges COMMAND CatalogImportTests
+        --test-procedural-material --hidden-edges-preview)
+    set_tests_properties(MaterialPreviewHiddenEdges PROPERTIES TIMEOUT 60)
+    add_test(NAME ProceduralPerforation COMMAND CatalogImportTests --test-procedural-material --perforation)
+    set_tests_properties(ProceduralPerforation PROPERTIES TIMEOUT 120)
+    if(WIN32)
+        # Qt's offscreen platform cannot create a WGL preview context.
+        set_tests_properties(MaterialPreviewHiddenEdges ProceduralPerforation PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=windows")
+    endif()
     set_tests_properties(TileTool PROPERTIES TIMEOUT 60 ENVIRONMENT "QT_QPA_PLATFORM_PLUGIN_PATH=${DOM3D_QT_MSVC2022_PATH}/plugins/platforms")
     add_test(NAME OrbitDimensionGrips COMMAND CatalogImportTests --test-face-primitive-cut --orbit-dimensions)
     set_tests_properties(OrbitDimensionGrips PROPERTIES TIMEOUT 30)
@@ -847,6 +988,12 @@ if(BUILD_TESTING)
         COMMAND CatalogImportTests --test-curve-link)
     add_test(NAME ParametricSmartHybrid
         COMMAND CatalogImportTests --test-smart-hybrid)
+    add_test(NAME SmartHybridCarOpenNormals
+        COMMAND CatalogImportTests --test-smart-hybrid-file
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/surface-regression/SmartHybridCarOpen.dom3d" 15)
+    add_test(NAME SmartHybridCarClosedNormals
+        COMMAND CatalogImportTests --test-smart-hybrid-file
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/surface-regression/SmartHybridCarClosed.dom3d" 18)
     add_test(NAME LiveFilletValidation
         COMMAND CatalogImportTests --test-live-fillet-validation)
     add_test(NAME MeshWireColor
@@ -905,6 +1052,14 @@ if(BUILD_TESTING)
         COMMAND CatalogImportTests --test-shell-rim-quadro
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Shell_Bag.dom3d")
     set_tests_properties(ShellRimQuadro PROPERTIES TIMEOUT 60)
+    add_test(NAME TorusPlaneCutQuadro
+        COMMAND CatalogImportTests --test-torus-plane-cut-quadro
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Torus_PlaneCut.dom3d")
+    set_tests_properties(TorusPlaneCutQuadro PROPERTIES TIMEOUT 60)
+    add_test(NAME TwoSketchCornerNormals
+        COMMAND CatalogImportTests --test-two-sketch-corner-normals
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Two_SL.dom3d")
+    set_tests_properties(TwoSketchCornerNormals PROPERTIES TIMEOUT 60)
     add_test(NAME PolyhedronProjectRebuild
         COMMAND CatalogImportTests --test-rebuild-polyhedron
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Polyhedron.dom3d"

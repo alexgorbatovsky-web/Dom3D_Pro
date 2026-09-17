@@ -13,6 +13,7 @@
 #include <vector>
 
 #include <TopoDS_Edge.hxx>
+#include <TopoDS_Wire.hxx>
 #include <TopoDS_Shape.hxx>
 
 class CSolid;
@@ -53,6 +54,7 @@ public:
     };
 
     CAlfaDoc();
+    TopoDS_Wire BuildCurveWire(unsigned long object_id) const;
     ~CAlfaDoc();
 
     void Clear();
@@ -336,12 +338,12 @@ public:
     bool RebuildTwoRailSweepSurface(size_t object_index,
                                     unsigned long profile_id,
                                     unsigned long first_rail_id,
-                                    unsigned long second_rail_id);
+                                    unsigned long second_rail_id, double delta_x = 0.0, double delta_y = 0.0, double angle_degrees = 0.0);
     bool CreateTwoRailSweepSolidFromSelection();
     bool RebuildTwoRailSweepSolid(size_t object_index,
                                   unsigned long profile_id,
                                   unsigned long first_rail_id,
-                                  unsigned long second_rail_id);
+                                  unsigned long second_rail_id, double delta_x = 0.0, double delta_y = 0.0, double angle_degrees = 0.0);
     bool ReverseSelectedSurfaceNormals();
     bool SewSelectedSurfacesToSolid(double tolerance,
                                     std::string* error_message = nullptr,

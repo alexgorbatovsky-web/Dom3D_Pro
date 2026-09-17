@@ -1,3 +1,4 @@
+#include "DefaultDialogAccept.h"
 #include "ExtrudeFaceDialog.h"
 
 #include <QDialogButtonBox>
@@ -57,6 +58,7 @@ ExtrudeFaceDialog::ExtrudeFaceDialog(QWidget* parent)
     });
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
+    SetDefaultDialogAccept(this, buttons);
     connect(buttons, &QDialogButtonBox::accepted, this, &ExtrudeFaceDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, this, &ExtrudeFaceDialog::reject);
     layout->addRow(buttons);

@@ -1,5 +1,8 @@
 #include "materials/ProceduralMaterialIO.h"
+#include "materials/EnvironmentPrefilter.h"
 #include "materials/PlasterBaker.h"
+#include "materials/GlbMaterialBaker.h"
+#include "render/RenderScene.h"
 #include "ui/MaterialPreviewGL.h"
 #include "ui/MaterialDrag.h"
 #include "ui/OpenGLViewport.h"
@@ -21,6 +24,7 @@
 #include <QMouseEvent>
 #include <QComboBox>
 #include <QCheckBox>
+#include <QListWidget>
 #include <iostream>
 #include <cstdlib>
 #include <set>
@@ -30,6 +34,137 @@ void require(bool value,const char* reason){if(!value){std::cerr<<reason<<std::e
 }
 int TestProceduralMaterial(int argc,char** argv){
     QApplication app(argc,argv);
+    if(app.arguments().contains("--perforation")) {
+        QTemporaryDir dir;MaterialLibrary library;QString error;
+        QDir().mkpath("output/perforation");
+        QImage previous;
+        for(int type=0;type<2;++type){
+            Material m=Material::DefaultSurface();m.id=811+type;m.name=type?"Honeycomb":"Perforation";
+            m.diffuse={.55f,.57f,.6f};m.metallic=.9f;m.roughness=.25f;
+            m.perforation.enabled=true;m.perforation.pattern=type;
+            if(type){m.perforation.holeSize=6;m.perforation.bridge=.6f;}
+            const QString encoded=EncodePerforation(m);Material copy;
+            require(DecodePerforation(encoded,copy)&&EncodePerforation(copy)==encoded,"Perforation JSON round trip failed");
+            QMimeData mime;mime.setData(MaterialDrag::MimeType(),MaterialDrag::Encode(m));
+            require(MaterialDrag::Decode(&mime,copy)&&EncodePerforation(copy)==encoded,"Drag/drop loses perforation");
+            require(library.SaveMaterial(dir.filePath("pattern.d3mat"),m,&error)&&library.LoadMaterial(dir.filePath("pattern.d3mat"),copy,&error)&&EncodePerforation(copy)==encoded,"Library loses perforation");
+            CAlfaDoc doc;doc.UpsertMaterial(m);Dom3DProjectSerializer serializer;ProjectViewState view;QString room;
+            require(serializer.Save(dir.filePath("pattern.dom3d"),doc,room,view,{},error),"Perforation project save failed");
+            CAlfaDoc loaded;require(serializer.Load(dir.filePath("pattern.dom3d"),loaded,room,view,error),"Perforation project load failed");
+            const auto* saved=loaded.FindMaterial(m.name);require(saved&&EncodePerforation(*saved)==encoded,"Project loses perforation");
+            const auto sphere=RenderMaterialSphereGL(m,480);
+            require(!sphere.isNull()&&sphere!=previous,"Perforation shader missing or presets identical");
+            sphere.save(QString("output/perforation/sphere-%1.png").arg(type));previous=sphere;
+            const auto plate=RenderMaterialSphereGL(m,480,true);
+            Material plain=m;plain.perforation.enabled=false;
+            const auto solid=RenderMaterialSphereGL(plain,480,true);
+            require(!plate.isNull()&&plate!=solid,"Perforation is an opaque surface");
+            plate.save(QString("output/perforation/plate-%1.png").arg(type));solid.save("output/perforation/solid.png");
+            const auto background=sphere.pixel(0,0);int holes=0,metal=0;
+            for(int y=80;y<400;++y)for(int x=80;x<400;++x){
+                if(solid.pixel(x,y)!=background){if(plate.pixel(x,y)==background)++holes;else ++metal;}
+            }
+            std::cout<<"holes="<<holes<<" metal="<<metal<<" background="<<background<<std::endl;
+            require(holes>1000&&metal>1000,"Perforation must contain real background openings and solid bridges");
+            plate.save(QString("output/perforation/plate-%1.png").arg(type));
+            RenderMesh mesh;mesh.vertices={{0,0,0},{100,0,0},{0,100,0}};
+            RenderTriangle tri;tri.vertices={0,1,2};tri.uvs={UV{0,0},UV{1,0},UV{0,1}};tri.normals={Vec3{0,0,1},Vec3{0,0,1},Vec3{0,0,1}};mesh.triangles.push_back(tri);
+            const auto maps=BakeGlbMaterial(mesh,m);int transparent=0,opaque=0;
+            for(int y=0;y<maps.color.height();y+=8)for(int x=0;x<maps.color.width();x+=8){int a=qAlpha(maps.color.pixel(x,y));if(a==0)++transparent;if(a==255)++opaque;}
+            require(transparent>100&&opaque>100,"GLB bake loses hole alpha mask");
+        }
+        Material invalid;require(!DecodePerforation("{\"version\":1,\"useUV\":true,\"pattern\":2}",invalid),"Invalid perforation pattern accepted");
+        require(DecodePerforation({},invalid)&&!invalid.perforation.enabled,"Legacy material became perforated");
+        Material material=Material::DefaultSurface();material.id=812;material.name="Editor perforation";Material edited;int commits=0;
+        MaterialEditorDialog editor(dir.path(),{material},false,&material);
+        QObject::connect(&editor,&MaterialEditorDialog::SaveMaterialToDocument,[&](const Material& m){edited=m;++commits;});
+        auto* button=editor.findChild<QPushButton*>("ProceduralPerforationButton");require(button,"Perforation editor missing");
+        QTimer::singleShot(0,[&](){auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());require(dialog,"Perforation dialog missing");dialog->reject();});button->click();
+        require(commits==0,"Cancel changed material");
+        QTimer::singleShot(0,[&](){auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());require(dialog,"Perforation dialog missing");
+            dialog->findChild<QComboBox*>("perforation_pattern")->setCurrentIndex(1);
+            dialog->findChild<QDoubleSpinBox*>("perforation_bridge")->setValue(.7);
+            QTimer::singleShot(250,dialog,[dialog](){dialog->grab().save("output/perforation/editor.png");dialog->accept();});
+        });button->click();
+        require(commits>0&&edited.perforation.enabled&&edited.perforation.pattern==1&&std::abs(edited.perforation.bridge-.7f)<.001f,"Editor loses perforation settings");
+        require(edited.metallic>.8f,"Perforated metal lost metallic shading");
+        std::cout<<"Perforation: viewport openings, presets, serialization, GLB alpha and editor checks passed\n";return 0;
+    }
+    if(app.arguments().contains("--hidden-edges-preview")) {
+        Material material = Material::DefaultSurface();
+        material.diffuse = {.7f,.12f,.08f};
+        material.name = "Preview without hidden edges";
+        CSolid::SetHiddenEdgeDrawingEnabled(false);
+        const auto baseline = RenderMaterialSphereGL(material,192);
+        require(!baseline.isNull(),"Material preview context failed");
+        // Names participate in the cache key but not shading: force a fresh
+        // render with the scene option enabled instead of comparing cache hits.
+        material.name = "Preview with hidden edges";
+        CSolid::SetHiddenEdgeDrawingEnabled(true);
+        const auto hidden = RenderMaterialSphereGL(material,192);
+        require(hidden == baseline,"Scene hidden edges corrupt the material sphere");
+        require(CSolid::IsHiddenEdgeDrawingEnabled(),"Preview changed the scene hidden-edge option");
+        material.name = "Preview hidden edges disabled again";
+        CSolid::SetHiddenEdgeDrawingEnabled(false);
+        require(RenderMaterialSphereGL(material,192) == baseline,"Preview changes after toggling hidden edges");
+        require(!CSolid::IsHiddenEdgeDrawingEnabled(),"Preview enabled hidden edges");
+        QDir().mkpath("output/material-preview");
+        require(hidden.save("output/material-preview/hidden-edges-fixed.png"),"Cannot save preview verification");
+        std::cout << "Material preview is independent of scene hidden edges\n";
+        return 0;
+    }
+    if(app.arguments().contains("--environment-prefilter")) {
+        QImage constant(64,32,QImage::Format_RGB32); constant.fill(qRgb(80,120,160));
+        for(bool diffuse : {false,true}) {
+            const QImage filtered=PrefilterEnvironment(constant,diffuse);
+            for(int y=0;y<filtered.height();++y) for(int x=0;x<filtered.width();++x)
+                require(filtered.pixel(x,y)==qRgb(80,120,160),"Environment filtering changed constant illumination");
+        }
+        QImage stripes(64,32,QImage::Format_RGB32);
+        for(int y=0;y<32;++y) for(int x=0;x<64;++x)
+            stripes.setPixel(x,y,(x%4<2)?qRgb(255,255,255):qRgb(0,0,0));
+        for(bool diffuse : {false,true}) {
+            const QImage filtered=PrefilterEnvironment(stripes,diffuse);
+            int low=255,high=0;
+            for(int y=0;y<filtered.height();++y) for(int x=0;x<filtered.width();++x) {
+                const int value=qRed(filtered.pixel(x,y)); low=std::min(low,value); high=std::max(high,value);
+            }
+            require(high-low<8,"Fine HDRI features survived rough filtering");
+        }
+        require(PrefilterEnvironment({},true).isNull(),"Empty environment should stay empty");
+        std::cout<<"Environment prefilter checks passed\n"; return 0;
+    }
+    if(app.arguments().contains("--plaster-presets")){
+        QDir().mkpath("output/plaster/presets");
+        QTemporaryDir temporary;QString error;MaterialLibrary library;
+        QImage previous;
+        for(int i=0;i<=6;++i){
+            Material preset;preset.diffuse={.78f,.73f,.64f};preset.plaster=PlasterPreset(i);
+            Material decoded;require(DecodePlaster(EncodePlaster(preset),decoded)&&EncodePlaster(decoded)==EncodePlaster(preset),"Preset serialization failed");
+            auto image=RenderMaterialSphereGL(preset,480,true);
+            require(!image.isNull()&&image!=previous,"Preset is missing or identical to previous");
+            require(image.save(QString("output/plaster/presets/type-%1.png").arg(i)),"Cannot save preset image");
+            previous=image;
+            require(library.SaveMaterial(temporary.filePath("preset.d3mat"),preset,&error)&&library.LoadMaterial(temporary.filePath("preset.d3mat"),decoded,&error)&&EncodePlaster(decoded)==EncodePlaster(preset),"Saved preset changed");
+            PlasterBakeSettings settings;settings.resolution=256;settings.widthMm=60;settings.heightMm=60;
+            QString package;require(BakePlasterMaps(preset,settings,temporary.path(),package,error),qPrintable(error));
+            QImage normals(QDir(package).filePath("NormalGL.png"));require(!normals.isNull(),"Missing preset normals");
+        }
+        Material legacy;require(DecodePlaster("{\"version\":1}",legacy)&&legacy.plaster.pattern==0,"Old plaster changed type");
+        require(!DecodePlaster("{\"version\":1,\"pattern\":1.5}",legacy),"Fractional type accepted");
+        Material material;material.id=701;material.diffuse={.78f,.73f,.64f};material.plaster=PlasterPreset(0);Material edited;
+        MaterialEditorDialog editor(temporary.path(),{material},false,&material);
+        QObject::connect(&editor,&MaterialEditorDialog::SaveMaterialToDocument,[&](const Material& value){edited=value;});
+        QTimer::singleShot(0,[&](){
+            auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());require(dialog,"Plaster dialog missing");
+            auto* presets=dialog->findChild<QListWidget*>("plaster_presets");require(presets&&presets->count()==7,"Preset gallery missing");
+            presets->setCurrentRow(6);
+            QTimer::singleShot(500,dialog,[dialog](){dialog->grab().save("output/plaster/presets/editor.png");dialog->accept();});
+        });
+        editor.findChild<QPushButton*>("ProceduralPlasterButton")->click();
+        require(edited.plaster.pattern==6 && edited.plaster.patternDepth==PlasterPreset(6).patternDepth,"Gallery does not apply preset");
+        std::cout<<"Plaster presets rendered and serialized"<<std::endl;return 0;
+    }
     Material m;m.name="Fine Plaster";m.diffuse={.84f,.84f,.82f};m.plaster.enabled=true;
     m.plaster.seed=4294967295u;m.plaster.highQuality=true;m.plaster.grainSize=.7f;
     QString encoded=EncodePlaster(m);Material copy;

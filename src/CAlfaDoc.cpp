@@ -15,6 +15,7 @@
 #include "DrawingText.h"
 #include "ReferenceImage.h"
 #include "solid/Solid.h"
+#include "solid/DraftFaceAxis.h"
 #include "solid/AssociativeClone.h"
 #include "solid/TwoSketchSolidBuilder.h"
 #include "solid/PolyhedronShapeBuilder.h"
@@ -44,6 +45,7 @@
 #include <BRepTools_WireExplorer.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
+#include <OSD.hxx>
 #include <BRepFilletAPI_MakeChamfer.hxx>
 #include <BRepOffsetAPI_DraftAngle.hxx>
 #include <BRepOffsetAPI_MakeFilling.hxx>
@@ -1117,7 +1119,7 @@ bool sweep_curve_samples(const CAlfaObject& object, SweepCurveSamples& samples)
 
 TopoDS_Shape make_two_rail_sweep_surface(const CAlfaObject& profile,
                                          const CAlfaObject& first_rail,
-                                         const CAlfaObject& second_rail)
+                                         const CAlfaObject& second_rail, double delta_x = 0.0, double delta_y = 0.0, double angle_degrees = 0.0)
 {
     SweepCurveSamples profile_samples;
     SweepCurveSamples first_samples;
@@ -1127,7 +1129,7 @@ TopoDS_Shape make_two_rail_sweep_surface(const CAlfaObject& profile,
         || !sweep_curve_samples(second_rail, second_samples)) {
         return {};
     }
-    return BuildTwoRailSweepSurfaceShape(profile_samples, first_samples, second_samples);
+    return BuildTwoRailSweepSurfaceShape(profile_samples, first_samples, second_samples, delta_x, delta_y, angle_degrees);
 }
 
 // SurfaceSet uses the same public deflection value as the Low Poly density
@@ -1903,7 +1905,7 @@ TopoDS_Shape make_four_spline_surface(const CAlfaObject& first,
 
 TopoDS_Shape make_two_rail_sweep_solid(const CAlfaObject& profile,
                                        const CAlfaObject& first_rail,
-                                       const CAlfaObject& second_rail)
+                                       const CAlfaObject& second_rail, double delta_x = 0.0, double delta_y = 0.0, double angle_degrees = 0.0)
 {
     SweepCurveSamples profile_samples;
     SweepCurveSamples first_samples;
@@ -1928,7 +1930,7 @@ TopoDS_Shape make_two_rail_sweep_solid(const CAlfaObject& profile,
         profile_samples,
         first_samples,
         second_samples,
-        TopoDS::Wire(wires.Current()));
+        TopoDS::Wire(wires.Current()), delta_x, delta_y, angle_degrees);
 }
 
 bool hit_test_polyline_screen(const CPolyline& polyline,
@@ -4108,45 +4110,10 @@ bool CAlfaDoc::SelectDraftFaceAxisEdgeAtScreen(DomPoint point,
         return false;
     }
 
-    const TopoDS_Edge* edge = surface->GetTopoEdge(edge_index);
-
     try {
         Vec3 edge_start{};
         Vec3 edge_end{};
-        if (edge && !edge->IsNull()) {
-            BRepAdaptor_Curve curve(*edge);
-            const Standard_Real first = curve.FirstParameter();
-            const Standard_Real last = curve.LastParameter();
-            if (last <= first) {
-                return false;
-            }
-
-            const gp_Pnt p0 = curve.Value(first);
-            const gp_Pnt p1 = curve.Value(last);
-            edge_start = {static_cast<float>(p0.X()), static_cast<float>(p0.Y()), static_cast<float>(p0.Z())};
-            edge_end = {static_cast<float>(p1.X()), static_cast<float>(p1.Y()), static_cast<float>(p1.Z())};
-            const Vec3 chord = edge_end - edge_start;
-            const float chord_length = std::sqrt(dot(chord, chord));
-            if (chord_length <= 0.000001f) {
-                return false;
-            }
-            const Vec3 chord_dir = chord * (1.0f / chord_length);
-            const float tolerance_3d = std::max(0.001f, chord_length * 0.001f);
-            for (int sample = 1; sample < 6; ++sample) {
-                const Standard_Real t = first + (last - first) * static_cast<Standard_Real>(sample) / 6.0;
-                const gp_Pnt p = curve.Value(t);
-                const Vec3 sample_point{static_cast<float>(p.X()), static_cast<float>(p.Y()), static_cast<float>(p.Z())};
-                const Vec3 from_start = sample_point - edge_start;
-                const Vec3 closest = edge_start + chord_dir * dot(from_start, chord_dir);
-                if (std::sqrt(dot(sample_point - closest, sample_point - closest)) > tolerance_3d) {
-                    return false;
-                }
-            }
-        } else {
-            if (!surface->GetEdgeEndpoints(edge_index, edge_start, edge_end)) {
-                return false;
-            }
-        }
+        if (!DraftFaceEdgeEndpoints(*surface, edge_index, edge_start, edge_end)) return false;
 
         Vec3 axis_point{(edge_start.x + edge_end.x) * 0.5f,
                         (edge_start.y + edge_end.y) * 0.5f,
@@ -6528,6 +6495,11 @@ bool CAlfaDoc::GetObjectPlane(unsigned long object_id,
     return true;
 }
 
+TopoDS_Wire CAlfaDoc::BuildCurveWire(unsigned long object_id) const {
+    const auto* object = FindObjectById(object_id);
+    return object ? make_wire_from_curve_object(*object) : TopoDS_Wire{};
+}
+
 size_t CAlfaDoc::CreateSurfaceIntersectionCurves() {
     std::vector<const CSurfaceSet*> surfaces;
     for (size_t index : selected_object_indices_) {
@@ -6947,6 +6919,9 @@ bool CAlfaDoc::CreateTwoRailSweepSurfaceFromSelection() {
         }
     }
 
+    for (CAlfaObject* curve : curves) {
+        EnsureObjectId(*curve);
+    }
     TopoDS_Shape shape = make_two_rail_sweep_surface(
         *curves[profile_index], *curves[rail_indices[0]], *curves[rail_indices[1]]);
     if (shape.IsNull()) {
@@ -6959,7 +6934,8 @@ bool CAlfaDoc::CreateTwoRailSweepSurfaceFromSelection() {
     surface->SetParametricOperation(0, "SurfaceSweepTwoRails", "Two-Rail Sweep Surface", {
         {"profile.id", static_cast<double>(curves[profile_index]->m_id)},
         {"guide1.id", static_cast<double>(curves[rail_indices[0]]->m_id)},
-        {"guide2.id", static_cast<double>(curves[rail_indices[1]]->m_id)}
+        {"guide2.id", static_cast<double>(curves[rail_indices[1]]->m_id)},
+        {"dx", 0.0}, {"dy", 0.0}, {"angle", 0.0}
     });
     if (!surface->ReBuldMesh()) {
         return false;
@@ -6971,7 +6947,7 @@ bool CAlfaDoc::CreateTwoRailSweepSurfaceFromSelection() {
 bool CAlfaDoc::RebuildTwoRailSweepSurface(size_t object_index,
                                           unsigned long profile_id,
                                           unsigned long first_rail_id,
-                                          unsigned long second_rail_id) {
+                                          unsigned long second_rail_id, double delta_x, double delta_y, double angle_degrees) {
     if (object_index >= objects_.size()) {
         return false;
     }
@@ -6983,7 +6959,7 @@ bool CAlfaDoc::RebuildTwoRailSweepSurface(size_t object_index,
         return false;
     }
 
-    TopoDS_Shape shape = make_two_rail_sweep_surface(*profile, *first_rail, *second_rail);
+    TopoDS_Shape shape = make_two_rail_sweep_surface(*profile, *first_rail, *second_rail, delta_x, delta_y, angle_degrees);
     if (shape.IsNull()) {
         return false;
     }
@@ -7052,7 +7028,8 @@ bool CAlfaDoc::CreateTwoRailSweepSolidFromSelection() {
     solid->SetParametricOperation(0, "SolidSweepTwoRails", "Two-Rail Sweep Solid", {
         {"profile.id", static_cast<double>(curves[profile_index]->m_id)},
         {"guide1.id", static_cast<double>(curves[rail_indices[0]]->m_id)},
-        {"guide2.id", static_cast<double>(curves[rail_indices[1]]->m_id)}
+        {"guide2.id", static_cast<double>(curves[rail_indices[1]]->m_id)},
+        {"dx", 0.0}, {"dy", 0.0}, {"angle", 0.0}
     });
     if (!solid->ReBuldMesh()) {
         return false;
@@ -7064,7 +7041,7 @@ bool CAlfaDoc::CreateTwoRailSweepSolidFromSelection() {
 bool CAlfaDoc::RebuildTwoRailSweepSolid(size_t object_index,
                                         unsigned long profile_id,
                                         unsigned long first_rail_id,
-                                        unsigned long second_rail_id) {
+                                        unsigned long second_rail_id, double delta_x, double delta_y, double angle_degrees) {
     if (object_index >= objects_.size()) {
         return false;
     }
@@ -7077,7 +7054,7 @@ bool CAlfaDoc::RebuildTwoRailSweepSolid(size_t object_index,
         return false;
     }
     TopoDS_Shape shape = make_two_rail_sweep_solid(
-        *profile, *first_rail, *second_rail);
+        *profile, *first_rail, *second_rail, delta_x, delta_y, angle_degrees);
     if (shape.IsNull()) {
         return false;
     }
@@ -8420,6 +8397,10 @@ bool CAlfaDoc::BuildLiveFilletShape(
     if (!valid_radii) {
         return false;
     }
+    // Preview runs on a pool thread. Install OCCT's thread-local SEH
+    // translator here so a kernel access violation becomes Standard_Failure
+    // and the original document survives a failed fillet calculation.
+    OSD::SetThreadLocalSignal(OSD_SignalMode_Set, Standard_False);
     try {
             BRepBuilderAPI_Copy build_copy(
                 request.base_shape, Standard_True, Standard_False);
@@ -8993,12 +8974,14 @@ bool CAlfaDoc::CreateAssociativeCloneFromSelection() {
 bool CAlfaDoc::RebuildAssociativeClones(unsigned long source_id) {
     bool rebuilt = false;
     std::set<unsigned long> changed_ids;
+    std::set<const CAssociativeClone*> rebuilt_clones;
     if (source_id != 0) changed_ids.insert(source_id);
     for (size_t pass = 0; pass < objects_.size(); ++pass) {
         bool pass_changed = false;
         for (const ObjectPtr& object : objects_) {
             auto* clone = dynamic_cast<CAssociativeClone*>(object.get());
-            if (!clone || (source_id != 0 && changed_ids.count(clone->GetSourceId()) == 0)) {
+            if (!clone || rebuilt_clones.count(clone) != 0
+                || (source_id != 0 && changed_ids.count(clone->GetSourceId()) == 0)) {
                 continue;
             }
             const CSolid* source = dynamic_cast<const CSolid*>(FindObjectById(clone->GetSourceId()));
@@ -9006,6 +8989,9 @@ bool CAlfaDoc::RebuildAssociativeClones(unsigned long source_id) {
                 continue;
             }
             changed_ids.insert(clone->m_id);
+            // Later passes discover downstream clones stored before their
+            // sources, but must not remesh already updated clones again.
+            rebuilt_clones.insert(clone);
             pass_changed = true;
             rebuilt = true;
         }

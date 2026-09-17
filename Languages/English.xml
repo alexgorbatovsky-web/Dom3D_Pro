@@ -10100,4 +10100,540 @@ Layer</Text>
     <ID>Auto_27CC776E2C1E8F</ID>
     <Text>Dom3D Scene</Text>
   </TextItem>
+  <TextItem>
+    <ID>BSplineCurve</ID>
+    <Text>B-Spline 3D</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BSplineCurve_HINT</ID>
+    <Text>Click to place control points in 3D. Press Enter to finish.
+Use Edit Nodes to adjust the shape after creation.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>DrawSpline</ID>
+    <Text>Draw Spline</Text>
+  </TextItem>
+  <TextItem>
+    <ID>DrawSpline_HINT</ID>
+    <Text>Hold the mouse button and draw a freehand stroke. Release to create a simplified spline.
+Adjust simplification in the tool settings.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BezierCurve3D</ID>
+    <Text>Bezier Curve 3D</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BezierCurve3D_HINT</ID>
+    <Text>Click to place interpolation points in 3D. Press Enter to finish.
+Use Edit Nodes to adjust the curve and its handles.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>NurbsCurve3D</ID>
+    <Text>NURBS Curve 3D</Text>
+  </TextItem>
+  <TextItem>
+    <ID>NurbsCurve3D_HINT</ID>
+    <Text>Click to place control points, then press Enter to finish.
+Use NURBS Parameters to edit the degree and control-point weights.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>PolylineCurve</ID>
+    <Text>Polyline 3D</Text>
+  </TextItem>
+  <TextItem>
+    <ID>PolylineCurve_HINT</ID>
+    <Text>Click to place successive vertices in 3D. Press Enter to finish, or C to close the contour.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>EditPoint</ID>
+    <Text>Edit Nodes</Text>
+  </TextItem>
+  <TextItem>
+    <ID>EditPoint_HINT</ID>
+    <Text>Select a curve and drag its nodes or handles to change the shape. Double-click a node to delete it.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceSmartHybrid</ID>
+    <Text>Smart Hybrid</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceSmartHybrid_HINT</ID>
+    <Text>Select open curves forming a connected frame of four-sided regions.
+Smart Hybrid builds surface patches from those regions. With Make Solid enabled, a closed frame becomes a solid; an open frame remains a set of surfaces.
+Editing the source curves rebuilds the parametric result.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>fillet_edge</ID>
+    <Text>Fillet</Text>
+  </TextItem>
+  <TextItem>
+    <ID>fillet_edge_HINT</ID>
+    <Text>Select edges of one body and set the radius. Wait for the preview, then confirm the operation.
+If the fillet cannot be built, check the radius and the selected geometry.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>fillet_all_edges</ID>
+    <Text>Fillet All Edges</Text>
+  </TextItem>
+  <TextItem>
+    <ID>fillet_all_edges_HINT</ID>
+    <Text>Select one body and set a fillet radius for all its edges. Wait for a valid preview before confirming.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceFourSplines</ID>
+    <Text>Surface from Four Curves</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceFourSplines_HINT</ID>
+    <Text>Select four open curves whose ends form a closed four-sided boundary. The tool creates a surface patch spanning that boundary.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ToolHintShortcut</ID>
+    <Text>Shortcut: %1</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidBeamTool</ID>
+    <Text>Beam</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidBeamTool_HINT</ID>
+    <Text>Create a beam with a standard cross-section. Choose the section type and set its width, height, length and wall thickness.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidBox</ID>
+    <Text>Box</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidBox_HINT</ID>
+    <Text>Create a rectangular solid. Set its length, width and height; use the placement controls to position the body.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidCylinder</ID>
+    <Text>Cylinder</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidCylinder_HINT</ID>
+    <Text>Create a cylinder. Set the diameter and height, then position the body with the placement controls.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidSphereTool</ID>
+    <Text>Sphere</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidSphereTool_HINT</ID>
+    <Text>Create a solid sphere. Set its diameter and position the body.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidTorusTool</ID>
+    <Text>Torus</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidTorusTool_HINT</ID>
+    <Text>Create a ring-shaped solid. Set the major diameter and the tube diameter to control the ring size and thickness.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidPrismTool</ID>
+    <Text>Prism</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidPrismTool_HINT</ID>
+    <Text>Create a prism with a regular polygonal section. Set the number of sides, section size, height and axis.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidExtrudeTool</ID>
+    <Text>Extrude</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidExtrudeTool_HINT</ID>
+    <Text>Select a closed Sketch or polyline to extrude into a solid. Set the distance and taper angle. Reverse changes the extrusion direction.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidTwoSketches</ID>
+    <Text>Body by Two Sketches</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidTwoSketches_HINT</ID>
+    <Text>Select two closed Sketches to create a body between their sections. Editing the source Sketches updates the body.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidSketchFeature</ID>
+    <Text>Boss / Pocket</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidSketchFeature_HINT</ID>
+    <Text>Select a closed Sketch attached to a solid face. Choose Boss to add material or Pocket to cut it away, then set the depth and taper angle.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidContourPanel</ID>
+    <Text>Panel from Contour</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidContourPanel_HINT</ID>
+    <Text>Select a surface and a closed contour to define a panel on the surface. Adjust the projection direction, gap and recess depth; Larger Region switches the chosen region.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidHole</ID>
+    <Text>Hole</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidHole_HINT</ID>
+    <Text>Click the hole position on a planar body face. Set the diameter and choose a through hole or a fixed depth. Edge distances let you refine its position.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidSweptTool</ID>
+    <Text>Swept</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidSweptTool_HINT</ID>
+    <Text>Select a closed section and an open guide curve, or select the section first and then click the guide. Adjust the section offset, rotation and corner treatment. Scale graphs change width and height along the path.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidSweepTwoRails</ID>
+    <Text>Sweep Solid (2 Rails)</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidSweepTwoRails_HINT</ID>
+    <Text>Select a closed profile and two open guide curves. The tool carries the profile along both guides to create a solid.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidFrameTool</ID>
+    <Text>Frame</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidFrameTool_HINT</ID>
+    <Text>Select a closed Sketch to build a frame along its contour. Set the width and height of the frame section.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidWireTool</ID>
+    <Text>Wire</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidWireTool_HINT</ID>
+    <Text>Select a path curve to create a solid with a circular section along it. Set the radius to control the wire thickness.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidPolyhedronTool</ID>
+    <Text>Polyhedron</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidPolyhedronTool_HINT</ID>
+    <Text>Select an open or closed Sketch. Choose a rotation axis in the profile plane and the number of sides. Open ends are capped; the axis must not cross the profile.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>TrimByPlane</ID>
+    <Text>Trim By Plane</Text>
+  </TextItem>
+  <TextItem>
+    <ID>TrimByPlane_HINT</ID>
+    <Text>Select the body to trim and a cutting plane, or pick the body and create a plane when prompted. Choose the side to keep with Direction and confirm the preview.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>TrimBySketch</ID>
+    <Text>Trim By Sketch</Text>
+  </TextItem>
+  <TextItem>
+    <ID>TrimBySketch_HINT</ID>
+    <Text>Select a closed Sketch as the cutter and the target body. Choose Inside or Outside with Direction to control the retained part.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>TrimBySurface</ID>
+    <Text>Trim By Surface</Text>
+  </TextItem>
+  <TextItem>
+    <ID>TrimBySurface_HINT</ID>
+    <Text>Select a body and a cutting surface that crosses it. Choose the side to keep with Direction and confirm the result.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceOfRevolution</ID>
+    <Text>Solid Revolve</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceOfRevolution_HINT</ID>
+    <Text>Select an open or closed Sketch, or a polyline in the XY plane. Choose an axis in the profile plane and the rotation angle. Open ends close to the axis; the profile must not cross it.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>boolean</ID>
+    <Text>Boolean</Text>
+  </TextItem>
+  <TextItem>
+    <ID>boolean_HINT</ID>
+    <Text>Choose Union to join bodies, Cut to subtract a tool body from the target, or Common to keep their shared volume. Assign the bodies in the operation dialog and apply.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ChamferSolid</ID>
+    <Text>Chamfer</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ChamferSolid_HINT</ID>
+    <Text>Select edges of one solid and set the chamfer distance. Check the preview and confirm to replace the sharp edges with flat bevels.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidExtrudeFace</ID>
+    <Text>Extrude Face</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidExtrudeFace_HINT</ID>
+    <Text>Set the taper angle, then select a body face and adjust the extrusion distance. Confirm the preview to add or remove material.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidOffsetFace</ID>
+    <Text>Offset Face</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidOffsetFace_HINT</ID>
+    <Text>Select a solid face and set the offset distance. The face moves along its normal; change the sign of the distance to reverse the direction.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidDraft</ID>
+    <Text>Draft Face</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidDraft_HINT</ID>
+    <Text>Select a solid face, then choose a straight edge as the tilt axis. Set the draft angle and confirm the result.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidSheetBend</ID>
+    <Text>Sheet Bend</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidSheetBend_HINT</ID>
+    <Text>Select a solid sheet and a directed two-point line for the bend. Set the inner radius and angle, then choose the moving side and bend direction. Preview the bend before applying.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThickSolidTool</ID>
+    <Text>Thick Solid</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThickSolidTool_HINT</ID>
+    <Text>Select a solid and the faces to remove. Set the wall thickness and confirm to create a hollow body with openings at the selected faces.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidShell</ID>
+    <Text>Shell</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidShell_HINT</ID>
+    <Text>Select one surface face and set the distance to give it thickness and create a solid. Change the sign of the distance to thicken in the opposite direction.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SewingFaceTool</ID>
+    <Text>Sew Faces</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SewingFaceTool_HINT</ID>
+    <Text>Select surfaces whose boundaries form a closed shell. The tool sews their matching edges and creates a solid.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>DeleteFaceOrEdge</ID>
+    <Text>Delete Face or Edge</Text>
+  </TextItem>
+  <TextItem>
+    <ID>DeleteFaceOrEdge_HINT</ID>
+    <Text>This tool is not connected yet. This button currently does not change the model.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ExtractFaceTool</ID>
+    <Text>Extract Face</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ExtractFaceTool_HINT</ID>
+    <Text>Click a body face to copy it into a separate surface. The source body is kept. Press Esc to cancel.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SplitRings</ID>
+    <Text>Split Rings</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SplitRings_HINT</ID>
+    <Text>This tool is not connected yet. This button currently does not change the model.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidInSet</ID>
+    <Text>Inset</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidInSet_HINT</ID>
+    <Text>This tool is not connected yet. This button currently does not change the model.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidTransform</ID>
+    <Text>Solid Transform</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SolidTransform_HINT</ID>
+    <Text>This tool is not connected yet. This button currently does not change the model.</Text>
+  </TextItem>
+  <TextItem><ID>SurfaceBulge</ID><Text>Panel Bulge</Text></TextItem>
+  <TextItem><ID>SurfaceBulge_HINT</ID><Text>Select a panel surface, then set Bulge Height. Positive values raise the middle along the surface normal; negative values create a recess. The boundary stays fixed. Apply Shell and fillets to the resulting surface.</Text></TextItem>
+  <TextItem><ID>BulgeHeightLabel</ID><Text>Bulge Height</Text></TextItem>
+  <TextItem><ID>MeshImageRelief</ID><Text>Image Relief</Text></TextItem>
+  <TextItem><ID>MeshImageRelief_HINT</ID><Text>Select one face of the vase and load a flat ornament image. Inspect Quick Preview, then build the final mesh at the requested spacing. Other faces receive no relief. Open shells remain open.</Text></TextItem>
+  <TextItem><ID>ImageReliefHelp</ID><Text>Wrap a height image around the vase: white is raised, black stays on the surface. Use a flat ornament image; photo shadows also become relief.</Text></TextItem>
+  <TextItem><ID>ImageReliefOpen</ID><Text>Open ornament image...</Text></TextItem>
+  <TextItem><ID>ImageReliefSpacing</ID><Text>Mesh spacing (mm)</Text></TextItem>
+  <TextItem><ID>ImageReliefSpacingHelp</ID><Text>Maximum triangle edge before relief. Smaller spacing creates a denser mesh. Limit: 2 million triangles.</Text></TextItem>
+  <TextItem><ID>ImageReliefHeight</ID><Text>Relief height (mm)</Text></TextItem>
+  <TextItem><ID>ImageReliefAxis</ID><Text>Vase axis</Text></TextItem>
+  <TextItem><ID>ImageReliefRepeatU</ID><Text>Repeats around</Text></TextItem>
+  <TextItem><ID>ImageReliefRepeatV</ID><Text>Repeats vertically</Text></TextItem>
+  <TextItem><ID>ImageReliefRotation</ID><Text>Pattern rotation (degrees)</Text></TextItem>
+  <TextItem><ID>ImageReliefStart</ID><Text>Relief starts at height (%)</Text></TextItem>
+  <TextItem><ID>ImageReliefEnd</ID><Text>Relief ends at height (%)</Text></TextItem>
+  <TextItem><ID>ImageReliefFade</ID><Text>Edge fade (mm)</Text></TextItem>
+  <TextItem><ID>ImageReliefInvert</ID><Text>Invert image heights</Text></TextItem>
+  <TextItem><ID>ImageReliefHide</ID><Text>Hide source Solid after creation</Text></TextItem>
+  <TextItem><ID>ImageReliefNote</ID><Text>The axis passes through the body centre. Relief is added to outward-facing sides; the cavity is preserved. Mesh spacing is measured before displacement.</Text></TextItem>
+  <TextItem><ID>ImageReliefCreate</ID><Text>Create relief mesh</Text></TextItem>
+  <TextItem><ID>ImageReliefTooLarge</ID><Text>Image is too large. Use at most 64 million pixels.</Text></TextItem>
+  <TextItem><ID>ImageReliefRange</ID><Text>The relief start must be below its end.</Text></TextItem>
+  <TextItem><ID>ImageReliefCreating</ID><Text>Creating relief mesh...</Text></TextItem>
+  <TextItem><ID>ImageReliefSelect</ID><Text>Select one vase Solid, then open Image Relief.</Text></TextItem>
+  <TextItem><ID>ImageReliefCreated</ID><Text>Relief mesh created: %1 triangles</Text></TextItem>
+  <TextItem><ID>ImageReliefMeshing</ID><Text>Meshing a copy of the Solid...</Text></TextItem>
+  <TextItem><ID>ImageReliefSeams</ID><Text>Joining surface seams...</Text></TextItem>
+  <TextItem><ID>ImageReliefRefining</ID><Text>Refining mesh to the requested spacing...</Text></TextItem>
+  <TextItem><ID>ImageReliefApplying</ID><Text>Applying image relief...</Text></TextItem>
+  <TextItem><ID>ImageReliefChecking</ID><Text>Checking the relief mesh...</Text></TextItem>
+  <TextItem><ID>ImageReliefBudget</ID><Text>Mesh limit exceeded. Increase the mesh spacing.</Text></TextItem>
+  <TextItem><ID>ImageReliefFold</ID><Text>Relief folds a triangle. Reduce the relief height or use a smoother image.</Text></TextItem>
+  <TextItem><ID>ImageReliefClosed</ID><Text>The Solid mesh is not closed or has inconsistent face orientation.</Text></TextItem>
+  <TextItem><ID>ImageReliefInvalid</ID><Text>The input Solid is not valid.</Text></TextItem>
+  <TextItem><ID>ImageReliefPick</ID><Text>Image Relief: click the vase Solid to open the ornament image dialog.</Text></TextItem>
+  <TextItem><ID>ImageReliefFacePick</ID><Text>Image Relief: click the face that will receive the ornament.</Text></TextItem>
+  <TextItem><ID>ImageReliefFaceName</ID><Text>Face %1</Text></TextItem>
+  <TextItem><ID>ImageReliefTwoStages</ID><Text>Relief is applied only to the selected face. First inspect a coarse preview, then build the final mesh.</Text></TextItem>
+  <TextItem><ID>ImageReliefPreviewHelp</ID><Text>Build a quick preview to inspect the ornament. Drag to rotate.</Text></TextItem>
+  <TextItem><ID>ImageReliefOpenNote</ID><Text>Open shells remain open. The preview is approximate. Final meshing refines only the selected face to the requested spacing.</Text></TextItem>
+  <TextItem><ID>ImageReliefPreviewButton</ID><Text>1. Quick preview</Text></TextItem>
+  <TextItem><ID>ImageReliefFinalButton</ID><Text>2. Build final mesh</Text></TextItem>
+  <TextItem><ID>ImageReliefStale</ID><Text>Preview needs rebuilding after changes.</Text></TextItem>
+  <TextItem><ID>ImageReliefPreviewSummary</ID><Text>Coarse preview: %1 triangles; face edge up to %2 mm. %3. Drag to rotate.</Text></TextItem>
+  <TextItem><ID>ImageReliefClosedState</ID><Text>Closed mesh</Text></TextItem>
+  <TextItem><ID>ImageReliefOpenState</ID><Text>Open shell</Text></TextItem>
+  <TextItem><ID>ImageReliefCancelling</ID><Text>Cancelling...</Text></TextItem>
+  <TextItem><ID>ImageReliefRefinePass</ID><Text>Refine %1: %2 triangles, %3%</Text></TextItem>
+  <TextItem><ID>ImageReliefMissingImage</ID><Text>Last ornament image is unavailable. Open another image.</Text></TextItem>
+  <TextItem><ID>ImageReliefSurfaceU</ID><Text>Repeats across surface</Text></TextItem>
+  <TextItem><ID>ImageReliefSurfaceV</ID><Text>Repeats along surface</Text></TextItem>
+  <TextItem><ID>ImageReliefSurfaceStart</ID><Text>Relief starts along surface (%)</Text></TextItem>
+  <TextItem><ID>ImageReliefSurfaceEnd</ID><Text>Relief ends along surface (%)</Text></TextItem>
+  <TextItem><ID>ImageReliefSurfaceHelp</ID><Text>The image follows the selected surface coordinates; the vase axis is not used.</Text></TextItem>
+  <TextItem><ID>ImageReliefDegenerateUV</ID><Text>The selected surface has degenerate image coordinates.</Text></TextItem>
+  <TextItem><ID>ImageReliefUVFailure</ID><Text>Could not map image coordinates on the selected face.</Text></TextItem>
+  <TextItem><ID>PlaneTool_HINT</ID><Text>Create a reference plane. Choose its definition in the dialog: coordinate plane, coefficients, points or a planar body face. Follow the pick prompts, then confirm the parameters.</Text></TextItem>
+  <TextItem><ID>SurfaceRuled_HINT</ID><Text>Select one B-Spline. A ruled surface extends this curve in the chosen X, Y or Z direction. Set Length and, if needed, Reverse Normal; press OK.</Text></TextItem>
+  <TextItem><ID>SurfaceLoft_HINT</ID><Text>Select at least two B-Splines as successive cross-sections, then run the tool. It creates a surface through the sections; open and closed splines are supported.</Text></TextItem>
+  <TextItem><ID>SurfaceTangentCap_HINT</ID><Text>Select a closed spline and an adjoining surface. The tool fills the contour with a cap that follows the surface tangent at the boundary. Adjust the cap parameters and press OK.</Text></TextItem>
+  <TextItem><ID>SurfaceSweepTwoRails_HINT</ID><Text>Select three curves: one open or closed profile and two open rails. Confirm the selection. The profile follows both rails to form a surface; check that its ends correspond to the rails.</Text></TextItem>
+  <TextItem><ID>SurfaceJoin_HINT</ID><Text>Select at least two touching surfaces and confirm the selection. The tool joins them into a surface set. Surfaces must share matching boundaries.</Text></TextItem>
+  <TextItem><ID>SurfaceReverseNormals_HINT</ID><Text>Select surfaces and run the tool to reverse their normal direction. Their shape stays the same; the front and back sides swap. This changes the sign direction of operations that follow surface normals.</Text></TextItem>
+  <TextItem><ID>SurfaceRevolve_HINT</ID><Text>Select a profile curve. Choose the revolution axis and angle, inspect the preview, then press OK. The curve sweeps around the axis to create a surface.</Text></TextItem>
+  <TextItem><ID>SurfaceSweep_HINT</ID><Text>This button is not connected yet and does not create geometry. To sweep a profile along two rails, use Sweep Surface (2 Rails).</Text></TextItem>
+  <TextItem><ID>SurfacePatch_HINT</ID><Text>This button is not connected yet and does not create geometry. For a four-sided curve boundary use Surface by 4 Splines; for a closed spline with an adjoining surface use Tangent Cap.</Text></TextItem>
+  <TextItem><ID>SurfaceOffset_HINT</ID><Text>This button is not connected yet and does not offset surfaces. To give a surface thickness, use Shell in the Solid room.</Text></TextItem>
+  <TextItem><ID>PlaneIntersection_HINT</ID><Text>Select or click a body, then define the cutting plane using the offered methods. The tool creates section curves where the plane intersects the body.</Text></TextItem>
+  <TextItem><ID>SurfaceIntersection_HINT</ID><Text>Select two intersecting surfaces and confirm the selection. The tool creates curves along their intersection. Separated surfaces have no intersection result.</Text></TextItem>
+  <TextItem><ID>ProjectCurveToSurface_HINT</ID><Text>Select one curve and a target surface, then confirm the selection. Set the projection vector X, Y, Z and press OK. A projected curve is created where that direction reaches the surface.</Text></TextItem>
+  <TextItem><ID>ExtractSurfaceEdge_HINT</ID><Text>Select a surface edge and confirm the selection. The edge is copied into a separate curve that can be used for further construction; the source surface is kept.</Text></TextItem>
+  <TextItem><ID>NurbsParametersTool_HINT</ID><Text>Select one B-Spline or NURBS curve. Open its parameters to adjust degree and control-point weights; inspect the resulting shape and press OK. Cancel discards the edits.</Text></TextItem>
+  <TextItem><ID>CurveFillets_HINT</ID><Text>Set the fillet radius, then click a polyline or sketch corner. The tool replaces the corner with a round transition. You can round several corners in succession; Cancel closes the tool.</Text></TextItem>
+  <TextItem><ID>CurveJoin_HINT</ID><Text>Select at least two open curves and press Enter. The tool joins them into one curve. Check the order and positions of their endpoints before joining.</Text></TextItem>
+  <TextItem><ID>CurveSplit_HINT</ID><Text>Select two intersecting curves and press Enter. Both curves are split at their intersection. If several intersections exist, click near the required one.</Text></TextItem>
+  <TextItem><ID>CurveCutByCurve_HINT</ID><Text>First click the curve to split, then the cutting curve. The cutting curve determines the intersection used to split the first curve. Follow any further intersection prompts.</Text></TextItem>
+  <TextItem><ID>CurveExtend_HINT</ID><Text>Click the end of a curve to extend it. A preselected curve can be extended at both ends. Follow the tool prompts to set the extension.</Text></TextItem>
+  <TextItem><ID>CurveOffset_HINT</ID><Text>Select planar curves and confirm the selection. Set the offset distance in the dialog and press OK. The result is a parametric parallel curve in the same plane.</Text></TextItem>
+  <TextItem><ID>CurveMirrorCopy_HINT</ID><Text>Select curves. In the dialog choose the XY, XZ or YZ mirror plane and its offset, then press OK. The tool creates parametric mirrored copies and keeps the originals.</Text></TextItem>
+  <TextItem><ID>CurveEndpointLink_HINT</ID><Text>Select curves with touching endpoints and run the tool. Their coincident ends become linked: moving a linked end updates the connected curve as well.</Text></TextItem>
+  <TextItem><ID>CurveLinkedBridge_HINT</ID><Text>Select two open curves. Choose which ends to connect and the connection type; adjust handle length when available and press OK. Free ends are preferred automatically when a bridge already occupies the other ends.</Text></TextItem>
+  <TextItem><ID>CurveTrimByPlane_HINT</ID><Text>Select one curve and optionally a cutting plane; press Enter. If no plane is selected, define one in the dialog. Click the part of the curve to remove.</Text></TextItem>
+  <TextItem><ID>CurveSimplifyByPoint_HINT</ID><Text>Select one open curve and press Enter, then click the desired split position. The tool creates two curve pieces; despite its internal name, this is Split by Point.</Text></TextItem>
+  <TextItem><ID>CurveReverse_HINT</ID><Text>Select one or more curves and press Enter. Their start and end swap while their shape is preserved. The direction arrow shows the new direction.</Text></TextItem>
+  <TextItem>
+    <ID>ThemeSetting0</ID>
+    <Text>Themes...</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeSetting1</ID>
+    <Text>Themes</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeSetting2</ID>
+    <Text>Choose a color scheme or customize its colors. Changes are previewed immediately.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeSetting3</ID>
+    <Text>Color scheme</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeSetting4</ID>
+    <Text>Studio Light</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeSetting5</ID>
+    <Text>Graphite</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeSetting6</ID>
+    <Text>Midnight</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeSetting7</ID>
+    <Text>Warm Gray</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeSetting8</ID>
+    <Text>Panels</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeSetting9</ID>
+    <Text>Input fields</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeSetting10</ID>
+    <Text>Buttons</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeSetting11</ID>
+    <Text>Text</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeSetting12</ID>
+    <Text>Accent</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeSetting13</ID>
+    <Text>Borders</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeSetting14</ID>
+    <Text>Reset scheme colors</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeSaveFile</ID>
+    <Text>Save theme to file</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeLoadFile</ID>
+    <Text>Load theme from file</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeInvalidFile</ID>
+    <Text>Invalid theme file.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeSaveButton</ID>
+    <Text>Save</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ThemeLoadButton</ID>
+    <Text>Load</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ViewShowHiddenEdges</ID>
+    <Text>Show Hidden Edges</Text>
+  </TextItem>
+  <TextItem>
+    <ID>ToolbarHiddenEdges</ID>
+    <Text>Hidden Edges</Text>
+  </TextItem>
 </ClassArray.TextItem>

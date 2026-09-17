@@ -1,3 +1,4 @@
+#include "DefaultDialogAccept.h"
 #include "PropertyPanel.h"
 
 #include "LanguageManager.h"
@@ -314,6 +315,8 @@ bool IsInternalPlacementParameter(const ToolParameter& parameter) {
         || parameter.id == "profile.id"
         || parameter.id == "section.id"
         || parameter.id == "guide.id"
+        || parameter.id == "guide1.id"
+        || parameter.id == "guide2.id"
         || (parameter.id.rfind("slx.", 0) == 0
             && parameter.type != ToolParameterType::CatalogSketch
             && parameter.type != ToolParameterType::CatalogProduct)
@@ -491,6 +494,8 @@ bool IsSliderParameter(const ActiveParametricObject& active,
         || tool_id == "SolidSketchFeature"
         || tool_id == "SolidExtrudeTool"
         || tool_id == "SolidSweptTool"
+        || tool_id == "SolidSweepTwoRails"
+        || tool_id == "SurfaceSweepTwoRails"
         || tool_id == "SolidExtrudeFace"
         || tool_id == "SolidDraft"
         || tool_id == "SolidSheetBend"
@@ -544,41 +549,6 @@ double SliderPositionToValue(int position, double minimum, double maximum) {
 }
 }
 
-namespace {
-class PrimitiveEnterFilter final : public QObject {
-public:
-    explicit PrimitiveEnterFilter(PropertyPanel* panel) : QObject(panel), panel_(panel) {
-        qApp->installEventFilter(this);
-    }
-protected:
-    bool eventFilter(QObject* watched, QEvent* event) override {
-        if (event->type() != QEvent::KeyPress && event->type() != QEvent::ShortcutOverride) return false;
-        const auto* key = static_cast<QKeyEvent*>(event);
-        const auto& id = panel_->ActiveObject().tool_id;
-        if (!panel_->isVisible() || (id != "SolidBox" && id != "SolidCylinder")
-            || (key->key() != Qt::Key_Return && key->key() != Qt::Key_Enter)
-            || (key->modifiers() & ~Qt::KeypadModifier) != Qt::NoModifier
-            || QApplication::activeModalWidget() || QApplication::activePopupWidget()) return false;
-        auto* widget = qobject_cast<QWidget*>(watched);
-        if (!widget) return false;
-        const bool editor = widget == panel_ || panel_->isAncestorOf(widget);
-        if (!editor && !widget->inherits("OpenGLViewport")) return false;
-        const auto root = [](QWidget* w) { while (w->parentWidget()) w = w->parentWidget(); return w; };
-        if (root(widget) != root(panel_)) return false;
-        event->accept();
-        if (event->type() == QEvent::ShortcutOverride || key->isAutoRepeat()) return true;
-        // Commit the text still being edited before the normal OK handler runs.
-        QList<QPointer<QAbstractSpinBox>> editors;
-        for (auto* spin : panel_->findChildren<QAbstractSpinBox*>()) editors.append(spin);
-        for (const auto& spin : editors) if (spin) spin->interpretText();
-        emit panel_->Accepted();
-        return true;
-    }
-private:
-    PropertyPanel* panel_;
-};
-}
-
 PropertyPanel::PropertyPanel(QWidget* parent, bool additional_parameters)
     : QWidget(parent),
       form_(new QFormLayout(this)),
@@ -586,7 +556,6 @@ PropertyPanel::PropertyPanel(QWidget* parent, bool additional_parameters)
     form_->setContentsMargins(10, 8, 10, 8);
     form_->setHorizontalSpacing(16);
     Clear();
-    if (!additional_parameters_) new PrimitiveEnterFilter(this);
 }
 
 void PropertyPanel::Clear() {
@@ -746,7 +715,7 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
                     const QStringList values = editor->text().split(
                         QRegularExpression("\\s+"), Qt::SkipEmptyParts);
                     if (values.size() != 3) {
-                        editor->setStyleSheet("QLineEdit { background: #ffd6d6; }");
+                        editor->setStyleSheet("QLineEdit { background: #ffd6d6; color: #641515; }");
                         return;
                     }
                     std::array<double, 3> parsed{};
@@ -755,7 +724,7 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
                         parsed[static_cast<size_t>(axis)] =
                             number_locale.toDouble(values[axis], &ok);
                         if (!ok) {
-                            editor->setStyleSheet("QLineEdit { background: #ffd6d6; }");
+                            editor->setStyleSheet("QLineEdit { background: #ffd6d6; color: #641515; }");
                             return;
                         }
                     }
@@ -1144,15 +1113,19 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
         form_->addRow(other_parameters);
     }
 
+    if (active_object_.tool_id == "fillet_edge" || active_object_.tool_id == "fillet_all_edges"
+        || active_object_.tool_id == "ChamferSolid") {
+        auto* all_edges = new QPushButton("All Edges", this);
+        all_edges->setObjectName("AllEdgesButton");
+        connect(all_edges, &QPushButton::clicked, this, &PropertyPanel::AllEdgesRequested);
+        form_->addRow(all_edges);
+    }
     auto* buttons = new QWidget(this);
     auto* button_layout = new QHBoxLayout(buttons);
     button_layout->setContentsMargins(0, 8, 0, 0);
     button_layout->addStretch();
 
     auto* ok = new QPushButton("OK", buttons);
-    const bool primitive = active_object_.tool_id == "SolidBox" || active_object_.tool_id == "SolidCylinder";
-    ok->setDefault(primitive);
-    ok->setAutoDefault(primitive);
     QPushButton* apply = nullptr;
     if (!additional_parameters_
         && (active_object_.tool_id == "cabinet"
@@ -1172,6 +1145,8 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
     button_layout->addWidget(ok);
     button_layout->addWidget(cancel);
     form_->addRow(buttons);
+    SetDefaultDialogAccept(this, ok);
+    buttons->show();
 }
 
 void PropertyPanel::SetMaterialParameterValue(

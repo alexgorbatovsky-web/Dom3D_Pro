@@ -43,6 +43,7 @@ bool CBSpline::CanClose() const {
 
 void CBSpline::SetClosed(bool closed) {
     closed_ = closed && CanClose();
+    if (!closed_) legacy_closed_interpolation_ = false;
 }
 
 bool CBSpline::Close() {
@@ -56,6 +57,7 @@ bool CBSpline::Close() {
 
 void CBSpline::Open() {
     closed_ = false;
+    legacy_closed_interpolation_ = false;
 }
 
 size_t CBSpline::GetPointCount() const {
@@ -63,6 +65,7 @@ size_t CBSpline::GetPointCount() const {
 }
 
 void CBSpline::Clear() {
+    legacy_closed_interpolation_ = false;
     points_.clear();
     weights_.clear();
     knots_.clear();
@@ -70,6 +73,7 @@ void CBSpline::Clear() {
 }
 
 void CBSpline::AddPoint(CPoint3d point) {
+    legacy_closed_interpolation_ = false;
     closed_ = false;
     knots_.clear();
     points_.push_back(point);
@@ -542,7 +546,7 @@ CPoint3d CBSpline::Evaluate(float t) const {
         return EvaluateNurbs(t);
     }
     if (IsClosed()) {
-        return EvaluateClosed(t);
+        return legacy_closed_interpolation_ ? EvaluateClosed(t) : EvaluateNurbs(t);
     }
 
     return EvaluateOpen(points_, t);
@@ -643,7 +647,7 @@ CPoint3d CBSpline::EvaluateNurbs(float t) const {
         return points_.front();
     }
 
-    if (curve_type_ == SplineCurveType::Nurbs && IsClosed()
+    if ((curve_type_ == SplineCurveType::Nurbs || curve_type_ == SplineCurveType::BSpline) && IsClosed()
         && knots_.empty()) {
         // A periodic NURBS of degree p repeats its first p poles internally.
         // Keep only the unique poles in the document so editing does not show
@@ -681,7 +685,7 @@ CPoint3d CBSpline::EvaluateNurbs(float t) const {
             for (int index = 0; index <= degree; ++index) {
                 const size_t pole = static_cast<size_t>(span - degree + index)
                     % unique_count;
-                const double weight = pole < weights_.size()
+                const double weight = curve_type_ == SplineCurveType::Nurbs && pole < weights_.size()
                     ? std::max(1.0e-6, weights_[pole]) : 1.0;
                 work[static_cast<size_t>(index)] = {
                     points_[pole].x * weight,
@@ -983,6 +987,7 @@ std::unique_ptr<CAlfaObject> CBSpline::Clone() const {
     copy->curve_type_ = curve_type_;
     copy->degree_ = degree_;
     copy->closed_ = closed_;
+    copy->legacy_closed_interpolation_ = legacy_closed_interpolation_;
     copy->SetGroupName(GetGroupName());
     copy->SetVisible(IsVisible());
     copy->SetColor(GetColor());
@@ -1054,7 +1059,7 @@ bool CBSpline::Save(std::ostream& stream) const {
            << material.alpha << " " << material.specular << " " << material.shininess << " "
            << (IsClosed() ? 1 : 0) << " "
            << static_cast<int>(curve_type_) << " " << GetDegree() << " "
-           << points_.size() << "\n";
+           << points_.size() << " " << (legacy_closed_interpolation_ ? 1 : 0) << "\n";
     for (size_t index = 0; index < points_.size(); ++index) {
         const CPoint3d& point = points_[index];
         const double weight = index < weights_.size() ? weights_[index] : 1.0;
@@ -1106,7 +1111,7 @@ bool CBSpline::Load(std::istream& stream) {
         material.shininess = values[2];
         closed_ = values[3] != 0.0f;
         count = static_cast<size_t>(values[4]);
-    } else if (values.size() == 7) {
+    } else if (values.size() == 7 || values.size() == 8) {
         material.alpha = values[0];
         material.specular = values[1];
         material.shininess = values[2];
@@ -1150,6 +1155,8 @@ bool CBSpline::Load(std::istream& stream) {
     SetWeights(std::move(loaded_weights));
     SetCurveType(curve_type_);
     SetClosed(loaded_closed);
+    legacy_closed_interpolation_ = loaded_closed && curve_type_ == SplineCurveType::BSpline
+        && (values.size() < 8 || values[7] != 0.0f);
     return true;
 }
 

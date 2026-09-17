@@ -72,7 +72,7 @@ QByteArray Encode(const Material& material)
     QByteArray payload;
     QDataStream stream(&payload, QIODevice::WriteOnly);
     stream.setVersion(QDataStream::Qt_6_0);
-    stream << static_cast<quint32>(8);
+    stream << static_cast<quint32>(9);
     stream << static_cast<qulonglong>(material.id);
     stream << QString::fromStdString(material.name);
     write_color(stream, material.ambient);
@@ -95,7 +95,7 @@ QByteArray Encode(const Material& material)
            << QString::fromStdString(material.displacement_texture_path);
     stream << material.coat_weight << material.coat_roughness;
     stream << EncodePlaster(material);
-    stream << EncodeFabric(material) << material.texture_wrap_object;
+    stream << EncodeFabric(material) << material.texture_wrap_object << EncodePerforation(material);
     return payload;
 }
 
@@ -112,7 +112,7 @@ bool Decode(const QMimeData* mime_data, Material& material)
     qulonglong id = 0;
     QString name;
     stream >> version;
-    if (version < 1 || version > 8) {
+    if (version < 1 || version > 9) {
         return false;
     }
 
@@ -164,6 +164,8 @@ bool Decode(const QMimeData* mime_data, Material& material)
     if(version>=6){QString text;stream>>text;if(!DecodePlaster(text,material))return false;}
     if(version>=7){QString text;stream>>text;if(!DecodeFabric(text,material))return false;}
     if(version>=8)stream>>material.texture_wrap_object;
+    material.perforation={};
+    if(version>=9){QString text;stream>>text;if(!DecodePerforation(text,material))return false;}
     return stream.status() == QDataStream::Ok;
 }
 

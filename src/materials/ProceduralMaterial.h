@@ -27,6 +27,12 @@ inline ProceduralFabricParameters FabricPreset(int weave) {
     return p;
 }
 #define DOM_PLASTER_PARAMETERS(X) \
+ X(pattern,0.f,0.f,6.f,"Pattern") \
+ X(patternSize,12.f,1.f,200.f,"Pattern size (mm)") \
+ X(patternDepth,.65f,0.f,5.f,"Pattern depth (mm)") \
+ X(patternDensity,.55f,.05f,.95f,"Pattern coverage") \
+ X(patternStretch,5.f,1.f,20.f,"Stroke length / stretch") \
+ X(patternAngle,0.f,-180.f,180.f,"Pattern angle (degrees)") \
  X(scale,1.0f,.01f,100.f,"Scale") \
  X(grainSize,.8f,.05f,20.f,"Grain Size (mm)") \
  X(grainStrength,.12f,0.f,2.f,"Grain Strength (mm)") \
@@ -49,4 +55,20 @@ struct ProceduralPlasterParameters {
 #define FIELD(name,value,lo,hi,label) float name=value;
     DOM_PLASTER_PARAMETERS(FIELD)
 #undef FIELD
+};
+ProceduralPlasterParameters PlasterPreset(int type);
+
+#define DOM_PERFORATION_PARAMETERS(X) \
+ X(holeSize,4.f,.1f,500.f,"Hole size (mm)") \
+ X(bridge,1.f,.05f,100.f,"Bridge width (mm)") \
+ X(bevel,.2f,0.f,5.f,"Edge relief (mm)") \
+ X(rotation,0.f,-180.f,180.f,"Pattern angle (degrees)") \
+ X(uvSize,100.f,.1f,10000.f,"UV tile size (mm)")
+struct ProceduralPerforationParameters {
+    bool enabled=false;
+    bool useUV=true;
+    int pattern=0; // Round perforation or honeycomb.
+#define PERFORATION_FIELD(name,value,lo,hi,label) float name=value;
+    DOM_PERFORATION_PARAMETERS(PERFORATION_FIELD)
+#undef PERFORATION_FIELD
 };

@@ -29,6 +29,7 @@
 #include <Standard_Handle.hxx>
 #include <AIS_InteractiveContext.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopExp.hxx>
 #include <TopoDS.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
@@ -36,6 +37,7 @@
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <GeomAPI_ProjectPointOnCurve.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <Poly.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
@@ -77,6 +79,7 @@
 #include <map>
 #include <set>
 #include <memory>
+#include <numeric>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -339,6 +342,7 @@ bool is_regular_uv_mesh_surface(const TopoDS_Face& face)
 		return false;
 	}
 }
+
 
 bool is_complete_spherical_face(const TopoDS_Face& face)
 {
@@ -649,6 +653,92 @@ bool build_regular_uv_mesh(CSurfaceFace* surface, float deflection)
 	return true;
 }
 
+// A toroidal face cut across the tube has two closed section boundaries and
+// two occurrences of the longitudinal seam. Keep that seam as a chart side;
+// joining only the non-seam edges collapses the chart onto its planar cut.
+bool build_trimmed_torus_quad_strip(CSurfaceFace* surface)
+{
+	if (!surface || surface->m_Face.IsNull()
+		|| surface->GetPreparedPolylineCount() != 4) return false;
+	const auto face = TopoDS::Face(surface->m_Face);
+	BRepAdaptor_Surface adaptor(face);
+	if (adaptor.GetType() != GeomAbs_Torus) return false;
+	double u0, u1, v0, v1;
+	BRepTools::UVBounds(face, u0, u1, v0, v1);
+	const double period = adaptor.VPeriod();
+	if (std::abs(v1-v0-period) > 1.e-5) return false;
+	struct Ring { std::vector<CPoint3d> xyz; std::vector<gp_Pnt2d> uv; double mean = 0; };
+	std::vector<Ring> rings;
+	int segments = 1;
+	for (int i = 0; i < 4; ++i) {
+		TopoDS_Edge edge;
+		std::vector<CPoint3d> points;
+		if (!surface->GetPreparedTopoEdge(i, edge)
+			|| !surface->GetPreparedPolylinePoints(i, points) || points.size() < 2) return false;
+		if (!TopExp::FirstVertex(edge).IsSame(TopExp::LastVertex(edge))) {
+			segments = std::max(segments, int(points.size())-1); continue;
+		}
+		Ring ring;
+		for (size_t j = 0; j+1 < points.size(); ++j) {
+			const auto& p = points[j];
+			double u, v;
+			ElSLib::Parameters(adaptor.Torus(), gp_Pnt(p.x,p.y,p.z), u,v);
+			u += std::round(((u0+u1)*0.5-u)/adaptor.UPeriod())*adaptor.UPeriod();
+			v += std::ceil((v0-v-1.e-6)/period)*period;
+			if (std::abs(v-v0) < 1.e-6) v = v0;
+			ring.xyz.push_back(p); ring.uv.emplace_back(u,v); ring.mean += u;
+		}
+		std::vector<size_t> order(ring.xyz.size());
+		std::iota(order.begin(), order.end(), 0);
+		std::sort(order.begin(), order.end(), [&](size_t a, size_t b) { return ring.uv[a].Y() < ring.uv[b].Y(); });
+		const auto source = ring;
+		for (size_t j = 0; j < order.size(); ++j) { ring.xyz[j] = source.xyz[order[j]]; ring.uv[j] = source.uv[order[j]]; }
+		if (ring.uv.size() < 3 || std::abs(ring.uv.front().Y()-v0) > 1.e-5) return false;
+		ring.mean /= ring.uv.size(); rings.push_back(std::move(ring));
+	}
+	if (rings.size() != 2 || rings[0].uv.size() != rings[1].uv.size()) return false;
+	if (rings[0].mean > rings[1].mean) std::swap(rings[0], rings[1]);
+	const size_t n = rings[0].uv.size();
+	std::vector<Vec3> vertices, normals;
+	std::vector<UV> uvs;
+	std::vector<CMesh3D::Face> faces;
+	for (int row = 0; row <= segments; ++row) {
+		const double t = double(row)/segments;
+		for (size_t j = 0; j < n; ++j) {
+			const auto a = rings[0].uv[j], b = rings[1].uv[j];
+			if (b.X() <= a.X()+1.e-8) return false;
+			const double u = a.X()*(1-t)+b.X()*t, v = a.Y()*(1-t)+b.Y()*t;
+			// End rows use the shared prepared XYZ below. Projecting their
+			// polygon samples can lie slightly outside the curved CAD pcurve.
+			// Interior nodes must belong to this face, not just the supporting torus.
+			if (row != 0 && row != segments) {
+				BRepClass_FaceClassifier classifier(face, gp_Pnt2d(u,v), 1.e-5);
+				if (classifier.State() != TopAbs_IN && classifier.State() != TopAbs_ON) return false;
+			}
+			CPoint8d p;
+			if (!surface->GetPoint(u,v,&p)) return false;
+			if (row == 0 || row == segments) {
+				const auto& exact = rings[row == 0 ? 0 : 1].xyz[j];
+				p.x=exact.x; p.y=exact.y; p.z=exact.z;
+			}
+			vertices.push_back({float(p.x),float(p.y),float(p.z)});
+			normals.push_back({float(p.l),float(p.m),float(p.n)});
+			uvs.push_back({float(u),float(v)});
+		}
+	}
+	for (int row = 0; row < segments; ++row) for (size_t j = 0; j < n; ++j) {
+		const size_t next=(j+1)%n, base=size_t(row)*n;
+		CMesh3D::Face q{base+j,base+n+j,base+n+next,base+next};
+		if (face.Orientation() == TopAbs_REVERSED) std::reverse(q.corners.begin(),q.corners.end());
+		faces.push_back(std::move(q));
+	}
+	if (!surface->pMesh3D) surface->pMesh3D = new CMesh3D;
+	if (!surface->pMesh3D->SetGeometry(std::move(vertices),std::move(faces),std::move(uvs),std::move(normals))) return false;
+	surface->m_QtyU=surface->m_QtyV=0;
+	surface->IsTrimmed=true; surface->IsInitMesh=true;
+	return true;
+}
+
 bool build_oblique_cylinder_quad_strip(CSurfaceFace* surface)
 {
 	if (!surface || surface->m_Face.IsNull()
@@ -893,7 +983,7 @@ size_t active_face_count(const CMesh3D* mesh)
 	return count;
 }
 
-bool triangulate_mesh_ngons_in_xy(CMesh3D& mesh)
+bool triangulate_mesh_ngons_in_xy(CMesh3D& mesh, bool split_nonconvex_quads = false)
 {
 	const std::vector<Vec3>& vertices = mesh.GetVertices();
 	std::vector<CMesh3D::Face> result;
@@ -915,7 +1005,22 @@ bool triangulate_mesh_ngons_in_xy(CMesh3D& mesh)
 	};
 
 	for (const CMesh3D::Face& source : mesh.GetFaces()) {
-		if (source.deleted || source.corners.size() <= 4) {
+		bool keep_quad = true;
+		if (split_nonconvex_quads && source.corners.size() == 4 && !source.deleted) {
+			double sign = 0;
+			for(size_t i=0;i<4;++i) {
+				const double turn = cross_2d(source.corners[i].v,
+					source.corners[(i+1)%4].v,source.corners[(i+2)%4].v);
+				const auto a = vertices[source.corners[i].v];
+				const auto b = vertices[source.corners[(i+1)%4].v];
+				const auto c = vertices[source.corners[(i+2)%4].v];
+				const double turn_tolerance = 1.0e-6 * std::max(dot(b-a,b-a), dot(c-b,c-b));
+				if(std::fabs(turn)<=std::max(eps,turn_tolerance) || (sign!=0 && sign*turn<=0)) keep_quad=false;
+				sign=turn;
+			}
+		}
+		if (source.deleted || source.corners.size() < 4
+			|| (source.corners.size() == 4 && keep_quad)) {
 			result.push_back(source);
 			continue;
 		}
@@ -3140,7 +3245,8 @@ bool CSurfaceFace::InitEdges3DCoat()
 void CSurfaceFace::RenderEdges(const Color& color,
                               const std::vector<int>& selected_edge_indices,
                               bool draw_regular_edges,
-                              bool surface_selected) const
+                              bool surface_selected,
+                              float line_width) const
 {
 	// Project files can restore a ready triangulation without going through
 	// ReBuldMesh().  Make the topological representation available for both
@@ -3148,7 +3254,14 @@ void CSurfaceFace::RenderEdges(const Color& color,
 	if (!IsInitEdges)
 		const_cast<CSurfaceFace*>(this)->InitEdges();
 
-	const float width = 0.9f;
+	const float width = line_width;
+	// Fractional widths need smooth rasterization; aliased lines round 1.17
+	// back to one pixel and would hide the requested 30% increase.
+	glPushAttrib(GL_ENABLE_BIT | GL_LINE_BIT | GL_COLOR_BUFFER_BIT | GL_HINT_BIT);
+	glEnable(GL_LINE_SMOOTH);
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
 	const Color edge_color = surface_selected
 		? CAlfaObject::SelectedColor : color;
 	const float r = std::clamp(edge_color.r, 0.0f, 1.0f);
@@ -3177,6 +3290,7 @@ void CSurfaceFace::RenderEdges(const Color& color,
 			continue;
 		edge->Draw(1.0f, 0.22f, 0.12f, 5.5f, 24, false, true);
 	}
+	glPopAttrib();
 }
 
 void CSurfaceFace::RenderContour(const Color& color, bool surface_selected) const
@@ -3294,7 +3408,7 @@ void CSurfaceFace::RenderContour(const Color& color, bool surface_selected) cons
 	glEnable(GL_LINE_SMOOTH);
 	glEnable(GL_BLEND);
 	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-	glLineWidth(surface_selected ? 1.7f : 1.15f);
+	glLineWidth((surface_selected ? 1.7f : 1.15f) * 1.3f);
 	glColor4f(
 		std::clamp(contour_color.r, 0.0f, 1.0f),
 		std::clamp(contour_color.g, 0.0f, 1.0f),
@@ -3924,11 +4038,80 @@ bool CSurfaceFace::SetPreparedPolylinePoints(int edge_index, const std::vector<C
 	if (!polyline)
 		return false;
 
+	std::vector<CPoint3d> canonical = points;
+	TopoDS_Edge edge;
+	if (GetPreparedTopoEdge(edge_index, edge)) {
+		// Incident curves may have different endpoints within the tolerance
+		// of their shared CAD vertex. Use that vertex, not a global gap radius,
+		// so valid fillet wires close without joining unrelated nearby edges.
+		const auto first = TopExp::FirstVertex(edge), last = TopExp::LastVertex(edge);
+		if (!first.IsNull() && !last.IsNull()) {
+			const auto a = BRep_Tool::Pnt(first), b = BRep_Tool::Pnt(last);
+			const auto distance = [](const CPoint3d& p, const gp_Pnt& q) {
+				return gp_Pnt(p.x,p.y,p.z).Distance(q);
+			};
+			const bool reversed = distance(points.front(),b)+distance(points.back(),a)
+				< distance(points.front(),a)+distance(points.back(),b);
+			const auto snap = [&](CPoint3d& p, const TopoDS_Vertex& vertex) {
+				const auto q = BRep_Tool::Pnt(vertex);
+				const double roundoff = 1.e-6 * std::max({1.,std::abs(q.X()),std::abs(q.Y()),std::abs(q.Z())});
+				if (distance(p,q) <= BRep_Tool::Tolerance(vertex)*1.01 + roundoff)
+					p = CPoint3d(q.X(),q.Y(),q.Z());
+			};
+			snap(canonical.front(),reversed ? last : first);
+			snap(canonical.back(),reversed ? first : last);
+		}
+	}
 	polyline->Clear();
-	for (const CPoint3d& point : points)
+	for (const CPoint3d& point : canonical)
 		polyline->AddPoint(point);
 	polyline->TmpLen = polyline->GetLength();
 	return true;
+}
+
+bool CSurfaceFace::HasRectangularUVBoundary() const
+{
+	if (m_Face.IsNull()) return false;
+	try {
+		const auto face = TopoDS::Face(m_Face);
+		double u0, u1, v0, v1;
+		BRepTools::UVBounds(face, u0, u1, v0, v1);
+		if (u1 <= u0 || v1 <= v0) return false;
+		std::vector<unsigned> sides;
+		int edges = 0;
+		for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
+			const auto edge = TopoDS::Edge(it.Current());
+			double first, last;
+			const auto curve = BRep_Tool::CurveOnSurface(edge, face, first, last);
+			if (curve.IsNull()) return false;
+			bool lowU=true, highU=true, lowV=true, highV=true;
+			for (int i=0; i<=16; ++i) {
+				const auto p = curve->Value(first+(last-first)*i/16.);
+				const double u = (p.X()-u0)/(u1-u0), v = (p.Y()-v0)/(v1-v0);
+				// Compatibility patches can bow away from a natural side.
+				// They still need four distinct sides: an edge crossing the
+				// entire chart cannot be replaced by a rectangular boundary row.
+				lowU &= std::abs(u)<.5;
+				highU &= std::abs(u-1)<.5;
+				lowV &= std::abs(v)<.5;
+				highV &= std::abs(v-1)<.5;
+			}
+			if (!lowU && !highU && !lowV && !highV) return false;
+			sides.push_back((lowU ? 1u : 0u) | (highU ? 2u : 0u)
+				| (lowV ? 4u : 0u) | (highV ? 8u : 0u));
+			++edges;
+		}
+		if (edges != 4) return false;
+		// A degenerate corner can belong to either incident side. Test all
+		// assignments instead of assigning it greedily to the first side.
+		std::array<unsigned, 4> assignment{1u, 2u, 4u, 8u};
+		do {
+			bool matched = true;
+			for (int i=0; i<4; ++i) matched &= (sides[i] & assignment[i]) != 0;
+			if (matched) return true;
+		} while (std::next_permutation(assignment.begin(), assignment.end()));
+		return false;
+	} catch (const Standard_Failure&) { return false; }
 }
 
 void CSurfaceFace::UpdateMeshTypeFromBoundary()
@@ -3954,6 +4137,11 @@ void CSurfaceFace::UpdateMeshTypeFromBoundary()
 	// row to each fragment duplicates that side and opens the receiver's loop.
 	// Fill from the exact contour so every split-edge sample is retained.
 	if (Polylines.size() > 4)
+		return;
+	// Four edges do not imply an untrimmed tensor-product patch. Fillet
+	// transitions can have four curved pcurves cutting across their UV box.
+	if (surface_type_of(TopoDS::Face(m_Face)) == GeomAbs_BSplineSurface
+		&& !HasRectangularUVBoundary())
 		return;
 
 	m_TypeMesh = REGULAR_MESH;
@@ -4125,6 +4313,7 @@ void CSurfaceFace::DumpPreparedPolylinesToScene() const
 }
 
 bool CSurfaceFace::BuildTrimmingMesh(CSolid* psol, float Deflection){
+	m_UsedSlxHoleCut = false;
 	TopoDS_Face F1 = TopoDS::Face(m_Face);
 	if (F1.IsNull())
 		return false;
@@ -4164,7 +4353,9 @@ bool CSurfaceFace::BuildTrimmingMesh(CSolid* psol, float Deflection){
 	// the trimming/classification stage below still removes any genuine excess.
 	const bool four_sided_bspline_compatibility = low_poly_quadro
 		&& surface_type_of(F1) == GeomAbs_BSplineSurface
-		&& topological_edge_count == 4;
+		&& topological_edge_count == 4 && HasRectangularUVBoundary();
+	if (low_poly_quadro && build_trimmed_torus_quad_strip(this))
+		return true;
 	if (low_poly_quadro && psol && psol->GetNumSurfaces() <= 4
 		&& topological_edge_count >= 4
 		&& build_oblique_cylinder_quad_strip(this))
@@ -4849,9 +5040,17 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 	// be used to snap neighbouring faces after this mesh has been built.
 	std::vector<std::unique_ptr<CPolyline>> loop_storage;
 	std::vector<CPolyline*> loose_lines;
+	const bool exact_bspline_boundary = surface_type_of(TopoDS::Face(m_Face)) == GeomAbs_BSplineSurface
+		&& m_PreparedTopoEdges.size() == Polylines.size()
+		&& !BRepAdaptor_Surface(TopoDS::Face(m_Face)).IsUPeriodic()
+		&& !BRepAdaptor_Surface(TopoDS::Face(m_Face)).IsVPeriodic()
+		&& std::all_of(m_PreparedTopoEdges.begin(),m_PreparedTopoEdges.end(),[](const TopoDS_Edge& edge) {
+			return !BRep_Tool::Degenerated(edge) && BRep_Tool::SameParameter(edge);
+		});
 	loop_storage.reserve(Polylines.size());
 	loose_lines.reserve(Polylines.size());
-	for (const CPolyline* source : Polylines) {
+	for (size_t edge_index=0; edge_index<Polylines.size(); ++edge_index) {
+		const CPolyline* source=Polylines[edge_index];
 		if (source) {
 			dump_polyline(dump_paths[0], source->GetPoints(),
 				source->IsClosed());
@@ -4859,6 +5058,40 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 		std::unique_ptr<CPolyline> copy = copy_polyline_points(source);
 		if (!copy || copy->GetPointCount() < 2)
 			continue;
+		if (exact_bspline_boundary) {
+			// A closest-point search on a filling surface can find the wrong
+			// stationary point. The edge already supplies its exact UV branch.
+			try {
+			const TopoDS_Edge& edge=m_PreparedTopoEdges[edge_index];
+			double first,last,pfirst,plast;
+			TopLoc_Location location;
+			const auto curve=BRep_Tool::Curve(edge,location,first,last);
+			const auto pcurve=BRep_Tool::CurveOnSurface(edge,TopoDS::Face(m_Face),pfirst,plast);
+			if (curve.IsNull() || pcurve.IsNull()) {
+				m_LastIslandFillError="The spline boundary has no CAD parameter curve."; return false;
+			}
+			copy->Clear();
+			for (const CPoint3d& point:source->GetPoints()) {
+				gp_Pnt local(point.x,point.y,point.z);
+				local.Transform(location.Transformation().Inverted());
+				GeomAPI_ProjectPointOnCurve projection(local,curve,first,last);
+				// The nearest point on a bounded curve may be an endpoint;
+				// ProjectPointOnCurve reports stationary interior solutions only.
+				// Prepared seam nodes can differ slightly within CAD tolerance.
+				double parameter = first;
+				double distance = local.Distance(curve->Value(first));
+				const double last_distance = local.Distance(curve->Value(last));
+				if (last_distance < distance) { parameter = last; distance = last_distance; }
+				if (projection.NbPoints() > 0 && projection.LowerDistance() < distance)
+					parameter = projection.LowerDistanceParameter();
+				const auto uv=pcurve->Value(parameter);
+				copy->AddPoint({uv.X(),uv.Y(),0});
+			}
+			copy->SetClosed(source->IsClosed());
+			} catch (const Standard_Failure&) {
+				m_LastIslandFillError="Cannot evaluate the spline boundary's CAD parameter curve."; return false;
+			}
+		}
 		loose_lines.push_back(copy.get());
 		loop_storage.push_back(std::move(copy));
 	}
@@ -4867,8 +5100,13 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 		return false;
 	}
 
-	const double world_join_tolerance = std::max(
+	double world_join_tolerance = std::max(
 		1.0e-7, static_cast<double>(std::max(lenEdgeMax, 1.0f)) * 1.0e-5);
+	if (exact_bspline_boundary) {
+		double u0,u1,v0,v1;
+		BRepTools::UVBounds(TopoDS::Face(m_Face),u0,u1,v0,v1);
+		world_join_tolerance=std::max(1.e-9,std::max(u1-u0,v1-v0)*1.e-5);
+	}
 	std::vector<CPolyline*> joined_loops;
 	if (!CPolyline::JoinMultuLines(&loose_lines, &joined_loops,
 		world_join_tolerance) || joined_loops.empty()) {
@@ -4887,7 +5125,7 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 			continue;
 		if (loop->P(0)->DistTo(loop->PLast()) <= world_join_tolerance)
 			loop->SetClosed(true);
-		if (!loop->IsClosed() || !loop->PutOnSurface(this))
+		if (!loop->IsClosed() || (!exact_bspline_boundary && !loop->PutOnSurface(this)))
 			continue;
 
 		std::vector<SurfacePatchPoint> contour;
@@ -5157,6 +5395,27 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 		}
 		centre.u /= static_cast<double>(boundary.size());
 		centre.v /= static_cast<double>(boundary.size());
+		// Shared angular charts need not sample a circle uniformly. Their
+		// vertex average is not the circle centre and can falsely reject the
+		// radial cap as non-circular, falling back to long cross-cap strips.
+		bool exact_circle = true;
+		bool have_centre = false;
+		gp_Pnt circle_centre;
+		for (TopExp_Explorer edge(m_Face, TopAbs_EDGE); edge.More(); edge.Next()) {
+			const TopoDS_Edge boundary_edge = TopoDS::Edge(edge.Current());
+			if (BRep_Tool::Degenerated(boundary_edge)) continue;
+			BRepAdaptor_Curve curve(boundary_edge);
+			if (curve.GetType() != GeomAbs_Circle) { exact_circle = false; break; }
+			const gp_Pnt candidate = curve.Circle().Location();
+			if (have_centre && circle_centre.Distance(candidate) > 1.e-7) { exact_circle = false; break; }
+			circle_centre = candidate; have_centre = true;
+		}
+		if (exact_circle && have_centre) {
+			SurfaceUVMapping mapping(this); SurfaceUVPoint uv{};
+			if (mapping.IsValid() && mapping.Project({float(circle_centre.X()),
+				float(circle_centre.Y()),float(circle_centre.Z())},uv))
+				centre = {uv.u,uv.v};
+		}
 
 		double mean_radius = 0.0;
 		double minimum_radius = std::numeric_limits<double>::max();
@@ -5657,10 +5916,10 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 		}
 	}
 
-	// Several small cuts arranged in one row must share one transition zone.
+	// Each row of nearby rectangular cuts shares one transition zone.
 	// Giving every cut its own bridge/collar makes neighbouring sizing fields
 	// overlap as soon as the background step becomes wider than the gap.  Split
-	// the face once around a compact rectangular zone, then solve all cuts only
+	// the background around disjoint row frames, then solve each row only
 	// inside that zone.  The same explicit strategy is used by both hole modes;
 	// it is deliberately limited to planar, aligned clusters and falls through
 	// to the established algorithms if any construction step is unsuccessful.
@@ -5760,353 +6019,38 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 			const auto limits = std::minmax_element(values.begin(), values.end());
 			return *limits.second - *limits.first;
 		};
-		const bool horizontal = spread(centres_v) <= median_height * 0.35;
-		const bool vertical = spread(centres_u) <= median_width * 0.35;
-		if (!horizontal && !vertical)
-			return false;
-		const bool along_u = horizontal || !vertical;
-		std::sort(holes.begin(), holes.end(), [&](const Bounds& a, const Bounds& b) {
-			return along_u ? a.min_u < b.min_u : a.min_v < b.min_v;
-		});
-		for (size_t i = 1; i < holes.size(); ++i) {
-			const double gap = along_u
-				? holes[i].min_u - holes[i - 1].max_u
-				: holes[i].min_v - holes[i - 1].max_v;
-			const double feature_size = along_u ? median_width : median_height;
-			if (gap > std::max(background_step * 1.5, feature_size * 2.5))
-				return false;
-		}
-
-		Bounds cluster;
-		for (const Bounds& hole : holes) {
-			cluster.min_u = std::min(cluster.min_u, hole.min_u);
-			cluster.max_u = std::max(cluster.max_u, hole.max_u);
-			cluster.min_v = std::min(cluster.min_v, hole.min_v);
-			cluster.max_v = std::max(cluster.max_v, hole.max_v);
-		}
-		const Bounds feature_bounds = cluster;
-		const double margin = background_step * 0.8;
-		cluster.min_u = std::max(cluster.min_u - margin,
-			outer_bounds.min_u + background_step * 0.25);
-		cluster.max_u = std::min(cluster.max_u + margin,
-			outer_bounds.max_u - background_step * 0.25);
-		cluster.min_v = std::max(cluster.min_v - margin,
-			outer_bounds.min_v + background_step * 0.25);
-		cluster.max_v = std::min(cluster.max_v + margin,
-			outer_bounds.max_v - background_step * 0.25);
-		if (cluster.max_u <= cluster.min_u || cluster.max_v <= cluster.min_v)
-			return false;
-
-		std::vector<SurfacePatchPoint> zone;
-		const auto append_edge = [&](double u0, double v0, double u1, double v1) {
-			const int segments = std::max(1, static_cast<int>(std::ceil(
-				std::hypot(u1 - u0, v1 - v0) / background_step)));
-			for (int i = 0; i < segments; ++i) {
-				const double t = static_cast<double>(i) / segments;
-				zone.push_back({u0 + (u1 - u0) * t,
-					v0 + (v1 - v0) * t, true});
-			}
-		};
-		append_edge(cluster.min_u, cluster.min_v, cluster.max_u, cluster.min_v);
-		append_edge(cluster.max_u, cluster.min_v, cluster.max_u, cluster.max_v);
-		append_edge(cluster.max_u, cluster.max_v, cluster.min_u, cluster.max_v);
-		append_edge(cluster.min_u, cluster.max_v, cluster.min_u, cluster.min_v);
-		Face2D outer_face;
-		for (SurfacePatchPoint point : outer)
-			outer_face.verts.emplace_back(point.u, point.v);
-		for (SurfacePatchPoint point : zone) {
-			if (ClassifyPointInFace2(outer_face,
-					cVec2(point.u, point.v), EPS2D) == PFP_OUTSIDE)
-				return false;
-		}
-
-		CMesh3D slx_background;
-		std::vector<SurfacePatchPoint> local_outer = zone;
-		if (use_slx_background) {
-			std::vector<Vec3> outer_contour;
-			for (SurfacePatchPoint point : outer)
-				outer_contour.push_back({static_cast<float>(point.u),
-					static_cast<float>(point.v), 0.0f});
-			if (!MakeFilledContour(outer_contour, {0.0f, 0.0f, 1.0f},
-					&slx_background, Deflection >= 1.5f,
-					nullptr, nullptr, nullptr)) {
-				return false;
-			}
-			Face2D zone_face;
-			for (SurfacePatchPoint point : zone)
-				zone_face.verts.emplace_back(point.u, point.v);
-			CPoint3d keep_point;
-			bool found_keep = false;
-			for (const CMesh3D::Face& face : slx_background.GetFaces()) {
-				if (face.deleted || face.corners.size() < 3)
-					continue;
-				cVec2 centre{};
-				bool valid = true;
-				for (const MeshCorner& corner : face.corners) {
-					if (corner.v >= slx_background.GetVertices().size()) {
-						valid = false;
-						break;
+		const bool along_u = spread(centres_u) / median_width
+			>= spread(centres_v) / median_height;
+		std::vector<std::vector<Bounds>> groups;
+		std::vector<bool> assigned(holes.size(), false);
+		for (size_t seed = 0; seed < holes.size(); ++seed) {
+			if (assigned[seed]) continue;
+			std::vector<size_t> members{seed};
+			assigned[seed] = true;
+			for (size_t next = 0; next < members.size(); ++next) {
+				const Bounds& a = holes[members[next]];
+				for (size_t j = 0; j < holes.size(); ++j) {
+					if (assigned[j]) continue;
+					const Bounds& b = holes[j];
+					const double cross_distance = along_u
+						? std::fabs(a.min_v + a.max_v - b.min_v - b.max_v) * 0.5
+						: std::fabs(a.min_u + a.max_u - b.min_u - b.max_u) * 0.5;
+					const double gap = along_u
+						? std::max(a.min_u, b.min_u) - std::min(a.max_u, b.max_u)
+						: std::max(a.min_v, b.min_v) - std::min(a.max_v, b.max_v);
+					if (cross_distance <= (along_u ? median_height : median_width) * 0.35
+						&& gap <= std::max(background_step * 1.5,
+							(along_u ? median_width : median_height) * 2.5)) {
+						assigned[j] = true;
+						members.push_back(j);
 					}
-					const Vec3 point = slx_background.GetVertices()[corner.v];
-					centre.x += point.x;
-					centre.y += point.y;
-				}
-				if (!valid)
-					continue;
-				centre.x /= static_cast<double>(face.corners.size());
-				centre.y /= static_cast<double>(face.corners.size());
-				if (ClassifyPointInFace2(zone_face, centre, EPS2D) == PFP_OUTSIDE) {
-					keep_point = CPoint3d(centre.x, centre.y, 0.0);
-					found_keep = true;
-					break;
 				}
 			}
-			if (!found_keep)
-				return false;
-			CPolyline zone_line;
-			for (SurfacePatchPoint point : zone)
-				zone_line.AddPoint(CPoint3d(point.u, point.v, 0.0));
-			zone_line.SetClosed(true);
-			slx_background.TrimByPline(&zone_line, keep_point);
-			slx_background.KeepConnectedComponentAt(keep_point);
-			merge_trim_triangle_pairs_to_quads(slx_background);
-
-			using Edge = std::pair<size_t, size_t>;
-			std::map<Edge, int> edge_uses;
-			for (const CMesh3D::Face& face : slx_background.GetFaces()) {
-				if (face.deleted || face.corners.size() < 3)
-					continue;
-				for (size_t i = 0; i < face.corners.size(); ++i) {
-					const size_t a = face.corners[i].v;
-					const size_t b = face.corners[(i + 1) % face.corners.size()].v;
-					if (a != b)
-						++edge_uses[std::minmax(a, b)];
-				}
-			}
-			std::map<size_t, std::vector<size_t>> boundary_neighbors;
-			for (const auto& [edge, uses] : edge_uses) {
-				if (uses != 1)
-					continue;
-				boundary_neighbors[edge.first].push_back(edge.second);
-				boundary_neighbors[edge.second].push_back(edge.first);
-			}
-			std::set<Edge> visited;
-			std::vector<std::vector<size_t>> loops;
-			for (const auto& [start, neighbors] : boundary_neighbors) {
-				for (size_t first_next : neighbors) {
-					if (visited.count(std::minmax(start, first_next)))
-						continue;
-					std::vector<size_t> loop;
-					size_t previous = std::numeric_limits<size_t>::max();
-					size_t current = start;
-					size_t next = first_next;
-					for (size_t guard = 0; guard <= boundary_neighbors.size() + 1; ++guard) {
-						loop.push_back(current);
-						visited.insert(std::minmax(current, next));
-						previous = current;
-						current = next;
-						if (current == start)
-							break;
-						const auto found = boundary_neighbors.find(current);
-						if (found == boundary_neighbors.end()
-							|| found->second.size() != 2) {
-							loop.clear();
-							break;
-						}
-						next = found->second[0] == previous
-							? found->second[1] : found->second[0];
-					}
-					if (loop.size() >= 3 && current == start)
-						loops.push_back(std::move(loop));
-				}
-			}
-			if (loops.size() < 2)
-				return false;
-			const auto loop_area = [&](const std::vector<size_t>& loop) {
-				double result = 0.0;
-				for (size_t i = 0; i < loop.size(); ++i) {
-					const Vec3& a = slx_background.GetVertices()[loop[i]];
-					const Vec3& b = slx_background.GetVertices()[
-						loop[(i + 1) % loop.size()]];
-					result += static_cast<double>(a.x) * b.y
-						- static_cast<double>(b.x) * a.y;
-				}
-				return std::fabs(result * 0.5);
-			};
-			const auto cut_loop = std::min_element(loops.begin(), loops.end(),
-				[&](const auto& a, const auto& b) {
-					return loop_area(a) < loop_area(b);
-				});
-			local_outer.clear();
-			for (size_t index : *cut_loop) {
-				const Vec3 point = slx_background.GetVertices()[index];
-				local_outer.push_back({point.x, point.y, true});
-			}
+			groups.emplace_back();
+			for (size_t i : members) groups.back().push_back(holes[i]);
 		}
-
-		std::vector<std::vector<SurfacePatchPoint>> outside_contours{outer, zone};
-		std::vector<double> strip_u;
-		std::vector<double> strip_v;
-		std::vector<SurfacePatchPoint> strip_outer;
-		std::array<std::vector<SurfacePatchPoint>, 4> bridge_outer;
-		std::array<std::vector<SurfacePatchPoint>, 4> bridge_inner;
-		bool structured_strip = true;
-		// The structured strip is exactly the row envelope. There is no second
-		// offset line above or below the holes: its only filled cells are the
-		// rectangular gaps between neighbouring cuts.
-		Bounds strip_bounds = feature_bounds;
-		if (strip_bounds.min_u >= strip_bounds.max_u
-			|| strip_bounds.min_v >= strip_bounds.max_v) {
-			structured_strip = false;
-		}
-		for (const Bounds& hole : holes) {
-			for (SurfacePatchPoint point : uv_contours[hole.contour_index]) {
-				strip_u.push_back(point.u);
-				strip_v.push_back(point.v);
-			}
-		}
-		strip_u.push_back(strip_bounds.min_u);
-		strip_u.push_back(strip_bounds.max_u);
-		strip_v.push_back(strip_bounds.min_v);
-		strip_v.push_back(strip_bounds.max_v);
-		const auto unique_axis = [rectangle_epsilon](std::vector<double>& axis) {
-			std::sort(axis.begin(), axis.end());
-			axis.erase(std::unique(axis.begin(), axis.end(),
-				[rectangle_epsilon](double a, double b) {
-					return std::fabs(a - b) <= rectangle_epsilon;
-				}), axis.end());
-		};
-		unique_axis(strip_u);
-		unique_axis(strip_v);
-		// A grid coordinate crossing a hole side must already be an exact CAD
-		// boundary node of that hole. This prevents the extra short-edge splits
-		// visible on the small vertical faces.
-		for (const Bounds& hole : holes) {
-			const auto& contour = uv_contours[hole.contour_index];
-			const auto has_vertical_node = [&](double v) {
-				return std::any_of(contour.begin(), contour.end(), [&](SurfacePatchPoint p) {
-					return std::fabs(p.v - v) <= rectangle_epsilon
-						&& (std::fabs(p.u - hole.min_u) <= rectangle_epsilon
-							|| std::fabs(p.u - hole.max_u) <= rectangle_epsilon);
-				});
-			};
-			const auto has_horizontal_node = [&](double u) {
-				return std::any_of(contour.begin(), contour.end(), [&](SurfacePatchPoint p) {
-					return std::fabs(p.u - u) <= rectangle_epsilon
-						&& (std::fabs(p.v - hole.min_v) <= rectangle_epsilon
-							|| std::fabs(p.v - hole.max_v) <= rectangle_epsilon);
-				});
-			};
-			for (double v : strip_v) {
-				if (v > hole.min_v + rectangle_epsilon
-					&& v < hole.max_v - rectangle_epsilon
-					&& !has_vertical_node(v)) {
-					structured_strip = false;
-				}
-			}
-			for (double u : strip_u) {
-				if (u > hole.min_u + rectangle_epsilon
-					&& u < hole.max_u - rectangle_epsilon
-					&& !has_horizontal_node(u)) {
-					structured_strip = false;
-				}
-			}
-		}
-		if (structured_strip) {
-			for (double u : strip_u)
-				strip_outer.push_back({u, strip_v.front(), true});
-			for (size_t i = 1; i < strip_v.size(); ++i)
-				strip_outer.push_back({strip_u.back(), strip_v[i], true});
-			for (size_t i = strip_u.size() - 1; i-- > 0;)
-				strip_outer.push_back({strip_u[i], strip_v.back(), true});
-			for (size_t i = strip_v.size() - 1; i-- > 1;)
-				strip_outer.push_back({strip_u.front(), strip_v[i], true});
-			Face2D local_face;
-			for (SurfacePatchPoint point : local_outer)
-				local_face.verts.emplace_back(point.u, point.v);
-			for (SurfacePatchPoint point : strip_outer) {
-				if (ClassifyPointInFace2(local_face,
-						cVec2(point.u, point.v), EPS2D) == PFP_OUTSIDE) {
-					structured_strip = false;
-					break;
-				}
-			}
-			// Split the rectangular annulus into four ordered one-cell strips.
-			// BuildSurfacePatchesWithoutHoles is intentionally not used here: it
-			// may connect unrelated vertices across this thin frame and produce
-			// the irregular crossing lines seen below a row of close holes.
-			const double side_tolerance = std::max(
-				rectangle_epsilon * 8.0, background_step * 1.0e-4);
-			for (SurfacePatchPoint point : local_outer) {
-				if (std::fabs(point.v - cluster.min_v) <= side_tolerance)
-					bridge_outer[0].push_back(point);
-				if (std::fabs(point.u - cluster.max_u) <= side_tolerance)
-					bridge_outer[1].push_back(point);
-				if (std::fabs(point.v - cluster.max_v) <= side_tolerance)
-					bridge_outer[2].push_back(point);
-				if (std::fabs(point.u - cluster.min_u) <= side_tolerance)
-					bridge_outer[3].push_back(point);
-			}
-			for (double u : strip_u) {
-				bridge_inner[0].push_back({u, strip_bounds.min_v, true});
-				bridge_inner[2].push_back({u, strip_bounds.max_v, true});
-			}
-			for (double v : strip_v) {
-				bridge_inner[1].push_back({strip_bounds.max_u, v, true});
-				bridge_inner[3].push_back({strip_bounds.min_u, v, true});
-			}
-			const auto prepare_chain = [side_tolerance](
-					std::vector<SurfacePatchPoint>& chain, bool use_u,
-					bool ascending) {
-				std::sort(chain.begin(), chain.end(), [&](SurfacePatchPoint a,
-						SurfacePatchPoint b) {
-					const double av = use_u ? a.u : a.v;
-					const double bv = use_u ? b.u : b.v;
-					return ascending ? av < bv : av > bv;
-				});
-				chain.erase(std::unique(chain.begin(), chain.end(),
-					[side_tolerance](SurfacePatchPoint a, SurfacePatchPoint b) {
-						return std::hypot(a.u - b.u, a.v - b.v)
-							<= side_tolerance;
-					}), chain.end());
-			};
-			prepare_chain(bridge_outer[0], true, true);
-			prepare_chain(bridge_inner[0], true, true);
-			prepare_chain(bridge_outer[1], false, true);
-			prepare_chain(bridge_inner[1], false, true);
-			prepare_chain(bridge_outer[2], true, false);
-			prepare_chain(bridge_inner[2], true, false);
-			prepare_chain(bridge_outer[3], false, false);
-			prepare_chain(bridge_inner[3], false, false);
-			for (size_t side = 0; side < bridge_outer.size(); ++side) {
-				if (bridge_outer[side].size() < 2
-					|| bridge_inner[side].size() < 2) {
-					structured_strip = false;
-					break;
-				}
-			}
-		}
-
-		std::vector<std::vector<SurfacePatchPoint>> inside_contours;
-		if (!structured_strip) {
-			inside_contours.push_back(local_outer);
-			for (const Bounds& hole : holes)
-				inside_contours.push_back(uv_contours[hole.contour_index]);
-		}
-		std::vector<std::vector<SurfacePatchPoint>> patches;
-		std::vector<std::vector<SurfacePatchPoint>> local_patches;
-		std::string patch_error;
-		if ((!use_slx_background
-				&& !BuildSurfacePatchesWithoutHoles(
-					outside_contours, patches, &patch_error))
-			|| (!structured_strip && !BuildSurfacePatchesWithoutHoles(
-				inside_contours, local_patches, &patch_error))) {
-			return false;
-		}
-		patches.insert(patches.end(), local_patches.begin(), local_patches.end());
-		if (patches.empty() && !use_slx_background)
-			return false;
-
+		const auto all_holes = holes;
+		std::vector<std::vector<SurfacePatchPoint>> all_zones;
 		std::vector<Vec3> vertices;
 		std::vector<CMesh3D::Face> faces;
 		const double coordinate_scale = std::max({1.0,
@@ -6131,6 +6075,513 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 			vertices_by_u.emplace(requested.x, index);
 			return index;
 		};
+		const auto append_patches = [&](const auto& patches) {
+			for (const auto& patch : patches) {
+				std::vector<Vec3> contour;
+				for (SurfacePatchPoint point : patch)
+					contour.push_back({static_cast<float>(point.u),
+						static_cast<float>(point.v), 0.0f});
+				CMesh3D patch_mesh;
+				if (!MakeFilledContour(contour, {0.0f, 0.0f, 1.0f},
+						&patch_mesh, false, nullptr, nullptr, nullptr))
+					return false;
+				std::vector<size_t> remap(patch_mesh.GetVertices().size());
+				for (size_t i = 0; i < remap.size(); ++i)
+					remap[i] = weld_vertex(patch_mesh.GetVertices()[i]);
+				for (const auto& source : patch_mesh.GetFaces()) {
+					if (source.deleted || source.corners.size() < 3)
+						continue;
+					CMesh3D::Face face = source;
+					for (MeshCorner& corner : face.corners) {
+						if (corner.v >= remap.size()) {
+							face.corners.clear();
+							break;
+						}
+						corner.v = remap[corner.v];
+						corner.uv = corner.n = corner.v;
+					}
+					if (face.corners.size() >= 3)
+						faces.push_back(std::move(face));
+				}
+			}
+			return true;
+		};
+		CMesh3D slx_background;
+		if (use_slx_background) {
+			std::vector<Vec3> outer_contour;
+			for (SurfacePatchPoint point : outer)
+				outer_contour.push_back({static_cast<float>(point.u),
+					static_cast<float>(point.v), 0.0f});
+			if (!MakeFilledContour(outer_contour, {0.0f, 0.0f, 1.0f},
+					&slx_background, Deflection >= 1.5f,
+					nullptr, nullptr, nullptr)) {
+				return false;
+			}
+		}
+
+		for (const auto& group : groups) {
+			holes = group;
+
+			Bounds cluster;
+			for (const Bounds& hole : holes) {
+				cluster.min_u = std::min(cluster.min_u, hole.min_u);
+				cluster.max_u = std::max(cluster.max_u, hole.max_u);
+				cluster.min_v = std::min(cluster.min_v, hole.min_v);
+				cluster.max_v = std::max(cluster.max_v, hole.max_v);
+			}
+			const Bounds feature_bounds = cluster;
+			const double margin = background_step * 0.8;
+			cluster.min_u -= std::min(margin, (feature_bounds.min_u - outer_bounds.min_u) * 0.4);
+			cluster.max_u += std::min(margin, (outer_bounds.max_u - feature_bounds.max_u) * 0.4);
+			cluster.min_v -= std::min(margin, (feature_bounds.min_v - outer_bounds.min_v) * 0.4);
+			cluster.max_v += std::min(margin, (outer_bounds.max_v - feature_bounds.max_v) * 0.4);
+			// Leave a background corridor between independently meshed rows.
+			for (const Bounds& other : all_holes) {
+				if (other.max_v < feature_bounds.min_v)
+					cluster.min_v = std::max(cluster.min_v,
+						feature_bounds.min_v - (feature_bounds.min_v - other.max_v) / 3.0);
+				if (other.min_v > feature_bounds.max_v)
+					cluster.max_v = std::min(cluster.max_v,
+						feature_bounds.max_v + (other.min_v - feature_bounds.max_v) / 3.0);
+				if (other.max_u < feature_bounds.min_u)
+					cluster.min_u = std::max(cluster.min_u,
+						feature_bounds.min_u - (feature_bounds.min_u - other.max_u) / 3.0);
+				if (other.min_u > feature_bounds.max_u)
+					cluster.max_u = std::min(cluster.max_u,
+						feature_bounds.max_u + (other.min_u - feature_bounds.max_u) / 3.0);
+			}
+
+			if (cluster.max_u <= cluster.min_u || cluster.max_v <= cluster.min_v)
+				return false;
+
+			std::vector<SurfacePatchPoint> zone;
+			const auto append_edge = [&](double u0, double v0, double u1, double v1) {
+				const int segments = std::max(1, static_cast<int>(std::ceil(
+					std::hypot(u1 - u0, v1 - v0) / background_step)));
+				for (int i = 0; i < segments; ++i) {
+					const double t = static_cast<double>(i) / segments;
+					zone.push_back({u0 + (u1 - u0) * t,
+						v0 + (v1 - v0) * t, true});
+				}
+			};
+			append_edge(cluster.min_u, cluster.min_v, cluster.max_u, cluster.min_v);
+			append_edge(cluster.max_u, cluster.min_v, cluster.max_u, cluster.max_v);
+			append_edge(cluster.max_u, cluster.max_v, cluster.min_u, cluster.max_v);
+			append_edge(cluster.min_u, cluster.max_v, cluster.min_u, cluster.min_v);
+			Face2D outer_face;
+			for (SurfacePatchPoint point : outer)
+				outer_face.verts.emplace_back(point.u, point.v);
+			for (SurfacePatchPoint point : zone) {
+				if (ClassifyPointInFace2(outer_face,
+						cVec2(point.u, point.v), EPS2D) == PFP_OUTSIDE)
+					return false;
+			}
+
+			std::vector<SurfacePatchPoint> local_outer = zone;
+			if (use_slx_background) {
+				Face2D zone_face;
+				for (SurfacePatchPoint point : zone)
+					zone_face.verts.emplace_back(point.u, point.v);
+				CPoint3d keep_point;
+				bool found_keep = false;
+				for (const CMesh3D::Face& face : slx_background.GetFaces()) {
+					if (face.deleted || face.corners.size() < 3)
+						continue;
+					cVec2 centre{};
+					bool valid = true;
+					for (const MeshCorner& corner : face.corners) {
+						if (corner.v >= slx_background.GetVertices().size()) {
+							valid = false;
+							break;
+						}
+						const Vec3 point = slx_background.GetVertices()[corner.v];
+						centre.x += point.x;
+						centre.y += point.y;
+					}
+					if (!valid)
+						continue;
+					centre.x /= static_cast<double>(face.corners.size());
+					centre.y /= static_cast<double>(face.corners.size());
+					if (ClassifyPointInFace2(zone_face, centre, EPS2D) == PFP_OUTSIDE) {
+						keep_point = CPoint3d(centre.x, centre.y, 0.0);
+						found_keep = true;
+						break;
+					}
+				}
+				if (!found_keep)
+					return false;
+				CPolyline zone_line;
+				for (SurfacePatchPoint point : zone)
+					zone_line.AddPoint(CPoint3d(point.u, point.v, 0.0));
+				zone_line.SetClosed(true);
+
+				if (!slx_background.TrimByPline(&zone_line, keep_point, true))
+					return false;
+
+
+				slx_background.KeepConnectedComponentAt(keep_point);
+
+
+				merge_trim_triangle_pairs_to_quads(slx_background);
+
+				using Edge = std::pair<size_t, size_t>;
+				std::map<Edge, int> edge_uses;
+				for (const CMesh3D::Face& face : slx_background.GetFaces()) {
+					if (face.deleted || face.corners.size() < 3)
+						continue;
+					for (size_t i = 0; i < face.corners.size(); ++i) {
+						const size_t a = face.corners[i].v;
+						const size_t b = face.corners[(i + 1) % face.corners.size()].v;
+						if (a != b)
+							++edge_uses[std::minmax(a, b)];
+					}
+				}
+				std::map<size_t, std::vector<size_t>> boundary_neighbors;
+				for (const auto& [edge, uses] : edge_uses) {
+					if (uses != 1)
+						continue;
+					boundary_neighbors[edge.first].push_back(edge.second);
+					boundary_neighbors[edge.second].push_back(edge.first);
+				}
+				std::set<Edge> visited;
+				std::vector<std::vector<size_t>> loops;
+				for (const auto& [start, neighbors] : boundary_neighbors) {
+					for (size_t first_next : neighbors) {
+						if (visited.count(std::minmax(start, first_next)))
+							continue;
+						std::vector<size_t> loop;
+						size_t previous = std::numeric_limits<size_t>::max();
+						size_t current = start;
+						size_t next = first_next;
+						for (size_t guard = 0; guard <= boundary_neighbors.size() + 1; ++guard) {
+							loop.push_back(current);
+							visited.insert(std::minmax(current, next));
+							previous = current;
+							current = next;
+							if (current == start)
+								break;
+							const auto found = boundary_neighbors.find(current);
+							if (found == boundary_neighbors.end()
+								|| found->second.size() != 2) {
+								loop.clear();
+								break;
+							}
+							next = found->second[0] == previous
+								? found->second[1] : found->second[0];
+						}
+						if (loop.size() >= 3 && current == start)
+							loops.push_back(std::move(loop));
+					}
+				}
+				if (loops.size() < 2)
+					return false;
+				const auto loop_area = [&](const std::vector<size_t>& loop) {
+					double result = 0.0;
+					for (size_t i = 0; i < loop.size(); ++i) {
+						const Vec3& a = slx_background.GetVertices()[loop[i]];
+						const Vec3& b = slx_background.GetVertices()[
+							loop[(i + 1) % loop.size()]];
+						result += static_cast<double>(a.x) * b.y
+							- static_cast<double>(b.x) * a.y;
+					}
+					return std::fabs(result * 0.5);
+				};
+				const cVec2 row_centre((cluster.min_u + cluster.max_u) * 0.5,
+					(cluster.min_v + cluster.max_v) * 0.5);
+				auto cut_loop = loops.end();
+				for (auto candidate = loops.begin(); candidate != loops.end(); ++candidate) {
+					Face2D polygon;
+					for (size_t index : *candidate) {
+						const Vec3 p = slx_background.GetVertices()[index];
+						polygon.verts.emplace_back(p.x, p.y);
+					}
+					if (ClassifyPointInFace2(polygon, row_centre, EPS2D) != PFP_OUTSIDE
+						&& (cut_loop == loops.end() || loop_area(*candidate) < loop_area(*cut_loop)))
+						cut_loop = candidate;
+				}
+				if (cut_loop == loops.end() || loop_area(*cut_loop) >= std::fabs(area(outer)) * 0.99)
+					return false;
+				local_outer.clear();
+				for (size_t index : *cut_loop) {
+					const Vec3 point = slx_background.GetVertices()[index];
+					local_outer.push_back({point.x, point.y, true});
+				}
+			}
+
+
+			all_zones.push_back(local_outer);
+
+			std::vector<double> strip_u;
+			std::vector<double> strip_v;
+			std::vector<SurfacePatchPoint> strip_outer;
+			std::array<std::vector<SurfacePatchPoint>, 4> bridge_outer;
+			std::array<std::vector<SurfacePatchPoint>, 4> bridge_inner;
+			bool structured_strip = true;
+			// The structured strip is exactly the row envelope. There is no second
+			// offset line above or below the holes: its only filled cells are the
+			// rectangular gaps between neighbouring cuts.
+			Bounds strip_bounds = feature_bounds;
+			if (strip_bounds.min_u >= strip_bounds.max_u
+				|| strip_bounds.min_v >= strip_bounds.max_v) {
+				structured_strip = false;
+			}
+			for (const Bounds& hole : holes) {
+				for (SurfacePatchPoint point : uv_contours[hole.contour_index]) {
+					strip_u.push_back(point.u);
+					strip_v.push_back(point.v);
+				}
+			}
+			strip_u.push_back(strip_bounds.min_u);
+			strip_u.push_back(strip_bounds.max_u);
+			strip_v.push_back(strip_bounds.min_v);
+			strip_v.push_back(strip_bounds.max_v);
+			const auto unique_axis = [rectangle_epsilon](std::vector<double>& axis) {
+				std::sort(axis.begin(), axis.end());
+				axis.erase(std::unique(axis.begin(), axis.end(),
+					[rectangle_epsilon](double a, double b) {
+						return std::fabs(a - b) <= rectangle_epsilon;
+					}), axis.end());
+			};
+			unique_axis(strip_u);
+			unique_axis(strip_v);
+
+			// A grid coordinate crossing a hole side must already be an exact CAD
+			// boundary node of that hole. This prevents the extra short-edge splits
+			// visible on the small vertical faces.
+			for (const Bounds& hole : holes) {
+				const auto& contour = uv_contours[hole.contour_index];
+				const auto has_vertical_node = [&](double v) {
+					return std::any_of(contour.begin(), contour.end(), [&](SurfacePatchPoint p) {
+						return std::fabs(p.v - v) <= rectangle_epsilon
+							&& (std::fabs(p.u - hole.min_u) <= rectangle_epsilon
+								|| std::fabs(p.u - hole.max_u) <= rectangle_epsilon);
+					});
+				};
+				const auto has_horizontal_node = [&](double u) {
+					return std::any_of(contour.begin(), contour.end(), [&](SurfacePatchPoint p) {
+						return std::fabs(p.u - u) <= rectangle_epsilon
+							&& (std::fabs(p.v - hole.min_v) <= rectangle_epsilon
+								|| std::fabs(p.v - hole.max_v) <= rectangle_epsilon);
+					});
+				};
+				for (double v : strip_v) {
+					if (v > hole.min_v + rectangle_epsilon
+						&& v < hole.max_v - rectangle_epsilon
+						&& !has_vertical_node(v)) {
+						structured_strip = false;
+					}
+				}
+				for (double u : strip_u) {
+					if (u > hole.min_u + rectangle_epsilon
+						&& u < hole.max_u - rectangle_epsilon
+						&& !has_horizontal_node(u)) {
+						structured_strip = false;
+					}
+				}
+			}
+			if (structured_strip) {
+				for (double u : strip_u)
+					strip_outer.push_back({u, strip_v.front(), true});
+				for (size_t i = 1; i < strip_v.size(); ++i)
+					strip_outer.push_back({strip_u.back(), strip_v[i], true});
+				for (size_t i = strip_u.size() - 1; i-- > 0;)
+					strip_outer.push_back({strip_u[i], strip_v.back(), true});
+				for (size_t i = strip_v.size() - 1; i-- > 1;)
+					strip_outer.push_back({strip_u.front(), strip_v[i], true});
+				Face2D local_face;
+				for (SurfacePatchPoint point : local_outer)
+					local_face.verts.emplace_back(point.u, point.v);
+				for (SurfacePatchPoint point : strip_outer) {
+					if (ClassifyPointInFace2(local_face,
+							cVec2(point.u, point.v), EPS2D) == PFP_OUTSIDE) {
+						structured_strip = false;
+						break;
+					}
+				}
+				// Split the rectangular annulus into four ordered one-cell strips.
+				// BuildSurfacePatchesWithoutHoles is intentionally not used here: it
+				// may connect unrelated vertices across this thin frame and produce
+				// the irregular crossing lines seen below a row of close holes.
+				const double side_tolerance = std::max(
+					rectangle_epsilon * 8.0, background_step * 1.0e-4);
+				for (SurfacePatchPoint point : local_outer) {
+					if (std::fabs(point.v - cluster.min_v) <= side_tolerance)
+						bridge_outer[0].push_back(point);
+					if (std::fabs(point.u - cluster.max_u) <= side_tolerance)
+						bridge_outer[1].push_back(point);
+					if (std::fabs(point.v - cluster.max_v) <= side_tolerance)
+						bridge_outer[2].push_back(point);
+					if (std::fabs(point.u - cluster.min_u) <= side_tolerance)
+						bridge_outer[3].push_back(point);
+				}
+				for (double u : strip_u) {
+					bridge_inner[0].push_back({u, strip_bounds.min_v, true});
+					bridge_inner[2].push_back({u, strip_bounds.max_v, true});
+				}
+				for (double v : strip_v) {
+					bridge_inner[1].push_back({strip_bounds.max_u, v, true});
+					bridge_inner[3].push_back({strip_bounds.min_u, v, true});
+				}
+				const auto prepare_chain = [side_tolerance](
+						std::vector<SurfacePatchPoint>& chain, bool use_u,
+						bool ascending) {
+					std::sort(chain.begin(), chain.end(), [&](SurfacePatchPoint a,
+							SurfacePatchPoint b) {
+						const double av = use_u ? a.u : a.v;
+						const double bv = use_u ? b.u : b.v;
+						return ascending ? av < bv : av > bv;
+					});
+					chain.erase(std::unique(chain.begin(), chain.end(),
+						[side_tolerance](SurfacePatchPoint a, SurfacePatchPoint b) {
+							return std::hypot(a.u - b.u, a.v - b.v)
+								<= side_tolerance;
+						}), chain.end());
+				};
+				prepare_chain(bridge_outer[0], true, true);
+				prepare_chain(bridge_inner[0], true, true);
+				prepare_chain(bridge_outer[1], false, true);
+				prepare_chain(bridge_inner[1], false, true);
+				prepare_chain(bridge_outer[2], true, false);
+				prepare_chain(bridge_inner[2], true, false);
+				prepare_chain(bridge_outer[3], false, false);
+				prepare_chain(bridge_inner[3], false, false);
+				for (size_t side = 0; side < bridge_outer.size(); ++side) {
+					if (bridge_outer[side].size() < 2
+						|| bridge_inner[side].size() < 2) {
+						structured_strip = false;
+						break;
+					}
+				}
+			}
+
+			std::vector<std::vector<SurfacePatchPoint>> inside_contours;
+			if (!structured_strip) {
+				inside_contours.push_back(local_outer);
+				for (const Bounds& hole : holes)
+					inside_contours.push_back(uv_contours[hole.contour_index]);
+			}
+			std::vector<std::vector<SurfacePatchPoint>> patches;
+			std::vector<std::vector<SurfacePatchPoint>> local_patches;
+			std::string patch_error;
+			if (!structured_strip && !BuildSurfacePatchesWithoutHoles(
+					inside_contours, local_patches, &patch_error))
+				return false;
+			patches.insert(patches.end(), local_patches.begin(), local_patches.end());
+
+
+
+
+			if (structured_strip) {
+				const auto append_bridge = [&](const auto& outer_chain,
+						const auto& inner_chain) {
+					std::vector<size_t> outer_indices, inner_indices;
+					for (SurfacePatchPoint point : outer_chain) {
+						outer_indices.push_back(weld_vertex({static_cast<float>(point.u),
+							static_cast<float>(point.v), 0.0f}));
+					}
+					for (SurfacePatchPoint point : inner_chain) {
+						inner_indices.push_back(weld_vertex({static_cast<float>(point.u),
+							static_cast<float>(point.v), 0.0f}));
+					}
+					const size_t outer_segments = outer_indices.size() - 1;
+					const size_t inner_segments = inner_indices.size() - 1;
+					if (outer_segments <= inner_segments) {
+						size_t inner_index = 0;
+						for (size_t outer_index = 0;
+								outer_index < outer_segments; ++outer_index) {
+							const size_t target_inner = static_cast<size_t>(std::llround(
+								static_cast<double>(outer_index + 1) * inner_segments
+								/ outer_segments));
+							while (inner_index + 1 < target_inner) {
+								CMesh3D::Face triangle;
+								triangle.corners = {
+									{outer_indices[outer_index], 0, 0},
+									{inner_indices[inner_index + 1], 0, 0},
+									{inner_indices[inner_index], 0, 0}};
+								faces.push_back(std::move(triangle));
+								++inner_index;
+							}
+							CMesh3D::Face quad;
+							quad.corners = {
+								{outer_indices[outer_index], 0, 0},
+								{outer_indices[outer_index + 1], 0, 0},
+								{inner_indices[target_inner], 0, 0},
+								{inner_indices[inner_index], 0, 0}};
+							faces.push_back(std::move(quad));
+							inner_index = target_inner;
+						}
+					} else {
+						size_t outer_index = 0;
+						for (size_t inner_index = 0;
+								inner_index < inner_segments; ++inner_index) {
+							const size_t target_outer = static_cast<size_t>(std::llround(
+								static_cast<double>(inner_index + 1) * outer_segments
+								/ inner_segments));
+							while (outer_index + 1 < target_outer) {
+								CMesh3D::Face triangle;
+								triangle.corners = {
+									{outer_indices[outer_index], 0, 0},
+									{outer_indices[outer_index + 1], 0, 0},
+									{inner_indices[inner_index], 0, 0}};
+								faces.push_back(std::move(triangle));
+								++outer_index;
+							}
+							CMesh3D::Face quad;
+							quad.corners = {
+								{outer_indices[outer_index], 0, 0},
+								{outer_indices[target_outer], 0, 0},
+								{inner_indices[inner_index + 1], 0, 0},
+								{inner_indices[inner_index], 0, 0}};
+							faces.push_back(std::move(quad));
+							outer_index = target_outer;
+						}
+					}
+				};
+				for (size_t side = 0; side < bridge_outer.size(); ++side)
+					append_bridge(bridge_outer[side], bridge_inner[side]);
+
+				std::vector<std::vector<size_t>> grid(strip_v.size(),
+					std::vector<size_t>(strip_u.size()));
+				for (size_t row = 0; row < strip_v.size(); ++row) {
+					for (size_t column = 0; column < strip_u.size(); ++column) {
+						grid[row][column] = weld_vertex({
+							static_cast<float>(strip_u[column]),
+							static_cast<float>(strip_v[row]), 0.0f});
+					}
+				}
+				std::vector<Face2D> hole_faces;
+				for (const Bounds& hole : holes) {
+					Face2D face;
+					for (SurfacePatchPoint point : uv_contours[hole.contour_index])
+						face.verts.emplace_back(point.u, point.v);
+					hole_faces.push_back(std::move(face));
+				}
+				for (size_t row = 0; row + 1 < strip_v.size(); ++row) {
+					for (size_t column = 0; column + 1 < strip_u.size(); ++column) {
+						const cVec2 centre(
+							(strip_u[column] + strip_u[column + 1]) * 0.5,
+							(strip_v[row] + strip_v[row + 1]) * 0.5);
+						if (std::any_of(hole_faces.begin(), hole_faces.end(),
+								[&](const Face2D& hole) {
+									return ClassifyPointInFace2(
+										hole, centre, EPS2D) != PFP_OUTSIDE;
+								})) {
+							continue;
+						}
+						CMesh3D::Face face;
+						face.corners = {
+							{grid[row][column], 0, 0},
+							{grid[row][column + 1], 0, 0},
+							{grid[row + 1][column + 1], 0, 0},
+							{grid[row + 1][column], 0, 0}};
+						faces.push_back(std::move(face));
+					}
+				}
+			}
+			if (!append_patches(patches))
+				return false;
+		} // Each row contributes only its local interior.
+
 		if (use_slx_background) {
 			std::vector<size_t> remap(slx_background.GetVertices().size());
 			for (size_t i = 0; i < remap.size(); ++i)
@@ -6151,141 +6602,16 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 					faces.push_back(std::move(face));
 			}
 		}
-		if (structured_strip) {
-			const auto append_bridge = [&](const auto& outer_chain,
-					const auto& inner_chain) {
-				std::vector<size_t> outer_indices, inner_indices;
-				for (SurfacePatchPoint point : outer_chain) {
-					outer_indices.push_back(weld_vertex({static_cast<float>(point.u),
-						static_cast<float>(point.v), 0.0f}));
-				}
-				for (SurfacePatchPoint point : inner_chain) {
-					inner_indices.push_back(weld_vertex({static_cast<float>(point.u),
-						static_cast<float>(point.v), 0.0f}));
-				}
-				const size_t outer_segments = outer_indices.size() - 1;
-				const size_t inner_segments = inner_indices.size() - 1;
-				if (outer_segments <= inner_segments) {
-					size_t inner_index = 0;
-					for (size_t outer_index = 0;
-							outer_index < outer_segments; ++outer_index) {
-						const size_t target_inner = static_cast<size_t>(std::llround(
-							static_cast<double>(outer_index + 1) * inner_segments
-							/ outer_segments));
-						while (inner_index + 1 < target_inner) {
-							CMesh3D::Face triangle;
-							triangle.corners = {
-								{outer_indices[outer_index], 0, 0},
-								{inner_indices[inner_index + 1], 0, 0},
-								{inner_indices[inner_index], 0, 0}};
-							faces.push_back(std::move(triangle));
-							++inner_index;
-						}
-						CMesh3D::Face quad;
-						quad.corners = {
-							{outer_indices[outer_index], 0, 0},
-							{outer_indices[outer_index + 1], 0, 0},
-							{inner_indices[target_inner], 0, 0},
-							{inner_indices[inner_index], 0, 0}};
-						faces.push_back(std::move(quad));
-						inner_index = target_inner;
-					}
-				} else {
-					size_t outer_index = 0;
-					for (size_t inner_index = 0;
-							inner_index < inner_segments; ++inner_index) {
-						const size_t target_outer = static_cast<size_t>(std::llround(
-							static_cast<double>(inner_index + 1) * outer_segments
-							/ inner_segments));
-						while (outer_index + 1 < target_outer) {
-							CMesh3D::Face triangle;
-							triangle.corners = {
-								{outer_indices[outer_index], 0, 0},
-								{outer_indices[outer_index + 1], 0, 0},
-								{inner_indices[inner_index], 0, 0}};
-							faces.push_back(std::move(triangle));
-							++outer_index;
-						}
-						CMesh3D::Face quad;
-						quad.corners = {
-							{outer_indices[outer_index], 0, 0},
-							{outer_indices[target_outer], 0, 0},
-							{inner_indices[inner_index + 1], 0, 0},
-							{inner_indices[inner_index], 0, 0}};
-						faces.push_back(std::move(quad));
-						outer_index = target_outer;
-					}
-				}
-			};
-			for (size_t side = 0; side < bridge_outer.size(); ++side)
-				append_bridge(bridge_outer[side], bridge_inner[side]);
-
-			std::vector<std::vector<size_t>> grid(strip_v.size(),
-				std::vector<size_t>(strip_u.size()));
-			for (size_t row = 0; row < strip_v.size(); ++row) {
-				for (size_t column = 0; column < strip_u.size(); ++column) {
-					grid[row][column] = weld_vertex({
-						static_cast<float>(strip_u[column]),
-						static_cast<float>(strip_v[row]), 0.0f});
-				}
-			}
-			std::vector<Face2D> hole_faces;
-			for (const Bounds& hole : holes) {
-				Face2D face;
-				for (SurfacePatchPoint point : uv_contours[hole.contour_index])
-					face.verts.emplace_back(point.u, point.v);
-				hole_faces.push_back(std::move(face));
-			}
-			for (size_t row = 0; row + 1 < strip_v.size(); ++row) {
-				for (size_t column = 0; column + 1 < strip_u.size(); ++column) {
-					const cVec2 centre(
-						(strip_u[column] + strip_u[column + 1]) * 0.5,
-						(strip_v[row] + strip_v[row + 1]) * 0.5);
-					if (std::any_of(hole_faces.begin(), hole_faces.end(),
-							[&](const Face2D& hole) {
-								return ClassifyPointInFace2(
-									hole, centre, EPS2D) != PFP_OUTSIDE;
-							})) {
-						continue;
-					}
-					CMesh3D::Face face;
-					face.corners = {
-						{grid[row][column], 0, 0},
-						{grid[row][column + 1], 0, 0},
-						{grid[row + 1][column + 1], 0, 0},
-						{grid[row + 1][column], 0, 0}};
-					faces.push_back(std::move(face));
-				}
-			}
-		}
-		for (const auto& patch : patches) {
-			std::vector<Vec3> contour;
-			for (SurfacePatchPoint point : patch)
-				contour.push_back({static_cast<float>(point.u),
-					static_cast<float>(point.v), 0.0f});
-			CMesh3D patch_mesh;
-			if (!MakeFilledContour(contour, {0.0f, 0.0f, 1.0f},
-					&patch_mesh, false, nullptr, nullptr, nullptr))
+		if (!use_slx_background) {
+			std::vector<std::vector<SurfacePatchPoint>> outside_contours{outer};
+			outside_contours.insert(outside_contours.end(), all_zones.begin(), all_zones.end());
+			std::vector<std::vector<SurfacePatchPoint>> outside_patches;
+			std::string error;
+			if (!BuildSurfacePatchesWithoutHoles(outside_contours, outside_patches, &error)
+				|| !append_patches(outside_patches))
 				return false;
-			std::vector<size_t> remap(patch_mesh.GetVertices().size());
-			for (size_t i = 0; i < remap.size(); ++i)
-				remap[i] = weld_vertex(patch_mesh.GetVertices()[i]);
-			for (const auto& source : patch_mesh.GetFaces()) {
-				if (source.deleted || source.corners.size() < 3)
-					continue;
-				CMesh3D::Face face = source;
-				for (MeshCorner& corner : face.corners) {
-					if (corner.v >= remap.size()) {
-						face.corners.clear();
-						break;
-					}
-					corner.v = remap[corner.v];
-					corner.uv = corner.n = corner.v;
-				}
-				if (face.corners.size() >= 3)
-					faces.push_back(std::move(face));
-			}
 		}
+
 		if (vertices.empty() || faces.empty())
 			return false;
 		if (m_Face.Orientation() == TopAbs_REVERSED) {
@@ -6299,11 +6625,10 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 		// borders have different point counts. Merge adjacent compatible
 		// triangles immediately so the transition keeps the smallest regular
 		// set of visible edges on both sides of the hole row.
-		if (structured_strip)
-			merge_trim_triangle_pairs_to_quads(result);
+		merge_trim_triangle_pairs_to_quads(result);
 		// The coarse front can leave a simple N-gon at the shared-zone junction.
 		// Keep its boundary and split only that remainder for rendering/export.
-		if (!triangulate_mesh_ngons_in_xy(result))
+		if (!triangulate_mesh_ngons_in_xy(result, true))
 			return false;
 		delete_mesh_faces_outside_occt_face(&result, this);
 		if (!std::any_of(result.GetFaces().begin(), result.GetFaces().end(),
@@ -6316,7 +6641,7 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 				result.GetUVs(), result.GetNormals()))
 			return false;
 		m_LastIslandBoundariesUV.clear();
-		for (const auto& patch : patches) {
+		for (const auto& patch : all_zones) {
 			std::vector<CPoint3d> boundary;
 			for (SurfacePatchPoint point : patch)
 				boundary.emplace_back(point.u, point.v, 0.0);
@@ -6324,6 +6649,7 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 		}
 		IsTrimmed = true;
 		IsInitMesh = true;
+		m_UsedSlxHoleCut = use_slx_background;
 		return true;
 	};
 	if (try_build_shared_hole_zone(use_mesh_quadro_hole_slx))
@@ -6333,6 +6659,21 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 	// holes did not exist, then cut that single coherent mesh by every inner
 	// contour.  TrimByPline owns the carefully tuned cell-splitting variants;
 	// OCCT classification below owns the side-to-remove decision.
+	bool rounded_opening = false;
+	if (uv_contours.size() == 2 && surface_type_of(TopoDS::Face(m_Face)) == GeomAbs_Plane) {
+		const TopoDS_Wire outer_wire = BRepTools::OuterWire(TopoDS::Face(m_Face));
+		for (TopExp_Explorer w(m_Face, TopAbs_WIRE); w.More(); w.Next()) {
+			if (w.Current().IsSame(outer_wire)) continue;
+			int lines = 0, arcs = 0, other = 0;
+			for (TopExp_Explorer e(w.Current(), TopAbs_EDGE); e.More(); e.Next()) {
+				const auto type = BRepAdaptor_Curve(TopoDS::Edge(e.Current())).GetType();
+				if (type == GeomAbs_Line) ++lines;
+				else if (type == GeomAbs_Circle) ++arcs;
+				else ++other;
+			}
+			rounded_opening = lines >= 2 && arcs >= 2 && other == 0;
+		}
+	}
 	if (slx_face_has_holes) {
 		const auto signed_area = [](const std::vector<SurfacePatchPoint>& contour) {
 			double area = 0.0;
@@ -6660,7 +7001,7 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 				const double collar_activation_ratio = periodic_cylinder_hole
 					? 0.75 : 1.35;
 				if (hole.size() < 4 || hole_step <= 0.0
-					|| background_step <= hole_step * collar_activation_ratio) {
+					|| (!rounded_opening && background_step <= hole_step * collar_activation_ratio)) {
 					continue;
 				}
 				SurfacePatchPoint center{};
@@ -6701,14 +7042,14 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 				const double radius_width_limit = small_hole
 					? std::numeric_limits<double>::max() : mean_radius * 1.25;
 				const double collar_width = std::min({
-					background_step * (small_hole ? 1.0 : 0.75),
+					background_step * (rounded_opening ? 1.25 : (small_hole ? 1.0 : 0.75)),
 					radius_width_limit,
 					clearance * (small_hole ? 0.45 : 0.30)});
 				if (!std::isfinite(collar_width)
 					|| collar_width < hole_step * 0.45) {
 					continue;
 				}
-				const int ring_count = collar_width >= hole_step * 1.1 ? 2 : 1;
+				const int ring_count = rounded_opening ? 2 : (collar_width >= hole_step * 1.1 ? 2 : 1);
 				SlxHoleCollar collar;
 				collar.contour_index = contour_index;
 				collar.width = collar_width;
@@ -7334,7 +7675,7 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 			// The outer collar contour owns the cut. Add the prebuilt collar to the
 			// retained SLX mesh and weld on that exact boundary; triangle pairs made
 			// by TrimByPline are restored to quads after the merge below.
-			bool collar_merge_ok = !trim_created_triangles
+			bool collar_merge_ok = (rounded_opening || !trim_created_triangles)
 				&& stitch_slx_collars(slx_mesh);
 			// Removing whole coarse cells can join neighbouring collar regions even
 			// when their requested rings are disjoint. Retry narrower collars on the
@@ -7536,6 +7877,7 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 						}
 						IsTrimmed = true;
 						IsInitMesh = true;
+						m_UsedSlxHoleCut = true;
 						return true;
 					}
 			}
@@ -7671,10 +8013,24 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 			}
 			mean_radius /= static_cast<double>(hole.size());
 			if (!convex || mean_radius <= geometry_epsilon
-				|| mean_radius > outer_step * 1.5) {
+				|| (!rounded_opening && mean_radius > outer_step * 1.5)) {
 				continue;
 			}
 
+			const auto direction_at = [&](size_t i) {
+				const auto p = hole[i];
+				double du = p.u-center.u, dv = p.v-center.v;
+				if (rounded_opening) {
+					const auto a = hole[(i+hole.size()-1)%hole.size()], b = hole[(i+1)%hole.size()];
+					const double l1 = std::hypot(p.u-a.u,p.v-a.v), l2 = std::hypot(b.u-p.u,b.v-p.v);
+					if (l1 > geometry_epsilon && l2 > geometry_epsilon) {
+						du = (p.v-a.v)/l1 + (b.v-p.v)/l2;
+						dv = -(p.u-a.u)/l1 - (b.u-p.u)/l2;
+					}
+				}
+				const double length = std::hypot(du,dv);
+				return std::array<double,2>{du/length,dv/length};
+			};
 			std::vector<double> directional_widths(hole.size(), 0.0);
 			double mean_width = 0.0;
 			double maximum_width = 0.0;
@@ -7687,11 +8043,9 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 			for (size_t point_index = 0;
 				point_index < hole.size(); ++point_index) {
 				const SurfacePatchPoint point = hole[point_index];
-				const double du = point.u - center.u;
-				const double dv = point.v - center.v;
-				const double radius = std::hypot(du, dv);
-				const double direction_u = du / radius;
-				const double direction_v = dv / radius;
+				const auto direction = direction_at(point_index);
+				const double direction_u = direction[0];
+				const double direction_v = direction[1];
 				double collision_distance =
 					std::numeric_limits<double>::max();
 				for (size_t other = 0;
@@ -7716,7 +8070,7 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 				maximum_width = std::max(maximum_width,
 					directional_widths[point_index]);
 			}
-			if (source_contours.size() > 2 && !directional_widths.empty()) {
+			if ((rounded_opening || source_contours.size() > 2) && !directional_widths.empty()) {
 				// Several islands must keep mutually predictable, convex collars;
 				// independent directional stretching can complicate the bridges
 				// between neighbouring holes. Reserve the asymmetric collar for
@@ -7738,7 +8092,7 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 			// the width small and a single ring is safer.
 			const double two_ring_width = std::min(
 				outer_step * 0.5, mean_radius);
-			const int ring_count = maximum_width >= two_ring_width ? 2 : 1;
+			const int ring_count = rounded_opening ? 1 : (maximum_width >= two_ring_width ? 2 : 1);
 			HoleCollar collar;
 			collar.rings.push_back(hole);
 			bool valid = true;
@@ -7748,14 +8102,12 @@ bool CSurfaceFace::BuildFilledMeshWhithHoles(float Deflection,
 				for (size_t point_index = 0;
 					point_index < hole.size(); ++point_index) {
 					const SurfacePatchPoint point = hole[point_index];
-					const double du = point.u - center.u;
-					const double dv = point.v - center.v;
-					const double radius = std::hypot(du, dv);
 					const double offset = directional_widths[point_index]
 						* ring / ring_count;
+					const auto direction = direction_at(point_index);
 					SurfacePatchPoint expanded_point{
-						point.u + du / radius * offset,
-						point.v + dv / radius * offset,
+						point.u + direction[0] * offset,
+						point.v + direction[1] * offset,
 						true};
 					if (!contains(outer, expanded_point)) {
 						valid = false;

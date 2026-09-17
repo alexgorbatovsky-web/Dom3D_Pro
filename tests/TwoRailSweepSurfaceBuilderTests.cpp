@@ -19,6 +19,8 @@
 #include <TopAbs_ShapeEnum.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepBndLib.hxx>
+#include <Bnd_Box.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <IGESControl_Reader.hxx>
@@ -31,6 +33,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <array>
+#include <limits>
 
 namespace {
 void require(bool condition, const char* message) {
@@ -124,6 +128,56 @@ void test_closed_profile_builds_anisotropic_solid() {
     require(BRepCheck_Analyzer(result).IsValid(), "two-rail sweep solid should be valid");
 }
 
+std::array<double, 6> bounds(const TopoDS_Shape& shape) {
+    require(!shape.IsNull(), "placement sweep should build");
+    require(BRepCheck_Analyzer(shape).IsValid(), "placement sweep should be valid");
+    Bnd_Box box;
+    BRepBndLib::AddOptimal(shape, box, false, false);
+    std::array<double, 6> result{};
+    box.Get(result[0], result[1], result[2], result[3], result[4], result[5]);
+    return result;
+}
+
+void test_section_placement() {
+    const SweepCurveSamples profile{{
+        {0, -2, -0.5}, {0, 2, -0.5}, {0, 2, 0.5}, {0, -2, 0.5}}, true};
+    const SweepCurveSamples first{{{0, -2, 0}, {10, -2, 0}}, false};
+    const SweepCurveSamples second{{{0, 2, 0}, {10, 2, 0}}, false};
+    BRepBuilderAPI_MakePolygon polygon;
+    for (const auto& p : profile.points) polygon.Add(gp_Pnt(p.x, p.y, p.z));
+    polygon.Close();
+    // Check both surface and solid paths, including the exact CAD profile used by the UI.
+    for (int mode = 0; mode < 3; ++mode) {
+        const auto build = [&](double dx, double dy, double angle) {
+            if (mode == 0) return BuildTwoRailSweepSurfaceShape(profile, first, second, dx, dy, angle);
+            if (mode == 1) return BuildTwoRailSweepSolidShape(profile, first, second, dx, dy, angle);
+            return BuildTwoRailSweepSolidShape(profile, first, second, polygon.Wire(), dx, dy, angle);
+        };
+        const auto base = bounds(build(0, 0, 0));
+        const auto shifted = bounds(build(1.25, -0.75, 0));
+        const auto rotated = bounds(build(0, 0, -90));
+        const auto combined = bounds(build(1.25, -0.75, -90));
+        const auto restored = bounds(build(0, 0, 0));
+        for (int axis = 0; axis < 3; ++axis) {
+            require(std::abs((shifted[axis + 3] - shifted[axis]) - (base[axis + 3] - base[axis])) < 1e-4,
+                    "offsets must not resize the section");
+            require(std::abs((combined[axis] - rotated[axis]) - (shifted[axis] - base[axis])) < 1e-4,
+                    "offsets must use the unrotated frame");
+            require(std::abs(restored[axis] - base[axis]) < 1e-6,
+                    "resetting placement must restore geometry");
+        }
+        require(std::abs(shifted[0] - base[0]) < 1e-4, "offsets must stay in section plane");
+        require(std::abs(shifted[1] - base[1] - 1.25) < 1e-4, "Delta X must move along the rail span");
+        require(std::abs(std::abs(shifted[2] - base[2]) - 0.75) < 1e-4, "Delta Y must move along section height");
+        require(std::abs((rotated[4] - rotated[1]) - (base[5] - base[2])) < 1e-4,
+                "90 degree rotation must exchange section width and height");
+        require(std::abs((rotated[5] - rotated[2]) - (base[4] - base[1])) < 1e-4,
+                "rotation must preserve the rail-scaled section size");
+        require(build(0, 0, std::numeric_limits<double>::quiet_NaN()).IsNull(),
+                "invalid placement must be rejected");
+    }
+}
+
 void test_iges_curves(const char* path) {
     IGESControl_Reader reader;
     require(reader.ReadFile(path) == IFSelect_RetDone, "IGES regression file should open");
@@ -188,6 +242,7 @@ int main(int argc, char** argv) {
     test_open_profile_and_reversed_rail();
     test_noisy_closed_profile_is_planarized();
     test_closed_profile_builds_anisotropic_solid();
+    test_section_placement();
     if (argc > 1) {
         test_iges_curves(argv[1]);
     }

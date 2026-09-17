@@ -88,6 +88,7 @@ public:
         QJsonObject out{{"name",QString::fromStdString(m.name)},{"doubleSided",true},
             {"emissiveFactor",QJsonArray{m.emission.r,m.emission.g,m.emission.b}}};
         if(m.alpha<.9999f)out["alphaMode"]="BLEND";
+        else if(m.perforation.enabled){out["alphaMode"]="MASK";out["alphaCutoff"]=.5;}
         if(baked){
             pbr["baseColorFactor"]=QJsonArray{1,1,1,std::clamp(m.alpha,0.f,1.f)};
             pbr["baseColorTexture"]=tex(baked->color);pbr["metallicRoughnessTexture"]=tex(baked->orm);
@@ -126,7 +127,7 @@ public:
         return parent;
     }
     void mesh(RenderMesh mesh,const Material& m){
-        GlbBakedMaps maps;const bool procedural=m.fabric.enabled||m.plaster.enabled;
+        GlbBakedMaps maps;const bool procedural=m.perforation.enabled||m.fabric.enabled||m.plaster.enabled;
         if(m.texture_wrap_object&&!procedural){
             Vec3 low=mesh.vertices.front(),high=low;
             for(const auto& p:mesh.vertices){low.x=std::min(low.x,p.x);low.y=std::min(low.y,p.y);low.z=std::min(low.z,p.z);
