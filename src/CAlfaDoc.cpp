@@ -1,3 +1,4 @@
+#include "SurfaceTopologyBuilder.h"
 #include "SurfaceRevolveProfile.h"
 #include "CAlfaDoc.h"
 
@@ -6,6 +7,9 @@
 #include "CAssembled.h"
 #include "CKitchenCabinet.h"
 #include "SmartLine.h"
+#include "Sketch.h"
+#include "SketchSelection.h"
+#include "MultiSketchProfileBuilder.h"
 #include "SketchProfileBuilder.h"
 #include "ExtrudeShapeBuilder.h"
 #include "SweptSolidBuilder.h"
@@ -24,6 +28,8 @@
 
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Check.hxx>
+#include <BOPAlgo_CheckResult.hxx>
+#include <ShapeCustom.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepAlgoAPI_Section.hxx>
@@ -75,6 +81,10 @@
 #include <Precision.hxx>
 #include <Standard_Failure.hxx>
 #include <ShapeFix_Solid.hxx>
+#include "solid/FilletResult.h"
+#include "solid/FilletParameterRepair.h"
+#include "ExtractedEdgeCurve.h"
+#include "SplineBezierSections.h"
 #include <ShapeAnalysis_FreeBounds.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopExp_Explorer.hxx>
@@ -1049,7 +1059,7 @@ TopoDS_Shape make_loft_surface_from_splines(const std::vector<const CBSpline*>& 
             if (!spline || spline->GetPointCount() < 2) {
                 return {};
             }
-            const TopoDS_Wire wire = make_wire_from_bspline(*spline);
+            const TopoDS_Wire wire = BuildSplineBezierWire(*spline);
             if (wire.IsNull()) {
                 return {};
             }
@@ -1109,7 +1119,7 @@ bool sweep_curve_samples(const CAlfaObject& object, SweepCurveSamples& samples)
         samples.closed = polyline->IsClosed();
         return samples.points.size() >= 2;
     }
-    if (const auto* sketch = dynamic_cast<const CSmartLine*>(&object)) {
+    if (const auto sketch = CopySingleSketchContour(&object)) {
         samples.points = sketch->GetProfilePointsWorld();
         samples.closed = sketch->IsClosed();
         return samples.points.size() >= 2;
@@ -1170,7 +1180,29 @@ bool valid_fillet_result(const TopoDS_Shape& source_shape,
         // end cap. The Boolean pre-check catches that partial/spiked result.
         BRepAlgoAPI_Check interference_check(
             result_shape, Standard_False, Standard_True);
-        return interference_check.IsValid();
+        if (interference_check.IsValid()) return true;
+        // OCCT's self-face intersection check can abort on an analytic
+        // surface of extrusion (ProjLib::MakePCurveOfType). Retry only that
+        // inconclusive check on an equivalent B-spline representation. Do not
+        // replace the result or its face identities, or forgive real faults.
+        for (const auto& fault : interference_check.Result()) {
+            if (fault.GetCheckStatus() != BOPAlgo_OperationAborted)
+                return false;
+        }
+        bool has_extrusion = false;
+        for (TopExp_Explorer it(result_shape, TopAbs_FACE); it.More(); it.Next()) {
+            if (BRepAdaptor_Surface(TopoDS::Face(it.Current())).GetType()
+                == GeomAbs_SurfaceOfExtrusion) {
+                has_extrusion = true;
+                break;
+            }
+        }
+        if (!has_extrusion) return false;
+        BRepBuilderAPI_Copy check_copy(result_shape, Standard_True, Standard_False);
+        const TopoDS_Shape check_shape = ShapeCustom::ConvertToBSpline(
+            check_copy.Shape(), Standard_True, Standard_False, Standard_False);
+        return !check_shape.IsNull()
+            && BRepAlgoAPI_Check(check_shape, Standard_False, Standard_True).IsValid();
     } catch (const Standard_Failure&) {
         return false;
     }
@@ -1309,28 +1341,11 @@ TopoDS_Wire make_wire_from_curve_object(const CAlfaObject& object)
 }
 
 std::unique_ptr<CBSpline> editable_nurbs_from_edge(
-    const TopoDS_Edge& edge, const std::string& name)
+    const TopoDS_Edge& edge, const std::string& name, double tolerance = 0.0)
 {
     if (edge.IsNull()) return {};
     try {
-        Standard_Real first = 0.0;
-        Standard_Real last = 0.0;
-        TopLoc_Location location;
-        const Handle(Geom_Curve) source =
-            BRep_Tool::Curve(edge, location, first, last);
-        if (source.IsNull()
-            || Precision::IsNegativeInfinite(first)
-            || Precision::IsPositiveInfinite(last)
-            || last - first <= Precision::PConfusion()) {
-            return {};
-        }
-
-        Handle(Geom_Curve) world =
-            Handle(Geom_Curve)::DownCast(source->Copy());
-        if (world.IsNull()) return {};
-        if (!location.IsIdentity()) world->Transform(location.Transformation());
-        Handle(Geom_BSplineCurve) nurbs = GeomConvert::CurveToBSplineCurve(
-            new Geom_TrimmedCurve(world, first, last));
+        Handle(Geom_BSplineCurve) nurbs = BuildExtractedEdgeCurve(edge, tolerance);
         if (nurbs.IsNull() || nurbs->NbPoles() < 2) return {};
 
         const bool preserve_closed = nurbs->IsClosed() || nurbs->IsPeriodic();
@@ -1357,7 +1372,6 @@ std::unique_ptr<CBSpline> editable_nurbs_from_edge(
         }
         if (!result->SetKnots(std::move(knots))) return {};
         result->SetClosed(preserve_closed);
-        result->SetColor(kDefaultCurveColor);
         return result;
     } catch (const Standard_Failure&) {
         return {};
@@ -1915,7 +1929,7 @@ TopoDS_Shape make_two_rail_sweep_solid(const CAlfaObject& profile,
         || !sweep_curve_samples(second_rail, second_samples)) {
         return {};
     }
-    const auto* sketch = dynamic_cast<const CSmartLine*>(&profile);
+    const auto sketch = CopySingleSketchContour(&profile);
     TopoDS_Face profile_face;
     Vec3 profile_normal{};
     if (!sketch
@@ -2076,6 +2090,10 @@ CAlfaDoc::CAlfaDoc() {
 }
 
 struct CAlfaDoc::LiveExtrudeData {
+    Vec3 taper_center{};
+    double taper_rate=0;
+    Vec3 center{};
+    float preview_distance=0;
     TopoDS_Shape base_shape;
     TopoDS_Face base_face;
     Vec3 normal{};
@@ -2088,6 +2106,7 @@ struct CAlfaDoc::LiveExtrudeData {
 
 struct CAlfaDoc::LivePolylineExtrudeData {
     TopoDS_Face profile_face;
+    std::vector<TopoDS_Face> profile_faces;
     Vec3 normal{};
     unsigned long profile_id = 0;
     double distance = 1.0;
@@ -2304,9 +2323,11 @@ bool CAlfaDoc::CreateSweptSolid(unsigned long section_id,
                                 double delta_x,
                                 double delta_y,
                                 double angle_degrees) {
-    const auto* section = dynamic_cast<const CSmartLine*>(FindObjectById(section_id));
+    const auto section = CopySingleSketchContour(FindObjectById(section_id));
     const CAlfaObject* guide = FindObjectById(guide_id);
-    if (!section || !section->IsClosed() || !guide || section == guide) {
+    const auto guide_contour=dynamic_cast<const CSketch*>(guide)?CopySingleSketchContour(guide):nullptr;
+    if(dynamic_cast<const CSketch*>(guide))guide=guide_contour.get();
+    if (!section || !section->IsClosed() || !guide || section_id == guide_id) {
         return false;
     }
     if (const auto* guide_sketch = dynamic_cast<const CSmartLine*>(guide)) {
@@ -2351,7 +2372,7 @@ bool CAlfaDoc::CreateSweptSolid(unsigned long section_id,
 bool CAlfaDoc::CreateFrameSolid(unsigned long profile_id,
                                 double width,
                                 double height) {
-    const auto* profile = dynamic_cast<const CSmartLine*>(FindObjectById(profile_id));
+    const auto profile = CopySingleSketchContour(FindObjectById(profile_id));
     if (!profile || !profile->IsClosed()) {
         return false;
     }
@@ -2379,20 +2400,20 @@ bool CAlfaDoc::CreateFrameSolid(unsigned long profile_id,
     return true;
 }
 
-bool CAlfaDoc::CreateWireSolid(unsigned long path_id, double radius) {
+bool CAlfaDoc::CreateWireSolid(unsigned long path_id, double radius, double thickness) {
     const CAlfaObject* path = FindObjectById(path_id);
     const bool supported = dynamic_cast<const CPolyline*>(path)
         || dynamic_cast<const CSmartLine*>(path)
         || dynamic_cast<const CBSpline*>(path);
     if (!path || !supported || radius <= 0.0) return false;
     TopoDS_Wire center_path;
-    TopoDS_Shape shape = BuildWireSolidShape(*path, radius, &center_path);
+    TopoDS_Shape shape = BuildWireSolidShape(*path, radius, &center_path, thickness);
     if (shape.IsNull()) return false;
     auto solid = std::make_unique<CSolid>(shape);
     solid->SetCenterlinePath("base:path", center_path);
     solid->SetName("Wire");
     solid->SetParametricOperation(0, "SolidWireTool", "Wire",
-                                  {{"radius", radius}, {"profile.id", static_cast<double>(path_id)}});
+                                  {{"radius", radius}, {"thick", thickness}, {"profile.id", static_cast<double>(path_id)}});
     if (!solid->ReBuldMesh()) return false;
     AddObject(std::move(solid));
     return true;
@@ -2402,8 +2423,7 @@ bool CAlfaDoc::CreatePolyhedronSolid(unsigned long profile_id,
                                      int axis_index,
                                      int turns)
 {
-    const auto* profile =
-        dynamic_cast<const CSmartLine*>(FindObjectById(profile_id));
+    const auto profile = CopySingleSketchContour(FindObjectById(profile_id));
     if (!profile) {
         return false;
     }
@@ -2676,18 +2696,21 @@ bool CAlfaDoc::CreatePolylineFromSelectedCurveByLength(
     return true;
 }
 
-bool CAlfaDoc::BeginLiveExtrudeSelectedPolyline(double distance, bool reverse, double taper_angle_degrees) {
+bool CAlfaDoc::BeginLiveExtrudeSelectedPolyline(double distance, bool reverse, double taper_angle_degrees, std::string* error) {
+    if(error) error->clear();
     CPolyline* polyline = GetSelectedPolyline();
     CSmartLine* sketch = GetSelectedSketch();
-    CAlfaObject* profile_object = sketch ? static_cast<CAlfaObject*>(sketch) : polyline;
-    if ((!polyline && !sketch) || !profile_object) {
+    auto* multi = dynamic_cast<CSketch*>(GetSelectedObject());
+    CAlfaObject* profile_object = multi ? static_cast<CAlfaObject*>(multi) : sketch ? static_cast<CAlfaObject*>(sketch) : polyline;
+    if (!profile_object) {
         return false;
     }
     EnsureObjectId(*profile_object);
 
     TopoDS_Face profile_face;
+    std::vector<TopoDS_Face> profile_faces;
     Vec3 normal{};
-    const bool profile_built = sketch
+    const bool profile_built = multi ? BuildSketchProfileFaces(*multi, profile_faces, normal, error) : sketch
         ? BuildSketchProfileFace(*sketch, profile_face, normal)
         : build_profile_face_from_polyline(*polyline, profile_face, normal);
     if (!profile_built) {
@@ -2696,6 +2719,7 @@ bool CAlfaDoc::BeginLiveExtrudeSelectedPolyline(double distance, bool reverse, d
 
     live_polyline_extrude_ = std::make_unique<LivePolylineExtrudeData>();
     live_polyline_extrude_->profile_face = profile_face;
+    live_polyline_extrude_->profile_faces = std::move(profile_faces);
     live_polyline_extrude_->normal = normal;
     live_polyline_extrude_->profile_id = profile_object->m_id;
     live_polyline_extrude_->polyline_index = selected_object_index_;
@@ -2734,7 +2758,10 @@ bool CAlfaDoc::UpdateLiveExtrudeSelectedPolyline(double distance, bool reverse, 
     live_polyline_extrude_->reverse = reverse;
     live_polyline_extrude_->taper_angle_degrees = taper_angle_degrees;
     try {
-        TopoDS_Shape shape = make_polyline_extrude_shape(live_polyline_extrude_->profile_face,
+        TopoDS_Shape shape = !live_polyline_extrude_->profile_faces.empty()
+            ? BuildExtrudeShape(live_polyline_extrude_->profile_faces,live_polyline_extrude_->normal,
+                                signed_distance,taper_angle_degrees)
+            : make_polyline_extrude_shape(live_polyline_extrude_->profile_face,
                                                          live_polyline_extrude_->normal,
                                                          signed_distance,
                                                          taper_angle_degrees);
@@ -2832,11 +2859,8 @@ void CAlfaDoc::CancelLiveExtrudeSelectedPolyline() {
 }
 
 bool CAlfaDoc::BeginLiveRevolveSelectedPolyline(double angle_degrees, int axis_index, bool surface) {
-    CPolyline* polyline = GetSelectedPolyline();
-    CSmartLine* sketch = GetSelectedSketch();
-    CAlfaObject* profile = polyline
-        ? static_cast<CAlfaObject*>(polyline)
-        : static_cast<CAlfaObject*>(sketch);
+    CAlfaObject* profile = GetSelectedObject();
+    if (!dynamic_cast<CPolyline*>(profile) && !CopySingleSketchContour(profile)) profile = nullptr;
     if (!profile && surface) profile = dynamic_cast<CBSpline*>(GetSelectedObject());
     if (!profile) {
         return false;
@@ -2892,7 +2916,7 @@ bool CAlfaDoc::UpdateLiveRevolveSelectedPolyline(double angle_degrees, int axis_
         const CAlfaObject* profile =
             objects_[live_polyline_revolve_->polyline_index].get();
         const auto* polyline = dynamic_cast<const CPolyline*>(profile);
-        const auto* sketch = dynamic_cast<const CSmartLine*>(profile);
+        const auto sketch = CopySingleSketchContour(profile);
         if (!polyline && !sketch && !(live_polyline_revolve_->surface && dynamic_cast<const CBSpline*>(profile))) {
             return false;
         }
@@ -2901,7 +2925,7 @@ bool CAlfaDoc::UpdateLiveRevolveSelectedPolyline(double angle_degrees, int axis_
         Vec3 axis_origin{};
         Vec3 axis_direction = revolve_axis_direction(axis_index);
         const bool built = live_polyline_revolve_->surface
-            ? BuildSurfaceRevolveProfile(*profile, profile_shape, axis_origin)
+            ? BuildSurfaceRevolveProfile(sketch ? static_cast<const CAlfaObject&>(*sketch) : *profile, profile_shape, axis_origin)
             : sketch
             ? build_revolve_profile_from_sketch(
                 *sketch,
@@ -3613,6 +3637,8 @@ const CSolid* CAlfaDoc::GetSelectedFaceSolid() const {
 }
 
 bool CAlfaDoc::GetSelectedSolidFaceCenterAndNormal(Vec3& center, Vec3& normal) const {
+    if(live_extrude_) {center=live_extrude_->center+live_extrude_->normal*live_extrude_->preview_distance;normal=live_extrude_->normal;return true;}
+
     if (!has_selected_solid_face_ || selected_face_object_index_ >= objects_.size()) {
         return false;
     }
@@ -3698,10 +3724,11 @@ bool CAlfaDoc::UpdateAttachedSketches() {
     bool updated = false;
     for (const ObjectPtr& object : objects_) {
         auto* sketch = dynamic_cast<CSmartLine*>(object.get());
-        if (!sketch || !sketch->HasFaceAttachment()) {
+        auto* multi = dynamic_cast<CSketch*>(object.get());
+        if ((!sketch || !sketch->HasFaceAttachment()) && (!multi || !multi->HasFaceAttachment())) {
             continue;
         }
-        const SketchFaceAttachment& attachment = sketch->GetFaceAttachment();
+        const SketchFaceAttachment attachment = multi ? multi->GetFaceAttachment() : sketch->GetFaceAttachment();
         const auto* solid = dynamic_cast<const CSolid*>(
             FindObjectById(attachment.body_id));
         if (!solid) {
@@ -3709,7 +3736,7 @@ bool CAlfaDoc::UpdateAttachedSketches() {
         }
 
         const SketchCoordinateSystem old_system =
-            sketch->GetCoordinateSystem();
+            multi ? multi->GetCoordinateSystem() : sketch->GetCoordinateSystem();
         Vec3 old_origin{
             static_cast<float>(old_system.origin.x),
             static_cast<float>(old_system.origin.y),
@@ -3823,16 +3850,14 @@ bool CAlfaDoc::UpdateAttachedSketches() {
         }
 
         if (attachment.face_index != best_face_index) {
-            sketch->SetFaceAttachment(
-                attachment.body_id, best_face_index);
+            if (multi) multi->SetFaceAttachment(attachment.body_id, best_face_index);
+            else sketch->SetFaceAttachment(attachment.body_id, best_face_index);
         }
-        if (sketch->SetCoordinateSystem(
-                CPoint3d(origin.x, origin.y, origin.z),
-                CPoint3d(x_axis.x, x_axis.y, x_axis.z),
-                CPoint3d(
-                    best_normal.x,
-                    best_normal.y,
-                    best_normal.z))) {
+        const CPoint3d next_origin(origin.x, origin.y, origin.z);
+        const CPoint3d next_axis(x_axis.x, x_axis.y, x_axis.z);
+        const CPoint3d next_normal(best_normal.x, best_normal.y, best_normal.z);
+        if (multi ? multi->SetCoordinateSystem(next_origin, next_axis, next_normal)
+                  : sketch->SetCoordinateSystem(next_origin, next_axis, next_normal)) {
             updated = true;
         }
     }
@@ -3876,9 +3901,18 @@ bool CAlfaDoc::BeginLiveExtrudeSelectedSolidFace(double taper_angle_degrees) {
     }
 
     live_extrude_ = std::make_unique<LiveExtrudeData>();
+    if(BRepAdaptor_Surface(face).GetType()!=GeomAbs_Plane && std::abs(taper_angle_degrees)>1.e-7) {
+        double sampleScale;
+        // A negative angle measures the scale rate without risking cap collapse.
+        if(!CurvedExtrudeScale(face,1,-std::abs(taper_angle_degrees),live_extrude_->taper_center,sampleScale)) {
+            live_extrude_.reset();return false;
+        }
+        live_extrude_->taper_rate=(sampleScale-1)*(taper_angle_degrees>0?1:-1);
+    }
     live_extrude_->base_shape = solid->m_Shape;
     live_extrude_->base_face = face;
     live_extrude_->normal = normal;
+    live_extrude_->center = center;
     live_extrude_->taper_angle_degrees = taper_angle_degrees;
     live_extrude_->object_index = selected_face_object_index_;
     live_extrude_->face_index = solid->GetSelectedFaceIndex();
@@ -3887,6 +3921,30 @@ bool CAlfaDoc::BeginLiveExtrudeSelectedSolidFace(double taper_angle_degrees) {
 
 bool CAlfaDoc::IsLiveExtrudeSelectedSolidFaceActive() const {
     return live_extrude_ && live_extrude_->object_index < objects_.size();
+}
+
+bool CAlfaDoc::PreviewLiveExtrudeSelectedSolidFace(float distance) {
+    if(!live_extrude_||!std::isfinite(distance))return false;
+    // Planar draft changes the cap outline (not a uniform scale). Use the
+    // final geometry builder so arbitrary outlines and holes preview correctly.
+    if(std::abs(live_extrude_->taper_angle_degrees)>1.e-7
+        && BRepAdaptor_Surface(live_extrude_->base_face).GetType()==GeomAbs_Plane) {
+        if(!UpdateLiveExtrudeSelectedSolidFace(distance))return false;
+        live_extrude_->preview_distance=distance;return true;
+    }
+    const float delta=distance-live_extrude_->preview_distance;
+    if(live_extrude_->taper_rate!=0) {
+        const auto center=live_extrude_->taper_center;
+        const double scale=1-std::abs(distance)*live_extrude_->taper_rate;
+        const double previous=1-std::abs(live_extrude_->preview_distance)*live_extrude_->taper_rate;
+        if(!std::isfinite(scale)||scale<=1.e-4)return false;
+        auto* solid=dynamic_cast<CSolid*>(objects_[live_extrude_->object_index].get());
+        auto* face=solid?solid->GetSurfaceFace(live_extrude_->face_index):nullptr;
+        if(!face)return false;
+        face->PreviewScale(center+live_extrude_->normal*live_extrude_->preview_distance,{},float(scale/previous));
+    }
+    if(!PreviewExtrudeSelectedSolidFace(live_extrude_->normal*delta))return false;
+    live_extrude_->preview_distance=distance;return true;
 }
 
 bool CAlfaDoc::UpdateLiveExtrudeSelectedSolidFace(float distance) {
@@ -3902,44 +3960,18 @@ bool CAlfaDoc::UpdateLiveExtrudeSelectedSolidFace(float distance) {
     if (std::fabs(distance) <= 0.0001f) {
         solid->m_Shape = live_extrude_->base_shape;
     } else {
-        try {
-            TopoDS_Shape prism_shape = make_extrude_prism(live_extrude_->base_face,
-                                                          live_extrude_->normal,
-                                                          distance,
-                                                          live_extrude_->taper_angle_degrees);
-            if (prism_shape.IsNull()) {
-                return false;
-            }
-
-            TopoDS_Shape result_shape;
-            if (distance >= 0.0f) {
-                BRepAlgoAPI_Fuse operation(live_extrude_->base_shape, prism_shape);
-                operation.Build();
-                if (!operation.IsDone()) {
-                    return false;
-                }
-                result_shape = operation.Shape();
-            } else {
-                BRepAlgoAPI_Cut operation(live_extrude_->base_shape, prism_shape);
-                operation.Build();
-                if (!operation.IsDone()) {
-                    return false;
-                }
-                result_shape = operation.Shape();
-            }
-
-            if (result_shape.IsNull()) {
-                return false;
-            }
-            solid->m_Shape = result_shape;
-        } catch (const Standard_Failure&) {
-            return false;
-        }
+        std::string error;
+        const auto result=BuildExtrudedFaceSolid(live_extrude_->base_shape,live_extrude_->base_face,
+            live_extrude_->normal,distance,live_extrude_->taper_angle_degrees,error);
+        if(result.IsNull())return false;
+        solid->m_Shape=result;
     }
 
     solid->ClearSelectedEdge();
     solid->ClearSelectedFace();
-    solid->ReBuldMesh();
+    if(!solid->ReBuldMesh()) {
+        solid->m_Shape=live_extrude_->base_shape;solid->ReBuldMesh();return false;
+    }
     live_extrude_->distance = distance;
     live_extrude_->created_surface_indices = solid->FindCreatedSurfaceIndices(live_extrude_->base_shape);
     active_object_index_ = live_extrude_->object_index;
@@ -4474,6 +4506,8 @@ bool CAlfaDoc::SelectPolylineAtScreen(DomPoint point,
             hit = hit_test_polyline_screen(*polyline, point, world_to_screen, tolerance);
         } else if (const auto* sketch = dynamic_cast<const CSmartLine*>(object)) {
             hit = hit_test_sketch_screen(*sketch, point, world_to_screen, tolerance);
+        } else if (const auto* multi_sketch = dynamic_cast<const CSketch*>(object)) {
+            hit = multi_sketch->HitTestScreen(point, world_to_screen, tolerance);
         } else if (const auto* spline = dynamic_cast<const CBSpline*>(object)) {
             hit = hit_test_bspline_screen(*spline, point, world_to_screen, tolerance);
         } else if (const auto* text = dynamic_cast<const CDrawingText*>(object)) {
@@ -5361,12 +5395,12 @@ void CAlfaDoc::ClearSelection() {
 bool CAlfaDoc::ClearInvisibleSelection() {
     const auto hidden = [this](size_t index) {
         return index >= objects_.size() || !objects_[index]
-            || !IsObjectVisible(*objects_[index]);
+            || !IsObjectSelectable(*objects_[index]);
     };
     bool changed = false;
     for (auto& object : objects_) {
         auto* solid = dynamic_cast<CSolid*>(object.get());
-        if (solid && !IsObjectVisible(*solid)) {
+        if (solid && !IsObjectSelectable(*solid)) {
             changed = solid->HasSelectedEdge() || solid->HasSelectedFace() || changed;
             solid->ClearSelectedEdge();
             solid->ClearSelectedFace();
@@ -5428,6 +5462,11 @@ bool CAlfaDoc::SelectObjectById(unsigned long object_id, SelectionAction action)
             has_selected_object_ = true;
         }
         return true;
+    }
+
+    if (!IsObjectSelectable(*objects_[index])) {
+        if(action==SelectionAction::Replace)ClearSelection();
+        return false;
     }
 
     if (action == SelectionAction::Replace) {
@@ -5517,7 +5556,7 @@ size_t CAlfaDoc::SelectAllVisibleObjects() {
                 return false;
             for (unsigned long id : group.GetElementIds()) {
                 const CAlfaObject* member = FindObjectById(id);
-                if (!member || !IsObjectVisible(*member)) {
+                if (!member || !IsObjectSelectable(*member)) {
                     visiting.erase(group.m_id);
                     return false;
                 }
@@ -5536,7 +5575,12 @@ size_t CAlfaDoc::SelectAllVisibleObjects() {
     };
 
     for (size_t index = 0; index < objects_.size(); ++index) {
-        if (!objects_[index] || !IsObjectVisible(*objects_[index]))
+        if (!objects_[index] || !IsObjectSelectable(*objects_[index]))
+            continue;
+        // Empty curve placeholders have no scene geometry or tree row.
+        if (const auto* curve = dynamic_cast<const CPolyline*>(objects_[index].get()); curve && curve->IsEmpty())
+            continue;
+        if (const auto* spline = dynamic_cast<const CBSpline*>(objects_[index].get()); spline && spline->IsEmpty())
             continue;
         // Selecting a group causes Delete to remove all its descendants. A
         // partially hidden group must therefore stay unselected when Ctrl+A
@@ -5770,6 +5814,79 @@ bool CAlfaDoc::IsObjectSelectionHighlighted(size_t index) const {
     return false;
 }
 
+size_t CAlfaDoc::ConvertTextToCurves(unsigned long text_id) {
+    const auto* text = dynamic_cast<const CDrawingText*>(FindObjectById(text_id));
+    if (!text) return 0;
+    auto letters = text->BuildBezierLetters();
+    if (letters.empty()) return 0;
+    const auto copy_appearance = [text](CAlfaObject& object) {
+        object.SetColor(text->GetColor());
+        object.SetLineWidth(text->GetLineWidth());
+        object.SetLineStyle(text->GetLineStyle());
+        object.SetGroupName(text->GetGroupName());
+        object.m_LayerID = text->m_LayerID;
+        object.SetVisible(text->IsVisible());
+    };
+    std::vector<std::unique_ptr<CSketch>> sketches;
+    const double angle = text->GetRotationDegrees() * 3.14159265358979323846 / 180.0;
+    size_t letter_index = 0;
+    for (auto& contours : letters) {
+        const std::string name = text->GetName() + " / Letter " + std::to_string(++letter_index);
+        auto letter = std::make_unique<CSketch>(name);
+        if (!letter->SetCoordinateSystem(text->GetInsertion(),
+                {std::cos(angle), std::sin(angle), 0.0}, {0.0, 0.0, 1.0})) return 0;
+        size_t contour_index = 0;
+        for (auto& points : contours) {
+            auto sketch = std::make_unique<CSmartLine>(name + " / Sketch " + std::to_string(++contour_index));
+            if (!sketch->SetCoordinateSystem(text->GetInsertion(),
+                    {std::cos(angle), std::sin(angle), 0.0}, {0.0, 0.0, 1.0})) return 0;
+            sketch->BeginEdit();
+            for (size_t i = 0; i + 3 < points.size(); i += 3) {
+                const auto& a = points[i];
+                const auto& b = points[i + 3];
+                const auto distance = [](const CPoint3d& p, const CPoint3d& q) {
+                    return std::hypot(std::hypot(p.x-q.x, p.y-q.y), p.z-q.z);
+                };
+                const double tolerance = 1e-10 * std::max(1.0, distance(a, b));
+                // QPainterPath straight edges were elevated to cubics by
+                // BuildBezierLetters. Restore their native sketch line type.
+                const bool straight = distance(points[i+1], a*(2.0f/3.0f)+b*(1.0f/3.0f)) <= tolerance
+                    && distance(points[i+2], a*(1.0f/3.0f)+b*(2.0f/3.0f)) <= tolerance;
+                const bool added = straight
+                    ? sketch->AddLine(std::make_unique<CLinkLine>(sketch->WorldToLocal(a), sketch->WorldToLocal(b)), i != 0)
+                    : sketch->AddBezierWorld(a, points[i+1], points[i+2], b, i != 0);
+                if (!added) return 0;
+            }
+            if (!sketch->SetClosed(true) || !sketch->CommitEdit()) return 0;
+            if (!letter->AddLocalContour(*sketch)) return 0;
+        }
+        sketches.push_back(std::move(letter));
+    }
+    // Build all profiles before replacing the source, so a failure is atomic.
+    std::vector<unsigned long> sketch_ids;
+    for (auto& sketch : sketches) {
+        EnsureObjectId(*sketch);
+        sketch_ids.push_back(sketch->m_id);
+        AddObject(std::move(sketch), false);
+        copy_appearance(*objects_.back());
+    }
+    // Retain membership when converting text inside an existing group/part.
+    for (const auto& object : objects_) {
+        auto* group = dynamic_cast<CGroup*>(object.get());
+        if (!group || !group->Contains(text_id)) continue;
+        auto ids = group->GetElementIds();
+        const auto position = std::find(ids.begin(), ids.end(), text_id);
+        const auto offset = position - ids.begin();
+        ids.erase(position);
+        ids.insert(ids.begin() + offset, sketch_ids.begin(), sketch_ids.end());
+        group->SetElementIds(std::move(ids));
+    }
+    ClearSelection();
+    objects_.erase(objects_.begin() + FindObjectIndexById(text_id));
+    for (unsigned long id : sketch_ids) SelectObjectById(id, SelectionAction::Add);
+    return sketch_ids.size();
+}
+
 bool CAlfaDoc::CreateGroupFromSelection() {
     if (!HasSelection()) {
         return false;
@@ -5891,10 +6008,46 @@ bool CAlfaDoc::UngroupSelection() {
     return true;
 }
 
-bool CAlfaDoc::DuplicateSelectedObject() {
+bool CAlfaDoc::DuplicateSelectedObject(bool make_clone) {
+    const auto copy_object = [make_clone](const CAlfaObject& source) -> std::unique_ptr<CAlfaObject> {
+        if (make_clone) {
+            // Repeated array copies retain the original link and placement.
+            if (dynamic_cast<const CAssociativeClone*>(&source)) return source.Clone();
+            if (const auto* solid = dynamic_cast<const CSolid*>(&source))
+                return CAssociativeClone::FromSource(*solid);
+        }
+        return source.Clone();
+    };
     if (!HasSelection()) {
         return false;
     }
+
+    const auto copy_name_base = [](std::string name) {
+        // Strip generated suffixes only, including legacy "Copy Copy" chains.
+        // A user name such as "Copy Holder" or "Box Copy Blue" stays intact.
+        for (;;) {
+            const size_t marker = name.rfind(" Copy");
+            if (marker == std::string::npos) break;
+            const std::string suffix = name.substr(marker + 5);
+            const bool numbered = suffix.size() > 1 && suffix.front() == ' '
+                && std::all_of(suffix.begin() + 1, suffix.end(),
+                               [](char c) { return c >= '0' && c <= '9'; });
+            if (!suffix.empty() && !numbered) break;
+            name.resize(marker);
+        }
+        return name + " Copy";
+    };
+    std::set<std::string> used_names;
+    for (const auto& object : objects_)
+        if (object) used_names.insert(object->GetName());
+    const auto unique_copy_name = [&](const std::string& source_name) {
+        const std::string base = copy_name_base(source_name);
+        std::string candidate = base;
+        size_t number = 2;
+        while (!used_names.insert(candidate).second)
+            candidate = base + " " + std::to_string(number++);
+        return candidate;
+    };
 
     if (selected_object_indices_.size() == 1
         && selected_object_indices_.front() < objects_.size()) {
@@ -5971,7 +6124,7 @@ bool CAlfaDoc::DuplicateSelectedObject() {
                     group_copy->m_LayerID = group->m_LayerID;
                     copy = std::move(group_copy);
                 } else {
-                    copy = source.Clone();
+                    copy = copy_object(source);
                 }
                 if (!copy) {
                     visiting_ids.erase(source.m_id);
@@ -5982,6 +6135,7 @@ bool CAlfaDoc::DuplicateSelectedObject() {
                 // current work layer. Enforce it here for every concrete
                 // Clone() implementation and every node of copied assemblies.
                 copy->m_LayerID = source.m_LayerID;
+                copy->SetName(unique_copy_name(source.GetName()));
                 copy->m_id = 0;
                 EnsureObjectId(*copy);
                 AssignDefaultMaterial(*copy);
@@ -6002,7 +6156,7 @@ bool CAlfaDoc::DuplicateSelectedObject() {
                     FindObjectById(source_id));
                 auto* copied_clone = dynamic_cast<CAssociativeClone*>(
                     FindObjectById(copy_id));
-                if (!source_clone || !copied_clone) {
+                if (make_clone || !source_clone || !copied_clone) {
                     continue;
                 }
                 const auto copied_source = copied_ids.find(
@@ -6027,13 +6181,13 @@ bool CAlfaDoc::DuplicateSelectedObject() {
     const std::vector<size_t> source_indices = selected_object_indices_;
     std::map<std::string, std::string> copied_group_names;
 
-    const auto unique_group_name = [this, &copied_group_names](const std::string& source_name) {
+    const auto unique_group_name = [this, &copied_group_names, &copy_name_base](const std::string& source_name) {
         const auto existing_copy = copied_group_names.find(source_name);
         if (existing_copy != copied_group_names.end()) {
             return existing_copy->second;
         }
 
-        const std::string base = source_name + " Copy";
+        const std::string base = copy_name_base(source_name);
         std::string candidate = base;
         int suffix = 2;
         const auto group_exists = [this, &copied_group_names](const std::string& name) {
@@ -6064,11 +6218,12 @@ bool CAlfaDoc::DuplicateSelectedObject() {
             continue;
         }
 
-        std::unique_ptr<CAlfaObject> copy = objects_[source_index]->Clone();
+        std::unique_ptr<CAlfaObject> copy = copy_object(*objects_[source_index]);
         if (!copy) {
             continue;
         }
         copy->m_LayerID = objects_[source_index]->m_LayerID;
+        copy->SetName(unique_copy_name(objects_[source_index]->GetName()));
         if (!copy->GetGroupName().empty()) {
             copy->SetGroupName(unique_group_name(copy->GetGroupName()));
         }
@@ -6094,7 +6249,7 @@ bool CAlfaDoc::DuplicateSelectedObject() {
             FindObjectById(source_id));
         auto* copied_clone = dynamic_cast<CAssociativeClone*>(
             FindObjectById(copy_id));
-        if (!source_clone || !copied_clone) {
+        if (make_clone || !source_clone || !copied_clone) {
             continue;
         }
         const auto copied_source = copied_ids.find(source_clone->GetSourceId());
@@ -6377,7 +6532,6 @@ size_t CAlfaDoc::CreatePlaneIntersectionCurves(
                 if (closed) points.pop_back();
                 for (const CPoint3d& point : points) polyline->AddPoint(point);
                 polyline->SetClosed(closed);
-                polyline->SetColor(kDefaultCurveColor);
                 results.push_back(std::move(polyline));
             }
         } else if (const auto* solid = dynamic_cast<const CSolid*>(target)) {
@@ -6572,7 +6726,7 @@ size_t CAlfaDoc::ProjectSelectedCurveToSurface(Vec3 direction) {
     }
 }
 
-size_t CAlfaDoc::ExtractSelectedSurfaceEdges() {
+size_t CAlfaDoc::ExtractSelectedSurfaceEdges(double tolerance) {
     CSolid* solid = GetSelectedSolid();
     if (!solid) return 0;
     const std::vector<TopoDS_Edge> edges =
@@ -6582,7 +6736,7 @@ size_t CAlfaDoc::ExtractSelectedSurfaceEdges() {
     int number = 1;
     for (const TopoDS_Edge& edge : edges) {
         std::unique_ptr<CBSpline> curve = editable_nurbs_from_edge(
-            edge, "Extracted Edge " + std::to_string(number++));
+            edge, "Extracted Edge " + std::to_string(number++), tolerance);
         if (curve) curves.push_back(std::move(curve));
     }
     const size_t count = curves.size();
@@ -6610,95 +6764,11 @@ bool CAlfaDoc::JoinSelectedSurfaces() {
     }
 
     try {
-        BRep_Builder builder;
-        TopoDS_Compound compound;
-        builder.MakeCompound(compound);
-        for (const CSurfaceSet* surface : surfaces) {
-            builder.Add(compound, surface->m_Shape);
-        }
-
-        // Connect all selected components with G2 filling patches. The bridge
-        // passes through both nearest boundary curves and matches both the
-        // tangent plane and the curvature of their supporting faces.
-        std::vector<bool> connected(surfaces.size(), false);
-        connected[0] = true;
-        for (size_t link = 1; link < surfaces.size(); ++link) {
-            SurfaceEdgePair closest;
-            size_t next_surface = surfaces.size();
-            for (size_t first = 0; first < surfaces.size(); ++first) {
-                if (!connected[first]) continue;
-                for (size_t second = 0; second < surfaces.size(); ++second) {
-                    if (connected[second]) continue;
-                    SurfaceEdgePair candidate = closest_surface_edges(
-                        surfaces[first]->m_Shape, surfaces[second]->m_Shape);
-                    if (!candidate.first.IsNull()
-                        && candidate.distance < closest.distance) {
-                        closest = candidate;
-                        next_surface = second;
-                    }
-                }
-            }
-            if (next_surface >= surfaces.size()) return false;
-
-            // A shared boundary needs only topological sewing. Building a
-            // filling patch here would create a zero-width and unstable
-            // "bridge" between already touching surfaces.
-            constexpr double sewing_tolerance = 1.0e-4;
-            if (surface_edges_coincide(closest.first, closest.second,
-                                       sewing_tolerance)) {
-                connected[next_surface] = true;
-                continue;
-            }
-
-            BRepOffsetAPI_MakeFilling filling(
-                4, 24, 3, Standard_True,
-                1.0e-5, 1.0e-4, 0.005, 0.02, 10, 16);
-            TopoDS_Vertex first_start, first_end;
-            TopoDS_Vertex second_start, second_end;
-            TopExp::Vertices(closest.first,
-                             first_start, first_end, Standard_True);
-            TopExp::Vertices(closest.second,
-                             second_start, second_end, Standard_True);
-            if (first_start.IsNull() || first_end.IsNull()
-                || second_start.IsNull() || second_end.IsNull()) {
-                return false;
-            }
-            const TopoDS_Edge end_connector = BRepBuilderAPI_MakeEdge(
-                BRep_Tool::Pnt(first_end), BRep_Tool::Pnt(second_end));
-            const TopoDS_Edge start_connector = BRepBuilderAPI_MakeEdge(
-                BRep_Tool::Pnt(second_start), BRep_Tool::Pnt(first_start));
-            if (end_connector.IsNull() || start_connector.IsNull()) {
-                return false;
-            }
-            TopoDS_Edge reversed_second = closest.second;
-            reversed_second.Reverse();
-            filling.Add(closest.first, closest.first_support,
-                        GeomAbs_G2, Standard_True);
-            filling.Add(end_connector, GeomAbs_C0, Standard_True);
-            filling.Add(reversed_second, closest.second_support,
-                        GeomAbs_G2, Standard_True);
-            filling.Add(start_connector, GeomAbs_C0, Standard_True);
-            filling.Build();
-            if (!filling.IsDone() || filling.Shape().IsNull()) return false;
-            if (!std::isfinite(filling.G1Error())
-                || !std::isfinite(filling.G2Error())
-                || filling.G1Error() > 0.02
-                || filling.G2Error() > 0.05) {
-                return false;
-            }
-            const TopoDS_Face bridge = TopoDS::Face(filling.Shape());
-            if (bridge.IsNull()) return false;
-            builder.Add(compound, bridge);
-            connected[next_surface] = true;
-        }
-
-        // A Surface Set may contain several faces without forcing them into a
-        // shell. Sewing open faces can reverse or split valid input faces and
-        // corrupt their UV triangulation. Keep their original geometry and
-        // orientation; coincident boundaries remain coincident, while a gap
-        // is occupied by the explicitly constructed bridge face above.
-        TopoDS_Shape joined_shape = compound;
-        if (!BRepCheck_Analyzer(joined_shape).IsValid()) return false;
+        std::vector<TopoDS_Shape> shapes;
+        for(const auto* surface:surfaces)shapes.push_back(surface->m_Shape);
+        surface_topology::Report report;std::string error;
+        auto joined_shape=surface_topology::Sew(shapes,1.e-4,report,error);
+        if(joined_shape.IsNull())return false;
         auto joined = std::make_unique<CSurfaceSet>(joined_shape);
         joined->SetName("Joined Surfaces");
         joined->SetColor(surfaces.front()->GetColor());
@@ -6758,7 +6828,7 @@ bool CAlfaDoc::RebuildRuledSurface(size_t object_index,
 bool CAlfaDoc::CreateShellFromSurface(unsigned long surface_id,
                                       int face_index,
                                       double distance,
-                                      std::string* error_message) {
+                                      std::string* error_message, bool whole_body) {
     auto* source = dynamic_cast<CSolid*>(FindObjectById(surface_id));
     CSurfaceFace* face = source ? source->GetSurfaceFace(face_index) : nullptr;
     if (!face) {
@@ -6766,7 +6836,10 @@ bool CAlfaDoc::CreateShellFromSurface(unsigned long surface_id,
         return false;
     }
 
-    TopoDS_Shape shape = CSolid::Shell(face, distance, error_message);
+    std::string failure;
+    TopoDS_Shape shape = whole_body ? surface_topology::Thicken(source->m_Shape,distance,failure)
+                                  : CSolid::Shell(face, distance, &failure);
+    if(error_message)*error_message=failure;
     if (shape.IsNull()) return false;
 
     auto shell = std::make_unique<CSolid>(shape);
@@ -6787,7 +6860,7 @@ bool CAlfaDoc::RebuildShellFromSurface(size_t object_index,
                                        unsigned long surface_id,
                                        int face_index,
                                        double distance,
-                                       std::string* error_message) {
+                                       std::string* error_message, bool whole_body) {
     if (object_index >= objects_.size()) {
         if (error_message) *error_message = "The shell object was not found";
         return false;
@@ -6800,7 +6873,10 @@ bool CAlfaDoc::RebuildShellFromSurface(size_t object_index,
         return false;
     }
 
-    TopoDS_Shape shape = CSolid::Shell(face, distance, error_message);
+    std::string failure;
+    TopoDS_Shape shape = whole_body ? surface_topology::Thicken(source->m_Shape,distance,failure)
+                                  : CSolid::Shell(face, distance, &failure);
+    if(error_message)*error_message=failure;
     if (shape.IsNull()) return false;
     shell->m_Shape = shape;
     if (!shell->ReBuldMesh()) {
@@ -6986,7 +7062,7 @@ bool CAlfaDoc::CreateTwoRailSweepSolidFromSelection() {
             return false;
         }
         if (samples.closed) {
-            if (!dynamic_cast<CSmartLine*>(objects_[index].get())) {
+            if (!CopySingleSketchContour(objects_[index].get())) {
                 return false;
             }
             profile_index = i;
@@ -7046,7 +7122,7 @@ bool CAlfaDoc::RebuildTwoRailSweepSolid(size_t object_index,
         return false;
     }
     auto* solid = dynamic_cast<CSolid*>(objects_[object_index].get());
-    const auto* profile = dynamic_cast<const CSmartLine*>(FindObjectById(profile_id));
+    const auto profile = CopySingleSketchContour(FindObjectById(profile_id));
     const CAlfaObject* first_rail = FindObjectById(first_rail_id);
     const CAlfaObject* second_rail = FindObjectById(second_rail_id);
     if (!solid || !profile || !profile->IsClosed()
@@ -7063,12 +7139,12 @@ bool CAlfaDoc::RebuildTwoRailSweepSolid(size_t object_index,
 }
 
 bool CAlfaDoc::ReverseSelectedSurfaceNormals() {
-    CSolid* solid = GetSelectedSolid();
-    if (!solid) {
-        return false;
-    }
-    const bool reversed = solid->ReverseNormals();
-    if (reversed) {
+    bool reversed = false;
+    const auto selection = GetSelectedObjectIndices();
+    for (size_t index : selection) {
+        auto* solid = index < objects_.size() ? dynamic_cast<CSolid*>(objects_[index].get()) : nullptr;
+        if (!solid || !solid->ReverseNormals()) continue;
+        reversed = true;
         if (solid->GetNumOperations() > 0) {
             solid->SetParametricOperation(
                 solid->GetOperationTree().size(),
@@ -7076,6 +7152,8 @@ bool CAlfaDoc::ReverseSelectedSurfaceNormals() {
                 "Reverse Normals",
                 {});
         }
+    }
+    if (reversed) {
         ClearPointSelection();
         selected_solid_face_indices_.clear();
         has_selected_solid_face_ = false;
@@ -7224,10 +7302,24 @@ bool CAlfaDoc::SewSelectedSurfacesToSolid(double tolerance,
             return fail("The solid was created, but its display mesh could not be built");
         }
 
-        std::sort(source_indices.begin(), source_indices.end(), std::greater<size_t>());
+        // Keep the unmodified sewn shape as a persistent base for feature replay.
+        // The owned tool store is serialized and cloned together with the body.
+        BRepBuilderAPI_Copy base_copy(result_shape, Standard_True, Standard_False);
+        TopoDS_Shape base_shape = base_copy.Shape();
+        CSolid base(base_shape);
+        const size_t base_index = result->AddBooleanToolCopy(base);
+        std::vector<ParametricParameterValue> sewing_parameters{
+            {"base.tool.index", static_cast<double>(base_index)},
+            {"tolerance", actual_tolerance},
+            {"source.count", static_cast<double>(source_indices.size())}};
+        for (size_t i = 0; i < source_indices.size(); ++i) {
+            sewing_parameters.push_back({"source." + std::to_string(i) + ".id",
+                static_cast<double>(objects_[source_indices[i]]->m_id)});
+        }
+        result->SetParametricOperation(0, "SewingFaceTool", "Sewing Faces",
+                                      std::move(sewing_parameters));
         for (size_t index : source_indices) {
-            objects_.erase(objects_.begin()
-                + static_cast<ObjectList::difference_type>(index));
+            objects_[index]->SetVisible(false);
         }
         AddObject(std::move(result));
         if (have_source_style && !objects_.empty()) {
@@ -7265,6 +7357,125 @@ int CAlfaDoc::RebuildVisibleObjectMeshes(float mesh_deflection) {
         }
     }
     return rebuilt;
+}
+
+namespace {
+bool invalid_for_save(const CAlfaObject* object) {
+    if (!object) return true;
+    const auto finite = [](const auto& point) {
+        return std::isfinite(point.x) && std::isfinite(point.y) && std::isfinite(point.z);
+    };
+    const auto invalid_points = [&](const auto& points) {
+        return points.empty() || !std::all_of(points.begin(), points.end(), finite);
+    };
+    if (const auto* curve = dynamic_cast<const CPolyline*>(object)) return invalid_points(curve->GetPoints());
+    if (const auto* curve = dynamic_cast<const CBSpline*>(object)) {
+        if (invalid_points(curve->GetPoints())) return true;
+        for (double weight : curve->GetWeights()) if (!std::isfinite(weight) || weight <= 0) return true;
+        const auto& knots = curve->GetKnots();
+        return !std::all_of(knots.begin(), knots.end(), [](double v) { return std::isfinite(v); })
+            || !std::is_sorted(knots.begin(), knots.end());
+    }
+    if (const auto* curve = dynamic_cast<const CCadCurve3D*>(object)) return invalid_points(curve->GetPoints());
+    if (const auto* sketch = dynamic_cast<const CSmartLine*>(object)) {
+        if (sketch->GetNumLines() == 0) return true;
+        for (size_t i=0; i<sketch->GetNumLines(); ++i) {
+            const auto* line = sketch->GetLine(i);
+            if (!line || !finite(line->GetStart()) || !finite(line->GetEnd())) return true;
+        }
+        return false;
+    }
+    if (const auto* solid = dynamic_cast<const CSolid*>(object)) {
+        // Imported mesh-backed surfaces may legitimately have no BRep.
+        return solid->m_Shape.IsNull() && solid->GetNumSurfaces() == 0;
+    }
+    if (const auto* mesh = dynamic_cast<const CMesh3D*>(object)) {
+        const auto& vertices = mesh->GetVertices();
+        if (invalid_points(vertices)) return true;
+        bool has_face = false;
+        for (const auto& face : mesh->GetFaces()) {
+            if (face.deleted) continue;
+            if (face.corners.size() < 3) return true;
+            for (const auto& corner : face.corners) if (corner.v >= vertices.size()) return true;
+            has_face = true;
+        }
+        return !has_face;
+    }
+    // Groups, annotations, reference images and parametric resources have
+    // their own representations; lack of a mesh/bounding box is not invalidity.
+    return false;
+}
+}
+
+bool CAlfaDoc::HasInvalidObjectsForSave() const {
+    return std::any_of(objects_.begin(), objects_.end(), [](const auto& object) { return invalid_for_save(object.get()); });
+}
+
+size_t CAlfaDoc::RemoveInvalidObjectsForSave() {
+    std::set<unsigned long> removed;
+    size_t count = 0;
+    for (const auto& object : objects_) if (invalid_for_save(object.get())) {
+        ++count;
+        if (object) removed.insert(object->m_id);
+    }
+    if (!count) return 0;
+    std::vector<size_t> remapped(objects_.size(), static_cast<size_t>(-1));
+    size_t next = 0;
+    for (size_t i = 0; i < objects_.size(); ++i)
+        if (!invalid_for_save(objects_[i].get())) remapped[i] = next++;
+    const auto remap = [&](size_t index) {
+        return index < remapped.size() ? remapped[index] : static_cast<size_t>(-1);
+    };
+    objects_.erase(std::remove_if(objects_.begin(), objects_.end(), [](const auto& object) {
+        return invalid_for_save(object.get());
+    }), objects_.end());
+    for (auto& object : objects_) if (auto* group = dynamic_cast<CGroup*>(object.get())) {
+        auto ids = group->GetElementIds();
+        ids.erase(std::remove_if(ids.begin(), ids.end(), [&](unsigned long id) { return removed.count(id) != 0; }), ids.end());
+        group->SetElementIds(std::move(ids));
+    }
+    curve_endpoint_links_.erase(std::remove_if(curve_endpoint_links_.begin(), curve_endpoint_links_.end(),
+        [&](const auto& link) { return removed.count(link.first_id) || removed.count(link.second_id); }), curve_endpoint_links_.end());
+    active_object_index_ = remap(active_object_index_);
+    if (active_object_index_ >= objects_.size()) active_object_index_ = 0;
+    selected_object_index_ = remap(selected_object_index_);
+    selected_face_object_index_ = remap(selected_face_object_index_);
+    for (auto& index : selected_object_indices_) index = remap(index);
+    selected_object_indices_.erase(std::remove_if(selected_object_indices_.begin(), selected_object_indices_.end(),
+        [&](size_t index) { return index >= objects_.size(); }), selected_object_indices_.end());
+    has_selected_object_ = !selected_object_indices_.empty();
+    if (selected_object_index_ >= objects_.size()) {
+        selected_object_index_ = has_selected_object_ ? selected_object_indices_.front() : 0;
+        has_selected_point_ = false;
+    }
+    if (selected_face_object_index_ >= objects_.size()) {
+        selected_face_object_index_ = 0;
+        has_selected_solid_face_ = false;
+        selected_solid_face_indices_.clear();
+    }
+    for (auto& point : selected_curve_points_) point.first = remap(point.first);
+    selected_curve_points_.erase(std::remove_if(selected_curve_points_.begin(), selected_curve_points_.end(),
+        [&](const auto& point) { return point.first >= objects_.size(); }), selected_curve_points_.end());
+    const auto remap_live = [&](auto& live) {
+        if (!live) return;
+        live->object_index = remap(live->object_index);
+        if (live->object_index >= objects_.size()) live.reset();
+    };
+    remap_live(live_extrude_);
+    remap_live(live_fillet_);
+    remap_live(live_chamfer_);
+    remap_live(draft_face_);
+    remap_live(live_thick_solid_);
+    const auto remap_profile = [&](auto& live) {
+        if (!live) return;
+        live->polyline_index = remap(live->polyline_index);
+        live->solid_index = remap(live->solid_index);
+        if (live->polyline_index >= objects_.size() || (live->has_solid && live->solid_index >= objects_.size())) live.reset();
+    };
+    remap_profile(live_polyline_extrude_);
+    remap_profile(live_polyline_revolve_);
+    // Do not call EnsureActivePolyline(): saving an empty scene must stay empty.
+    return count;
 }
 
 bool CAlfaDoc::DeleteSelectedObject() {
@@ -8070,7 +8281,7 @@ bool CAlfaDoc::ApplyFilletToSelectedEdge(double radius) {
         if (!fillet.IsDone()) {
             return false;
         }
-        result_shape = fillet.Shape();
+        result_shape = RepairFilletParameters(OrientFilletResult(fillet.Shape()));
     } catch (const Standard_Failure&) {
         return false;
     }
@@ -8121,7 +8332,7 @@ bool CAlfaDoc::ApplyFilletToAllSelectedSolidEdges(double radius) {
         if (!fillet.IsDone()) {
             return false;
         }
-        result_shape = fillet.Shape();
+        result_shape = RepairFilletParameters(OrientFilletResult(fillet.Shape()));
     } catch (const Standard_Failure&) {
         return false;
     }
@@ -8158,8 +8369,25 @@ bool CAlfaDoc::BeginLiveFilletSelectedEdges(bool all_edges) {
     if (!all_edges) {
         edge_refs = solid->GetSelectedEdgeRefs();
     }
-    std::vector<TopoDS_Edge> edges = all_edges ? solid->GetAllTopoEdges() : solid->GetSelectedTopoEdges();
-    edges = unique_edges(edges);
+    std::vector<TopoDS_Edge> edges;
+    if (all_edges) {
+        edges = unique_edges(solid->GetAllTopoEdges());
+    } else {
+        // Adjacent selected faces may reference the same topological edge.
+        // Keep saved references in the same one-to-one order as build edges.
+        std::vector<std::pair<int, int>> unique_refs;
+        for (const auto& ref : edge_refs) {
+            const auto candidates = solid->GetTopoEdgesByRefs({ref});
+            if (candidates.empty()) continue;
+            const auto& edge = candidates.front();
+            if (std::any_of(edges.begin(), edges.end(), [&](const auto& existing) {
+                    return existing.IsSame(edge);
+                })) continue;
+            edges.push_back(edge);
+            unique_refs.push_back(ref);
+        }
+        edge_refs = std::move(unique_refs);
+    }
     if (edges.empty()) {
         return false;
     }
@@ -8304,12 +8532,13 @@ bool CAlfaDoc::UpdateLiveFillet(double radius) {
         if (!fillet.IsDone()) {
             return false;
         }
-        result_shape = fillet.Shape();
+        result_shape = OrientFilletResult(fillet.Shape());
+        created_surface_indices = generated_face_indices(fillet, live_fillet_->edges, result_shape);
+        result_shape = RepairFilletParameters(result_shape);
         if (!valid_fillet_result(live_fillet_->base_shape, result_shape)) {
             return false;
         }
-        created_surface_indices =
-            generated_face_indices(fillet, live_fillet_->edges, result_shape);
+
     } catch (const Standard_Failure&) {
         return false;
     }
@@ -8445,12 +8674,13 @@ bool CAlfaDoc::BuildLiveFilletShape(
             if (!fillet.IsDone()) {
                 return false;
             }
-            result_shape = fillet.Shape();
+            result_shape = OrientFilletResult(fillet.Shape());
+            created_surface_indices = generated_face_indices(fillet, build_edges, result_shape);
+            result_shape = RepairFilletParameters(result_shape);
             if (!valid_fillet_result(request.base_shape, result_shape)) {
                 return false;
             }
-            created_surface_indices =
-                generated_face_indices(fillet, build_edges, result_shape);
+
         } catch (const Standard_Failure&) {
             return false;
         }
@@ -8461,13 +8691,12 @@ bool CAlfaDoc::ApplyLiveFilletShape(
     const LiveFilletBuildRequest& request,
     const TopoDS_Shape& result_shape,
     std::vector<int> created_surface_indices) {
+    // All callers pass results validated by BuildLiveFilletShape or the
+    // synchronous UpdateLiveFillet path. Repeating the Boolean interference
+    // check here would block the UI after the worker has already finished.
     if (!live_fillet_ || live_fillet_->object_index != request.object_index
         || !live_fillet_->base_shape.IsSame(request.source_shape)
-        || request.object_index >= objects_.size()
-        || !valid_fillet_result(
-            request.base_shape.IsNull()
-                ? request.source_shape : request.base_shape,
-            result_shape)) {
+        || request.object_index >= objects_.size() || result_shape.IsNull()) {
         return false;
     }
     auto* solid = dynamic_cast<CSolid*>(objects_[request.object_index].get());
@@ -8519,7 +8748,15 @@ bool CAlfaDoc::BeginLiveChamferSelectedEdges() {
         return false;
     }
 
-    std::vector<TopoDS_Edge> edges = unique_edges(solid->GetSelectedTopoEdges());
+    std::vector<TopoDS_Edge> edges;
+    std::vector<std::pair<int,int>> refs;
+    for (const auto& ref : solid->GetSelectedEdgeRefs()) {
+        const auto candidates = solid->GetTopoEdgesByRefs({ref});
+        if (candidates.empty()) continue;
+        const auto& edge = candidates.front();
+        if (std::any_of(edges.begin(), edges.end(), [&](const auto& item) { return item.IsSame(edge); })) continue;
+        edges.push_back(edge); refs.push_back(ref);
+    }
     if (edges.empty()) {
         return false;
     }
@@ -8527,7 +8764,7 @@ bool CAlfaDoc::BeginLiveChamferSelectedEdges() {
     live_chamfer_ = std::make_unique<LiveChamferData>();
     live_chamfer_->base_shape = solid->m_Shape;
     live_chamfer_->edges = std::move(edges);
-    live_chamfer_->edge_refs = solid->GetSelectedEdgeRefs();
+    live_chamfer_->edge_refs = std::move(refs);
     live_chamfer_->object_index = solid_index;
     return true;
 }
@@ -8538,6 +8775,10 @@ bool CAlfaDoc::HasLiveChamfer() const {
 
 std::vector<std::pair<int, int>> CAlfaDoc::GetLiveChamferEdgeRefs() const {
     return live_chamfer_ ? live_chamfer_->edge_refs : std::vector<std::pair<int, int>>{};
+}
+
+std::vector<TopoDS_Edge> CAlfaDoc::GetLiveChamferEdges() const {
+    return live_chamfer_ ? live_chamfer_->edges : std::vector<TopoDS_Edge>{};
 }
 
 std::vector<int> CAlfaDoc::GetLiveChamferCreatedSurfaceIndices() const {
@@ -8939,12 +9180,37 @@ void CAlfaDoc::SetObjectVisibility(unsigned long objectId,bool visible) {
     apply(objectId);
 }
 
+void CAlfaDoc::SetObjectFrozen(unsigned long object_id, bool frozen) {
+    std::set<unsigned long> visited;
+    std::function<void(unsigned long)> apply=[&](unsigned long id) {
+        if(!visited.insert(id).second)return;
+        auto* object=FindObjectById(id);if(!object)return;
+        object->SetFrozen(frozen);
+        if(auto* group=dynamic_cast<CGroup*>(object))for(auto child:group->GetElementIds())apply(child);
+    };
+    apply(object_id);
+    ClearInvisibleSelection();
+}
+
 bool CAlfaDoc::IsObjectVisible(const CAlfaObject& object) const {
     return object.IsVisible() && IsLayerVisible(object.m_LayerID);
 }
 
 bool CAlfaDoc::IsObjectSelectable(const CAlfaObject& object) const {
-    return IsObjectVisible(object) && IsLayerSelectable(object.m_LayerID);
+    if (!IsObjectVisible(object) || !IsLayerSelectable(object.m_LayerID) || object.IsFrozen()) return false;
+    // A group transform would also modify frozen descendants.
+    std::set<unsigned long> visited;
+    std::function<bool(const CAlfaObject&)> frozen_child = [&](const CAlfaObject& current) {
+        if (!visited.insert(current.m_id).second) return false;
+        if (current.IsFrozen()) return true;
+        if (const auto* group=dynamic_cast<const CGroup*>(&current))
+            for(auto id:group->GetElementIds()) {
+                const auto* child=FindObjectById(id);
+                if(child && frozen_child(*child))return true;
+            }
+        return false;
+    };
+    return !frozen_child(object);
 }
 
 bool CAlfaDoc::CreateAssociativeCloneFromSelection() {
@@ -8957,34 +9223,44 @@ bool CAlfaDoc::CreateAssociativeCloneFromSelection() {
         return false;
     }
     EnsureObjectId(*source);
-    auto clone = std::make_unique<CAssociativeClone>(source->m_Shape, source->m_id);
-    clone->SetName(source->GetName() + " Linked Copy");
-    clone->SetGroupName(source->GetGroupName());
-    clone->SetVisible(source->IsVisible());
-    clone->SetColor(source->GetColor());
-    clone->SetMaterial(source->GetMaterial());
-    clone->SetMaterialId(source->GetMaterialId());
-    clone->m_LayerID = source->m_LayerID;
-    clone->InitSurfaces();
-    clone->ReBuldMesh();
+    auto clone = CAssociativeClone::FromSource(*source);
     AddObject(std::move(clone));
     return true;
 }
 
-bool CAlfaDoc::RebuildAssociativeClones(unsigned long source_id) {
+bool CAlfaDoc::RebuildAssociativeClones(unsigned long source_id, const Snapshot* before) {
     bool rebuilt = false;
     std::set<unsigned long> changed_ids;
     std::set<const CAssociativeClone*> rebuilt_clones;
     if (source_id != 0) changed_ids.insert(source_id);
+    if (before) {
+        std::map<unsigned long, TopoDS_Shape> previous_shapes;
+        for (const auto& object : before->objects)
+            if (const auto* solid = dynamic_cast<const CSolid*>(object.get()))
+                previous_shapes.emplace(solid->m_id, solid->m_Shape);
+        for (const auto& object : objects_) {
+            const auto* solid = dynamic_cast<const CSolid*>(object.get());
+            if (!solid) continue;
+            const auto previous = previous_shapes.find(solid->m_id);
+            if (previous == previous_shapes.end() || !solid->m_Shape.IsEqual(previous->second))
+                changed_ids.insert(solid->m_id);
+        }
+        if (changed_ids.empty()) return false;
+    }
+    const bool rebuild_all = source_id == 0 && !before;
     for (size_t pass = 0; pass < objects_.size(); ++pass) {
         bool pass_changed = false;
         for (const ObjectPtr& object : objects_) {
             auto* clone = dynamic_cast<CAssociativeClone*>(object.get());
             if (!clone || rebuilt_clones.count(clone) != 0
-                || (source_id != 0 && changed_ids.count(clone->GetSourceId()) == 0)) {
+                || (!rebuild_all && changed_ids.count(clone->GetSourceId()) == 0)) {
                 continue;
             }
             const CSolid* source = dynamic_cast<const CSolid*>(FindObjectById(clone->GetSourceId()));
+            // Rebuild parents first even when a saved clone precedes its source.
+            const auto* linked_source = dynamic_cast<const CAssociativeClone*>(source);
+            if (linked_source && rebuilt_clones.count(linked_source) == 0
+                && (rebuild_all || changed_ids.count(linked_source->GetSourceId()) != 0)) continue;
             if (!source || source == clone || !clone->RebuildFromSource(*source)) {
                 continue;
             }
@@ -8996,26 +9272,22 @@ bool CAlfaDoc::RebuildAssociativeClones(unsigned long source_id) {
             rebuilt = true;
         }
         if (!pass_changed) break;
-        if (source_id == 0) break;
     }
     return rebuilt;
 }
 
 bool CAlfaDoc::CreateSolidFromTwoSelectedSketches() {
     if (selected_object_indices_.size() != 2) return false;
-    CSmartLine* first = nullptr;
-    CSmartLine* second = nullptr;
-    for (size_t index : selected_object_indices_) {
-        if (index >= objects_.size()) return false;
-        CSmartLine* sketch = dynamic_cast<CSmartLine*>(objects_[index].get());
-        if (!sketch) return false;
-        if (!first) first = sketch; else second = sketch;
-    }
-    if (!first || !second) return false;
+    for (size_t index : selected_object_indices_) if (index >= objects_.size()) return false;
+    auto* first = objects_[selected_object_indices_[0]].get();
+    auto* second = objects_[selected_object_indices_[1]].get();
+    const auto first_contour = CopySingleSketchContour(first);
+    const auto second_contour = CopySingleSketchContour(second);
+    if (!first_contour || !second_contour) return false;
     EnsureObjectId(*first);
     EnsureObjectId(*second);
     TopoDS_Shape shape;
-    if (!BuildSolidBetweenSketches(*first, *second, shape)) return false;
+    if (!BuildSolidBetweenSketches(*first_contour, *second_contour, shape)) return false;
 
     // Early versions of the Solid-panel button created the correct B-Rep but
     // then overwrote both source references with the registry defaults (0).
@@ -9071,8 +9343,8 @@ bool CAlfaDoc::RebuildTwoSketchSolid(size_t object_index) {
         if (parameter.id == "profile.id") first_id = static_cast<unsigned long>(parameter.value);
         if (parameter.id == "section.id") second_id = static_cast<unsigned long>(parameter.value);
     }
-    const CSmartLine* first = dynamic_cast<const CSmartLine*>(FindObjectById(first_id));
-    const CSmartLine* second = dynamic_cast<const CSmartLine*>(FindObjectById(second_id));
+    const auto first = CopySingleSketchContour(FindObjectById(first_id));
+    const auto second = CopySingleSketchContour(FindObjectById(second_id));
     TopoDS_Shape shape;
     if (!first || !second || !BuildSolidBetweenSketches(*first, *second, shape)) return false;
     solid->Clear();
@@ -9264,6 +9536,7 @@ std::shared_ptr<const CAlfaDoc::Snapshot> CAlfaDoc::CreateSnapshot() const {
         clone->m_LayerID = object->m_LayerID;
         clone->SetName(object->GetName());
         clone->SetGroupName(object->GetGroupName());
+        clone->SetFrozen(object->IsFrozen());
         clone->CAlfaObject::SetVisible(object->IsVisible());
         clone->CAlfaObject::SetColor(object->GetColor());
         clone->SetMaterial(object->GetMaterial());
@@ -9316,6 +9589,7 @@ bool CAlfaDoc::RestoreSnapshot(const Snapshot& snapshot) {
         clone->m_LayerID = object->m_LayerID;
         clone->SetName(object->GetName());
         clone->SetGroupName(object->GetGroupName());
+        clone->SetFrozen(object->IsFrozen());
         clone->CAlfaObject::SetVisible(object->IsVisible());
         clone->CAlfaObject::SetColor(object->GetColor());
         clone->SetMaterial(object->GetMaterial());
@@ -9378,16 +9652,16 @@ void CAlfaDoc::EnsureActivePolyline() {
         active_object_index_ = 0;
     }
 
-    if (active_object_index_ >= objects_.size() || dynamic_cast<CPolyline*>(objects_[active_object_index_].get()) == nullptr) {
+    if (active_object_index_ >= objects_.size() || (dynamic_cast<CPolyline*>(objects_[active_object_index_].get()) == nullptr || objects_[active_object_index_]->IsFrozen())) {
         for (size_t i = 0; i < objects_.size(); ++i) {
-            if (dynamic_cast<CPolyline*>(objects_[i].get()) != nullptr) {
+            if (dynamic_cast<CPolyline*>(objects_[i].get()) != nullptr && !objects_[i]->IsFrozen()) {
                 active_object_index_ = i;
                 break;
             }
         }
     }
 
-    if (dynamic_cast<CPolyline*>(objects_[active_object_index_].get()) == nullptr) {
+    if (active_object_index_ >= objects_.size() || (dynamic_cast<CPolyline*>(objects_[active_object_index_].get()) == nullptr || objects_[active_object_index_]->IsFrozen())) {
         auto polyline = std::make_unique<CPolyline>("Curve " + std::to_string(objects_.size() + 1));
         EnsureObjectId(*polyline);
         AssignDefaultMaterial(*polyline);
@@ -9414,16 +9688,16 @@ void CAlfaDoc::EnsureActiveBSpline() {
         return;
     }
 
-    if (active_object_index_ >= objects_.size() || dynamic_cast<CBSpline*>(objects_[active_object_index_].get()) == nullptr) {
+    if (active_object_index_ >= objects_.size() || (dynamic_cast<CBSpline*>(objects_[active_object_index_].get()) == nullptr || objects_[active_object_index_]->IsFrozen())) {
         for (size_t i = objects_.size(); i > 0; --i) {
-            if (dynamic_cast<CBSpline*>(objects_[i - 1].get()) != nullptr) {
+            if (dynamic_cast<CBSpline*>(objects_[i - 1].get()) != nullptr && !objects_[i-1]->IsFrozen()) {
                 active_object_index_ = i - 1;
                 break;
             }
         }
     }
 
-    if (dynamic_cast<CBSpline*>(objects_[active_object_index_].get()) == nullptr) {
+    if (active_object_index_ >= objects_.size() || (dynamic_cast<CBSpline*>(objects_[active_object_index_].get()) == nullptr || objects_[active_object_index_]->IsFrozen())) {
         auto spline = std::make_unique<CBSpline>("B-Spline " + std::to_string(objects_.size() + 1));
         EnsureObjectId(*spline);
         AssignDefaultMaterial(*spline);

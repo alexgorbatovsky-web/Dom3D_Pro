@@ -29,6 +29,7 @@ std::unique_ptr<CAlfaObject> CPart::Clone() const {
     copy->SetFileLinked(IsFileLinked());
     copy->SetSourcePath(GetSourcePath());
     copy->SetGroupName(GetGroupName());
+    copy->SetFrozen(IsFrozen());
     copy->SetVisible(IsVisible());
     copy->CAlfaObject::SetColor(GetColor());
     copy->SetMaterial(GetMaterial());

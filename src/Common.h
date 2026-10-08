@@ -136,13 +136,14 @@ enum class ToolMode {
     SketchFillet,
     SketchConstraintHorizontal,
     SketchConstraintVertical,
-    SketchConstraintTangentStart,
-    SketchConstraintTangentEnd,
+    SketchSmoothJoint,
+    SketchSharpJoint,
     SolidFillet,
     SolidBoxRectangle,
     SolidCylinderCircle,
     MovePointToPoint,
-    MeasurePointToPoint
+    MeasurePointToPoint,
+    SketchBoolean
 };
 
 enum class BooleanOperation {
@@ -176,7 +177,8 @@ enum class TransformAxis {
 enum class TransformOperation {
     Move,
     Rotate,
-    Scale
+    Scale,
+    Universal
 };
 
 enum class SolidDisplayMode {

@@ -20,6 +20,10 @@ public:
     void Rotate(Vec3 center, Vec3 axis, float angle) override;
     void Scale(Vec3 center, Vec3 axis, float factor) override;
     void Mirror(Vec3 plane_point, Vec3 plane_normal) override;
+    bool CommitPreviewTranslate(Vec3 delta, bool record_operation = true) override;
+    bool CommitPreviewRotate(Vec3 center, Vec3 axis, float angle) override;
+    bool ApplyAffineTransform(const std::array<double, 16>& matrix) override;
+    static std::unique_ptr<CAssociativeClone> FromSource(const CSolid& source);
 
 private:
     void Prepend(const gp_Trsf& transform);

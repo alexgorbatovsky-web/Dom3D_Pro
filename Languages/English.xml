@@ -1,5 +1,13 @@
-<?xml version='1.0' encoding='UTF-8'?>
+﻿<?xml version='1.0' encoding='UTF-8'?>
 <ClassArray.TextItem>
+  <TextItem>
+    <ID>BlinnPhongLighting</ID>
+    <Text>Blinn-Phong for all surfaces and meshes</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BlinnPhongLighting_HINT</ID>
+    <Text>Use Blinn-Phong instead of PBR lighting in the viewport. Adjust Specular and Shininess scale to control highlights.</Text>
+  </TextItem>
   <TextItem>
     <ID>LanguageName</ID>
     <Text>English</Text>
@@ -10525,12 +10533,11 @@ If the fillet cannot be built, check the radius and the selected geometry.</Text
   <TextItem><ID>SurfaceLoft_HINT</ID><Text>Select at least two B-Splines as successive cross-sections, then run the tool. It creates a surface through the sections; open and closed splines are supported.</Text></TextItem>
   <TextItem><ID>SurfaceTangentCap_HINT</ID><Text>Select a closed spline and an adjoining surface. The tool fills the contour with a cap that follows the surface tangent at the boundary. Adjust the cap parameters and press OK.</Text></TextItem>
   <TextItem><ID>SurfaceSweepTwoRails_HINT</ID><Text>Select three curves: one open or closed profile and two open rails. Confirm the selection. The profile follows both rails to form a surface; check that its ends correspond to the rails.</Text></TextItem>
-  <TextItem><ID>SurfaceJoin_HINT</ID><Text>Select at least two touching surfaces and confirm the selection. The tool joins them into a surface set. Surfaces must share matching boundaries.</Text></TextItem>
-  <TextItem><ID>SurfaceReverseNormals_HINT</ID><Text>Select surfaces and run the tool to reverse their normal direction. Their shape stays the same; the front and back sides swap. This changes the sign direction of operations that follow surface normals.</Text></TextItem>
+  <TextItem><ID>SurfaceJoin_HINT</ID><Text>Select at least two touching surfaces and confirm. Shared edges are sewn into one surface body without smoothing. Use Bridge for gaps.</Text></TextItem>
+  <TextItem><ID>SurfaceReverseNormals_HINT</ID><Text>Run the tool and click surfaces to reverse their normals, or preselect several surfaces to reverse them together. Click again to reverse back. Esc finishes the tool. Surface shape stays the same.</Text></TextItem>
   <TextItem><ID>SurfaceRevolve_HINT</ID><Text>Select a profile curve. Choose the revolution axis and angle, inspect the preview, then press OK. The curve sweeps around the axis to create a surface.</Text></TextItem>
   <TextItem><ID>SurfaceSweep_HINT</ID><Text>This button is not connected yet and does not create geometry. To sweep a profile along two rails, use Sweep Surface (2 Rails).</Text></TextItem>
   <TextItem><ID>SurfacePatch_HINT</ID><Text>This button is not connected yet and does not create geometry. For a four-sided curve boundary use Surface by 4 Splines; for a closed spline with an adjoining surface use Tangent Cap.</Text></TextItem>
-  <TextItem><ID>SurfaceOffset_HINT</ID><Text>This button is not connected yet and does not offset surfaces. To give a surface thickness, use Shell in the Solid room.</Text></TextItem>
   <TextItem><ID>PlaneIntersection_HINT</ID><Text>Select or click a body, then define the cutting plane using the offered methods. The tool creates section curves where the plane intersects the body.</Text></TextItem>
   <TextItem><ID>SurfaceIntersection_HINT</ID><Text>Select two intersecting surfaces and confirm the selection. The tool creates curves along their intersection. Separated surfaces have no intersection result.</Text></TextItem>
   <TextItem><ID>ProjectCurveToSurface_HINT</ID><Text>Select one curve and a target surface, then confirm the selection. Set the projection vector X, Y, Z and press OK. A projected curve is created where that direction reaches the surface.</Text></TextItem>
@@ -10636,4 +10643,616 @@ If the fillet cannot be built, check the radius and the selected geometry.</Text
     <ID>ToolbarHiddenEdges</ID>
     <Text>Hidden Edges</Text>
   </TextItem>
+  <TextItem>
+    <ID>ThemeActiveButtons</ID>
+    <Text>Active buttons</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SketchSmoothJoint</ID>
+    <Text>Smooth joint: click a node</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SketchSharpJoint</ID>
+    <Text>Sharp joint: remove smoothness at a node</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SketchSmoothJointPick</ID>
+    <Text>Smooth joint: click the node joining two segments</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SketchSharpJointPick</ID>
+    <Text>Sharp joint: click a node to remove smoothness</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SketchJointMiss</ID>
+    <Text>Joint: click closer to the node joining two segments</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SketchSmoothJointInvalid</ID>
+    <Text>Smooth joint: choose a shared node with a Bezier segment and nonzero handles</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SketchSharpJointInvalid</ID>
+    <Text>Sharp joint: choose the shared node of two adjacent segments</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SketchSmoothJointDone</ID>
+    <Text>Smooth joint applied: both segments share a tangent</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SketchSharpJointDone</ID>
+    <Text>Sharp joint: smoothness removed; the handles are independent</Text>
+  </TextItem>
+  <TextItem>
+    <ID>HelpSplashScreen</ID>
+    <Text>Splash Screen...</Text>
+  </TextItem>
+  <TextItem><ID>SurfaceBridge</ID><Text>Surface Bridge</Text></TextItem>
+  <TextItem><ID>SurfaceBridge_HINT</ID><Text>Select two surface edges. Click the G0/G1/G2 markers to set position, tangent or curvature continuity independently, then create the bridge.</Text></TextItem>
+  <TextItem><ID>SurfaceSweptTool</ID><Text>Swept-1</Text></TextItem>
+  <TextItem><ID>SurfaceSweptTool_HINT</ID><Text>Select the profile spline first, then an open guide spline. Creates a swept surface without end caps. Adjust automatic orientation, offsets, angle, twist and final scale.</Text></TextItem>
+  <TextItem><ID>SurfaceFillet</ID><Text>Fillet</Text></TextItem>
+  <TextItem><ID>SurfaceFillet_HINT</ID><Text>Select two surfaces. Set a constant radius or start and end radii. Trim both surfaces is available when they share a boundary edge.</Text></TextItem>
+  <TextItem><ID>Body2</ID><Text>Body-2 (two spatial guides)</Text></TextItem>
+  <TextItem><ID>Body2_HINT</ID><Text>Build a mirrored solid from two spatial splines. Guide Up and Guide Dwn each define their own height and width.</Text></TextItem>
+  <TextItem><ID>SurfaceSaddle</ID><Text>Saddle</Text></TextItem>
+  <TextItem><ID>SurfaceSaddle_HINT</ID><Text>Create a saddle surface with opposite curvature along X and Z. Adjust width, length, rise and drop.</Text></TextItem>
+  <TextItem><ID>Body1</ID><Text>Body-1</Text></TextItem>
+  <TextItem><ID>Body1_HINT</ID><Text>Create a body from Guide Up, Guide Dwn and Guide Left. Edit the source splines to reshape it. Curvature controls the front and back generators.</Text></TextItem>
+  <TextItem><ID>SurfaceTwoView</ID><Text>Surface by two View</Text></TextItem>
+  <TextItem><ID>SurfaceTwoView_HINT</ID><Text>Choose Up, Middle for two guides, or Up, Middle, Down for three. Up/Down lie on XY; Middle is spatial. Conic sections form the surface; adjust rho, Mirror Z and patch subdivision.</Text></TextItem>
+  <TextItem><ID>SurfaceTrimSketch</ID><Text>Trim By Sketch</Text></TextItem>
+  <TextItem><ID>SurfaceTrimSketch_HINT</ID><Text>Select a surface and a Sketch. Keep cutout creates a separate surface for glass or another material. Projection runs in both directions along the Sketch normal.</Text></TextItem>
+  <TextItem><ID>RotateLightButton</ID><Text>Light</Text></TextItem>
+  <TextItem><ID>RotateLightButton_HINT</ID><Text>Hold the left mouse button and drag left or right to rotate lighting. Arrow keys also rotate lighting.</Text></TextItem>
+  <TextItem>
+    <ID>Array Along Curve</ID>
+    <Text>Array Along Curve</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Place on curve</ID>
+    <Text>Place on curve</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Rotate along curve</ID>
+    <Text>Rotate along curve</Text>
+  </TextItem>
+  <TextItem>
+    <ID>End scale factor</ID>
+    <Text>End scale factor</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Anchor point</ID>
+    <Text>Anchor point</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Scale changes from 1 at the start to the end factor. With Place on curve off, the original is the first member.</ID>
+    <Text>Scale changes from 1 at the start to the end factor. With Place on curve off, the original is the first member.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Select source objects and a separate nonzero-length guide curve.</ID>
+    <Text>Select source objects and a separate nonzero-length guide curve.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Preview paused: about %1 objects (preview limit: %2). Reduce quantity to resume, or press OK to create the full array.</ID>
+    <Text>Preview paused: about %1 objects (preview limit: %2). Reduce quantity to resume, or press OK to create the full array.</Text>
+  </TextItem>
+  <TextItem><ID>ProfilePrimitives</ID><Text>Profile Primitives</Text></TextItem>
+  <TextItem><ID>ProfilePrimitives_HINT</ID><Text>Create a profile primitive. Choose a type and edit its guides and profile parameters.</Text></TextItem>
+  <TextItem><ID>ProfilePrimitiveType</ID><Text>Primitive type</Text></TextItem>
+  <TextItem><ID>ProfilePrimitiveReset</ID><Text>Reset profile parameters</Text></TextItem>
+  <TextItem><ID>ProfilePrimitiveGuides</ID><Text>Create default guides</Text></TextItem>
+  <TextItem><ID>ProfilePrimitiveReady</ID><Text>Preview ready. Accept, then edit the guide splines to reshape the primitive.</Text></TextItem>
+  <TextItem><ID>BodyBlade</ID><Text>Blade</Text></TextItem>
+  <TextItem><ID>BodyAdapter</ID><Text>Adapter</Text></TextItem>
+  <TextItem><ID>BodyBoat</ID><Text>Boat</Text></TextItem>
+  <TextItem><ID>BodyTower</ID><Text>Tower</Text></TextItem>
+  <TextItem><ID>BodyConic</ID><Text>Body Conic</Text></TextItem>
+  <TextItem><ID>BodyCar</ID><Text>Car</Text></TextItem>
+  <TextItem><ID>BodySUP</ID><Text>SUP Board</Text></TextItem>
+  <TextItem><ID>BodyShip</ID><Text>Ship</Text></TextItem>
+  <TextItem><ID>BodyVehicle</ID><Text>Vehicle</Text></TextItem>
+  <TextItem><ID>BodyComb</ID><Text>Massage Comb</Text></TextItem>
+  <TextItem><ID>BodyBottle1</ID><Text>Bottle-1</Text></TextItem>
+  <TextItem><ID>BodyBottle2</ID><Text>Bottle-2</Text></TextItem>
+  <TextItem><ID>BodyMouse</ID><Text>Mouse</Text></TextItem>
+  <TextItem><ID>BodyCockpit</ID><Text>Cockpit</Text></TextItem>
+  <TextItem><ID>BladeTipTwist</ID><Text>Tip twist</Text></TextItem>
+  <TextItem><ID>BodyHandle</ID><Text>Curved Handle</Text></TextItem>
+  <TextItem><ID>BodyCanopy</ID><Text>Canopy</Text></TextItem>
+  <TextItem><ID>BodyCrestedDrop</ID><Text>Crested Drop</Text></TextItem>
+  <TextItem><ID>PrimitiveAxisGuide</ID><Text>Axis (3D)</Text></TextItem>
+  <TextItem><ID>PrimitiveWidthGuide</ID><Text>Half-width (XZ)</Text></TextItem>
+  <TextItem><ID>PrimitiveThicknessGuide</ID><Text>Half-thickness (XY)</Text></TextItem>
+  <TextItem><ID>PrimitiveFrontGuide</ID><Text>Front boundary</Text></TextItem>
+  <TextItem><ID>PrimitiveRearGuide</ID><Text>Rear boundary</Text></TextItem>
+  <TextItem><ID>PrimitiveSilhouetteGuide</ID><Text>Side silhouette (XY)</Text></TextItem>
+  <TextItem><ID>PrimitiveRidgeGuide</ID><Text>Ridge line (XY)</Text></TextItem>
+  <TextItem><ID>PrimitiveAxisBend</ID><Text>Axis bend</Text></TextItem>
+  <TextItem><ID>PrimitiveWidthScale</ID><Text>Width scale</Text></TextItem>
+  <TextItem><ID>PrimitiveThicknessScale</ID><Text>Thickness scale</Text></TextItem>
+  <TextItem><ID>PrimitiveTransverseBulge</ID><Text>Transverse bulge</Text></TextItem>
+  <TextItem><ID>PrimitiveCanopyThickness</ID><Text>Canopy thickness</Text></TextItem>
+  <TextItem><ID>PrimitiveRidgeScale</ID><Text>Ridge height scale</Text></TextItem>
+  <TextItem><ID>PrimitiveLowerDepth</ID><Text>Lower depth scale</Text></TextItem>
+  <TextItem><ID>BodyLegTapered</ID><Text>Chair Leg - Tapered</Text></TextItem>
+  <TextItem><ID>BodyLegSaber</ID><Text>Chair Leg - Saber</Text></TextItem>
+  <TextItem><ID>BodyLegCabriole</ID><Text>Chair Leg - Cabriole</Text></TextItem>
+  <TextItem><ID>ChairLegAxis</ID><Text>Leg axis (3D)</Text></TextItem>
+  <TextItem><ID>ChairLegHeight</ID><Text>Leg height</Text></TextItem>
+  <TextItem><ID>ChairLegLeanX</ID><Text>Seat offset X</Text></TextItem>
+  <TextItem><ID>ChairLegLeanY</ID><Text>Seat offset Y</Text></TextItem>
+  <TextItem><ID>ChairLegCircle</ID><Text>Circle</Text></TextItem>
+  <TextItem><ID>ChairLegOval</ID><Text>Oval</Text></TextItem>
+  <TextItem><ID>ChairLegRoundedRect</ID><Text>Rounded rectangle</Text></TextItem>
+  <TextItem><ID>ChairLeg0shape</ID><Text>Foot: section</Text></TextItem>
+  <TextItem><ID>ChairLeg0width</ID><Text>Foot: width</Text></TextItem>
+  <TextItem><ID>ChairLeg0depth</ID><Text>Foot: depth</Text></TextItem>
+  <TextItem><ID>ChairLeg0rounding</ID><Text>Foot: rounding</Text></TextItem>
+  <TextItem><ID>ChairLeg0rotation</ID><Text>Foot: rotation</Text></TextItem>
+  <TextItem><ID>ChairLeg1shape</ID><Text>Neck: section</Text></TextItem>
+  <TextItem><ID>ChairLeg1width</ID><Text>Neck: width</Text></TextItem>
+  <TextItem><ID>ChairLeg1depth</ID><Text>Neck: depth</Text></TextItem>
+  <TextItem><ID>ChairLeg1rounding</ID><Text>Neck: rounding</Text></TextItem>
+  <TextItem><ID>ChairLeg1rotation</ID><Text>Neck: rotation</Text></TextItem>
+  <TextItem><ID>ChairLeg2shape</ID><Text>Knee: section</Text></TextItem>
+  <TextItem><ID>ChairLeg2width</ID><Text>Knee: width</Text></TextItem>
+  <TextItem><ID>ChairLeg2depth</ID><Text>Knee: depth</Text></TextItem>
+  <TextItem><ID>ChairLeg2rounding</ID><Text>Knee: rounding</Text></TextItem>
+  <TextItem><ID>ChairLeg2rotation</ID><Text>Knee: rotation</Text></TextItem>
+  <TextItem><ID>ChairLeg3shape</ID><Text>Seat: section</Text></TextItem>
+  <TextItem><ID>ChairLeg3width</ID><Text>Seat: width</Text></TextItem>
+  <TextItem><ID>ChairLeg3depth</ID><Text>Seat: depth</Text></TextItem>
+  <TextItem><ID>ChairLeg3rounding</ID><Text>Seat: rounding</Text></TextItem>
+  <TextItem><ID>ChairLeg3rotation</ID><Text>Seat: rotation</Text></TextItem>
+  <TextItem><ID>ChairLegEditSection</ID><Text>Edit section</Text></TextItem>
+  <TextItem><ID>ChairLegFootStation</ID><Text>Foot (floor)</Text></TextItem>
+  <TextItem><ID>ChairLegNeckStation</ID><Text>Neck (22% height)</Text></TextItem>
+  <TextItem><ID>ChairLegKneeStation</ID><Text>Knee (68% height)</Text></TextItem>
+  <TextItem><ID>ChairLegSeatStation</ID><Text>Seat attachment</Text></TextItem>
+  <TextItem><ID>ChairLegReady</ID><Text>Ends stay on floor and seat planes. Choose a section to edit. For a circle, width is its diameter.</Text></TextItem>
+  <TextItem><ID>BodySole</ID><Text>Shoe Sole</Text></TextItem>
+  <TextItem><ID>SurfaceShoeUpper</ID><Text>Men's Shoe Upper (surfaces)</Text></TextItem>
+  <TextItem><ID>SurfaceShoeUpper_HINT</ID><Text>Build an open shoe upper from closed sole, form and collar contours.</Text></TextItem>
+  <TextItem><ID>ShoeOutline</ID><Text>Sole outline (XY)</Text></TextItem>
+  <TextItem><ID>ShoeForm</ID><Text>Upper form contour</Text></TextItem>
+  <TextItem><ID>ShoeCollar</ID><Text>Collar opening</Text></TextItem>
+  <TextItem><ID>ShoeThickness</ID><Text>Sole thickness</Text></TextItem>
+  <TextItem><ID>ShoeHeelRise</ID><Text>Heel rise</Text></TextItem>
+  <TextItem><ID>ShoeArchStart</ID><Text>Arch start</Text></TextItem>
+  <TextItem><ID>ShoeHeelStart</ID><Text>Heel block start</Text></TextItem>
+  <TextItem><ID>ShoeFullness</ID><Text>Upper fullness</Text></TextItem>
+  <TextItem><ID>ShoeHeight</ID><Text>Upper height scale</Text></TextItem>
+  <TextItem><ID>ShoePick</ID><Text>Pick a closed shoe contour.</Text></TextItem>
+  <TextItem><ID>ShoeUpperReady</ID><Text>Open shoe upper ready. The three closed contours control the lower edge, fullness and collar opening.</Text></TextItem>
+  <TextItem><ID>ShoeSoleReady</ID><Text>Sole ready. Edit its closed XY outline to reshape the toe, waist and heel.</Text></TextItem>
+  <TextItem><ID>SurfaceMatch</ID><Text>Match Surfaces</Text></TextItem>
+  <TextItem><ID>SurfaceSplitIso</ID><Text>Split Surface by Isoline</Text></TextItem>
+  <TextItem><ID>TopologyWholeBody</ID><Text>Whole surface body</Text></TextItem>
+  <TextItem><ID>TopologyFirst</ID><Text>Change first</Text></TextItem>
+  <TextItem><ID>TopologySecond</ID><Text>Change second</Text></TextItem>
+  <TextItem><ID>TopologyBoth</ID><Text>Change both</Text></TextItem>
+  <TextItem><ID>TopologyContinuity</ID><Text>Continuity</Text></TextItem>
+  <TextItem><ID>TopologyIsoline</ID><Text>Isoline</Text></TextItem>
+  <TextItem><ID>TopologyPosition</ID><Text>Position</Text></TextItem>
+  <TextItem><ID>TopologyModify</ID><Text>Modify</Text></TextItem>
+  <TextItem><ID>TopologyG1</ID><Text>G1 - tangent</Text></TextItem>
+  <TextItem><ID>TopologyG2</ID><Text>G2 - curvature</Text></TextItem>
+  <TextItem><ID>TopologyPick</ID><Text>Select surface faces.</Text></TextItem>
+  <TextItem><ID>TopologyReset</ID><Text>Select again</Text></TextItem>
+  <TextItem><ID>TopologyU</ID><Text>U = constant</Text></TextItem>
+  <TextItem><ID>TopologyV</ID><Text>V = constant</Text></TextItem>
+  <TextItem><ID>SurfaceMatch_HINT</ID><Text>Match tangent or curvature continuity along a shared full spline boundary.</Text></TextItem>
+  <TextItem><ID>SurfaceSplitIso_HINT</ID><Text>Split a rectangular surface along a U or V isoline without changing its shape.</Text></TextItem>
+  <TextItem><ID>TopologyMatchHelp</ID><Text>Select two patches sharing one complete boundary. The order is shown below. G1/G2 changes nearby control rows; the opposite boundary stays fixed. Rational and trimmed patches are not supported yet.</Text></TextItem>
+  <TextItem><ID>TopologySplitHelp</ID><Text>Select a complete rectangular surface patch. The preview seam shows the cut. Two independent surfaces will be created.</Text></TextItem>
+  <TextItem><ID>TopologyFirstPicked</ID><Text>First: object %1, face %2. Select the second face.</Text></TextItem>
+  <TextItem><ID>TopologyMatched</ID><Text>Preview: two separate faces, %1 boundary matching. Join afterwards to sew them.</Text></TextItem>
+  <TextItem><ID>TopologySplitReady</ID><Text>Preview: two independent surface parts; shape preserved.</Text></TextItem>
+  <TextItem><ID>TopologyTrimError</ID><Text>This operation currently requires a complete rectangular UV patch (no trimmed boundaries or holes).</Text></TextItem>
+  <TextItem><ID>TopologyRationalError</ID><Text>Matching rational patches is not supported yet.</Text></TextItem>
+  <TextItem><ID>TopologyBoundaryError</ID><Text>Select patches sharing one full boundary with matching parameterization. Use Bridge for a gap.</Text></TextItem>
+  <TextItem><ID>TopologySewn</ID><Text>Sewn: %1 faces in one surface body; shape preserved</Text></TextItem>
+  <TextItem><ID>SurfaceOffset</ID><Text>Offset Surface</Text></TextItem>
+  <TextItem><ID>SurfaceOffset_HINT</ID><Text>Select a surface face and set a signed normal offset. The source is preserved.</Text></TextItem>
+  <TextItem><ID>SurfaceOffsetHint</ID><Text>Select a surface face. Positive distance follows its normal; negative distance reverses the offset. The source is preserved.</Text></TextItem>
+  <TextItem><ID>SurfaceOffsetSelect</ID><Text>Select a surface face.</Text></TextItem>
+  <TextItem><ID>SurfaceOffsetCreate</ID><Text>Create Offset Surface</Text></TextItem>
+  <TextItem><ID>SurfaceOffsetReady</ID><Text>Offset preview ready.</Text></TextItem>
+  <TextItem><ID>SurfaceOffsetZero</ID><Text>Offset distance must be different from zero.</Text></TextItem>
+  <TextItem><ID>SurfaceOffsetFailed</ID><Text>Cannot offset this surface. Reduce the distance or select a separate face.</Text></TextItem>
+  <TextItem><ID>SurfaceOffsetSource</ID><Text>Select a surface or a face, not a solid body.</Text></TextItem>
+  <TextItem><ID>SurfaceOffsetReverse</ID><Text>Reverse direction</Text></TextItem>
+  <TextItem><ID>SurfaceDisplayMenu</ID><Text>Surface Display</Text></TextItem>
+  <TextItem><ID>SurfaceDisplayIsoline</ID><Text>Isoline UV</Text></TextItem>
+  <TextItem><ID>SurfaceDisplayNormal</ID><Text>Normal</Text></TextItem>
+  <TextItem><ID>SurfaceReverseClickHint</ID><Text>Reverse Normals: click a surface to reverse it; Esc to finish.</Text></TextItem>
+  <TextItem><ID>SurfaceReverseClickDone</ID><Text>Normals reversed. Click another surface; Esc to finish.</Text></TextItem>
+  <TextItem><ID>SurfaceReverseFinished</ID><Text>Reverse Normals finished.</Text></TextItem>
+  <TextItem><ID>TextToCurvesTitle</ID><Text>Text to Curves</Text></TextItem>
+  <TextItem><ID>TextToCurvesHint</ID><Text>Text to Curves: click text; Esc to cancel.</Text></TextItem>
+  <TextItem><ID>TextToCurvesEmpty</ID><Text>Text to Curves: this text has no outlines.</Text></TextItem>
+  <TextItem><ID>TextToCurvesDone</ID><Text>Text converted to planar sketches.</Text></TextItem>
+  <TextItem><ID>Section graphs (rounded rectangle)</ID><Text>Section graphs (rounded rectangle)</Text></TextItem>
+  <TextItem><ID>Drag points. Double-click to add a point.</ID><Text>Drag points. Double-click to add a point.</Text></TextItem>
+  <TextItem><ID>Add point</ID><Text>Add point</Text></TextItem>
+  <TextItem><ID>Remove point</ID><Text>Remove point</Text></TextItem>
+  <TextItem><ID>Section count</ID><Text>Section count</Text></TextItem>
+  <TextItem><ID>Section Sketch</ID><Text>Section Sketch</Text></TextItem>
+  <TextItem><ID>Section Sketch created. Double-click to edit its contour.</ID><Text>Section Sketch created. Double-click to edit its contour.</Text></TextItem>
+  <TextItem><ID>Bottle-3 (Bezier sections)</ID><Text>Bottle-3 (Bezier sections)</Text></TextItem>
+  <TextItem><ID>Upper guide (YZ)</ID><Text>Upper guide (YZ)</Text></TextItem>
+  <TextItem><ID>Lower guide (YZ)</ID><Text>Lower guide (YZ)</Text></TextItem>
+  <TextItem><ID>Top drop / height</ID><Text>Top drop / height</Text></TextItem>
+  <TextItem><ID>Bottom rise / height</ID><Text>Bottom rise / height</Text></TextItem>
+  <TextItem><ID>Bottom run / width</ID><Text>Bottom run / width</Text></TextItem>
+  <TextItem><ID>Top bulge / height</ID><Text>Top bulge / height</Text></TextItem>
+  <TextItem><ID>Bottom bulge / height</ID><Text>Bottom bulge / height</Text></TextItem>
+  <TextItem><ID>Left bulge / width</ID><Text>Left bulge / width</Text></TextItem>
+  <TextItem><ID>Right bulge / width</ID><Text>Right bulge / width</Text></TextItem>
+  <TextItem><ID>Top left radius / smaller size</ID><Text>Top left radius / smaller size</Text></TextItem>
+  <TextItem><ID>Bottom left radius / smaller size</ID><Text>Bottom left radius / smaller size</Text></TextItem>
+  <TextItem><ID>Bottom right radius / smaller size</ID><Text>Bottom right radius / smaller size</Text></TextItem>
+  <TextItem><ID>Top right radius / smaller size</ID><Text>Top right radius / smaller size</Text></TextItem>
+  <TextItem><ID>Bezier sections ready. Graphs use percentages; both guides define the frame mirrored across Z=0.</ID><Text>Bezier sections ready. Graphs use percentages; both guides define the frame mirrored across Z=0.</Text></TextItem>
+  <TextItem><ID>Catmull-Clark Subdivision...</ID><Text>Catmull-Clark Subdivision...</Text></TextItem>
+  <TextItem><ID>Shading</ID><Text>Shading</Text></TextItem>
+  <TextItem><ID>Shade Smooth</ID><Text>Shade Smooth</Text></TextItem>
+  <TextItem><ID>Shade Flat</ID><Text>Shade Flat</Text></TextItem>
+  <TextItem><ID>Subdivision level (0 disables smoothing):</ID><Text>Subdivision level (0 disables smoothing):</Text></TextItem>
+  <TextItem><ID>Cannot subdivide this mesh. Check manifold topology or reduce the level (limit: 1,000,000 faces).</ID><Text>Cannot subdivide this mesh. Check manifold topology or reduce the level (limit: 1,000,000 faces).</Text></TextItem>
+  <TextItem><ID>Add Sharp Edges</ID><Text>Add Sharp Edges</Text></TextItem>
+  <TextItem><ID>Minimum angle between adjacent surface normals.</ID><Text>Minimum angle between adjacent surface normals.</Text></TextItem>
+  <TextItem><ID>Angle</ID><Text>Angle</Text></TextItem>
+  <TextItem><ID>Drag: orange top, blue bottom, yellow seam. Release to rebuild. Esc cancels.</ID><Text>Drag: orange top, blue bottom, yellow seam. Release to rebuild. Esc cancels.</Text></TextItem>
+  <TextItem><ID>Upper seam / width</ID><Text>Upper seam / width</Text></TextItem>
+  <TextItem>
+    <ID>Freeze</ID>
+    <Text>Freeze</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Unfreeze object</ID>
+    <Text>Unfreeze object</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Freeze object (visible, not selectable or editable)</ID>
+    <Text>Freeze object (visible, not selectable or editable)</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Make Clone</ID>
+    <Text>Make Clone</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Link solid copies to the source body. Other objects are copied normally.</ID>
+    <Text>Link solid copies to the source body. Other objects are copied normally.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Associative Clone: click a solid; Esc to cancel</ID>
+    <Text>Associative Clone: click a solid; Esc to cancel</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceAlignment</ID>
+    <Text>Smart Hybrid Alignment</Text>
+  </TextItem>
+  <TextItem>
+    <ID>AlignmentUBias</ID>
+    <Text>U distribution</Text>
+  </TextItem>
+  <TextItem>
+    <ID>AlignmentVBias</ID>
+    <Text>V distribution</Text>
+  </TextItem>
+  <TextItem>
+    <ID>AlignmentReset</ID>
+    <Text>Reset distribution</Text>
+  </TextItem>
+  <TextItem>
+    <ID>AlignmentPreview</ID>
+    <Text>Face accepted. Change U/V and watch the yellow grid. Shape and seams stay fixed. Click OK to apply.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>AlignmentHint</ID>
+    <Text>1. Click a face of the surface or solid. 2. Change U or V to move the yellow grid lines. Zero keeps the original spacing; positive values concentrate lines near the start, negative near the end. 3. Click OK to apply. The shape and seams stay fixed; the body stays whole.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>AlignmentPickFace</ID>
+    <Text>Click a face in the viewport. The yellow grid will appear on the accepted face.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceMoveSeam</ID>
+    <Text>Move Surface Seam</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SeamPosition</ID>
+    <Text>Seam position</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SeamHint</ID>
+    <Text>Select two neighboring faces of the same body. 50% is the original seam; smaller values shrink the first face, larger values expand it. The yellow line shows the new seam. The outer boundary and body shape stay fixed.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SeamPick</ID>
+    <Text>Select the first face, then its neighbor on the same body.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SeamSameBody</ID>
+    <Text>Select the second face on the same body.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SeamReady</ID>
+    <Text>Preview ready. Move the seam position, then click OK. 50% restores the original boundary.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceBoundaryGraph</ID>
+    <Text>Boundary on Surface</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BoundaryCapture</ID>
+    <Text>Use selected region</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BoundaryHint</ID>
+    <Text>Select a connected region of faces, then click Use selected region. Choose its side and edit the graph. Movement scales the whole profile; negative values move inward. Shape is preserved.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BoundaryRegionSide</ID>
+    <Text>Region side</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BoundaryMovement</ID>
+    <Text>Movement</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BoundaryUStart</ID>
+    <Text>U start</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BoundaryUEnd</ID>
+    <Text>U end</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BoundaryVStart</ID>
+    <Text>V start</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BoundaryVEnd</ID>
+    <Text>V end</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BoundaryReset</ID>
+    <Text>Reset graph</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BoundarySelectFaces</ID>
+    <Text>Select faces in the viewport.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BoundaryOneBody</ID>
+    <Text>Select a region on one body.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BoundaryReady</ID>
+    <Text>Region: %1 faces. Cyan dashed: original side. Yellow: new boundary (0-100% along the graph). Release a graph point to update the preview.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceBoundaryTitle</ID>
+    <Text>Boundary on Surface</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceBoundaryPick</ID>
+    <Text>Pick boundary on model</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceBoundarySettings</ID>
+    <Text>Graph settings</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceBoundaryHint</ID>
+    <Text>Select a connected region. Pick its boundary on the model, then click the surface to add spline points. Drag the points to shape the new boundary. The body shape is preserved.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceBoundaryPickHint</ID>
+    <Text>Click an edge of the selected region. Orbit with the usual navigation controls.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceBoundaryOuter</ID>
+    <Text>Click near an outer edge of the selected region.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceBoundaryLimit</ID>
+    <Text>Point limit reached. Move or delete an existing point.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceBoundaryReady</ID>
+    <Text>Region: %1 faces. Click the surface to add a point; drag a handle to move it. Delete removes an interior point. Cyan: original boundary. Yellow: new spline. Faces update on release.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BoundarySymmetry</ID>
+    <Text>Symmetry</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BoundarySavedMissing</ID>
+    <Text>Saved boundary data or its source is missing. The existing body was preserved.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BoundaryMirrorMissing</ID>
+    <Text>No matching mirrored faces on this body. Choose another symmetry plane.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BoundaryMirrorOverlap</ID>
+    <Text>The selected and mirrored strips overlap. Choose a region on one side of the symmetry plane.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceGraphOffset</ID>
+    <Text>Region Offset by Graphs</Text>
+  </TextItem>
+  <TextItem>
+    <ID>GraphOffsetHint</ID>
+    <Text>Select a rectangular region of faces (one or more rows). Offset = coefficient x U graph x V graph, along the surface normal. The perimeter stays fixed. Both graphs affect the entire region.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>GraphOffsetCoefficient</ID>
+    <Text>Offset coefficient</Text>
+  </TextItem>
+  <TextItem>
+    <ID>GraphOffsetU</ID>
+    <Text>Along region (U)</Text>
+  </TextItem>
+  <TextItem>
+    <ID>GraphOffsetV</ID>
+    <Text>Across region (V)</Text>
+  </TextItem>
+  <TextItem>
+    <ID>GraphOffsetReady</ID>
+    <Text>Offset preview ready. U runs along the region; V runs across it. Graph endpoints are fixed at zero.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>GraphOffsetMissing</ID>
+    <Text>Saved offset data or its source is missing.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>GraphOffsetStrip</ID>
+    <Text>Select one complete rectangular region without gaps or branches.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>GraphOffsetFit</ID>
+    <Text>Cannot fit this offset smoothly. Reduce the coefficient or simplify the graphs.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>GraphOffsetGap</ID>
+    <Text>Offset would leave a gap at the region perimeter.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>GraphOffsetQuad</ID>
+    <Text>Select a rectangular region of four-sided faces without holes.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceKnots</ID>
+    <Text>Increase Surface Knots</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceKnotsHint</ID>
+    <Text>Select one or more NURBS faces. Add knots per existing interval in U and V. Shape, boundaries and degree stay unchanged. Yellow lines show the control net, which may lie outside the surface.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceKnotsU</ID>
+    <Text>New knots per U interval</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceKnotsV</ID>
+    <Text>New knots per V interval</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceKnotsReady</ID>
+    <Text>Faces: %1. Control points: %2 -&gt; %3. Shape and degree preserved.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceKnotsCount</ID>
+    <Text>Add at least one knot in U or V (maximum 8 per interval).</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceKnotsNurbs</ID>
+    <Text>Knot insertion requires a NURBS surface.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceKnotsLimit</ID>
+    <Text>Too many control points. Reduce the knot count.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceShowPoints</ID>
+    <Text>Show Points</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfacePointTransform</ID>
+    <Text>Smart Hybrid Transform</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfacePointTransformCapture</ID>
+    <Text>Use selected surface</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfacePointTransformApply</ID>
+    <Text>Apply move</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfacePointTransformSoft</ID>
+    <Text>Soft Selection</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfacePointTransformHint</ID>
+    <Text>Select one complete NURBS face, then Use selected surface. Click or drag a box to select points. Shift adds, Ctrl toggles. Drag X/Y/Z arrows to move; the surface updates on release. Two outer control rows stay locked.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfacePointTransformStatus</ID>
+    <Text>Selected: %1. Grey: locked. Red: selected. Blue to yellow: soft influence.</Text>
+  </TextItem>
+
+  <TextItem><ID>PointInfluenceGraph</ID><Text>Influence graph: left = radius edge, right = selected points</Text></TextItem>
+  <TextItem><ID>PointResetGraph</ID><Text>Reset graph</Text></TextItem>
+  <TextItem><ID>PointInfluenceStatus</ID><Text>Selected: %1. Soft neighbours: %2. Green: 0%, yellow: 50%, red: 100%. Grey: locked.</Text></TextItem>
+<TextItem><ID>SelectionInteriorGraph</ID><Text>Influence graph: left = selection border, right = selection centre</Text></TextItem>
+<TextItem><ID>SelectionMoveCoefficient</ID><Text>Movement coefficient</Text></TextItem>
+<TextItem><ID>SelectionInteriorStatus</ID><Text>Selected: %1. Only selected points move. Green: 0%, yellow: 50%, red: 100%. Grey: locked.</Text></TextItem>
+<TextItem><ID>PointSmoothCurvature</ID><Text>Smooth curvature</Text></TextItem>
+<TextItem><ID>PointSmoothCurvatureHint</ID><Text>Smooth the selected movement profile. Unselected points stay fixed.</Text></TextItem>
+<TextItem><ID>HybridExtrudeTitle</ID><Text>Smart Hybrid Extrude</Text></TextItem>
+<TextItem><ID>HybridExtrudeHint</ID><Text>Select connected faces on one body. Arrows: Move. Rings: Rotate. White square: uniform Scale. Side walls follow the outer boundary. Preview updates on release.</Text></TextItem>
+<TextItem><ID>HybridExtrudeReady</ID><Text>Extrusion ready. Move, rotate and scale the cap.</Text></TextItem>
+<TextItem><ID>HybridExtrudeStart</ID><Text>Move the cap away from the surface, then rotate or scale it.</Text></TextItem>
+<TextItem><ID>SketchPrimitive.U</ID><Text>Center U</Text></TextItem>
+<TextItem><ID>SketchPrimitive.V</ID><Text>Center V</Text></TextItem>
+<TextItem><ID>SketchPrimitive.Axis1</ID><Text>First semi-axis</Text></TextItem>
+<TextItem><ID>SketchPrimitive.Axis2</ID><Text>Second semi-axis</Text></TextItem>
+<TextItem><ID>SketchPrimitive.Angle</ID><Text>Rotation (degrees)</Text></TextItem>
+<TextItem><ID>SketchPrimitive.Sides</ID><Text>Number of sides</Text></TextItem>
+<TextItem><ID>SketchPrimitive.EditHint</ID><Text>Sketch: double-click a figure to edit its parameters, or a contour to edit its nodes.</Text></TextItem>
+<TextItem><ID>SketchPrimitive.Circle</ID><Text>Circle</Text></TextItem>
+<TextItem><ID>SketchPrimitive.Ellipse</ID><Text>Ellipse</Text></TextItem>
+<TextItem><ID>SketchPrimitive.Polygon</ID><Text>Polygon</Text></TextItem>
+<TextItem><ID>SketchPrimitive.CombinedTool</ID><Text>Ellipse / Circle: click center, then frame corner. Hold Shift for a circle.</Text></TextItem>
+<TextItem><ID>SketchPrimitive.CornerPrompt</ID><Text>Click frame corner. Hold Shift for a circle.</Text></TextItem>
+<TextItem><ID>SketchPrimitive.LiveTitle</ID><Text>Figure parameters</Text></TextItem>
+<TextItem><ID>SketchPrimitive.RadiusAxis</ID><Text>Radius / first semi-axis</Text></TextItem>
+<TextItem><ID>SketchPrimitive.Full</ID><Text>Full figure</Text></TextItem>
+<TextItem><ID>SketchPrimitive.Arc</ID><Text>Arc</Text></TextItem>
+<TextItem><ID>SketchPrimitive.Pie</ID><Text>Pie sector</Text></TextItem>
+<TextItem><ID>SketchPrimitive.Mode</ID><Text>Figure type</Text></TextItem>
+<TextItem><ID>SketchPrimitive.Start</ID><Text>Start angle (degrees)</Text></TextItem>
+<TextItem><ID>SketchPrimitive.Sweep</ID><Text>Sweep angle (degrees)</Text></TextItem>
+<TextItem><ID>SketchBoolean.Title</ID><Text>Sketch Boolean</Text></TextItem>
+<TextItem><ID>SketchBoolean.Union</ID><Text>Union contours</Text></TextItem>
+<TextItem><ID>SketchBoolean.Cut</ID><Text>Subtract contours</Text></TextItem>
+<TextItem><ID>SketchBoolean.UnionTip</ID><Text>Select two closed contours to unite.</Text></TextItem>
+<TextItem><ID>SketchBoolean.CutTip</ID><Text>Select first contour, then the contour to subtract.</Text></TextItem>
+<TextItem><ID>SketchBoolean.ChooseSketch</ID><Text>Sketch Boolean: select a sketch with two closed contours.</Text></TextItem>
+<TextItem><ID>SketchBoolean.UnionFirst</ID><Text>Sketch union: click the first contour. Esc cancels.</Text></TextItem>
+<TextItem><ID>SketchBoolean.UnionSecond</ID><Text>Sketch union: click the second contour. Esc cancels.</Text></TextItem>
+<TextItem><ID>SketchBoolean.CutFirst</ID><Text>Sketch subtraction: click the contour to cut from. Esc cancels.</Text></TextItem>
+<TextItem><ID>SketchBoolean.CutSecond</ID><Text>Sketch subtraction: click the cutting contour. Esc cancels.</Text></TextItem>
+<TextItem><ID>SketchBoolean.Closed</ID><Text>Sketch Boolean: choose two closed, non-construction contours.</Text></TextItem>
+<TextItem><ID>SketchBoolean.Different</ID><Text>Sketch Boolean: choose two different closed contours.</Text></TextItem>
+<TextItem><ID>SketchBoolean.Canceled</ID><Text>Sketch Boolean canceled</Text></TextItem>
+<TextItem><ID>SketchBoolean.Completed</ID><Text>Sketch Boolean completed</Text></TextItem>
+<TextItem><ID>SketchBoolean.InvalidSource</ID><Text>Sketch Boolean: invalid source contour.</Text></TextItem>
+<TextItem><ID>SketchBoolean.UnionFailed</ID><Text>Sketch Boolean: union failed.</Text></TextItem>
+<TextItem><ID>SketchBoolean.CutFailed</ID><Text>Sketch Boolean: subtraction failed.</Text></TextItem>
+<TextItem><ID>SketchBoolean.InvalidResult</ID><Text>Sketch Boolean: invalid result.</Text></TextItem>
+<TextItem><ID>SketchBoolean.ConvertFailed</ID><Text>Sketch Boolean: cannot convert the result to editable curves.</Text></TextItem>
+<TextItem><ID>SketchBoolean.EmptyBoundary</ID><Text>Sketch Boolean: empty boundary.</Text></TextItem>
+<TextItem><ID>SketchBoolean.OpenBoundary</ID><Text>Sketch Boolean: result boundary is not closed.</Text></TextItem>
+<TextItem><ID>SketchBoolean.InvalidBoundary</ID><Text>Sketch Boolean: invalid editable boundary.</Text></TextItem>
+<TextItem><ID>SketchBoolean.IdLimit</ID><Text>Sketch Boolean: contour ID limit reached.</Text></TextItem>
+<TextItem><ID>SketchBoolean.GeometryFailed</ID><Text>Sketch Boolean: geometry calculation failed.</Text></TextItem>
+<TextItem><ID>SketchQuickMenu.SweepProfile</ID><Text>Swept requires one closed profile contour.</Text></TextItem>
+<TextItem><ID>CurveNode.Title</ID><Text>3D Point modeling</Text></TextItem>
+<TextItem><ID>CurveNode.Corner</ID><Text>Corner node</Text></TextItem>
+<TextItem><ID>CurveNode.Control</ID><Text>Control node</Text></TextItem>
+<TextItem><ID>CurveNode.Smooth</ID><Text>Smooth node</Text></TextItem>
+<TextItem><ID>CurveNode.Fillets</ID><Text>Remove node fillets before changing node types.</Text></TextItem>
+<TextItem><ID>BodySectionSketch</ID><Text>Section Sketch</Text></TextItem>
+<TextItem><ID>BodySectionSketch_HINT</ID><Text>Select or click a Solid body, then define the cutting plane using the offered methods. Creates an editable planar sketch of the section. Double-click the sketch to edit its contours.</Text></TextItem>
+<TextItem><ID>TextToCurves</ID><Text>Text to Curves</Text></TextItem>
+<TextItem><ID>TextToCurves_HINT</ID><Text>Activate the tool, then click a text object. Converts letter outlines into planar sketches for editing and extrusion. Press Esc to cancel.</Text></TextItem>
+<TextItem><ID>Centered</ID><Text>Centered</Text></TextItem>
+<TextItem><ID>Build the box base around the first point.</ID><Text>Build the box base around the first point.</Text></TextItem>
 </ClassArray.TextItem>

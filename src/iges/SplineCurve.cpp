@@ -1,3 +1,4 @@
+#include "../Diagnostics.h"
 #include "../OpenGLCompat.h"
 
 #include "SplineCurve.h"
@@ -716,6 +717,7 @@ int CSplineCurve::ControlDelta(int num, double dopusk, double ds, int* pr)
 
 void CSplineCurve::print()
 {
+    if constexpr (!Dom3DDiagnosticsEnabled) return;
     FILE* strm = std::fopen("c:\\temp\\stdout.txt", "a+");
     if (!strm)
         return;
@@ -727,6 +729,7 @@ void CSplineCurve::print()
 
 void CSplineCurve::printS()
 {
+    if constexpr (!Dom3DDiagnosticsEnabled) return;
     FILE* strm = std::fopen("c:\\temp\\stdout.txt", "a+");
     if (!strm)
         return;
@@ -738,6 +741,7 @@ void CSplineCurve::printS()
 
 void CSplineCurve::printKnots()
 {
+    if constexpr (!Dom3DDiagnosticsEnabled) return;
     FILE* strm = std::fopen("c:\\temp\\stdout.txt", "a+");
     if (!strm)
         return;
@@ -748,6 +752,7 @@ void CSplineCurve::printKnots()
 }
 void CSplineCurve::printToFile(std::string Name)
 {
+    if constexpr (!Dom3DDiagnosticsEnabled) return;
     std::string fileName = std::string("c:\\temp\\") + Name + ".txt";
     FILE* strm = std::fopen(fileName.c_str(), "a+");
     if (nullptr == strm)

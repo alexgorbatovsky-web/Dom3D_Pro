@@ -13,6 +13,7 @@ struct Scheme {
     QString id;
     QString name;
     QColor window, base, button, text, accent, border;
+    QColor activeButton;
 };
 QVector<Scheme> Presets();
 QPalette Palette(const Scheme& scheme);

@@ -8,6 +8,8 @@
 #include <BRepTools.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <Geom_Surface.hxx>
+#include <GeomAdaptor_Surface.hxx>
+#include <ElSLib.hxx>
 #include <Standard_Failure.hxx>
 #include <TopLoc_Location.hxx>
 #include <TopoDS.hxx>
@@ -16,6 +18,7 @@
 #include <gp_Trsf.hxx>
 
 #include <cmath>
+#include <limits>
 #include <mutex>
 #include <utility>
 
@@ -67,8 +70,7 @@ SurfaceUVMapping::SurfaceUVMapping(const CSurfaceFace* surface)
         // projector can return the opposite side of the generating arc.
         impl_->bounded_projection = BRepAdaptor_Surface(face).GetType()
             == GeomAbs_SurfaceOfRevolution;
-        if (impl_->bounded_projection)
-            BRepTools::UVBounds(face, impl_->u_min, impl_->u_max,
+        BRepTools::UVBounds(face, impl_->u_min, impl_->u_max,
                                impl_->v_min, impl_->v_max);
         impl_->valid = true;
     } catch (const Standard_Failure&) {
@@ -107,6 +109,24 @@ bool SurfaceUVMapping::Project(Vec3 point, SurfaceUVPoint& uv) const {
             projector->Init(dummy, impl_->surface);
         projector->Perform(projected_point);
         if (projector->NbPoints() < 1) {
+            // Float mesh nodes can fall just outside a trimmed analytic surface's
+            // parameter bounds. Invert its supporting surface directly; the trim
+            // domain is classified by the caller, not by the stationary solver.
+            GeomAdaptor_Surface analytic(impl_->surface);
+            double au = 0.0, av = 0.0;
+            switch (analytic.GetType()) {
+            case GeomAbs_Cylinder: ElSLib::Parameters(analytic.Cylinder(), projected_point, au, av); break;
+            case GeomAbs_Cone: ElSLib::Parameters(analytic.Cone(), projected_point, au, av); break;
+            case GeomAbs_Sphere: ElSLib::Parameters(analytic.Sphere(), projected_point, au, av); break;
+            case GeomAbs_Torus: ElSLib::Parameters(analytic.Torus(), projected_point, au, av); break;
+            default: au = std::numeric_limits<double>::quiet_NaN(); break;
+            }
+            if (std::isfinite(au) && std::isfinite(av)) {
+                // Select the equivalent branch belonging to this trimmed face.
+                if (analytic.IsUPeriodic()) au = unwrap_periodic(au, (impl_->u_min+impl_->u_max)*.5, analytic.UPeriod());
+                if (analytic.IsVPeriodic()) av = unwrap_periodic(av, (impl_->v_min+impl_->v_max)*.5, analytic.VPeriod());
+                uv = {au, av}; return true;
+            }
             return false;
         }
         Standard_Real u = 0.0;

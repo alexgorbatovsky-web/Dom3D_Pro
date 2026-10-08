@@ -28,7 +28,7 @@ QImage RenderMaterialSphereGL(const Material& material,int size,bool flat) {
     QDataStream cacheSettings(&payload,QIODevice::Append);
     cacheSettings<<flat;
     const auto& light=CMesh3D::GetLightingSettings();
-    cacheSettings<<size<<light.light_x<<light.light_y<<light.light_z<<light.ambient<<light.wrap_light<<light.diffuse
+    cacheSettings<<light.blinn_phong<<size<<light.light_x<<light.light_y<<light.light_z<<light.ambient<<light.wrap_light<<light.diffuse
         <<light.specular<<light.shininess_scale<<light.rim<<light.gamma<<light.environment_enabled
         <<QString::fromStdString(light.environment_path)<<light.environment_strength<<light.environment_rotation_degrees;
     QByteArray key=QCryptographicHash::hash(payload,QCryptographicHash::Sha256);
@@ -87,6 +87,17 @@ QImage RenderMaterialSphereGL(const Material& material,int size,bool flat) {
                 RestoreHiddenEdges() { CSolid::SetHiddenEdgeDrawingEnabled(false); }
                 ~RestoreHiddenEdges() { CSolid::SetHiddenEdgeDrawingEnabled(enabled); }
             } restore_hidden_edges;
+            // Zebra belongs to the editing viewport, not the material. Never
+            // bake its global analysis state into a cached library thumbnail.
+            struct RestoreZebraAnalysis {
+                bool enabled = CMesh3D::IsZebraAnalysisEnabled();
+                bool target = CMesh3D::IsZebraAnalysisTarget();
+                RestoreZebraAnalysis() { CMesh3D::SetZebraAnalysisEnabled(false); }
+                ~RestoreZebraAnalysis() {
+                    CMesh3D::SetZebraAnalysisEnabled(enabled);
+                    CMesh3D::SetZebraAnalysisTarget(target);
+                }
+            } restore_zebra_analysis;
             auto oldSolidMode=CSolid::GetDisplayMode();CSolid::SetDisplayMode(SolidDisplayMode::SurfacesAndEdges);
             auto oldMode=CMesh3D::GetDisplayMode();CMesh3D::SetDisplayMode(MeshDisplayMode::SurfaceMaterial);
             const bool oldOpenEdges=CMesh3D::IsOpenEdgeDisplayEnabled();CMesh3D::SetOpenEdgeDisplayEnabled(false);

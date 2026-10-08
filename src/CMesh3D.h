@@ -15,6 +15,7 @@ class CSurfaceFace;
 class CPolyline;
 
 struct ViewportLightingSettings {
+    bool blinn_phong = false;
     float light_x = -0.48f;
     float light_y = -0.72f;
     float light_z = -0.50f;
@@ -106,6 +107,8 @@ public:
 
     CMesh3D();
     explicit CMesh3D(std::string name);
+    CMesh3D(const CMesh3D& other);
+    CMesh3D& operator=(const CMesh3D& other);
     ~CMesh3D() override;
 
     const std::vector<Vec3>& GetVertices() const;
@@ -139,6 +142,12 @@ public:
         size_t* welded_vertex_count = nullptr,
         float* used_tolerance = nullptr);
     void GeneratePlanarUVs();
+    // Non-destructive display settings; geometry accessors retain the control mesh.
+    bool SetSubdivisionLevel(int level);
+    int GetSubdivisionLevel() const { return subdivision_level_; }
+    void SetShadingMode(int mode); // 0: imported normals, 1: smooth, 2: flat
+    int GetShadingMode() const { return shading_mode_; }
+    const CMesh3D& GetEvaluatedMesh() const;
 
     void Render();
     void Render3d(bool selected) const override;
@@ -194,6 +203,8 @@ public:
     bool Load(std::istream& stream);
     bool Create(CPolyline* pline, CVector3d dir, float dist);
     bool TrimByPline(CPolyline* pLine, CPoint3d pc, bool preserve_boundary = false);
+    // Legacy DivideFace: insert contour nodes, split by finite segments, keep pc's side.
+    bool TrimByDivideFace(CPolyline* pLine, CPoint3d pc);
     bool TrimByPlineTest(CPolyline* pLine, CPoint3d pc);
     bool KeepConnectedComponentAt(CPoint3d pc);
     bool SplitFaceByPoint(int face_index, int ind1, int ind2, const cVec2& pm);
@@ -233,6 +244,11 @@ private:
     std::vector<Vec3> normals_;
     std::vector<Face> faces_;
     std::vector<Edge> sharp_edges_;
+    int subdivision_level_ = 0;
+    int shading_mode_ = 0;
+    mutable std::unique_ptr<CMesh3D> evaluated_mesh_;
+    std::vector<Edge> subdivision_cage_edges_;
+    std::unique_ptr<CMesh3D> BuildEvaluatedMesh(int level) const;
     mutable unsigned int gpu_triangle_buffer_ = 0;
     mutable unsigned int gpu_wire_buffer_ = 0;
     mutable size_t gpu_triangle_vertex_count_ = 0;

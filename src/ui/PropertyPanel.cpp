@@ -1,5 +1,8 @@
 #include "DefaultDialogAccept.h"
 #include "PropertyPanel.h"
+#include "SectionGraphEditor.h"
+#include "BottleGraphEditor.h"
+#include "../Body1Builder.h"
 
 #include "LanguageManager.h"
 #include "MeasurementUnits.h"
@@ -39,11 +42,11 @@ public:
     ScaleGraphEditor(std::vector<double> values,
                      double minimum,
                      double maximum,
-                     QWidget* parent = nullptr)
+                     QWidget* parent = nullptr, double reference = 1.0)
         : QWidget(parent),
           values_(std::move(values)),
           minimum_(minimum),
-          maximum_(maximum) {
+          maximum_(maximum), reference_(std::clamp(reference,minimum,maximum)) {
         setMinimumSize(520, 280);
         setMouseTracking(true);
     }
@@ -84,14 +87,14 @@ protected:
             painter.drawLine(QPointF(area.left(), y), QPointF(area.right(), y));
         }
 
-        const double one_ratio = (1.0 - minimum_)
+        const double one_ratio = (reference_ - minimum_)
             / std::max(1.0e-9, maximum_ - minimum_);
         const double one_y = area.bottom() - area.height() * one_ratio;
         painter.setPen(QPen(QColor(88, 145, 194), 1.0, Qt::DashLine));
         painter.drawLine(QPointF(area.left(), one_y), QPointF(area.right(), one_y));
         painter.setPen(QColor(175, 180, 185));
         painter.drawText(QRectF(2.0, one_y - 9.0, 40.0, 18.0),
-                         Qt::AlignRight | Qt::AlignVCenter, QStringLiteral("1.00"));
+                         Qt::AlignRight | Qt::AlignVCenter, QString::number(reference_,'f',reference_==1?2:3));
         painter.drawText(QRectF(area.left(), area.bottom() + 8.0, area.width(), 20.0),
                          Qt::AlignCenter, QStringLiteral("Position along guide  0 — 100%"));
 
@@ -161,7 +164,7 @@ protected:
         for (int index = 0; index < static_cast<int>(values_.size()); ++index) {
             const QPointF delta = point_position(index) - event->position();
             if (delta.x() * delta.x() + delta.y() * delta.y() <= 144.0) {
-                values_[static_cast<size_t>(index)] = 1.0;
+                values_[static_cast<size_t>(index)] = reference_;
                 if (values_changed) values_changed(values_);
                 if (editing_finished) editing_finished(values_);
                 update();
@@ -182,6 +185,7 @@ private:
     }
 
     std::vector<double> values_;
+    double reference_ = 1.0;
     double minimum_ = 0.05;
     double maximum_ = 3.0;
     int active_point_ = -1;
@@ -291,6 +295,7 @@ bool IsLengthParameter(const ToolParameter& parameter) {
 bool IsIntegerParameter(const ToolParameter& parameter) {
     const std::string& id = parameter.id;
     return id == "qty"
+        || id == "turns"
         || id == "shelf_count"
         || id == "drawer_count"
         || id == "vertical_bars"
@@ -309,6 +314,7 @@ bool IsInternalPlacementParameter(const ToolParameter& parameter) {
         || parameter.id.rfind("width.scale.", 0) == 0
         || parameter.id.rfind("height.scale.", 0) == 0
         || parameter.id == "curve.count"
+        || parameter.id == "primitive.type.id"
         || (parameter.id.rfind("curve", 0) == 0
             && parameter.id.size() > 3
             && parameter.id.compare(parameter.id.size() - 3, 3, ".id") == 0)
@@ -322,6 +328,12 @@ bool IsInternalPlacementParameter(const ToolParameter& parameter) {
             && parameter.type != ToolParameterType::CatalogProduct)
         || parameter.id == "cutter.id"
         || parameter.id == "surface.id"
+        || parameter.id == "support1.id" || parameter.id == "support2.id"
+        || parameter.id == "support3.id" || parameter.id == "support4.id"
+        || parameter.id == "support1.face" || parameter.id == "support2.face"
+        || parameter.id == "support3.face" || parameter.id == "support4.face"
+        || parameter.id == "support1.edge" || parameter.id == "support2.edge"
+        || parameter.id == "support3.edge" || parameter.id == "support4.edge"
         || parameter.id == "host.wall.id"
         || parameter.id == "face.index"
         || parameter.id == "boolean.body_id"
@@ -457,6 +469,15 @@ bool IsPlaneParameterVisible(const ActiveParametricObject& active,
 
 bool IsFilletParameterVisible(const ActiveParametricObject& active,
                               const ToolParameter& parameter) {
+    if(active.tool_id=="SurfaceTwoView"&&(parameter.id.rfind("top.scale.",0)==0||parameter.id.rfind("bottom.scale.",0)==0))return false;
+    if(active.tool_id=="SurfaceTwoView"&&(parameter.id=="rho.bottom"||parameter.id=="bottom.graph")) {
+        for(const auto& p:active.parameters)if(p.id=="two.guides"&&p.value!=0)return false;
+    }
+    if(active.tool_id=="SurfaceFillet") {
+        if(parameter.id.rfind("normal",0)==0)return false;
+        const auto mode=std::find_if(active.parameters.begin(),active.parameters.end(),[](const auto& p){return p.id=="normal.mode";});
+        if(parameter.id=="solution"&&mode!=active.parameters.end()&&mode->value!=0)return false;
+    }
     if (active.tool_id != "fillet_edge" && active.tool_id != "fillet_all_edges") {
         return true;
     }
@@ -491,9 +512,13 @@ bool IsSliderParameter(const ActiveParametricObject& active,
         || tool_id == "SolidSphereTool"
         || tool_id == "SolidTorusTool"
         || tool_id == "SolidPrismTool"
+        || tool_id == "SolidFrameTool"
+        || tool_id == "SolidWireTool"
+        || tool_id == "SolidPolyhedronTool"
         || tool_id == "SolidSketchFeature"
         || tool_id == "SolidExtrudeTool"
         || tool_id == "SolidSweptTool"
+        || tool_id == "SurfaceSweptTool"
         || tool_id == "SolidSweepTwoRails"
         || tool_id == "SurfaceSweepTwoRails"
         || tool_id == "SolidExtrudeFace"
@@ -554,6 +579,7 @@ PropertyPanel::PropertyPanel(QWidget* parent, bool additional_parameters)
       form_(new QFormLayout(this)),
       additional_parameters_(additional_parameters) {
     form_->setContentsMargins(10, 8, 10, 8);
+    form_->setSizeConstraint(QLayout::SetMinimumSize);
     form_->setHorizontalSpacing(16);
     Clear();
 }
@@ -627,8 +653,74 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
     }
     RebuildForm();
 
+    const bool bottle=active_object_.tool_id=="BodyBottle3";
+    if(bottle) {
+        std::vector<ParametricParameterValue> saved;for(const auto& p:active_object_.parameters)saved.push_back({p.id,p.value});
+        auto* editor=new BottleGraphEditor(ReadBody1Parameters(saved).bottle_graphs,this);form_->addRow(editor);
+        editor->committed=[this](const std::vector<SectionLaw>& laws){
+            for(int g=0;g<12;++g){const auto prefix="bottle.graph."+std::to_string(g)+".";UpdateParameterValue(prefix+"count",laws[g].count);
+                for(int j=0;j<SectionLaw::capacity;++j){UpdateParameterValue(prefix+std::to_string(j)+".t",laws[g].position[j]);UpdateParameterValue(prefix+std::to_string(j)+".v",laws[g].value[j]);}}
+            emit ParametersChanged();
+        };
+    }
+    const bool chair_leg = active_object_.tool_id.rfind("BodyLeg", 0) == 0;
+    bool section_graphs=false;
+    if(chair_leg) {
+        std::vector<ParametricParameterValue> saved;
+        for(const auto& p:active_object_.parameters)saved.push_back({p.id,p.value});
+        const auto settings=ReadBody1Parameters(saved);
+        section_graphs=settings.leg.use_graphs;
+        auto* enabled=new QCheckBox(DomTranslate("Section graphs (rounded rectangle)"),this);
+        enabled->setObjectName("SectionGraphsEnabled");enabled->setChecked(section_graphs);form_->addRow(enabled);
+        connect(enabled,&QCheckBox::toggled,this,[this](bool on){
+            UpdateParameterValue("leg.graph.enabled",on?1:0);
+            QTimer::singleShot(0,this,[this]{SetActiveObject(active_object_);emit ParametersChanged();});
+        });
+        if(section_graphs) {
+            auto* editor=new SectionGraphEditor(settings.leg.graphs,settings.leg.height,this);form_->addRow(editor);
+            editor->committed=[this](const std::array<SectionLaw,3>& graphs){
+                for(int g=0;g<3;++g) {
+                    const auto prefix="leg.graph."+std::to_string(g)+".";
+                    UpdateParameterValue(prefix+"count",graphs[g].count);
+                    for(int i=0;i<SectionLaw::capacity;++i) {
+                        UpdateParameterValue(prefix+std::to_string(i)+".t",graphs[g].position[i]);
+                        UpdateParameterValue(prefix+std::to_string(i)+".v",graphs[g].value[i]);
+                    }
+                }
+                emit ParametersChanged();
+            };
+        }
+    }
+    const int chair_section = std::clamp(property("chairLegSectionIndex").toInt(), 0, 3);
+    bool chair_section_picker_added = false;
     for (int i = 0; i < static_cast<int>(active_object_.parameters.size()); ++i) {
         ToolParameter& parameter = active_object_.parameters[static_cast<size_t>(i)];
+        if(bottle&&parameter.id.rfind("bottle.graph.",0)==0)continue;
+        if(chair_leg && parameter.id.rfind("leg.graph.",0)==0)continue;
+        if(chair_leg && section_graphs && parameter.id.rfind("leg.section.",0)==0
+            && parameter.id.find("rotation")==std::string::npos)continue;
+        if (chair_leg && parameter.id.rfind("leg.section.", 0) == 0) {
+            if (!chair_section_picker_added) {
+                auto* section_picker = new QComboBox(this);
+                section_picker->setObjectName("chairLegSection");
+                section_picker->addItems({DomTranslate("Foot (floor)"), DomTranslate("Neck (22% height)"),
+                    DomTranslate("Knee (68% height)"), DomTranslate("Seat attachment")});
+                section_picker->setCurrentIndex(chair_section);
+                form_->addRow(DomTranslate("Edit section"), section_picker);
+                connect(section_picker, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index) {
+                    setProperty("chairLegSectionIndex", index);
+                    QTimer::singleShot(0, this, [this] { SetActiveObject(active_object_); });
+                });
+                chair_section_picker_added = true;
+            }
+            if (parameter.id.rfind("leg.section." + std::to_string(chair_section) + ".", 0) != 0) continue;
+        }
+        if (active_object_.tool_id == "SolidCylinder"
+            && (parameter.id == "base_chamfer" || parameter.id == "base_chamfer_size")
+            && std::none_of(active_object_.parameters.begin(), active_object_.parameters.end(),
+                [](const ToolParameter& p) { return p.id == "boolean.body_id" && p.value > 0.0; })) {
+            continue;
+        }
         if (IsInternalPlacementParameter(parameter)
             || !IsPlaneParameterVisible(active_object_, parameter)
             || !IsFilletParameterVisible(active_object_, parameter)
@@ -743,11 +835,21 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
 
         if (parameter.type == ToolParameterType::Checkbox) {
             auto* editor = new QCheckBox(this);
+            editor->setObjectName(QString::fromStdString("parameter_"+parameter.id));
             editor->setChecked(parameter.value >= 0.5);
+            editor->setEnabled(parameter.enabled);
             connect(editor, &QCheckBox::toggled, this, [this, i](bool checked) {
                 ToolParameter& changed =
                     active_object_.parameters[static_cast<size_t>(i)];
                 changed.value = checked ? 1.0 : 0.0;
+                if(active_object_.tool_id=="SurfaceSweptTool"&&changed.id=="auto_orientation") {
+                    for(const auto* id:{"angle","dx","dy"}) {
+                        if(auto* field=findChild<QDoubleSpinBox*>(QString("parameter_%1").arg(id))) {
+                            field->setEnabled(checked);
+                            if(auto* label=form_->labelForField(field))label->setEnabled(checked);
+                        }
+                    }
+                }
                 emit ParametersChanged();
                 if (IsCompactCabinetTool(active_object_.tool_id)
                     && (changed.id == "overhead"
@@ -786,6 +888,7 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
             }
             index = std::clamp(index, 0, std::max(0, editor->count() - 1));
             editor->setCurrentIndex(index);
+            editor->setEnabled(parameter.enabled);
             connect(editor, &QComboBox::currentIndexChanged, this,
                     [this, i, editor, material_library_index](int index) {
                 ToolParameter& parameter =
@@ -834,9 +937,11 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
                     ? parameter.option_values[static_cast<size_t>(index)]
                     : static_cast<double>(index);
                 emit ParametersChanged();
-                if (rebuild_plane_form || rebuild_catalog_form || rebuild_fillet_form) {
+                if (rebuild_plane_form || rebuild_catalog_form || rebuild_fillet_form
+                    || (active_object_.tool_id=="SurfaceTwoView"&&parameter.id=="two.guides")) {
                     QTimer::singleShot(0, this, [this]() {
                         SetActiveObject(active_object_);
+                        if(active_object_.tool_id=="SurfaceTwoView")emit ParametersChanged();
                     });
                 }
             });
@@ -846,9 +951,11 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
 
         if (parameter.type == ToolParameterType::Graph) {
             auto* edit_graph = new QPushButton(QStringLiteral("Edit…"), this);
+            edit_graph->setObjectName(QString::fromStdString("parameter_"+parameter.id));
+            edit_graph->setEnabled(parameter.enabled);
             const bool fillet_law = active_object_.tool_id == "fillet_edge"
                 || active_object_.tool_id == "fillet_all_edges";
-            edit_graph->setToolTip(fillet_law
+            edit_graph->setToolTip(active_object_.tool_id=="SurfaceTwoView" ? QStringLiteral("Conic rho along X at 0, 25, 50, 75 and 100%. Used when Use Rho Graphs is enabled.") : !parameter.enabled ? QStringLiteral("Scale graphs require a guide without sharp corners.") : fillet_law
                 ? QStringLiteral("Edit radius along the edge from 0 to 100%.")
                 : QStringLiteral("Edit scale along the guide. Double-click a point to reset it to 1.0."));
             connect(edit_graph, &QPushButton::clicked, this, [this, i]() {
@@ -882,7 +989,7 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
                 auto* layout = new QVBoxLayout(&dialog);
                 auto* graph = new ScaleGraphEditor(
                     original_values, graph_parameter.minimum,
-                    graph_parameter.maximum, &dialog);
+                    graph_parameter.maximum, &dialog, active_object_.tool_id=="SurfaceTwoView"?.4142135623730951:1.0);
                 const auto store_values = [this, parameter_indices](
                                               const std::vector<double>& values) {
                     for (size_t point = 0; point < parameter_indices.size(); ++point) {
@@ -936,7 +1043,7 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
             QStringLiteral("parameter_%1").arg(QString::fromStdString(parameter.id)));
         editor->setRange(parameter.minimum * display_factor, parameter.maximum * display_factor);
         editor->setSingleStep(parameter.step * display_factor);
-        editor->setDecimals(integer_parameter ? 0 : ((solid_transform_angle || degree_parameter) ? 1 : (length_parameter ? 3 : (parameter.step < 0.1 ? 2 : 1))));
+        editor->setDecimals(active_object_.tool_id=="SurfaceTwoView" ? (parameter.step==1 ? 0 : 4) : integer_parameter ? 0 : ((solid_transform_angle || degree_parameter) ? 1 : (length_parameter ? 3 : (parameter.step < 0.1 ? 2 : 1))));
         editor->setSuffix((solid_transform_angle || degree_parameter)
             ? QString::fromUtf8("°") : QString());
         editor->setValue(parameter.value * display_factor);
@@ -1040,6 +1147,13 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
             form_->addRow(drag_label, editor);
         } else {
             form_->addRow(QString::fromStdString(parameter.label), editor);
+        }
+        if(active_object_.tool_id=="SurfaceSweptTool"&&(parameter.id=="angle"||parameter.id=="dx"||parameter.id=="dy")) {
+            const auto automatic=std::find_if(active_object_.parameters.begin(),active_object_.parameters.end(),
+                [](const auto& p){return p.id=="auto_orientation";});
+            const bool enabled=automatic==active_object_.parameters.end()||automatic->value>=0.5;
+            editor->setEnabled(enabled);
+            if(auto* label=form_->labelForField(editor))label->setEnabled(enabled);
         }
     }
 
@@ -1250,4 +1364,12 @@ void PropertyPanel::RebuildForm() {
         delete item->widget();
         delete item;
     }
+}
+
+void PropertyPanel::SetBottleModelValue(int graph,int knot,double value,bool notify) {
+    if(active_object_.tool_id!="BodyBottle3"||(graph!=0&&graph!=1&&graph!=11)||knot<0||knot>=SectionLaw::capacity)return;
+    UpdateParameterValue("bottle.graph."+std::to_string(graph)+"."+std::to_string(knot)+".v",value);
+    if(auto* editor=findChild<QWidget*>("BottleGraphEditor"))
+        static_cast<BottleGraphEditor*>(editor)->SetModelValue(graph,knot,value);
+    if(notify)emit ParametersChanged();
 }

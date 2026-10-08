@@ -375,6 +375,54 @@ int main() try {
                 && left_tangent.x * right_tangent.x
                      + left_tangent.y * right_tangent.y > 0.0,
             "Bezier smoothness did not remain bidirectional.");
+    const auto smooth_at = [](const CSmartLine& sketch, size_t incoming, size_t outgoing) {
+        const auto a = sketch.GetLine(incoming)->GetTangent(1.0);
+        const auto b = sketch.GetLine(outgoing)->GetTangent(0.0);
+        const double lengths = std::hypot(a.x, a.y) * std::hypot(b.x, b.y);
+        return lengths > 1.e-12 && std::abs(a.x*b.y-a.y*b.x) / lengths < 1.e-10
+            && a.x*b.x+a.y*b.y > 0;
+    };
+    CSmartLine joints("Node smoothness");
+    require(joints.Add(new CBezierSpline({0,0,0}, {2,1,0}, {7,-2,0}, {10,0,0}))
+         && joints.Add(new CBezierSpline({10,0,0}, {12,-3,0}, {18,4,0}, {20,5,0})),
+            "Cannot create kinked Bezier pair");
+    require(!smooth_at(joints,0,1) && joints.SetNodeSmooth(1,true) && smooth_at(joints,0,1),
+            "Node tool did not align the two tangents");
+    require(joints.GetNumConstraints()==1 && joints.SetNodeSmooth(1,true)
+            && joints.GetNumConstraints()==1, "Smoothing duplicated a joint constraint");
+    require(joints.MoveBezierControlPointWorld(1,joints.LocalToWorld({8,-5,0})) && smooth_at(joints,0,1),
+            "Incoming handle lost joint smoothness");
+    require(joints.MoveBezierControlPointWorld(2,joints.LocalToWorld({14,2,0})) && smooth_at(joints,0,1),
+            "Outgoing handle lost joint smoothness");
+    require(joints.MoveNodeWorld(1,joints.LocalToWorld({11,1,0})) && smooth_at(joints,0,1),
+            "Moving the joint lost smoothness");
+    const auto before_sharp = joints.GetBezierControlPointWorld(1);
+    require(joints.SetNodeSmooth(1,false) && joints.GetNumConstraints()==0,
+            "Sharp joint did not remove its constraint");
+    const auto after_sharp = joints.GetBezierControlPointWorld(1);
+    require(before_sharp.x==after_sharp.x && before_sharp.y==after_sharp.y
+            && before_sharp.z==after_sharp.z, "Removing smoothness changed the curve");
+    require(joints.MoveBezierControlPointWorld(2,joints.LocalToWorld({15,-4,0})) && !smooth_at(joints,0,1),
+            "Sharp joint still couples its two handles");
+    require(!joints.SetNodeSmooth(0,true) && !joints.SetNodeSmooth(2,true),
+            "A free endpoint was accepted as a joint");
+    require(joints.ConstrainBezierTangentAtStart(1) && joints.ConstrainBezierTangentAtEnd(0)
+            && joints.SetNodeSmooth(1,false) && joints.GetNumConstraints()==0,
+            "Sharp joint did not remove both legacy tangency representations");
+    require(tangent_profile.SetNodeSmooth(1,false) && tangent_profile.SetNodeSmooth(1,true),
+            "Line-Bezier joint was rejected");
+    require(tangent_profile.MoveBezierControlPointWorld(0,tangent_profile.LocalToWorld({13,7,0}))
+            && smooth_at(tangent_profile,0,1), "Line-Bezier smoothness was not preserved");
+
+    CSmartLine loop("Closing joint");
+    require(loop.Add(new CBezierSpline({0,0,0},{4,-1,0},{8,-2,0},{10,0,0}))
+         && loop.Add(new CBezierSpline({10,0,0},{12,4,0},{4,8,0},{0,0,0}))
+         && loop.SetClosed(true), "Cannot make closed joint fixture");
+    // Closed sketches enumerate end nodes first: the closing joint is node 1.
+    require(loop.SetNodeSmooth(1,true) && smooth_at(loop,1,0), "Closing node was not smoothed");
+    require(loop.MoveBezierControlPointWorld(0,loop.LocalToWorld({4,-3,0})) && smooth_at(loop,1,0),
+            "Closing-node handle did not propagate");
+    require(loop.SetNodeSmooth(1,false) && loop.GetNumConstraints()==0, "Closing smoothness was not removed");
     return EXIT_SUCCESS;
 } catch (const std::exception& error) {
     std::cerr << error.what() << std::endl; return EXIT_FAILURE;

@@ -534,13 +534,19 @@ public:
         for (const auto& face : source.GetFaces()) {
             if (face.deleted || face.corners.size() < 3) continue;
             for (size_t i = 1; i+1 < face.corners.size(); ++i) {
-                check(++triangle_count <= kMaxTriangles, "Scene contains too many 3MF triangles.");
                 const MeshCorner corners[]{face.corners[0],face.corners[i],face.corners[i+1]};
+                for (const auto& corner : corners)
+                    check(corner.v < vertices.size(), "Mesh contains an invalid triangle index.");
+                // Welding can collapse polygon corners. Lib3MF rejects repeated
+                // triangle indices, so omit these zero-area fan triangles while
+                // retaining any valid triangles from the same polygon.
+                if (corners[0].v == corners[1].v || corners[1].v == corners[2].v
+                    || corners[2].v == corners[0].v) continue;
+                check(++triangle_count <= kMaxTriangles, "Scene contains too many 3MF triangles.");
                 sTriangle triangle{};
                 sTriangleProperties property{};
                 property.m_ResourceID = multi ? multi->GetUniqueResourceID() : palette->GetUniqueResourceID();
                 for (int c = 0; c < 3; ++c) {
-                    check(corners[c].v < vertices.size(), "Mesh contains an invalid triangle index.");
                     triangle.m_Indices[c] = static_cast<Lib3MF_uint32>(corners[c].v);
                     property.m_PropertyIDs[c] = multi ? property_at(corners[c]) : material_id;
                 }

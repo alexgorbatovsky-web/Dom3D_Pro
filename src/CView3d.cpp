@@ -13,6 +13,19 @@
 //#include "GLU.h"
 
 namespace {
+// Screen-door transparency keeps materials intact and works with the compatibility renderer.
+struct FrozenRenderScope {
+    bool frozen;
+    explicit FrozenRenderScope(bool enabled):frozen(enabled) {
+        if(!frozen)return;
+        glPushAttrib(GL_ENABLE_BIT|GL_POLYGON_STIPPLE_BIT|GL_LINE_BIT);
+        GLubyte mask[128];
+        for(int row=0;row<32;++row)for(int col=0;col<4;++col)mask[row*4+col]=(row%2)?0x55:0xaa;
+        glPolygonStipple(mask);glEnable(GL_POLYGON_STIPPLE);
+        glLineStipple(1,0x5555);glEnable(GL_LINE_STIPPLE);
+    }
+    ~FrozenRenderScope() { if(frozen)glPopAttrib(); }
+};
 void set_color(float r, float g, float b, float a = 1.0f) {
     glColor4f(r, g, b, a);
 }
@@ -149,6 +162,7 @@ void CView3d::DrawObjects(const CAlfaDoc& document,
         return dot(center - camera_eye, camera_forward);
     };
     const auto render_object = [&](size_t index) {
+        FrozenRenderScope frozen(objects[index]->IsFrozen());
         const bool selected = document.IsObjectSelectionHighlighted(index);
         const bool has_selected_point = document.HasSelection()
             && document.GetSelectedObjectIndex() == index
@@ -199,6 +213,7 @@ void CView3d::DrawObjects(const CAlfaDoc& document,
                 || is_curve_overlay(*objects[index])) {
                 continue;
             }
+            FrozenRenderScope frozen(objects[index]->IsFrozen());
             if (const auto* solid = dynamic_cast<const CSolid*>(objects[index].get())) {
                 solid->RenderHiddenLineDepth();
             } else if (const auto* mesh =
@@ -209,6 +224,7 @@ void CView3d::DrawObjects(const CAlfaDoc& document,
         }
         for (const auto& object : objects) {
             if (object && document.IsObjectVisible(*object)) {
+                FrozenRenderScope frozen(object->IsFrozen());
                 if (const auto* solid = dynamic_cast<const CSolid*>(object.get())) {
                     solid->RenderHiddenLineEdges(true);
                 } else if (const auto* mesh =
@@ -221,6 +237,7 @@ void CView3d::DrawObjects(const CAlfaDoc& document,
         }
         for (const auto& object : objects) {
             if (object && document.IsObjectVisible(*object)) {
+                FrozenRenderScope frozen(object->IsFrozen());
                 if (const auto* solid = dynamic_cast<const CSolid*>(object.get())) {
                     solid->RenderHiddenLineEdges(false);
                 } else if (const auto* mesh =
@@ -247,6 +264,7 @@ void CView3d::DrawObjects(const CAlfaDoc& document,
             const bool has_selected_point = document.HasSelection()
                 && document.GetSelectedObjectIndex() == index
                 && document.HasSelectedPoint();
+            FrozenRenderScope frozen(objects[index]->IsFrozen());
             objects[index]->Render3d(
                 selected, has_selected_point, document.GetSelectedPointIndex());
         }

@@ -47,6 +47,22 @@ void TestThreeMfIO(const QString& directory) {
     ThreeMfIO io;
     std::string error;
     const auto wrapper = Lib3MF::CWrapper::loadLibrary();
+    {
+        CAlfaDoc welded_document;
+        auto welded = std::make_unique<CMesh3D>("Collapsed welded polygons");
+        CMesh3D::Face collapsed, partial;
+        collapsed.corners = {{0,0,0},{1,0,0},{0,0,0},{2,0,0}};
+        partial.corners = {{0,0,0},{1,0,0},{1,0,0},{2,0,0}};
+        require(welded->SetGeometry({{0,0,0},{10,0,0},{0,10,0}}, {collapsed,partial}),
+                "Could not create collapsed polygon fixture");
+        welded_document.AddMesh(std::move(welded));
+        const auto path = (directory + "/welded.3mf").toStdString();
+        require(io.Export(path, welded_document, error), "Welded 3MF export failed: " + error);
+        std::vector<std::unique_ptr<CMesh3D>> restored;
+        require(io.Import(path, restored, error), "Welded 3MF import failed: " + error);
+        require(restored.size() == 1 && restored.front()->GetFaces().size() == 1,
+                "Collapsed polygons lost their valid triangle or retained degenerate triangles");
+    }
     const auto model = wrapper->CreateModel();
     model->SetUnit(eModelUnit::Inch);
     const auto palette = model->AddBaseMaterialGroup();

@@ -1,3 +1,4 @@
+#include "Diagnostics.h"
 //Point3d	: implementation of the Points class
 //
 
@@ -61,6 +62,7 @@ CPoint3d::CPoint3d(CPoint3d* p)
 
 void CPoint3d::print(FILE* strm)
 {
+    if (!Dom3DDiagnosticsEnabled && !strm) return;
 	int str_null = 0;
 	if (!strm) {
 		str_null = 1;
@@ -75,6 +77,7 @@ void CPoint3d::print(FILE* strm)
 
 void CPoint3d::print(const char* text, FILE* strm)
 {
+    if (!Dom3DDiagnosticsEnabled && !strm) return;
 	int str_null = 0;
 	if (!strm) {
 		str_null = 1;
@@ -649,11 +652,13 @@ void CPoint8d::SetGrPoz(CView3d* pv)
 
 void CPoint8d::print(FILE* strm)
 {
+    if (!Dom3DDiagnosticsEnabled && !strm) return;
 	fprintf(strm, " %10.4f %10.4f %10.4f  %7.5f  %7.5f  %7.5f  %7.5f  %7.5f\n", x, y, z, l, m, n, s, t);
 }
 
 void CPoint8d::print(LPCTSTR text, FILE* strm)
 {
+    if (!Dom3DDiagnosticsEnabled && !strm) return;
 	fprintf(strm, "%s %10.4f %10.4f %10.4f\n", text, x, y, z);
 }
 
@@ -950,11 +955,13 @@ void CPoint8f::SetGrPoz(CView3d* pv)
 
 void CPoint8f::print(FILE* strm)
 {
+    if (!Dom3DDiagnosticsEnabled && !strm) return;
 	fprintf(strm, " %10.4f %10.4f %10.4f\n", x, y, z);
 }
 
 void CPoint8f::print(LPCTSTR text, FILE* strm)
 {
+    if (!Dom3DDiagnosticsEnabled && !strm) return;
 	fprintf(strm, "%s %10.4f %10.4f %10.4f\n", text, x, y, z);
 }
 
@@ -1197,11 +1204,13 @@ void CPoint4d::Read(LPCTSTR str)
 
 void CPoint4d::print(FILE* strm)
 {
+    if (!Dom3DDiagnosticsEnabled && !strm) return;
 	fprintf(strm, " %10.4f %10.4f %10.4f\n", x, y, z);
 }
 
 void CPoint4d::print(LPCTSTR text, FILE* strm)
 {
+    if (!Dom3DDiagnosticsEnabled && !strm) return;
 	fprintf(strm, "%s %10.4f %10.4f %10.4f\n", text, x, y, z);
 }
 
@@ -1498,6 +1507,7 @@ void CPoint7d::SetGrPoz(CView3d* pv)
 
 void CPoint7d::print(FILE* strm)
 {
+    if (!Dom3DDiagnosticsEnabled && !strm) return;
 	fprintf(strm, " %10.4f %10.4f %10.4f\n", x, y, z);
 }
 
@@ -1519,6 +1529,7 @@ void CPoint7d::print(CMemFile* file)
 
 void CPoint7d::print(LPCTSTR text, FILE* strm)
 {
+    if (!Dom3DDiagnosticsEnabled && !strm) return;
 	fprintf(strm, "%s %10.2f %10.2f %10.2f %6.5f  %6.5f  %6.5f %5.2f\n", text, x, y, z, l, m, n, s);
 }
 
@@ -1850,11 +1861,13 @@ void CPoint14d::SetGrPoz(CView3d* pv)
 
 void CPoint14d::print(FILE* strm)
 {
+    if (!Dom3DDiagnosticsEnabled && !strm) return;
 	fprintf(strm, " %10.4f %10.4f %10.4f\n", x, y, z);
 }
 
 void CPoint14d::print(LPCTSTR text, FILE* strm)
 {
+    if (!Dom3DDiagnosticsEnabled && !strm) return;
 	fprintf(strm, "%s %10.4f %10.4f %10.4f\n", text, x, y, z);
 }
 

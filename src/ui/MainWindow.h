@@ -31,6 +31,7 @@
 #include <vector>
 
 class QAction;
+class QApplication;
 class QAbstractButton;
 class QCheckBox;
 class QComboBox;
@@ -70,6 +71,9 @@ public:
 
 private:
     friend int TestScenePersistence(int argc, char** argv);
+    friend int TestBodySectionSketch(QApplication& application);
+    friend int TestTextToCurves(int argc, char** argv);
+    friend int TestMultiSketch(int argc, char** argv);
     friend int TestSolidPrimitiveTool(int argc, char** argv);
     friend int TestImageRelief();
     [[nodiscard]] QScopedValueRollback<bool> RememberCommand(std::function<void()> command);
@@ -108,6 +112,9 @@ private:
     void ShowMaterialEditor(const Material* initial_material = nullptr, const QString& material_file_path = {});
     void ShowSurfaceTextureEditor();
     void ShowViewportPopupMenu(const QPoint& global_position);
+    void AddWorkPlaneAction(QMenu& menu);
+    int work_origin_plane_ = -1;
+    unsigned long work_plane_object_id_ = 0;
     void ShowCurveQuickPalette();
     void BeginShapeEditNodes();
     void RequestObjectColor();
@@ -126,7 +133,7 @@ private:
     void CreateBodyFromTwoSketches();
     void CreateAssociativeClone();
     void JoinSelectedSurfaces();
-    void CreatePlaneIntersection();
+    void CreatePlaneIntersection(bool as_sketch = false);
     void BeginBodySectionPlaneInput();
     void BeginBodySectionThreePointPick();
     void AppendBodySectionThreePointPick(CPoint3d point);
@@ -154,6 +161,11 @@ private:
     void ShowLinearArrayDialog();
     void ShowRadialArrayDialog();
     void ShowRectangularArrayDialog();
+    void ShowCurveArrayDialog();
+    void OpenCurveArrayDialog(unsigned long guide_id);
+    void CompleteCurveArrayGuidePick();
+    bool CreateCurveArray(unsigned long curve_id, int quantity, bool on_curve,
+                          bool follow_tangent, double end_scale, Vec3 anchor, bool record_undo = true, bool preview_only = false, bool make_clone = false);
     void BeginNewSketch();
     enum class SpatialCurveKind {
         None,
@@ -189,6 +201,8 @@ private:
     };
     void BeginCurveEditCommand(CurveEditCommand command);
     bool PrepareCurveEditCommandSelection();
+    void TryPrepareCurvePlaneSelection();
+    bool waiting_curve_plane_selection_ = false;
     void CompleteCurveEditPoint(CPoint3d point);
     void CancelCurveEditCommand(const QString& message = {});
     bool JoinSelectedCurves();
@@ -229,6 +243,10 @@ private:
     void BeginMeshIslandBoundaryTool();
     void CreateSelectedSurfaceIslandBoundaries();
     void WeldSelectedMeshVertices();
+    void ShowMeshSubdivisionDialog();
+    void PopulateMeshDisplayMenu(QMenu& menu);
+    bool AddMeshContextActions(QMenu& menu);
+    void SetSelectedMeshShading(bool smooth);
     void ShowMeshBoundaryLineTool();
     void ShowTrimMeshTestTool();
     void ShowClassifyFaceCutTool();
@@ -261,6 +279,7 @@ private:
     void OpenProject();
     void OpenProjectFromPath(const QString& path);
     bool SaveProject(bool save_as = false);
+    bool SaveValidatedProject(const QString& path, const QString& room, const ProjectViewState& view, QString& error);
     bool HasUnsavedProjectChanges() const;
     void SaveProjectAs();
     void UpdateAutoSaveTimer();
@@ -331,7 +350,12 @@ private:
         FourSplineSurface,
         TwoRailSweepSurface,
         TwoRailSweepSolid,
-        ChangeLayer
+        ChangeLayer,
+        ArrayLinear,
+        ArrayRadial,
+        ArrayRectangular,
+        ArrayCurve,
+        ArrayCurveGuide
     };
 
     enum class PendingPreciseTransform {
@@ -455,6 +479,8 @@ private:
     int solid_body_selected_operation_index_ = 0;
     bool solid_body_all_dimensions_ = false;
     bool active_parametric_edit_existing_ = false;
+    bool active_solid_creation_undo_ = false;
+    bool active_revolve_creation_undo_ = false;
     bool face_primitive_boolean_preview_active_ = false;
     unsigned long face_primitive_boolean_preview_body_id_ = 0;
     unsigned long face_primitive_boolean_preview_tool_id_ = 0;
@@ -481,6 +507,7 @@ private:
     std::vector<CPoint3d> plane_three_point_picks_;
     bool pending_reference_plane_face_pick_ = false;
     unsigned long pending_body_section_target_id_ = 0;
+    bool pending_body_section_as_sketch_ = false;
     bool pending_body_section_plane_face_pick_ = false;
     bool pending_body_section_plane_object_pick_ = false;
     bool pending_body_section_three_point_pick_ = false;
@@ -530,9 +557,13 @@ private:
     std::string pending_trim_tool_id_;
     unsigned long pending_trim_cutter_id_ = 0;
     unsigned long pending_trim_plane_body_id_ = 0;
+    int pending_trim_origin_plane_ = -1;
+    bool pending_sketch_feature_ = false;
     unsigned long pending_sketch_cut_profile_id_ = 0;
     unsigned long pending_sweep_section_id_ = 0;
+    std::string pending_sweep_tool_id_ = "SolidSweptTool";
     std::string pending_architecture_opening_tool_id_;
+    std::vector<unsigned long> pending_array_source_ids_;
     PendingGroupCommand pending_group_command_ = PendingGroupCommand::None;
     PendingPreciseTransform pending_precise_transform_ = PendingPreciseTransform::None;
     PendingTransformPointPick pending_transform_point_pick_ = PendingTransformPointPick::None;

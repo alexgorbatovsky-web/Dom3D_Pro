@@ -5,6 +5,8 @@
 #include "FbxIO.h"
 #include "GlbIO.h"
 #include "CMesh3D.h"
+#include "FbxSharpEdges.h"
+#include "ObjSharpEdges.h"
 #include "solid/Solid.h"
 #include "solid/SurfaceFace.h"
 
@@ -376,34 +378,83 @@ bool FbxIO::Export(const std::string& path, const CAlfaDoc& document, std::strin
             const unsigned id=static_cast<unsigned>(out_materials.size()); out_materials.push_back(a); material_ids[key]=id; return id;
         };
         std::vector<aiNode*> nodes; size_t triangle_count=0;
+        std::vector<fbxsharp::Geometry> edge_geometry;
         for(const ExportPart& part:parts) {
             const auto& vertices=part.mesh->GetVertices(); const auto& faces=part.mesh->GetFaces();
             Vec3 low,high; check(part.mesh->GetBounds(low,high),"Cannot export invalid FBX mesh bounds.");
             const Vec3 center=(low+high)*0.5f;
+            fbxsharp::Geometry geometry;
+            geometry.enabled = !part.mesh->GetSharpEdges().empty();
+            objsharp::Data sharp;
+            std::vector<size_t> position_ids(vertices.size());
+            if (geometry.enabled) {
+                // Low-poly CAD patches may have separate indices at the same
+                // surface boundary. Match Assimp's position welding, including
+                // when writing explicit Sharp/Crease layers.
+                std::map<std::array<float,3>,size_t> positions;
+                for (size_t i=0;i<vertices.size();++i) {
+                    const auto& p=vertices[i];
+                    const std::array<float,3> local{(p.x-center.x)/10, (p.y-center.y)/10, (p.z-center.z)/10};
+                    const auto entry=positions.emplace(local, positions.size());
+                    position_ids[i]=entry.first->second;
+                    if(entry.second) geometry.vertices.insert(geometry.vertices.end(),local.begin(),local.end());
+                }
+                sharp = objsharp::Build(*part.mesh, position_ids);
+                check(sharp.valid, "FBX sharp edges refer to invalid geometry.");
+            }
+            std::map<std::pair<size_t,size_t>,size_t> edge_ids;
             auto* mesh=new aiMesh(); mesh->mName.Set(part.name); mesh->mMaterialIndex=add_material(part.material);
             const auto& uvs=part.mesh->GetUVs(); const auto& normals=part.mesh->GetNormals();
             size_t corner_count=0;
-            for(const auto& face:faces) if(!face.deleted&&face.corners.size()>=3) corner_count+=(face.corners.size()-2)*3;
+            for(const auto& face:faces) if(!face.deleted&&face.corners.size()>=3) corner_count+=face.corners.size();
             check(corner_count>0&&corner_count<=std::numeric_limits<unsigned>::max(),"FBX mesh has no valid faces or is too large.");
             mesh->mNumVertices=static_cast<unsigned>(corner_count); mesh->mVertices=new aiVector3D[mesh->mNumVertices];
             if(!uvs.empty()){mesh->mTextureCoords[0]=new aiVector3D[mesh->mNumVertices]{};mesh->mNumUVComponents[0]=2;}
-            if(!normals.empty()) mesh->mNormals=new aiVector3D[mesh->mNumVertices]{};
-            std::vector<aiFace> triangles;
-            for(const auto& face:faces) if(!face.deleted&&face.corners.size()>=3) for(size_t c=1;c+1<face.corners.size();++c) {
-                aiFace f; f.mNumIndices=3; f.mIndices=new unsigned[3];
-                const MeshCorner corners[3]{face.corners[0],face.corners[c],face.corners[c+1]};
-                for(unsigned k=0;k<3;++k) {
-                    check(corners[k].v<vertices.size(),"FBX source face refers to a missing vertex.");
-                    const unsigned dst=static_cast<unsigned>(triangles.size()*3+k); f.mIndices[k]=dst;
-                    const Vec3 p=vertices[corners[k].v]; mesh->mVertices[dst]={(p.x-center.x)/10,(p.y-center.y)/10,(p.z-center.z)/10};
-                    if(mesh->mTextureCoords[0]) { check(corners[k].uv<uvs.size(),"FBX source face refers to missing UV coordinates."); const UV uv=uvs[corners[k].uv];mesh->mTextureCoords[0][dst]={uv.u,uv.v,0}; }
-                    if(mesh->mNormals) { check(corners[k].n<normals.size(),"FBX source face refers to a missing normal."); const Vec3 n=normals[corners[k].n];mesh->mNormals[dst]={n.x,n.y,n.z}; }
+            if(!normals.empty() || geometry.enabled) mesh->mNormals=new aiVector3D[mesh->mNumVertices]{};
+            std::vector<aiFace> polygons;
+            unsigned next_corner=0;
+            for(size_t face_id=0;face_id<faces.size();++face_id) {
+                const auto& face=faces[face_id];
+                if(face.deleted || face.corners.size()<3) continue;
+                // FBX supports polygons. Keep quads/n-gons intact: triangulating
+                // the control cage changes Catmull-Clark subdivision.
+                aiFace f; f.mNumIndices=static_cast<unsigned>(face.corners.size());
+                f.mIndices=new unsigned[f.mNumIndices];
+                triangle_count+=face.corners.size()-2;
+                check(triangle_count<=kMaxTriangles,"FBX export contains too many polygons.");
+                for(unsigned k=0;k<f.mNumIndices;++k) {
+                    const auto& corner=face.corners[k];
+                    check(corner.v<vertices.size(),"FBX source face refers to a missing vertex.");
+                    const unsigned dst=next_corner++; f.mIndices[k]=dst;
+                    const Vec3 p=vertices[corner.v]; mesh->mVertices[dst]={(p.x-center.x)/10,(p.y-center.y)/10,(p.z-center.z)/10};
+                    if(mesh->mTextureCoords[0]) { check(corner.uv<uvs.size(),"FBX source face refers to missing UV coordinates."); const UV uv=uvs[corner.uv];mesh->mTextureCoords[0][dst]={uv.u,uv.v,0}; }
+                    if(mesh->mNormals) {
+                        Vec3 n;
+                        if (geometry.enabled) n=sharp.normals[sharp.corner_normals[face_id][k]];
+                        else { check(corner.n<normals.size(),"FBX source face refers to a missing normal."); n=normals[corner.n]; }
+                        mesh->mNormals[dst]={n.x,n.y,n.z};
+                    }
+                    if (geometry.enabled) {
+                        const size_t a=position_ids[corner.v];
+                        const size_t b=position_ids[face.corners[(k+1)%f.mNumIndices].v];
+                        check(a <= size_t(INT32_MAX), "FBX vertex index exceeds the format limit.");
+                        const auto v=static_cast<qint32>(a);
+                        geometry.polygons.push_back(k+1==f.mNumIndices ? ~v : v);
+                        const auto edge=std::minmax(a,b);
+                        if(edge_ids.emplace(edge, edge_ids.size()).second) {
+                            geometry.edges.push_back(static_cast<qint32>(dst));
+                            const bool hard=sharp.edges.count(edge)!=0;
+                            geometry.smoothing.push_back(hard ? 0 : 1);
+                            geometry.creases.push_back(hard ? 1.0 : 0.0);
+                        }
+                    }
                 }
-                triangles.push_back(f);
+                polygons.push_back(std::move(f));
             }
-            check(!triangles.empty(),"FBX mesh has no valid faces."); triangle_count+=triangles.size();check(triangle_count<=kMaxTriangles,"FBX export contains too many triangles.");
-            mesh->mNumFaces=static_cast<unsigned>(triangles.size()); mesh->mFaces=new aiFace[triangles.size()];
-            for(size_t i=0;i<triangles.size();++i) mesh->mFaces[i]=std::move(triangles[i]);
+            edge_geometry.push_back(std::move(geometry));
+            check(!polygons.empty(),"FBX mesh has no valid faces.");
+            mesh->mNumFaces=static_cast<unsigned>(polygons.size()); mesh->mFaces=new aiFace[polygons.size()];
+            for(size_t i=0;i<polygons.size();++i) mesh->mFaces[i]=std::move(polygons[i]);
             const unsigned mesh_id=static_cast<unsigned>(out_meshes.size()); out_meshes.push_back(mesh);
             auto* node=new aiNode(part.name); node->mNumMeshes=1; node->mMeshes=new unsigned[1]{mesh_id};
             node->mTransformation.a4=center.x/10;node->mTransformation.b4=center.y/10;node->mTransformation.c4=center.z/10; nodes.push_back(node);
@@ -415,7 +466,10 @@ bool FbxIO::Export(const std::string& path, const CAlfaDoc& document, std::strin
         for(size_t i=0;i<nodes.size();++i){scene->mRootNode->mChildren[i]=nodes[i];nodes[i]->mParent=scene->mRootNode;}
         Assimp::Exporter exporter; const aiExportDataBlob* blob=exporter.ExportToBlob(scene.get(),"fbx");
         check(blob&&blob->data&&blob->size,std::string("Assimp FBX writer: ")+exporter.GetErrorString());
-        QSaveFile file(QString::fromStdString(path));check(file.open(QIODevice::WriteOnly)&&file.write(static_cast<const char*>(blob->data),static_cast<qint64>(blob->size))==static_cast<qint64>(blob->size)&&file.commit(),"Could not write the FBX file.");
+        QByteArray bytes(static_cast<const char*>(blob->data), static_cast<qsizetype>(blob->size));
+        if(std::any_of(edge_geometry.begin(),edge_geometry.end(),[](const auto& g){return g.enabled;}))
+            bytes=fbxsharp::Complete(bytes,edge_geometry);
+        QSaveFile file(QString::fromStdString(path));check(file.open(QIODevice::WriteOnly)&&file.write(bytes)==bytes.size()&&file.commit(),"Could not write the FBX file.");
         return true;
     } catch(const std::exception& exception) { error=std::string("FBX export: ")+exception.what(); return false; }
 }

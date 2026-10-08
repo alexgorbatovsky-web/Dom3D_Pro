@@ -29,6 +29,9 @@
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Wire.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Circ.hxx>
+#include <gp_Elips.hxx>
+#include <gp_Ax2.hxx>
 
 #include <cmath>
 #include <vector>
@@ -40,6 +43,34 @@ constexpr double kWireConnectionTolerance = 1.0e-6;
 gp_Pnt to_occ_point(const CSmartLine& sketch, const CPoint3d& local) {
     const CPoint3d world = sketch.LocalToWorld(local);
     return gp_Pnt(world.x, world.y, world.z);
+}
+
+bool primitive_wire(const CSmartLine& sketch, TopoDS_Wire& wire) {
+    const auto& p=sketch.GetPrimitive();
+    if(p.kind!=1 && p.kind!=2) return false;
+    const auto& frame=sketch.GetCoordinateSystem();
+    const double angle=p.angle+(p.kind==2 && p.minor_radius>p.radius ? 1.57079632679489661923 : 0);
+    const auto x=frame.x_axis,y=frame.y_axis;
+    gp_Ax2 axes(to_occ_point(sketch,{p.u,p.v,0}),gp_Dir(frame.normal.x,frame.normal.y,frame.normal.z),
+        gp_Dir(x.x*std::cos(angle)+y.x*std::sin(angle),x.y*std::cos(angle)+y.y*std::sin(angle),x.z*std::cos(angle)+y.z*std::sin(angle)));
+    const double shift=p.kind==2 && p.minor_radius>p.radius ? 1.57079632679489661923 : 0;
+    const double start=p.start_angle-shift;
+    BRepBuilderAPI_MakeEdge edge=p.kind==1
+        ? BRepBuilderAPI_MakeEdge(gp_Circ(axes,p.radius),start,start+p.sweep_angle)
+        : BRepBuilderAPI_MakeEdge(gp_Elips(axes,std::max(p.radius,p.minor_radius),std::min(p.radius,p.minor_radius)),start,start+p.sweep_angle);
+    if(!edge.IsDone()) return false;
+    BRepBuilderAPI_MakeWire builder(edge.Edge());
+    if(p.pie && !p.IsFullConic()) {
+        const auto at=[&](double t) {
+            const double u=p.radius*std::cos(t),v=(p.kind==1 ? p.radius : p.minor_radius)*std::sin(t);
+            return to_occ_point(sketch,{p.u+u*std::cos(p.angle)-v*std::sin(p.angle),p.v+u*std::sin(p.angle)+v*std::cos(p.angle),0});
+        };
+        const auto center=to_occ_point(sketch,{p.u,p.v,0});
+        builder.Add(BRepBuilderAPI_MakeEdge(at(p.start_angle+p.sweep_angle),center).Edge());
+        builder.Add(BRepBuilderAPI_MakeEdge(center,at(p.start_angle)).Edge());
+    }
+    if(!builder.IsDone()) return false;
+    wire=builder.Wire(); return true;
 }
 
 double point_distance(const CPoint3d& first, const CPoint3d& second) {
@@ -238,7 +269,13 @@ static bool BuildSketchProfileFaceImpl(const CSmartLine& sketch,
 
     try {
         BRepBuilderAPI_MakeWire wire_builder;
-        for (std::size_t line_index = 0; line_index < sketch.GetNumLines(); ++line_index) {
+        const bool analytic=sketch.GetPrimitive().kind==1 || sketch.GetPrimitive().kind==2;
+        if(analytic) {
+            TopoDS_Wire exact;
+            if(!primitive_wire(sketch,exact)) return false;
+            wire_builder.Add(exact);
+        }
+        for (std::size_t line_index = 0; !analytic && line_index < sketch.GetNumLines(); ++line_index) {
             if (point_distance(line_starts[line_index], line_ends[line_index]) <= kProfileTolerance) {
                 return false;
             }
@@ -413,8 +450,14 @@ bool BuildSketchPathWire(const CSmartLine& sketch,
 
     try {
         BRepBuilderAPI_MakeWire wire_builder;
+        const bool analytic=sketch.GetPrimitive().kind==1 || sketch.GetPrimitive().kind==2;
+        if(analytic) {
+            TopoDS_Wire exact;
+            if(!primitive_wire(sketch,exact)) return false;
+            wire_builder.Add(exact);
+        }
         for (std::size_t line_index = 0;
-             line_index < sketch.GetNumLines();
+             !analytic && line_index < sketch.GetNumLines();
              ++line_index) {
             if (point_distance(
                     line_starts[line_index], line_ends[line_index])

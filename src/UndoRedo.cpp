@@ -25,6 +25,8 @@ bool CUndoRedo::CommitChange(std::string command_name) {
         return RecordChange(std::move(command_name));
     }
 
+    // Finalize dependent geometry before capturing the operation's redo state.
+    document_.RebuildAssociativeClones(0, pending_before_.get());
     std::shared_ptr<const CAlfaDoc::Snapshot> next = document_.CreateSnapshot();
     if (!next) {
         pending_before_.reset();
@@ -43,6 +45,7 @@ bool CUndoRedo::CommitChangeLazy(std::string command_name) {
     if (!pending_before_) {
         return CommitChange(std::move(command_name));
     }
+    document_.RebuildAssociativeClones(0, pending_before_.get());
     if (undo_stack_.size() == maximum_commands_) {
         undo_stack_.erase(undo_stack_.begin());
     }
@@ -59,6 +62,12 @@ void CUndoRedo::CancelChange() {
     }
 }
 
+bool CUndoRedo::RollbackChange() {
+    if (!pending_before_ || !document_.RestoreSnapshot(*pending_before_)) return false;
+    current_ = std::move(pending_before_);
+    return true;
+}
+
 bool CUndoRedo::RecordChange(std::string command_name) {
     // Live tools can emit many DocumentChanged signals while a preview is
     // rebuilt. They belong to the pending command and must not create
@@ -66,6 +75,8 @@ bool CUndoRedo::RecordChange(std::string command_name) {
     if (pending_before_) {
         return true;
     }
+    // Finalize dependent geometry before capturing the operation's redo state.
+    document_.RebuildAssociativeClones(0, current_.get());
     std::shared_ptr<const CAlfaDoc::Snapshot> next = document_.CreateSnapshot();
     if (!next) {
         return false;

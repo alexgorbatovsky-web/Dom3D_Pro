@@ -397,6 +397,7 @@ bool CAssembled::Save(std::ostream& stream) const {
 std::unique_ptr<CAlfaObject> CAssembled::Clone() const {
     auto copy = std::make_unique<CAssembled>(GetName() + " Copy", GetElementIds());
     copy->SetGroupName(GetGroupName());
+    copy->SetFrozen(IsFrozen());
     copy->CAlfaObject::SetVisible(IsVisible());
     copy->CAlfaObject::SetColor(GetColor());
     copy->SetMaterial(GetMaterial());

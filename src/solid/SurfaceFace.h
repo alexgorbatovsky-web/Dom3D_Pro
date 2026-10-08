@@ -1,6 +1,7 @@
 #pragma once
 #include "../CMesh3D.h"
 #include "../Net.h"
+#include "SurfaceDisplay.h"
 
 #include <TopoDS_Shape.hxx>
 #include <TopoDS_Edge.hxx>
@@ -82,6 +83,10 @@ public:
 	bool IsPlanar() const;
 	bool IsSpherical() const;
 	bool GetCenterAndNormal(Vec3& center, Vec3& normal) const;
+    void RenderDisplayOverlays() const;
+    void PrepareDisplayGeometry() const;
+    mutable TopoDS_Shape display_geometry_source_;
+    mutable surface_display::Geometry display_geometry_;
 	bool GetPoint(double U, double V, CPoint8d* pnt);
 	void RenderEdges(const Color& color,
 	                 const std::vector<int>& selected_edge_indices = {},
@@ -128,7 +133,8 @@ public:
 		CMesh3D* contour_to_fill_mesh = nullptr,
 		std::string* quadrangulator_rejection = nullptr);
 	bool BuildFilledMeshWhithHoles(float Deflection,
-		bool use_mesh_quadro_hole_slx = false);
+		bool use_mesh_quadro_hole_slx = false, bool use_divide_face = false,
+		bool trim_outer_by_pline = false, bool recover_four_edge_trim = false);
 	float GetLastLowPolyDensity() const { return m_LastLowPolyDensity; }
 	bool UsedSlxHoleCut() const { return m_UsedSlxHoleCut; }
 	const std::string& GetLastIslandFillError() const {
@@ -171,6 +177,8 @@ public:
 	float m_LastLowPolyDensity = 0.0f;
 	std::vector<std::vector<CPoint3d>> m_LastIslandBoundariesUV;
 	bool m_UsedSlxHoleCut = false;
+	bool m_UsedCadTrimRecovery = false;
+	bool m_UsedRegularOuterTrim = false;
 	std::vector<std::vector<CPoint3d>> m_LastQuadrangulationBoundariesXY;
 	std::vector<CPoint3d> m_CircularCapMasterBoundary3D;
 	std::string m_LastIslandFillError;

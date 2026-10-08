@@ -1,3 +1,4 @@
+#include "Diagnostics.h"
 // Spline.cpp: implementation of the CSpline class.
 //
 //////////////////////////////////////////////////////////////////////
@@ -1605,6 +1606,7 @@ void CSpline::print(CMemFile* file)
 
 void CSpline::print(FILE* fil)
 {
+    if (!Dom3DDiagnosticsEnabled && !fil) return;
 if(this==NULL)
     return;
 	if(!fil)
@@ -1622,6 +1624,7 @@ if(this==NULL)
 
 void CSpline::print()
 {
+    if constexpr (!Dom3DDiagnosticsEnabled) return;
 	FILE* strm = fopen("c:\\stdout.txt", "a+");;
 	if (NULL == strm)
 		return;

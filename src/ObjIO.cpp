@@ -1,3 +1,4 @@
+#include "ObjSharpEdges.h"
 #include "ObjIO.h"
 
 #include "Point3d.h"
@@ -60,6 +61,8 @@ struct ObjFaceVertex {
     size_t vertex = 0;
     size_t uv = 0;
     bool has_uv = false;
+    size_t normal = 0;
+    bool has_normal = false;
 };
 
 struct ObjMeshPart {
@@ -108,6 +111,7 @@ bool parse_obj_index(const std::string& text, size_t count, size_t& index) {
 bool parse_face_vertex(const std::string& token,
                        size_t vertex_count,
                        size_t uv_count,
+                       size_t normal_count,
                        ObjFaceVertex& result) {
     const size_t first_slash = token.find('/');
     const std::string vertex_text = token.substr(0, first_slash);
@@ -126,6 +130,10 @@ bool parse_face_vertex(const std::string& token,
             return false;
         }
         result.has_uv = true;
+    }
+    if (second_slash != std::string::npos && second_slash + 1 < token.size()) {
+        if (!parse_obj_index(token.substr(second_slash+1), normal_count, result.normal)) return false;
+        result.has_normal = true;
     }
     return true;
 }
@@ -199,33 +207,33 @@ std::string export_texture(const std::string& source,
         return {};
     }
 
-    const std::filesystem::path source_path(source);
+    const auto source_path = std::filesystem::u8path(source);
     std::error_code ec;
     if (!std::filesystem::is_regular_file(source_path, ec)) {
-        return source_path.generic_string();
+        return source_path.generic_u8string();
     }
 
     std::filesystem::create_directories(texture_directory, ec);
     if (ec) {
-        return source_path.generic_string();
+        return source_path.generic_u8string();
     }
 
     std::filesystem::path extension = source_path.extension();
     std::filesystem::path destination =
-        texture_directory / (material_name + "_" + role + extension.string());
+        texture_directory / std::filesystem::u8path(material_name + "_" + role + extension.u8string());
     int suffix = 2;
     while (std::filesystem::exists(destination, ec)) {
         ec.clear();
         if (std::filesystem::equivalent(source_path, destination, ec) && !ec) {
-            return destination.filename().generic_string();
+            return destination.filename().generic_u8string();
         }
         destination = texture_directory
-            / (material_name + "_" + role + "_" + std::to_string(suffix++) + extension.string());
+            / std::filesystem::u8path(material_name + "_" + role + "_" + std::to_string(suffix++) + extension.u8string());
     }
     ec.clear();
     std::filesystem::copy_file(
         source_path, destination, std::filesystem::copy_options::overwrite_existing, ec);
-    return ec ? source_path.generic_string() : destination.filename().generic_string();
+    return ec ? source_path.generic_u8string() : destination.filename().generic_u8string();
 }
 
 void write_mtl_material(std::ostream& stream,
@@ -439,11 +447,11 @@ bool load_mtl(const std::filesystem::path& path,
             if (texture.empty()) {
                 continue;
             }
-            std::filesystem::path texture_path(texture);
+            auto texture_path = std::filesystem::u8path(texture);
             if (texture_path.is_relative()) {
                 texture_path = path.parent_path() / texture_path;
             }
-            const std::string resolved = texture_path.lexically_normal().string();
+            const std::string resolved = texture_path.lexically_normal().u8string();
             if (keyword == "map_Kd") current->color_texture_path = resolved;
             else if (keyword == "map_Ke") current->light_texture_path = resolved;
             else if (keyword == "norm") current->normal_texture_path = resolved;
@@ -514,7 +522,7 @@ struct ObjIO::ObjExportVertexPool {
 
 bool ObjIO::Import(const std::string& path, std::vector<std::unique_ptr<CMesh3D>>& meshes, std::string& error) const {
     meshes.clear();
-    std::ifstream file(path);
+    std::ifstream file(std::filesystem::u8path(path));
     if (!file) {
         error = "Could not open OBJ file.";
         return false;
@@ -522,6 +530,8 @@ bool ObjIO::Import(const std::string& path, std::vector<std::unique_ptr<CMesh3D>
 
     std::vector<Vec3> vertices;
     std::vector<UV> texture_coordinates;
+    std::vector<Vec3> imported_normals;
+    std::set<std::pair<size_t,size_t>> imported_sharp_edges;
     std::map<std::string, Material> materials;
     std::vector<ObjMeshPart> parts;
     parts.push_back({});
@@ -530,7 +540,7 @@ bool ObjIO::Import(const std::string& path, std::vector<std::unique_ptr<CMesh3D>
     std::string current_material_name;
     bool has_explicit_object = false;
     double vertex_scale = 1.0;
-    const std::filesystem::path obj_path(path);
+    const auto obj_path = std::filesystem::u8path(path);
     const auto start_part = [&]() -> ObjMeshPart* {
         if (current->faces.empty()) {
             current->name = current_object_name;
@@ -542,6 +552,12 @@ bool ObjIO::Import(const std::string& path, std::vector<std::unique_ptr<CMesh3D>
     };
     std::string line;
     while (std::getline(file, line)) {
+        if (line.rfind(objsharp::Prefix, 0) == 0) {
+            std::istringstream record(line.substr(std::char_traits<char>::length(objsharp::Prefix)));
+            size_t a=0,b=0;
+            if ((record>>a>>b) && a>0 && b>0 && a!=b) imported_sharp_edges.insert(std::minmax(a-1,b-1));
+            continue;
+        }
         if (line.rfind(kDom3DObjUnitsPrefix, 0) == 0) {
             ObjLengthUnit unit = ObjLengthUnit::Millimeters;
             if (obj_unit_from_key(
@@ -565,6 +581,10 @@ bool ObjIO::Import(const std::string& path, std::vector<std::unique_ptr<CMesh3D>
             vertex.y = static_cast<float>(vertex.y * vertex_scale);
             vertex.z = static_cast<float>(vertex.z * vertex_scale);
             vertices.push_back(vertex);
+        } else if (keyword == "vn") {
+            Vec3 normal{}; line_stream >> normal.x >> normal.y >> normal.z;
+            if (!line_stream) { error="OBJ file has an invalid normal."; return false; }
+            imported_normals.push_back(normalize(normal));
         } else if (keyword == "vt") {
             UV uv{};
             line_stream >> uv.u >> uv.v;
@@ -578,7 +598,7 @@ bool ObjIO::Import(const std::string& path, std::vector<std::unique_ptr<CMesh3D>
             std::getline(line_stream, library_name);
             library_name = unquoted(library_name);
             if (!library_name.empty()) {
-                std::filesystem::path mtl_path(library_name);
+                auto mtl_path = std::filesystem::u8path(library_name);
                 if (mtl_path.is_relative()) {
                     mtl_path = obj_path.parent_path() / mtl_path;
                 }
@@ -607,7 +627,7 @@ bool ObjIO::Import(const std::string& path, std::vector<std::unique_ptr<CMesh3D>
             std::string token;
             while (line_stream >> token) {
                 ObjFaceVertex index;
-                if (!parse_face_vertex(token, vertices.size(), texture_coordinates.size(), index)) {
+                if (!parse_face_vertex(token, vertices.size(), texture_coordinates.size(), imported_normals.size(), index)) {
                     error = "OBJ file has an invalid face.";
                     return false;
                 }
@@ -629,25 +649,32 @@ bool ObjIO::Import(const std::string& path, std::vector<std::unique_ptr<CMesh3D>
 
         std::vector<Vec3> local_vertices;
         std::vector<UV> local_uvs;
+        std::vector<Vec3> local_normals;
+        std::vector<size_t> global_vertex_ids;
+        bool has_complete_normals = true;
         std::vector<CMesh3D::Face> local_faces;
-        std::map<std::pair<size_t, long long>, size_t> index_map;
+        // OBJ position, UV and normal indices are independent. A UV seam must
+        // not split the geometric vertex and turn shared edges into boundaries.
+        std::map<size_t, size_t> index_map;
         bool has_complete_uvs = true;
         for (const std::vector<ObjFaceVertex>& global_face : part.faces) {
             CMesh3D::Face local_face;
             for (const ObjFaceVertex& global_index : global_face) {
-                const long long uv_key = global_index.has_uv ? static_cast<long long>(global_index.uv) : -1;
                 auto [it, inserted] = index_map.emplace(
-                    std::make_pair(global_index.vertex, uv_key), local_vertices.size());
+                    global_index.vertex, local_vertices.size());
                 if (inserted) {
                     if (global_index.vertex >= vertices.size()) {
                         error = "OBJ file has a face index outside vertex list.";
                         return false;
                     }
                     local_vertices.push_back(vertices[global_index.vertex]);
-                    local_uvs.push_back(global_index.has_uv ? texture_coordinates[global_index.uv] : UV{});
+                    global_vertex_ids.push_back(global_index.vertex);
                 }
                 has_complete_uvs = has_complete_uvs && global_index.has_uv;
-                local_face.corners.push_back({it->second, it->second, it->second});
+                local_face.corners.push_back({it->second, local_normals.size(), local_uvs.size()});
+                local_uvs.push_back(global_index.has_uv ? texture_coordinates[global_index.uv] : UV{});
+                has_complete_normals = has_complete_normals && global_index.has_normal;
+                local_normals.push_back(global_index.has_normal ? imported_normals[global_index.normal] : Vec3{});
             }
             local_faces.push_back(std::move(local_face));
         }
@@ -664,10 +691,19 @@ bool ObjIO::Import(const std::string& path, std::vector<std::unique_ptr<CMesh3D>
         }
         if (!loaded->SetGeometry(std::move(local_vertices),
                                  std::move(local_faces),
-                                 has_complete_uvs ? std::move(local_uvs) : std::vector<UV>{})) {
+                                 has_complete_uvs ? std::move(local_uvs) : std::vector<UV>{},
+                                 has_complete_normals ? std::move(local_normals) : std::vector<Vec3>{})) {
             error = "OBJ file has invalid mesh geometry.";
             return false;
         }
+        std::vector<Edge> sharp;
+        for (const auto& f : static_cast<const CMesh3D&>(*loaded).GetFaces())
+            for (size_t i=0;i<f.corners.size();++i) {
+                size_t a=f.corners[i].v,b=f.corners[(i+1)%f.corners.size()].v;
+                if (imported_sharp_edges.count(std::minmax(global_vertex_ids[a],global_vertex_ids[b])))
+                    sharp.emplace_back(int(a),int(b));
+            }
+        loaded->SetSharpEdges(std::move(sharp));
         meshes.push_back(std::move(loaded));
         ++mesh_index;
     }
@@ -684,8 +720,9 @@ bool ObjIO::Export(const std::string& path,
                    const CAlfaDoc& document,
                    std::string& error,
                    ObjLengthUnit unit) const {
-    const std::filesystem::path obj_path(path);
-    const std::filesystem::path mtl_path = obj_path.parent_path() / (obj_path.stem().string() + ".mtl");
+    const auto obj_path = std::filesystem::u8path(path);
+    auto mtl_path = obj_path;
+    mtl_path.replace_extension(".mtl");
     // Fusion resolves OBJ textures most reliably when OBJ, MTL and image files
     // are placed side by side. Unique material/role names avoid collisions.
     const std::filesystem::path texture_directory = obj_path.parent_path();
@@ -704,7 +741,7 @@ bool ObjIO::Export(const std::string& path,
     file << std::setprecision(std::numeric_limits<double>::max_digits10);
     file << "# Dom3D Pro OBJ export\n";
     file << kDom3DObjUnitsPrefix << obj_unit_key(unit) << "\n";
-    file << "mtllib " << mtl_path.filename().generic_string() << "\n\n";
+    file << "mtllib " << mtl_path.filename().generic_u8string() << "\n\n";
     material_file << "# Dom3D Pro material library\n\n";
     size_t exported_vertex_count = 0;
     size_t uv_offset = 0;
@@ -858,7 +895,7 @@ bool ObjIO::ExportMesh(std::ostream& stream,
                << static_cast<double>(vertex.z) * vertex_scale << "\n";
     }
 
-    const bool has_uvs = mesh.GetUVs().size() == mesh.GetVertices().size();
+    const bool has_uvs = !mesh.GetUVs().empty();
     if (has_uvs) {
         UV uv_min = mesh.GetUVs().front();
         UV uv_max = mesh.GetUVs().front();
@@ -880,7 +917,12 @@ bool ObjIO::ExportMesh(std::ostream& stream,
         }
     }
 
-    const std::vector<Vec3> export_normals = export_normals_for_mesh(mesh, surface);
+    const bool use_sharp_edges = !mesh.GetSharpEdges().empty();
+    const auto sharp_data = use_sharp_edges ? objsharp::Build(mesh, welded_vertex_indices) : objsharp::Data{};
+    if (!sharp_data.valid) return false;
+    if (use_sharp_edges) objsharp::WriteEdges(stream, sharp_data);
+    const std::vector<Vec3> export_normals = use_sharp_edges
+        ? sharp_data.normals : export_normals_for_mesh(mesh, surface);
     const bool has_mesh_normals = !mesh.GetNormals().empty();
     const bool has_normals = !export_normals.empty();
     if (has_normals) {
@@ -893,13 +935,19 @@ bool ObjIO::ExportMesh(std::ostream& stream,
     std::map<int, size_t> source_smoothing_groups;
     size_t mesh_smoothing_group = 0;
     size_t active_smoothing_group = 0;
-    for (const CMesh3D::Face& face : mesh.GetFaces()) {
+    std::map<size_t,size_t> sharp_groups;
+    for (size_t face_index=0;face_index<mesh.GetFaces().size();++face_index) {
+        const auto& face = mesh.GetFaces()[face_index];
         if (face.deleted || face.corners.size() < 3) {
             continue;
         }
 
         size_t smoothing_group = 0;
-        if (!surface && face.sourceFaceId >= 0) {
+        if (use_sharp_edges) {
+            auto group = sharp_groups.emplace(sharp_data.groups[face_index], next_smoothing_group);
+            if (group.second) ++next_smoothing_group;
+            smoothing_group=group.first->second;
+        } else if (!surface && face.sourceFaceId >= 0) {
             auto [group, inserted] = source_smoothing_groups.emplace(
                 face.sourceFaceId, next_smoothing_group);
             if (inserted) {
@@ -919,7 +967,8 @@ bool ObjIO::ExportMesh(std::ostream& stream,
         }
 
         stream << "f";
-        for (const MeshCorner& corner : face.corners) {
+        for (size_t corner_index=0;corner_index<face.corners.size();++corner_index) {
+            const auto& corner=face.corners[corner_index];
             const size_t index = corner.v;
             if (index >= mesh.GetVertices().size()) {
                 return false;
@@ -934,7 +983,8 @@ bool ObjIO::ExportMesh(std::ostream& stream,
                     stream << (corner.uv + uv_offset + 1);
                 }
                 if (has_normals) {
-                    const size_t normal_index = has_mesh_normals ? corner.n : corner.v;
+                    const size_t normal_index = use_sharp_edges ? sharp_data.corner_normals[face_index][corner_index]
+                        : has_mesh_normals ? corner.n : corner.v;
                     if (normal_index >= export_normals.size()) {
                         return false;
                     }

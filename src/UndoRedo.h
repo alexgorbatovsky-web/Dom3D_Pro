@@ -21,6 +21,8 @@ public:
     // resulting document.  The redo snapshot is captured on the first Undo.
     bool CommitChangeLazy(std::string command_name);
     void CancelChange();
+    // Restore the pending before-state when a live operation modified existing objects.
+    bool RollbackChange();
     bool RecordChange(std::string command_name);
     bool RecordCommand(
         std::string command_name,

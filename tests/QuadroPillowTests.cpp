@@ -23,12 +23,12 @@ std::vector<double> signature(const CMesh3D& mesh) {
 }
 }
 
-static void TestCadPatchBody(const char* path,const char* outputPrefix,bool frame) {
+static void TestCadPatchBody(const char* path,const char* outputPrefix,bool frame,bool bridge=false) {
     CAlfaDoc document;Dom3DProjectSerializer serializer;QString room,error;ProjectViewState view;
     check(serializer.Load(QString::fromLocal8Bit(path),document,room,view,error),"Cannot load pillow fixture");
     CSolid* solid=nullptr;
-    for(const auto& o:document.GetObjects())if(auto* s=dynamic_cast<CSolid*>(o.get());s&&s->GetName()==(frame?"Frame":"Extrude Solid"))solid=s;
-    check(solid&&solid->InitSurfaces()&&solid->GetNumSurfaces()==(frame?32:18),"CAD patch body fixture body changed");
+    for(const auto& o:document.GetObjects())if(auto* s=dynamic_cast<CSolid*>(o.get());s&&s->GetName()==(bridge?"Shell":frame?"Frame":"Extrude Solid"))solid=s;
+    check(solid&&solid->InitSurfaces()&&solid->GetNumSurfaces()==(bridge?6:frame?32:18),"CAD patch body fixture body changed");
     const auto topology=solid->GetQuadroTopologySnapshot();
     for(int i=0;i<solid->GetNumSurfaces();++i)
         check(topology->faces()[i].reversed==(solid->GetSurfaceFace(i)->m_Face.Orientation()==TopAbs_REVERSED),"Snapshot changed CAD face orientation");
@@ -37,8 +37,12 @@ static void TestCadPatchBody(const char* path,const char* outputPrefix,bool fram
     const double cadVolume=properties.Mass();
     std::vector<double> repeat;std::size_t lowCount=0,highCount=0;
     int iteration=0;
-    for(float density:{0.25f,frame?0.45f:0.5f,1.f,frame?0.45f:0.5f}) {
-        check(solid->ReBuldMesh(1.f/density),"CAD patch body CAD quad meshing failed");
+    const float lowDensity=bridge?0.2f:0.25f;
+    for(float density:{lowDensity,frame?0.45f:0.5f,1.f,frame?0.45f:0.5f}) {
+        const bool rebuilt=solid->ReBuldMesh(1.f/density);
+        if(!rebuilt) for(int i=0;i<solid->GetNumSurfaces();++i)
+            std::cerr<<"Face "<<i<<": "<<solid->GetSurfaceFace(i)->GetLastIslandFillError()<<std::endl;
+        check(rebuilt,"CAD patch body CAD quad meshing failed");
         check(solid->GetQuadroTopologySnapshot()==topology&&solid->GetQuadroBoundaryCaptureCount()==1,"Density recaptured CAD topology");
         std::vector<const CMesh3D*> meshes;
         for(int i=0;i<solid->GetNumSurfaces();++i) {
@@ -57,6 +61,14 @@ static void TestCadPatchBody(const char* path,const char* outputPrefix,bool fram
             }
             meshes.push_back(s->pMesh3D);
         }
+        if(bridge && density==lowDensity) {
+            int singleRowSides=0;
+            for(int i=0;i<solid->GetNumSurfaces();++i) {
+                const auto* face=solid->GetSurfaceFace(i);
+                if(face->m_QtyU==2 || face->m_QtyV==2) ++singleRowSides;
+            }
+            check(singleRowSides==4,"Thin Bridge shell must have one cell through thickness on all four sides");
+        }
         auto mesh=CMesh3D::CreateWelded(meshes);check(bool(mesh),"Cannot assemble pillow mesh");
         std::map<std::pair<std::size_t,std::size_t>,std::pair<int,int>> edges;
         double volume=0;
@@ -71,7 +83,7 @@ static void TestCadPatchBody(const char* path,const char* outputPrefix,bool fram
         check(static_cast<long long>(mesh->GetVertices().size())-static_cast<long long>(edges.size())+static_cast<long long>(mesh->GetFaces().size())==(frame?0:2),"Unexpected CAD patch body Euler characteristic");
         std::cout<<"CAD volume="<<cadVolume<<" mesh volume="<<volume<<std::endl;
         check(std::abs(volume-cadVolume)<std::abs(cadVolume)*0.03,"CAD patch body volume differs from CAD by more than 3 percent");
-        if(density==0.25f)lowCount=mesh->GetFaces().size();
+        if(density==lowDensity)lowCount=mesh->GetFaces().size();
         if(density==1.f)highCount=mesh->GetFaces().size();
         if(iteration==1)repeat=signature(*mesh);
         if(iteration==3)check(repeat==signature(*mesh),"Repeated density changed pillow result");
@@ -96,3 +108,5 @@ static void TestCadPatchBody(const char* path,const char* outputPrefix,bool fram
 
 void TestPillowCadQuadro(const char* path,const char* outputPrefix) { TestCadPatchBody(path,outputPrefix,false); }
 void TestFrameCadQuadro(const char* path) { TestCadPatchBody(path,nullptr,true); }
+
+void TestBridgeShellQuadro(const char* path,const char* outputPrefix) { TestCadPatchBody(path,outputPrefix,false,true); }

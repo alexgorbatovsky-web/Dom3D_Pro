@@ -1,4 +1,5 @@
 #include "TrimShapeBuilder.h"
+#include "BoundedSolidOrientation.h"
 
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
@@ -25,6 +26,7 @@
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
 #include <TopTools_ListOfShape.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 
 #include <algorithm>
 #include <cmath>
@@ -272,7 +274,7 @@ bool TrimSolidByFace(const TopoDS_Shape& body,
 }
 
 bool TrimSolidByClosedProfile(const TopoDS_Shape& body,
-                              const TopoDS_Face& profile,
+                              const TopoDS_Shape& profile,
                               Vec3 extrusion_normal,
                               bool keep_inside,
                               TopoDS_Shape& result) {
@@ -282,6 +284,8 @@ bool TrimSolidByClosedProfile(const TopoDS_Shape& body,
     }
 
     try {
+        const TopoDS_Shape bounded_body = OrientBoundedSolidComponents(body);
+        if (bounded_body.IsNull()) return false;
         const double extent = BodyExtent(body);
         gp_Trsf shift;
         shift.SetTranslation(gp_Vec(
@@ -301,11 +305,14 @@ bool TrimSolidByClosedProfile(const TopoDS_Shape& body,
             return false;
         }
 
+        const TopoDS_Shape bounded_cutter = OrientBoundedSolidComponents(prism.Shape());
+        if (bounded_cutter.IsNull()) return false;
+
         if (keep_inside) {
-            BRepAlgoAPI_Common common(body, prism.Shape());
+            BRepAlgoAPI_Common common(bounded_body, bounded_cutter);
             return FinishBoolean(common, result);
         }
-        BRepAlgoAPI_Cut cut(body, prism.Shape());
+        BRepAlgoAPI_Cut cut(bounded_body, bounded_cutter);
         return FinishBoolean(cut, result);
     } catch (...) {
         return false;
@@ -359,11 +366,30 @@ bool TrimSolidByOpenProfile(const TopoDS_Shape& body,
             return false;
         }
 
+        // A bent open profile has no single separating plane. Classify the
+        // split pieces by the actual curtain faces, including their Boolean
+        // fragments. OCCT's curtain normal points to the left of the directed
+        // profile (extrusion normal cross profile tangent). A piece on that
+        // side has the opposite outward normal on its cut boundary.
+        TopTools_IndexedMapOfShape curtain_faces;
+        for (TopExp_Explorer face(curtain.Shape(), TopAbs_FACE); face.More(); face.Next()) {
+            curtain_faces.Add(face.Current());
+            for (const auto& fragment : splitter.Modified(face.Current()))
+                if (fragment.ShapeType() == TopAbs_FACE) curtain_faces.Add(fragment);
+        }
         std::vector<TopoDS_Shape> kept;
         for (TopExp_Explorer explorer(splitter.Shape(), TopAbs_SOLID);
              explorer.More();
              explorer.Next()) {
             const TopoDS_Shape solid = explorer.Current();
+            int curtain_side = 0;
+            for (TopExp_Explorer face(solid, TopAbs_FACE); face.More(); face.Next()) {
+                const int index = curtain_faces.FindIndex(face.Current());
+                if (!index) continue;
+                const int side = face.Current().Orientation() == curtain_faces(index).Orientation() ? -1 : 1;
+                if (curtain_side && curtain_side != side) return false;
+                curtain_side = side;
+            }
             GProp_GProps mass;
             BRepGProp::VolumeProperties(solid, mass);
             const gp_Pnt center = mass.CentreOfMass();
@@ -371,7 +397,7 @@ bool TrimSolidByOpenProfile(const TopoDS_Shape& body,
                 (center.X() - side_origin.x) * side_normal.x
                 + (center.Y() - side_origin.y) * side_normal.y
                 + (center.Z() - side_origin.z) * side_normal.z;
-            if ((side >= 0.0) == keep_positive_side) {
+            if ((curtain_side ? curtain_side > 0 : side >= 0.0) == keep_positive_side) {
                 kept.push_back(solid);
             }
         }

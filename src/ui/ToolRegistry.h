@@ -39,6 +39,7 @@ struct ToolParameter {
     std::vector<std::string> options;
     ToolParameterUnit unit = ToolParameterUnit::None;
     std::vector<double> option_values;
+    bool enabled = true;
 };
 
 struct ToolDefinition {
@@ -61,6 +62,7 @@ class ToolRegistry {
 public:
     ToolRegistry();
 
+    bool TryRebuildSurfaceOffset(const ActiveParametricObject&, CAlfaDoc&, std::string& error) const;
     const std::vector<ToolDefinition>& Tools() const;
     const ToolDefinition* Find(const std::string& id) const;
     ActiveParametricObject Activate(const std::string& id, CAlfaDoc& document) const;
@@ -78,7 +80,7 @@ public:
         CAlfaDoc& document,
         const std::vector<ToolParameter>& parameters) const;
     ActiveParametricObject ApplyTrimToSelection(const std::string& id,
-                                                CAlfaDoc& document) const;
+                                                CAlfaDoc& document, int origin_plane = -1) const;
     void AcceptTransientTrim(const ActiveParametricObject& active_object,
                              const CAlfaDoc& document) const;
     bool CancelTransientTrim(const ActiveParametricObject& active_object,
@@ -94,6 +96,8 @@ public:
     bool ApplyOffsetFaceOnce(CAlfaDoc& document, double distance) const;
     void Rebuild(const ActiveParametricObject& active_object, CAlfaDoc& document) const;
     bool TryRebuildPolyhedron(const ActiveParametricObject& active_object, CAlfaDoc& document) const;
+    bool TryRebuildProfileSolid(const ActiveParametricObject& active_object, CAlfaDoc& document) const;
+    bool TryRebuildSurfacePatch(const ActiveParametricObject& active_object, CAlfaDoc& document, std::string& error) const;
     bool TryRebuildBulge(const ActiveParametricObject& active_object, CAlfaDoc& document) const;
     bool ApplyFurnitureMaterialParameter(
         const ActiveParametricObject& active_object,

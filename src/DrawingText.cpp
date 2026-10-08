@@ -19,9 +19,15 @@
 #include <QPainterPath>
 #include <QPolygonF>
 #include <QStringList>
+#include <QTextLayout>
+#include <QGlyphRun>
+#include <QRawFont>
+#include <QTextBoundaryFinder>
 
 #include <algorithm>
 #include <cmath>
+#include <map>
+#include <iterator>
 #include <ostream>
 
 namespace {
@@ -108,6 +114,81 @@ void CDrawingText::EnsureGeometry() const {
         }
         contours_.push_back(std::move(contour));
     }
+}
+
+std::vector<std::vector<std::vector<CPoint3d>>> CDrawingText::BuildBezierLetters() const {
+    std::vector<std::vector<std::vector<CPoint3d>>> letters;
+    QFont font(QString::fromUtf8(font_family_.c_str()));
+    font.setPixelSize(1000);
+    const double scale = height_ / std::max(1.0, QFontMetricsF(font).capHeight());
+    const QStringList lines = QString::fromUtf8(text_.c_str()).split('\n');
+    for (int row = 0; row < lines.size(); ++row) {
+        QTextLayout layout(lines[row], font);
+        layout.setCacheEnabled(true);
+        layout.beginLayout();
+        QTextLine line = layout.createLine();
+        if (line.isValid()) line.setNumColumns(lines[row].size());
+        layout.endLayout();
+        if (!line.isValid()) continue;
+        // Keep combining marks with their letter even when font fallback emits
+        // them in a separate glyph run. Use logical order for RTL text as well.
+        std::vector<int> boundaries{0};
+        QTextBoundaryFinder finder(QTextBoundaryFinder::Grapheme, lines[row]);
+        for (int boundary = finder.toNextBoundary(); boundary >= 0; boundary = finder.toNextBoundary())
+            boundaries.push_back(boundary);
+        std::map<int, std::vector<std::vector<CPoint3d>>> row_letters;
+        for (const QGlyphRun& run : layout.glyphRuns(0, -1, QTextLayout::RetrieveAll)) {
+            const auto glyphs = run.glyphIndexes();
+            const auto positions = run.positions();
+            const auto indexes = run.stringIndexes();
+            for (qsizetype glyph = 0; glyph < glyphs.size(); ++glyph) {
+                const QPainterPath path = run.rawFont().pathForGlyph(glyphs[glyph]);
+                std::vector<std::vector<CPoint3d>> contours;
+                std::vector<CPoint3d> points;
+                const auto world = [&](const QPainterPath::Element& element) {
+                    return LocalToWorld((element.x + positions[glyph].x()) * scale,
+                        -(element.y + positions[glyph].y() - line.ascent() + row * 1200.0) * scale);
+                };
+                const auto append_line = [&](CPoint3d end) {
+                    const CPoint3d start = points.back();
+                    points.push_back(start * (2.0 / 3.0) + end * (1.0 / 3.0));
+                    points.push_back(start * (1.0 / 3.0) + end * (2.0 / 3.0));
+                    points.push_back(end);
+                };
+                const auto finish = [&]() {
+                    if (points.size() >= 4) {
+                        const auto& a = points.front();
+                        const auto& b = points.back();
+                        if (a.x != b.x || a.y != b.y || a.z != b.z) append_line(a);
+                        contours.push_back(std::move(points));
+                    }
+                    points.clear();
+                };
+                for (int i = 0; i < path.elementCount(); ++i) {
+                    const auto element = path.elementAt(i);
+                    if (element.isMoveTo()) {
+                        finish();
+                        points.push_back(world(element));
+                    } else if (element.isLineTo()) {
+                        append_line(world(element));
+                    } else if (element.type == QPainterPath::CurveToElement && i + 2 < path.elementCount()) {
+                        points.push_back(world(element));
+                        points.push_back(world(path.elementAt(++i)));
+                        points.push_back(world(path.elementAt(++i)));
+                    }
+                }
+                finish();
+                if (!contours.empty()) {
+                    const int index = static_cast<int>(indexes[glyph]);
+                    const int cluster = *std::prev(std::upper_bound(boundaries.begin(), boundaries.end(), index));
+                    auto& letter = row_letters[cluster];
+                    for (auto& contour : contours) letter.push_back(std::move(contour));
+                }
+            }
+        }
+        for (auto& entry : row_letters) letters.push_back(std::move(entry.second));
+    }
+    return letters;
 }
 
 void CDrawingText::Render3d(bool selected) const {

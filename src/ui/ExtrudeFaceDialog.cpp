@@ -8,6 +8,8 @@
 #include <QSlider>
 #include <QVBoxLayout>
 #include <QWidget>
+#include <QLabel>
+#include <QSettings>
 
 #include <cmath>
 
@@ -27,13 +29,13 @@ ExtrudeFaceDialog::ExtrudeFaceDialog(QWidget* parent)
     taper_angle_->setDecimals(2);
     taper_angle_->setSingleStep(1.0);
     taper_angle_->setSuffix(" deg");
-    taper_angle_->setValue(0.0);
+    taper_angle_->setValue(QSettings().value("tools/SolidExtrudeFace/taper", 0.0).toDouble());
 
     taper_slider_ = new QSlider(Qt::Horizontal, this);
     taper_slider_->setRange(-8900, 8900);
     taper_slider_->setSingleStep(1);
     taper_slider_->setPageStep(100);
-    taper_slider_->setValue(0);
+    taper_slider_->setValue(static_cast<int>(std::lround(taper_angle_->value()*100.0)));
     taper_slider_->setToolTip(
         "Taper Angle: drag; arrow keys — 0.01 deg, Page Up/Down — 1 deg");
 
@@ -62,8 +64,17 @@ ExtrudeFaceDialog::ExtrudeFaceDialog(QWidget* parent)
     connect(buttons, &QDialogButtonBox::accepted, this, &ExtrudeFaceDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, this, &ExtrudeFaceDialog::reject);
     layout->addRow(buttons);
+    connect(this, &QDialog::accepted, this, [this] { QSettings().setValue("tools/SolidExtrudeFace/taper", TaperAngle()); });
 }
 
 double ExtrudeFaceDialog::TaperAngle() const {
     return taper_angle_ ? taper_angle_->value() : 0.0;
+}
+
+void ExtrudeFaceDialog::SetCurvedFace(bool curved) {
+    taper_angle_->setEnabled(true);taper_slider_->setEnabled(true);
+    if(curved) {
+        auto* hint=new QLabel("Curved patch: positive angle narrows, negative angle widens.\nThe cap scales uniformly; this is not a constant wall draft angle.",this);
+        hint->setWordWrap(true);static_cast<QFormLayout*>(layout())->insertRow(0,hint);
+    }
 }

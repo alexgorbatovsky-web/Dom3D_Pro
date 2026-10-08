@@ -18,6 +18,7 @@
 #include <TopoDS_Face.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Vec.hxx>
+#include <gp_Sphere.hxx>
 
 #include <algorithm>
 #include <cmath>
@@ -319,6 +320,16 @@ bool CSurfaceFace::GetPoint(double U, double V, CPoint8d* pnt)
         d1v.Transform(transform);
 
         gp_Vec normal = d1u.Crossed(d1v);
+        const BRepAdaptor_Surface analytic(face);
+        if (analytic.GetType() == GeomAbs_Sphere) {
+            // Float UV storage can round V past +/- pi/2. The derivative
+            // cross product then changes sign although the point remains at
+            // the same pole. Use the exact radial normal, as triangulation
+            // already does, preserving indirect CAD parametrizations.
+            const gp_Sphere sphere = analytic.Sphere();
+            normal = gp_Vec(sphere.Location(), point);
+            if (!sphere.Position().Direct()) normal.Reverse();
+        }
         // A topologically collapsed spline side can retain tiny, noisy
         // derivatives in CAD. Their cross product (or SLProps normal) is not
         // the limiting normal. Sample just inside that side without moving XYZ.
@@ -400,6 +411,13 @@ int CNet::Build(CSurfaceFace* mm, double delta)
         constexpr size_t max_points = 180000;
         constexpr int max_passes = 24;
         const double samples[] = {0.25, 0.5, 0.75};
+        // Reflections require normal accuracy even when positional error is small.
+        const auto normal_error=[](const CPoint8d& actual,const CPoint8d& a,const CPoint8d& b,double t){
+            gp_Vec n(actual.l,actual.m,actual.n), expected(a.l*(1-t)+b.l*t,a.m*(1-t)+b.m*t,a.n*(1-t)+b.n*t);
+            if(n.SquareMagnitude()<1.e-20||expected.SquareMagnitude()<1.e-20)return false;
+            return n.Normalized().Dot(expected.Normalized()) < 0.9999904807207345; // 0.25 degree
+        };
+
 
         for (int pass = 0; pass < max_passes; ++pass) {
             std::vector<bool> split_u(u_parameters.size() - 1, false);
@@ -422,7 +440,8 @@ int CNet::Build(CSurfaceFace* mm, double delta)
                         const double u = first_u + (last_u - first_u) * alpha;
                         if (!mm->GetPoint(u, v, &point))
                             return 3;
-                        if (point_segment_distance(point, first, last) > delta) {
+                        if (point_segment_distance(point, first, last) > delta
+                            || normal_error(point,first,last,alpha)) {
                             split_u[i] = true;
                             break;
                         }
@@ -447,7 +466,8 @@ int CNet::Build(CSurfaceFace* mm, double delta)
                         const double v = first_v + (last_v - first_v) * alpha;
                         if (!mm->GetPoint(u, v, &point))
                             return 3;
-                        if (point_segment_distance(point, first, last) > delta) {
+                        if (point_segment_distance(point, first, last) > delta
+                            || normal_error(point,first,last,alpha)) {
                             split_v[j] = true;
                             break;
                         }
@@ -469,7 +489,12 @@ int CNet::Build(CSurfaceFace* mm, double delta)
                         || !mm->GetPoint(u_parameters[i + 1], v_parameters[j + 1], &p11)) {
                         return 3;
                     }
-                    if (diagonal_line_distance(p00, p11, p01, p10) > delta) {
+                    CPoint8d centre;
+                    if(!mm->GetPoint((u_parameters[i]+u_parameters[i+1])*.5,
+                                     (v_parameters[j]+v_parameters[j+1])*.5,&centre))return 3;
+                    if (diagonal_line_distance(p00, p11, p01, p10) > delta
+                        || normal_error(centre,p00,p11,.5)
+                        || normal_error(centre,p01,p10,.5)) {
                         split_u[i] = true;
                         split_v[j] = true;
                     }

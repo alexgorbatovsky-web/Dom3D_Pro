@@ -1,3 +1,4 @@
+#include "CurveAppearance.h"
 #include "CadCurve3D.h"
 
 #include "OpenGLCompat.h"
@@ -10,14 +11,17 @@
 
 CCadCurve3D::CCadCurve3D()
     : CAlfaObject("CAD Curve") {
+    SetLineWidth(kDefaultCurveWidth);
 }
 
 CCadCurve3D::CCadCurve3D(std::string name)
     : CAlfaObject(std::move(name)) {
+    SetLineWidth(kDefaultCurveWidth);
 }
 
 CCadCurve3D::CCadCurve3D(std::string name, std::vector<Vec3> points)
     : CAlfaObject(std::move(name)), points_(std::move(points)) {
+    SetLineWidth(kDefaultCurveWidth);
 }
 
 const std::vector<Vec3>& CCadCurve3D::GetPoints() const {
@@ -44,13 +48,14 @@ void CCadCurve3D::Render3d(bool selected) const {
     const Color color = GetColor();
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_LINE_SMOOTH);
-    glLineWidth(selected ? 5.0f : 3.0f);
+    ApplyLineAppearance(selected, 5.0f, 3.0f);
     glColor3f(selected ? 0.35f : color.r, selected ? 0.86f : color.g, selected ? 1.0f : color.b);
     glBegin(GL_LINE_STRIP);
     for (const Vec3& point : points_) {
         glVertex3f(point.x, point.y, point.z);
     }
     glEnd();
+    ResetLineAppearance();
     glDisable(GL_LINE_SMOOTH);
     glEnable(GL_DEPTH_TEST);
 }
@@ -61,13 +66,14 @@ void CCadCurve3D::Render2d(float center_x, float center_y, float scale) const {
     }
 
     const Color color = GetColor();
-    glLineWidth(2.0f);
+    ApplyLineAppearance(false);
     glColor3f(color.r, color.g, color.b);
     glBegin(GL_LINE_STRIP);
     for (const Vec3& point : points_) {
         glVertex2f(center_x + point.x * scale, center_y + point.z * scale);
     }
     glEnd();
+    ResetLineAppearance();
 }
 
 bool CCadCurve3D::HitTest(CurvePoint point, float tolerance) const {
@@ -94,8 +100,11 @@ bool CCadCurve3D::Save(std::ostream& stream) const {
 std::unique_ptr<CAlfaObject> CCadCurve3D::Clone() const {
     auto copy = std::make_unique<CCadCurve3D>(GetName() + " Copy", points_);
     copy->SetGroupName(GetGroupName());
+    copy->SetFrozen(IsFrozen());
     copy->SetVisible(IsVisible());
     copy->SetColor(GetColor());
+    copy->SetLineWidth(GetLineWidth());
+    copy->SetLineStyle(GetLineStyle());
     copy->SetMaterial(GetMaterial());
     copy->SetMaterialId(GetMaterialId());
     return copy;

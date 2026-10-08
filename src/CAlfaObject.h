@@ -47,6 +47,8 @@ public:
     void SetName(std::string name);
     const std::string& GetGroupName() const;
     void SetGroupName(std::string group_name);
+    bool IsFrozen() const { return frozen_; }
+    void SetFrozen(bool frozen) { frozen_ = frozen; }
     bool IsVisible() const;
     virtual void SetVisible(bool visible);
 
@@ -80,6 +82,7 @@ private:
     Material material_;
     unsigned long material_id_ = 0;
     bool visible_ = true;
+    bool frozen_ = false;
     double line_width_ = 0.5;
     std::string line_style_ = "CONTINUOUS";
     std::string parametric_tool_id_;

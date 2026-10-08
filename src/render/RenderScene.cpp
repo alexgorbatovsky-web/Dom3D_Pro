@@ -65,14 +65,15 @@ int append_material(RenderScene& scene, Material material) {
 }
 
 void append_mesh(RenderScene& scene,
-                 const CMesh3D& source,
+                 const CMesh3D& control,
                  Material material,
                  const QString& name,
                  bool independent_surface_patch = false) {
+    const CMesh3D& source = control.GetEvaluatedMesh();
     if (source.GetVertices().empty()) return;
     RenderMesh mesh;
     mesh.name = name;
-    mesh.group_name = QString::fromStdString(source.GetGroupName());
+    mesh.group_name = QString::fromStdString(control.GetGroupName());
     mesh.independent_surface_patch = independent_surface_patch;
     mesh.material_index = append_material(scene, material);
     mesh.vertices = source.GetVertices();

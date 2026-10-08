@@ -1,3 +1,4 @@
+#include "Diagnostics.h"
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
@@ -49,7 +50,7 @@ namespace {
 constexpr int kCurveSampleCount = 96;
 struct IgesStageTimer {
     const char* name;int index;std::chrono::steady_clock::time_point start=std::chrono::steady_clock::now();
-    ~IgesStageTimer(){if(std::getenv("DOM3D_PROFILE_IGES"))std::cerr<<"IGES "<<name<<" "<<index<<": "<<std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count()<<" s"<<std::endl;}
+    ~IgesStageTimer(){if(Dom3DDiagnosticsEnabled && std::getenv("DOM3D_PROFILE_IGES"))std::cerr<<"IGES "<<name<<" "<<index<<": "<<std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count()<<" s"<<std::endl;}
 };
 
 Handle(Geom_BSplineCurve) make_bspline_curve(
@@ -158,6 +159,7 @@ Handle(Geom_BSplineCurve) make_periodic_bspline_curve(
 
 TopoDS_Shape make_export_curve_shape(const CBSpline& source)
 {
+    if(source.HasNodeTypes())return make_export_curve_shape(source.BuildNodeBezier());
     const std::vector<CPoint3d>& points = source.GetPoints();
     if (points.size() < 2) {
         return {};
@@ -414,7 +416,6 @@ std::unique_ptr<CAlfaObject> make_editable_nurbs_curve(
     result->SetClosed(preserve_closed);
 
     result->SetGroupName("Curves from IGES");
-    result->SetColor(kDefaultCurveColor);
     return result;
 }
 

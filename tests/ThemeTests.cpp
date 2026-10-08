@@ -18,6 +18,10 @@
 #include <QSettings>
 #include <QTemporaryDir>
 #include <QTimer>
+#include <QToolBar>
+#include <QToolButton>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <cstdlib>
 #include <iostream>
 
@@ -42,19 +46,38 @@ int main(int argc, char** argv) {
     require(presets.size() == 4, "Four presets");
     for (auto scheme : presets) {
         scheme.accent = QColor("#abcdef");
+        scheme.activeButton = QColor("#ea9132");
         Themes::Save(settings, scheme);
         const auto loaded = Themes::Load(settings);
         require(loaded.id == scheme.id && loaded.accent == scheme.accent && loaded.base == scheme.base, "Settings round trip");
+        require(loaded.activeButton == scheme.activeButton, "Active button settings round trip");
     }
     settings.clear();
     const QString themePath = directory.filePath("custom.dom3dtheme");
     QString error;
     auto custom = presets[1];
     custom.accent = QColor("#04259e");
+    custom.activeButton = QColor("#de9a41");
     require(Themes::SaveFile(themePath, custom, error), "Export custom theme");
     auto imported = presets[0];
     require(Themes::LoadFile(themePath, imported, error), "Import custom theme");
     require(imported.id == custom.id && Themes::Palette(imported) == Themes::Palette(custom), "All exported colors round trip");
+    require(imported.activeButton == custom.activeButton, "Active button file round trip");
+    {
+        QFile file(themePath);
+        require(file.open(QIODevice::ReadOnly), "Read legacy theme fixture");
+        auto object = QJsonDocument::fromJson(file.readAll()).object();
+        file.close();
+        auto colors = object["colors"].toObject();
+        colors.remove("activeButton");
+        object["colors"] = colors;
+        require(file.open(QIODevice::WriteOnly | QIODevice::Truncate), "Write legacy theme fixture");
+        file.write(QJsonDocument(object).toJson());
+        file.close();
+        auto legacy = presets[0];
+        require(Themes::LoadFile(themePath, legacy, error), "Old theme files remain supported");
+        require(legacy.activeButton == presets[1].activeButton, "Old theme uses preset active color");
+    }
     require(!Themes::SaveFile(directory.path(), custom, error) && !error.isEmpty(), "Export errors reported");
     require(!Themes::LoadFile(directory.filePath("missing"), imported, error), "Missing file rejected");
     for (const QByteArray invalid : {QByteArray("not json"),
@@ -72,6 +95,22 @@ int main(int argc, char** argv) {
     settings.clear();
     Themes::Initialize();
     QMainWindow window;
+    auto* toolbar = window.addToolBar("View");
+    auto* selection = toolbar->addAction("Obj");
+    selection->setCheckable(true);
+    selection->setChecked(true);
+    auto* selectionButton = qobject_cast<QToolButton*>(toolbar->widgetForAction(selection));
+    auto* edges = new QPushButton("Draw Edges");
+    edges->setCheckable(true);
+    edges->setChecked(true);
+    toolbar->addWidget(edges);
+    auto* hidden = new QPushButton("Hidden Edges");
+    hidden->setCheckable(true);
+    toolbar->addWidget(hidden);
+    auto* openEdges = new QPushButton("Mesh Open Edges");
+    openEdges->setCheckable(true);
+    openEdges->setChecked(true);
+    toolbar->addWidget(openEdges);
     window.setStyleSheet("QMainWindow::separator { width: 1px; }");
     auto* menu = window.menuBar()->addMenu("Edit");
     menu->addAction("Themes...");
@@ -111,6 +150,23 @@ int main(int argc, char** argv) {
         app.processEvents();
         require(label->palette().color(QPalette::WindowText) == scheme.text, "Repeated switching updates text");
         require(button->palette().color(QPalette::Button) == scheme.button, "Repeated switching updates styled controls");
+        // Sample the rendered fill, away from the label, border and focus frame.
+        for (QWidget* toggle : {static_cast<QWidget*>(edges), static_cast<QWidget*>(selectionButton)}) {
+            toggle->clearFocus();
+            const auto rendered = toggle->grab().toImage();
+            require(rendered.pixelColor(4, rendered.height() / 2) == scheme.activeButton,
+                    "Checked push and tool buttons render the active color after switching themes");
+        }
+        require(hidden->grab().toImage().pixelColor(4, hidden->height() / 2) != scheme.activeButton,
+                "Unchecked button is visually distinct");
+        const QSize checkedSize = edges->sizeHint();
+        edges->setChecked(false);
+        require(edges->sizeHint() == checkedSize, "Toggling does not change button size");
+        edges->setChecked(true);
+        edges->setEnabled(false);
+        require(edges->grab().toImage().pixelColor(4, edges->height() / 2) != scheme.activeButton,
+                "Disabled buttons do not appear enabled");
+        edges->setEnabled(true);
         QLabel createdLater("New dialog label", &window);
         createdLater.ensurePolished();
         require(createdLater.palette().color(QPalette::WindowText) == scheme.text, "New widgets inherit current theme");

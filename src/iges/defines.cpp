@@ -1,3 +1,4 @@
+#include "../Diagnostics.h"
 #include "defines.h"
 
 #include <cstdio>
@@ -8,6 +9,7 @@
 
 void message_to_file(const char* text)
 {
+    if constexpr (!Dom3DDiagnosticsEnabled) return;
     if (text) {
         std::fprintf(stderr, "%s\n", text);
     }
@@ -15,6 +17,7 @@ void message_to_file(const char* text)
 
 void Step(const char* text)
 {
+    if constexpr (!Dom3DDiagnosticsEnabled) return;
 	if (!text)
 		return;
 	std::string text2(text);

@@ -1,4 +1,57 @@
+#include "solid/FilletEdgeIdentity.h"
+#include "ui/ExtrudeFaceDialog.h"
+#include "HybridExtrude.h"
+#include "SurfacePointTransform.h"
+#include <QSpinBox>
+#include "SurfaceGraphOffsetBuilder.h"
+#include "solid/SubdivideFace.h"
+#include <BRepFilletAPI_MakeFillet.hxx>
+#include "ExtrudeShapeBuilder.h"
+#include "SurfaceTopologyBuilder.h"
+#include "ExtractedEdgeCurve.h"
+#include "SplineBezierSections.h"
+#include "SurfaceOffsetBuilder.h"
+#include <BRepExtrema_DistShapeShape.hxx>
+#include <BRepBuilderAPI_MakeVertex.hxx>
+#include <BRepBuilderAPI_MakeEdge.hxx>
+#include <gp_Circ.hxx>
+#include "SaddleSurfaceBuilder.h"
+#include "Body1Builder.h"
+#include "BottleSection.h"
+#include "BodySectionSketchBuilder.h"
+#include <QLineEdit>
+#include "Sketch.h"
+#include "SketchArcLine.h"
+#include "MultiSketchProfileBuilder.h"
+#include "SketchProfileBuilder.h"
+#include <BRepAlgoAPI_Cut.hxx>
+#include "ui/SectionGraphEditor.h"
+#include <BRepAlgoAPI_Section.hxx>
+#include <BRepBndLib.hxx>
+#include <Bnd_Box.hxx>
+#include "SurfaceSketchTrimBuilder.h"
+#include "TwoViewSurfaceBuilder.h"
+#include "ui/PropertyPanel.h"
+#include "SurfaceEdgePatchBuilder.h"
+#include "SurfaceFilletBuilder.h"
+#include <set>
+#include <BRepAlgoAPI_Splitter.hxx>
+#include <TopTools_ListIteratorOfListOfShape.hxx>
+#include <QLabel>
+#include <QShortcut>
+#include <QElapsedTimer>
+#include <QEventLoop>
+#include <QCursor>
+#include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <GeomLProp_SLProps.hxx>
+#include <BRepTools.hxx>
+#include "SurfaceBridgeBuilder.h"
+#include <BRepAdaptor_Curve.hxx>
+#include <BRep_Tool.hxx>
+#include <Geom_Surface.hxx>
 #include "CBSpline.h"
+#include "CurveCutGeometry.h"
+#include <gp_Lin.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
@@ -27,7 +80,9 @@
 #include <Geom_BSplineSurface.hxx>
 #include <GeomConvert.hxx>
 #include <TColgp_Array2OfPnt.hxx>
+#include <TColStd_Array2OfReal.hxx>
 #include <QApplication>
+#include <QFontDatabase>
 #include <QElapsedTimer>
 #include <QAbstractButton>
 #include <QCheckBox>
@@ -37,9 +92,14 @@
 #include <QComboBox>
 #include <QDialog>
 #include <QDoubleSpinBox>
+#include <QSpinBox>
+#include <QToolBar>
+#include <QDockWidget>
+#include <QSlider>
 #include <gp_Pln.hxx>
 #include <QDialogButtonBox>
 #include <QPushButton>
+#include <QTabBar>
 #include <QCloseEvent>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -52,12 +112,16 @@
 #include <QSettings>
 #include <QTemporaryDir>
 #include <QTimer>
+#include <QProgressDialog>
+#include <QProgressBar>
+#include <QTextStream>
 #include <QTreeWidget>
 #include <QTreeWidgetItemIterator>
 
 #include <cstdlib>
 #include <cmath>
 #include <iostream>
+#include <sstream>
 
 namespace {
 void require(bool condition, const char* message) {
@@ -74,9 +138,2552 @@ void answer(QMessageBox::StandardButton button) {
 }
 }
 
+#include "BodySectionSketchTestCases.inc"
+
 int TestScenePersistence(int argc, char** argv) {
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
     QApplication application(argc, argv);
+    if (application.arguments().contains("--quick-menu-cancel-only")) {
+        CAlfaDoc document;
+        auto mesh=std::make_unique<CMesh3D>("Quick menu fixture");
+        CMesh3D::Face face; face.corners={{0,0,0},{1,0,0},{2,0,0},{3,0,0}};
+        require(mesh->SetGeometry({{-50,-50,0},{50,-50,0},{50,50,0},{-50,50,0}}, {face}), "Cannot create menu fixture");
+        document.AddMesh(std::move(mesh));
+        OpenGLViewport viewport; viewport.SetDocument(&document); viewport.SetTool(ToolMode::Select);
+        viewport.resize(800,600); viewport.show(); viewport.SetXYView(); viewport.FitToDocument();
+        int shown=0;
+        QObject::connect(&viewport,&OpenGLViewport::ObjectQuickMenuRequested,&viewport,[&](QPoint){++shown;});
+        const auto wait=[&](int ms) {
+            QEventLoop loop; QTimer::singleShot(ms,&loop,&QEventLoop::quit); loop.exec();
+        };
+        const auto arm=[&]() {
+            QApplication::setActiveWindow(&viewport); viewport.setFocus();
+            const QPoint point(viewport.width()/2,viewport.height()/2);
+            QCursor::setPos(viewport.mapToGlobal(point)); wait(100);
+            const QPointF local(point), global(viewport.mapToGlobal(point));
+            QMouseEvent press(QEvent::MouseButtonPress,local,global,Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);
+            QApplication::sendEvent(&viewport,&press);
+            QMouseEvent release(QEvent::MouseButtonRelease,local,global,Qt::LeftButton,Qt::NoButton,Qt::NoModifier);
+            QApplication::sendEvent(&viewport,&release);
+            require(document.HasSelection(),"Quick menu fixture was not selected");
+        };
+        wait(200); arm(); wait(1200);
+        require(shown==1,"Uninterrupted selection must still show its quick menu");
+        arm();
+        QMouseEvent right(QEvent::MouseButtonPress,QPointF(400,300),QPointF(viewport.mapToGlobal(QPoint(400,300))),
+            Qt::RightButton,Qt::RightButton,Qt::NoModifier);
+        QApplication::sendEvent(&viewport,&right);
+        QMouseEvent right_release(QEvent::MouseButtonRelease,QPointF(400,300),QPointF(viewport.mapToGlobal(QPoint(400,300))),
+            Qt::RightButton,Qt::NoButton,Qt::NoModifier);
+        QApplication::sendEvent(&viewport,&right_release); wait(1200);
+        require(shown==1,"Right click did not cancel delayed quick menu");
+        arm();
+        QMenu popup; popup.addAction("Context menu"); popup.popup(viewport.mapToGlobal(QPoint(400,300)));
+        wait(1200); require(shown==1,"Quick menu appeared over a popup"); popup.close();
+        arm();
+        QDialog dialog(&viewport); QTimer::singleShot(150,&dialog,&QDialog::accept); dialog.exec();
+        wait(1200); require(shown==1,"Closed modal dialog allowed stale quick menu");
+        arm();
+        QDialog modeless(&viewport); modeless.show(); wait(100); modeless.close(); wait(1200);
+        require(shown==1,"Modeless dialog allowed stale quick menu");
+        arm(); QEvent leave(QEvent::Leave); QApplication::sendEvent(&viewport,&leave); wait(1200);
+        require(shown==1,"Leaving viewport allowed stale quick menu");
+        arm(); wait(1200); require(shown==2,"Quick menu did not recover for a fresh selection");
+        std::cout << "Delayed quick menu cancellation passed.\n";
+        return EXIT_SUCCESS;
+    }
+    if(application.arguments().contains("--body-section-sketch"))return TestBodySectionSketch(application);
+    if(application.arguments().contains("--body-copy-placement")) {
+        QTemporaryDir temp;QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,temp.path());
+        MainWindow window;auto& doc=window.document_;auto settings=BodyPrimitiveDefaults(0);
+        settings.guides=CreateBodyPrimitiveGuides(doc,0);std::string error;
+        auto shape=BuildBody1(doc,settings,error);require(!shape.IsNull(),"Cannot build Body-1 fixture");
+        auto source=std::make_unique<CSolid>(shape);source->SetName("Body-1");
+        source->SetParametricOperation(0,"Body1","Body-1",Body1Parameters(settings));
+        auto* ptr=source.get();doc.AddObject(std::move(source));const auto sourceId=ptr->m_id;
+        doc.SelectObjectById(sourceId);require(doc.DuplicateSelectedObject(),"Cannot copy Body-1");
+        const auto copyId=doc.GetSelectedObject()->m_id;const auto index=doc.FindObjectIndexById(copyId);
+        const Vec3 delta{75,40,250},axis{0,1,0};const float angle=.35f;
+        doc.MoveSelectedObjects(delta);doc.RotateSelectedObjects({0,0,0},axis,angle);
+        const auto originalShape=dynamic_cast<CSolid*>(doc.FindObjectById(sourceId))->m_Shape;
+        window.active_parametric_edit_existing_=true;
+        for(double value:{.22,.31}) {
+            auto* copy=dynamic_cast<CSolid*>(doc.FindObjectById(copyId));
+            window.active_parametric_object_=window.tool_registry_.ActiveObjectFromDocument(index,*copy,0,&doc);
+            window.property_panel_->SetActiveObject(window.active_parametric_object_);
+            auto* editor=window.property_panel_->findChild<QDoubleSpinBox*>("parameter_front.up.y");
+            require(editor,"Missing Body-1 parameter editor");editor->setValue(value);
+            // Exercise the same ParametersChanged path as the operation editor.
+            window.property_panel_->ParametersChanged();
+            require(window.property("surfaceFilletError").toString().isEmpty(),"Copy parameter rebuild failed");
+            settings.curvature[4]=value;auto expectedShape=BuildBody1(doc,settings,error);
+            CSolid expected(expectedShape);expected.Translate(delta);expected.Rotate({0,0,0},axis,angle);
+            copy=dynamic_cast<CSolid*>(doc.FindObjectById(copyId));
+            GProp_GProps actualMass,expectedMass;BRepGProp::VolumeProperties(copy->m_Shape,actualMass);BRepGProp::VolumeProperties(expected.m_Shape,expectedMass);
+            require(actualMass.CentreOfMass().Distance(expectedMass.CentreOfMass())<.001,"Body copy lost placement while editing parameters");
+            require(std::abs(actualMass.Mass()-expectedMass.Mass())<.01,"Body copy parameter edit produced wrong geometry");
+            require(copy->GetNumOperations()==3,"Copy lost its Move/Rotate history");
+            require(dynamic_cast<CSolid*>(doc.FindObjectById(sourceId))->m_Shape.IsSame(originalShape),"Editing copy changed source body");
+        }
+        auto* guide=dynamic_cast<CBSpline*>(doc.FindObjectById(settings.guides[0]));auto point=guide->GetPoints()[1];point.y+=5;guide->SetPointDirect(1,point);
+        require(window.tool_registry_.ReplayProfileDependents(settings.guides[0],doc),"Shared guide no longer updates bodies");
+        auto expectedShape=BuildBody1(doc,settings,error);CSolid expected(expectedShape);expected.Translate(delta);expected.Rotate({0,0,0},axis,angle);
+        GProp_GProps actualMass,expectedMass;BRepGProp::VolumeProperties(dynamic_cast<CSolid*>(doc.FindObjectById(copyId))->m_Shape,actualMass);BRepGProp::VolumeProperties(expected.m_Shape,expectedMass);
+        require(actualMass.CentreOfMass().Distance(expectedMass.CentreOfMass())<.001,"Guide replay lost edited copy placement");
+        std::cout<<"Body-1 copy: parameter preview preserves Move/Rotate, repeated edits and shared guides passed\n";
+        return EXIT_SUCCESS;
+    }
+    #include "ClonePlacementTestCases.inc"
+    if(application.arguments().contains("--freeze-object-only")) {
+        QTemporaryDir temp;QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,temp.path());
+        MainWindow window;auto& doc=window.document_;doc.Clear();
+        TopoDS_Shape boxShape=BRepPrimAPI_MakeBox(40,30,25).Shape();
+        auto box=std::make_unique<CSolid>(boxShape);box->SetName("Freeze test box");
+        auto* raw=box.get();doc.AddObject(std::move(box));const auto id=raw->m_id;
+        doc.SelectObjectById(id);window.undo_redo_.Reset();window.RefreshSceneTree();
+        QTreeWidgetItem* row=nullptr;
+        std::function<void(QTreeWidgetItem*)> find=[&](QTreeWidgetItem* item) {
+            if(item->text(1)=="Freeze test box")row=item;
+            for(int i=0;i<item->childCount();++i)find(item->child(i));
+        };
+        for(int i=0;i<window.scene_tree_->topLevelItemCount();++i)find(window.scene_tree_->topLevelItem(i));
+        require(row&&!row->icon(3).isNull(),"Freeze icon missing");
+        const auto alpha=doc.FindObjectById(id)->GetMaterial().alpha;
+        window.OnSceneTreeItemClicked(row,3);
+        require(doc.FindObjectById(id)->IsFrozen()&&doc.IsObjectVisible(*doc.FindObjectById(id)),"Freeze hid the object or did not set flag");
+        require(!doc.HasSelection()&&!doc.SelectObjectById(id),"Frozen object is selectable");
+        doc.SelectAllVisibleObjects();require(!doc.IsObjectSelected(doc.FindObjectIndexById(id)),"Select all includes frozen object");
+        require(doc.FindObjectById(id)->GetMaterial().alpha==alpha,"Freeze modified material");
+        require(window.undo_redo_.Undo()&&!doc.FindObjectById(id)->IsFrozen(),"Cannot undo freeze");
+        require(window.undo_redo_.Redo()&&doc.FindObjectById(id)->IsFrozen(),"Cannot redo freeze");
+        Dom3DProjectSerializer serializer;ProjectViewState view;QString error,room;
+        const auto path=temp.filePath("frozen.dom3d");
+        require(serializer.Save(path,static_cast<const CAlfaDoc&>(doc),room,view,{},error),"Cannot save frozen object");
+        CAlfaDoc loaded;require(serializer.Load(path,loaded,room,view,error),"Cannot load frozen object");
+        require(loaded.FindObjectById(id)->IsFrozen()&&!loaded.SelectObjectById(id),"Frozen state lost on load");
+        SetAlfaDoc(&doc);
+        if(application.arguments().contains("--freeze-preview")) {
+            window.resize(1100,800);window.show();window.RefreshSceneTree();window.viewport_->FitToDocument();
+            QElapsedTimer wait;wait.start();while(wait.elapsed()<600)application.processEvents();
+            require(window.viewport_->grabFramebuffer().save("C:/My_projects/Dom3D_Pro/tmp/frozen-object.png"),"Cannot save frozen preview");
+            require(window.grab().save("C:/My_projects/Dom3D_Pro/tmp/frozen-tree.png"),"Cannot save freeze tree preview");
+        }
+        doc.SetObjectFrozen(id,false);require(doc.SelectObjectById(id),"Unfreeze did not restore selection");
+        auto line=std::make_unique<CPolyline>();line->AddPoint({0,0,0});line->AddPoint({10,0,0});
+        auto* lineRaw=line.get();doc.AddObject(std::move(line));const auto lineId=lineRaw->m_id;
+        doc.SelectObjectById(id);doc.SelectObjectById(lineId,SelectionAction::Add);require(doc.CreateGroupFromSelection(),"Cannot create freeze group");
+        const auto groupId=doc.GetSelectedObject()->m_id;
+        doc.SetObjectFrozen(groupId,true);
+        require(doc.FindObjectById(id)->IsFrozen()&&doc.FindObjectById(lineId)->IsFrozen(),"Group freeze missed children");
+        doc.SetObjectFrozen(groupId,false);doc.SetObjectFrozen(lineId,true);
+        require(!doc.SelectObjectById(groupId),"Group can edit frozen child");
+        doc.SetObjectFrozen(groupId,false);require(doc.SelectObjectById(groupId),"Group thaw failed");
+        std::cout<<"Freeze icon, selection protection, groups, persistence, undo/redo passed\n";
+        return EXIT_SUCCESS;
+    }
+    if (application.arguments().contains("--array-pick-only")) {
+        QTemporaryDir temporary;
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,temporary.path());
+        MainWindow window;application.processEvents();auto& doc=window.document_;
+        const auto launch=[&](int kind) {
+            if(kind==0)window.ShowLinearArrayDialog();
+            else if(kind==1)window.ShowRadialArrayDialog();
+            else if(kind==2)window.ShowRectangularArrayDialog();
+            else window.ShowCurveArrayDialog();
+        };
+        for(int kind=0;kind<4;++kind) {
+            doc.Clear();
+            auto source=std::make_unique<CPolyline>();source->AddPoint({9,0,0});source->AddPoint({11,0,0});
+            const auto* sourcePtr=source.get();doc.AddObject(std::move(source));const auto sourceId=sourcePtr->m_id;
+            auto guide=std::make_unique<CPolyline>();guide->AddPoint({0,0,0});guide->AddPoint({0,100,0});
+            doc.AddObject(std::move(guide));window.undo_redo_.Reset();doc.ClearSelection();
+            const auto base=doc.GetObjects().size();
+            launch(kind);
+            require(window.pending_group_command_!=MainWindow::PendingGroupCommand::None,"Array did not wait for a click");
+            QKeyEvent escape(QEvent::KeyPress,Qt::Key_Escape,Qt::NoModifier);
+            QApplication::sendEvent(window.viewport_,&escape);
+            require(window.pending_group_command_==MainWindow::PendingGroupCommand::None,"Esc did not cancel array selection");
+            // Changing tools before the queued click handler runs must cancel it.
+            launch(kind);doc.SelectObjectById(sourceId);window.viewport_->SelectionChanged();
+            window.SetTool(ToolMode::Select,{});application.processEvents();
+            require(!window.findChild<QDialog*>("LinearArrayDialog")&&!window.findChild<QDialog*>("RadialArrayDialog")
+                &&!window.findChild<QDialog*>("RectangularArrayDialog")&&!window.findChild<QDialog*>("CurveArrayDialog"),"Stale array click opened a dialog");
+            for(bool accept:{false,true}) {
+                doc.ClearSelection();launch(kind);
+                const QString name=kind==0?"LinearArrayDialog":kind==1?"RadialArrayDialog":kind==2?"RectangularArrayDialog":"CurveArrayDialog";
+                bool opened=false;QTimer finish;
+                QObject::connect(&finish,&QTimer::timeout,[&]() {
+                    auto* dialog=window.findChild<QDialog*>(name);if(!dialog)return;
+                    opened=true;finish.stop();
+                    require(window.pending_group_command_==MainWindow::PendingGroupCommand::None,"Array pick remained armed during preview");
+                    if(kind==3)dialog->findChild<QComboBox*>("CurveArrayGuide")->setCurrentIndex(1);
+                    dialog->findChild<QDialogButtonBox*>()->button(accept?QDialogButtonBox::Ok:QDialogButtonBox::Cancel)->click();
+                });
+                finish.start(100);
+                doc.SelectObjectById(sourceId);window.viewport_->SelectionChanged();
+                QElapsedTimer wait;wait.start();while(!opened&&wait.elapsed()<2000)application.processEvents();
+                require(opened,"Selecting an object did not open array parameters without Enter");
+                std::cout<<"Array pick kind="<<kind<<" accept="<<accept<<" objects="<<doc.GetObjects().size()<<std::endl;
+                require(accept?doc.GetObjects().size()>base:doc.GetObjects().size()==base,"Array pick accept/cancel changed wrong objects");
+                require(window.undo_redo_.UndoCount()==(accept?1:0),"Array pick changed undo history incorrectly");
+                if(accept)require(window.undo_redo_.Undo()&&doc.GetObjects().size()==base,"Cannot undo picked array");
+            }
+        }
+        doc.Clear();
+        std::vector<unsigned long> ids;
+        for(int i=0;i<3;++i) {
+            auto line=std::make_unique<CPolyline>();line->AddPoint({float(i*10),0,0});line->AddPoint({float(i*10),100,0});
+            auto* raw=line.get();doc.AddObject(std::move(line));ids.push_back(raw->m_id);
+        }
+        doc.ClearSelection();doc.SelectObjectById(ids[0]);
+        doc.FindObjectById(ids[2])->SetVisible(false);
+        QTimer::singleShot(0,[&]() {
+            auto* dialog=window.findChild<QDialog*>("CurveArrayDialog");require(dialog,"Single visible guide was not automatic");
+            auto* combo=dialog->findChild<QComboBox*>("CurveArrayGuide");
+            require(combo->currentData().toULongLong()==ids[1],"Automatic array guide is wrong");
+            require(combo->findData(QVariant::fromValue<qulonglong>(ids[2]))<0,"Hidden guide offered for array");
+            dialog->reject();
+        });
+        window.ShowCurveArrayDialog();
+        doc.FindObjectById(ids[2])->SetVisible(true);
+        window.ShowCurveArrayDialog();
+        require(window.pending_group_command_==MainWindow::PendingGroupCommand::ArrayCurveGuide,"Multiple guides were assigned automatically");
+        doc.SelectObjectById(ids[0]);window.viewport_->SelectionChanged();application.processEvents();
+        require(window.pending_group_command_==MainWindow::PendingGroupCommand::ArrayCurveGuide,"Source accepted as its own guide");
+        QKeyEvent escape(QEvent::KeyPress,Qt::Key_Escape,Qt::NoModifier);QApplication::sendEvent(window.viewport_,&escape);
+        require(doc.GetSelectedObject()->m_id==ids[0],"Cancel lost source selection");
+        window.ShowCurveArrayDialog();
+        bool picked=false;QTimer closeGuide;
+        QObject::connect(&closeGuide,&QTimer::timeout,[&]() {
+            auto* dialog=window.findChild<QDialog*>("CurveArrayDialog");if(!dialog)return;
+            picked=true;closeGuide.stop();
+            require(dialog->findChild<QComboBox*>("CurveArrayGuide")->currentData().toULongLong()==ids[2],"Clicked guide was not assigned");
+            dialog->reject();
+        });
+        closeGuide.start(100);doc.SelectObjectById(ids[2]);window.viewport_->SelectionChanged();
+        QElapsedTimer wait;wait.start();while(!picked&&wait.elapsed()<2000)application.processEvents();
+        require(picked&&doc.GetSelectedObject()->m_id==ids[0],"Guide click lost sources or did not open parameters");
+        std::cout<<"All four arrays: click selection, Escape, tool switching, accept/cancel and undo passed\n";
+        return EXIT_SUCCESS;
+    }
+    if (application.arguments().contains("--basic-array-preview-only")) {
+        QTemporaryDir temporary;
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,temporary.path());
+        MainWindow window;
+        auto& doc=window.document_;
+        for(int kind=0;kind<3;++kind) {
+            doc.Clear();
+            auto source=std::make_unique<CPolyline>(); source->AddPoint({9,0,0}); source->AddPoint({11,0,0});
+            auto* ptr=source.get(); doc.AddObject(std::move(source)); doc.SelectObjectById(ptr->m_id);
+            window.undo_redo_.Reset(); window.undo_redo_.BeginChange(); doc.MoveSelectedObjects({1,0,0});
+            window.undo_redo_.CommitChange("Seed redo"); require(window.undo_redo_.Undo(),"Cannot seed redo history");
+            const auto base=doc.GetObjects().size(), undo=window.undo_redo_.UndoCount(), redo=window.undo_redo_.RedoCount();
+            // A toolbar nested inside a dock reproduces the inherited-enabled-state bug.
+            auto* regression_dock=new QDockWidget("Array test dock",&window);
+            auto* regression_toolbar=new QToolBar(regression_dock);
+            regression_dock->setWidget(regression_toolbar);
+            window.addDockWidget(Qt::LeftDockWidgetArea,regression_dock);
+            auto* action=regression_toolbar->addAction("Test command");
+            require(regression_dock->isEnabled() && regression_toolbar->isEnabled() && action->isEnabled(),"Toolbar fixture disabled");
+            for(bool accept:{false,true}) {
+                QTimer::singleShot(0,[&,kind,accept]() {
+                    const QString name=kind==0?"LinearArrayDialog":kind==1?"RadialArrayDialog":"RectangularArrayDialog";
+                    auto* dialog=window.findChild<QDialog*>(name); require(dialog,"Array dialog missing");
+                    require(!dialog->isModal() && QApplication::activeModalWidget()==nullptr && window.viewport_->isEnabled(),
+                            "Array window blocks viewport navigation");
+                    const auto distance=window.viewport_->GetCamera().distance;
+                    QWheelEvent wheel(QPointF(100,100),QPointF(100,100),QPoint(),QPoint(0,120),Qt::NoButton,Qt::NoModifier,Qt::NoScrollPhase,false);
+                    QApplication::sendEvent(window.viewport_,&wheel);
+                    require(window.viewport_->GetCamera().distance!=distance,"Cannot zoom scene with array window open");
+                    require(dialog->findChildren<QSlider*>().empty(), "Array still contains sliders");
+                    // Exercise the label gesture, not just programmatic spin-box changes.
+                    QLabel* drag_label = nullptr;
+                    for (auto* label : dialog->findChildren<QLabel*>())
+                        if (label->cursor().shape() == Qt::SizeHorCursor) { drag_label = label; break; }
+                    require(drag_label, "Array drag label missing");
+                    auto* count = dialog->findChild<QSpinBox*>();
+                    const int old_count = count->value();
+                    QMouseEvent press(QEvent::MouseButtonPress, QPointF(5,5), QPointF(100,100), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                    QMouseEvent move(QEvent::MouseMove, QPointF(25,5), QPointF(120,100), Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+                    QMouseEvent release(QEvent::MouseButtonRelease, QPointF(25,5), QPointF(120,100), Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+                    QApplication::sendEvent(drag_label, &press);
+                    QApplication::sendEvent(drag_label, &move);
+                    QApplication::sendEvent(drag_label, &release);
+                    require(count->value() == old_count + 2, "Dragging quantity label did not change count");
+
+                    require(regression_dock->isEnabled() && regression_toolbar->isEnabled() && action->isEnabled(),
+                            "Array preview grays out panels or commands");
+                    const auto counts=dialog->findChildren<QSpinBox*>();
+                    counts[0]->setValue(kind==2?2:4); if(kind==2) counts[1]->setValue(2);
+                    const auto values=dialog->findChildren<QDoubleSpinBox*>();
+                    if(kind==0) values[0]->setValue(5);
+                    if(kind==1) { values[0]->setValue(180); for(int i=1;i<values.size();++i) values[i]->setValue(0); }
+                    if(kind==2) {values[0]->setValue(5); values[1]->setValue(7);}
+                    dialog->findChild<QComboBox*>()->setCurrentIndex(kind==1?2:1);
+                    QTimer::singleShot(160,dialog,[&,dialog,kind,accept]() {
+                        require(doc.GetObjects().size()==base+3,"Initial basic array preview missing");
+                        require(window.undo_redo_.UndoCount()==undo && window.undo_redo_.RedoCount()==redo,"Preview changed history");
+                        dialog->findChildren<QSpinBox*>()[0]->setValue(kind==2?150:1000);
+                        QTimer::singleShot(160,dialog,[&,dialog,kind,accept]() {
+                            require(doc.GetObjects().size()==base,"Oversized preview generated copies");
+                            auto* notice=dialog->findChild<QLabel*>("ArrayPreviewBudgetNotice");
+                            require(notice && !notice->isHidden(),"Preview limit not explained");
+                            dialog->findChildren<QSpinBox*>()[0]->setValue(3);
+                        QTimer::singleShot(160,dialog,[&,dialog,kind,accept]() {
+                            require(dialog->findChild<QLabel*>("ArrayPreviewBudgetNotice")->isHidden(),"Preview limit did not reset");
+                            require(doc.GetObjects().size()==base+(kind==2?5:2),"Preview accumulated copies");
+                            const auto* last=dynamic_cast<const CPolyline*>(doc.GetObjects().back().get()); require(last,"Preview curve missing");
+                            const auto a=last->GetPoints()[0],b=last->GetPoints()[1];
+                            const Vec3 expected=kind==0?Vec3{10,10,0}:kind==1?Vec3{-10,0,0}:Vec3{20,0,7};
+                            require(std::abs((a.x+b.x)/2-expected.x)<0.001 && std::abs((a.y+b.y)/2-expected.y)<0.001
+                                    && std::abs((a.z+b.z)/2-expected.z)<0.001,"Preview ignored geometry settings");
+                            dialog->findChild<QDialogButtonBox*>()->button(accept?QDialogButtonBox::Ok:QDialogButtonBox::Cancel)->click();
+                        });
+                    });
+                    });
+                });
+                if(kind==0) window.ShowLinearArrayDialog(); else if(kind==1) window.ShowRadialArrayDialog(); else window.ShowRectangularArrayDialog();
+                require(regression_dock->isEnabled() && regression_toolbar->isEnabled() && action->isEnabled(),
+                        "Array window left a toolbar disabled after closing");
+                require(doc.GetObjects().size()==base+(accept?(kind==2?5:2):0),"Array accept/cancel result wrong");
+                require(window.undo_redo_.UndoCount()==undo+(accept?1:0),"Array confirmation not a single undo step");
+                if(!accept) require(window.undo_redo_.RedoCount()==redo,"Cancel discarded redo history");
+            }
+            require(window.undo_redo_.Undo() && doc.GetObjects().size()==base,"Cannot undo confirmed array");
+            delete regression_dock;
+        }
+        std::cout<<"Linear, radial and rectangular live preview, replacement, geometry, cancellation and undo passed\n";
+        return EXIT_SUCCESS;
+    }
+    if (application.arguments().contains("--curve-array-only")) {
+        QTemporaryDir temporary;
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,temporary.path());
+        MainWindow window;
+        auto& doc=window.document_;
+        doc.Clear();
+        auto source=std::make_unique<CPolyline>(); source->AddPoint({100,0,0}); source->AddPoint({102,0,0});
+        auto* original=source.get(); doc.AddObject(std::move(source)); const auto source_id=original->m_id;
+        auto guide=std::make_unique<CPolyline>();
+        guide->AddPoint({0,0,0}); guide->AddPoint({10,0,0}); guide->AddPoint({10,30,0});
+        auto* path=guide.get(); doc.AddObject(std::move(guide)); const auto guide_id=path->m_id;
+        const size_t before=doc.GetObjects().size();
+        doc.SelectObjectById(source_id); doc.SelectObjectById(guide_id,SelectionAction::Add);
+        window.undo_redo_.Reset();
+        require(window.CreateCurveArray(guide_id,5,true,true,0.5,{101,0,0}), "Cannot create curve array");
+        require(doc.GetObjects().size()==before+5,"Guide was copied or array count is incorrect");
+        const std::array<Vec3,5> centers{Vec3{0,0,0},Vec3{10,0,0},Vec3{10,10,0},Vec3{10,20,0},Vec3{10,30,0}};
+        for(size_t i=0;i<5;++i) {
+            const auto* copy=dynamic_cast<CPolyline*>(doc.GetObjects()[before+i].get());
+            require(copy && copy->GetPointCount()==2,"Array copy geometry missing");
+            const auto a=copy->GetPoints()[0], b=copy->GetPoints()[1];
+            require(std::abs((a.x+b.x)/2-centers[i].x)<0.001 && std::abs((a.y+b.y)/2-centers[i].y)<0.001,
+                    "Array members are not equally spaced by curve length");
+            const double length=std::sqrt((a.x-b.x)*(a.x-b.x)+(a.y-b.y)*(a.y-b.y));
+            require(std::abs(length-2*(1-0.5*i/4))<0.001,"Array scale ramp is wrong");
+            if(i>0) require(std::abs(a.x-b.x)<0.001,"Array did not follow tangent");
+        }
+        require(original->GetPoints()[0].x==100 && path->GetPointCount()==3,"Array modified its sources");
+        Dom3DProjectSerializer serializer; QString error,room; ProjectViewState view;
+        require(serializer.Save(temporary.filePath("array.dom3d"),doc,"Curves",view,{},error),"Cannot save curve array");
+        CAlfaDoc loaded; require(serializer.Load(temporary.filePath("array.dom3d"),loaded,room,view,error)
+            && loaded.GetObjects().size()==doc.GetObjects().size(),"Curve array did not survive reload");
+        SetAlfaDoc(&doc);
+        require(window.undo_redo_.Undo() && doc.GetObjects().size()==before,"Curve array undo failed");
+        require(window.undo_redo_.Redo() && doc.GetObjects().size()==before+5,"Curve array redo failed");
+        require(window.undo_redo_.Undo(),"Cannot reset array fixture");
+        doc.SelectObjectById(source_id);
+        require(window.CreateCurveArray(guide_id,5,false,false,2,{101,0,0}),"Cannot create offset curve array");
+        require(doc.GetObjects().size()==before+4,"Offset array duplicated original member");
+        const auto* last=dynamic_cast<CPolyline*>(doc.GetObjects().back().get());
+        require(last && std::abs(last->GetPoints()[0].x-109)<0.001 && std::abs(last->GetPoints()[1].x-113)<0.001
+            && std::abs(last->GetPoints()[0].y-30)<0.001,"Offset/orientation/scale mode is incorrect");
+        require(window.undo_redo_.Undo(),"Cannot undo offset array");
+        auto* closed=dynamic_cast<CPolyline*>(doc.FindObjectById(guide_id));
+        closed->GetPoints()={{0,0,0},{10,0,0},{10,10,0},{0,10,0}}; closed->SetClosed(true);
+        doc.SelectObjectById(source_id);
+        require(window.CreateCurveArray(guide_id,4,true,false,1,{101,0,0}),"Cannot create closed array");
+        last=dynamic_cast<CPolyline*>(doc.GetObjects().back().get());
+        require(last && std::abs(last->GetPoints()[0].x+1)<0.001 && std::abs(last->GetPoints()[0].y-10)<0.001,
+                "Closed array duplicates seam or misses final interval");
+        require(window.undo_redo_.Undo(),"Cannot undo closed array");
+        doc.SelectObjectById(source_id);
+        QTimer::singleShot(0,[&]() {
+            auto* dialog=window.findChild<QDialog*>("CurveArrayDialog"); require(dialog,"Curve array dialog missing");
+            auto* combo=dialog->findChild<QComboBox*>("CurveArrayGuide");
+            for(int i=0;i<combo->count();++i) if(combo->itemData(i).toULongLong()==guide_id) combo->setCurrentIndex(i);
+            dialog->findChild<QSpinBox*>("CurveArrayCount")->setValue(3);
+            dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+        });
+        window.ShowCurveArrayDialog();
+        require(doc.GetObjects().size()==before+3,"Curve array UI did not apply settings");
+        require(window.undo_redo_.Undo(),"Cannot reset preview fixture");
+        doc.SelectObjectById(source_id);
+        const auto preview_count=doc.GetObjects().size();
+        const auto undo_count=window.undo_redo_.UndoCount();
+        const auto redo_count=window.undo_redo_.RedoCount();
+        for (bool accept : {false,true}) {
+            QTimer::singleShot(0,[&,accept]() {
+                auto* dialog=window.findChild<QDialog*>("CurveArrayDialog"); require(dialog,"Preview dialog missing");
+                require(!dialog->isModal() && QApplication::activeModalWidget()==nullptr && window.viewport_->isEnabled(),
+                        "Curve array window is still modal");
+                auto* combo=dialog->findChild<QComboBox*>("CurveArrayGuide");
+                for(int i=0;i<combo->count();++i) if(combo->itemData(i).toULongLong()==guide_id) combo->setCurrentIndex(i);
+                require(dialog->findChildren<QSlider*>().empty(), "Curve array still contains sliders");
+                dialog->findChild<QSpinBox*>("CurveArrayCount")->setValue(5);
+                dialog->findChild<QDoubleSpinBox*>("CurveArrayEndScale")->setValue(0.5);
+                QTimer::singleShot(160,dialog,[&,dialog,accept]() {
+                    require(doc.GetObjects().size()==preview_count+5,"Array preview not visible before OK");
+                    require(window.undo_redo_.UndoCount()==undo_count && window.undo_redo_.RedoCount()==redo_count,
+                            "Preview modified undo/redo history");
+                    dialog->findChild<QSpinBox*>("CurveArrayCount")->setValue(10000);
+                    QTimer::singleShot(160,dialog,[&,dialog,accept]() {
+                        require(doc.GetObjects().size()==preview_count,"Oversized curve preview generated copies");
+                        require(!dialog->findChild<QLabel*>("ArrayPreviewBudgetNotice")->isHidden(),"Curve preview limit not explained");
+                        dialog->findChild<QSpinBox*>("CurveArrayCount")->setValue(4);
+                    QTimer::singleShot(160,dialog,[&,dialog,accept]() {
+                        require(doc.GetObjects().size()==preview_count+4,"Preview accumulated old copies");
+                        dialog->findChild<QDialogButtonBox*>()->button(accept?QDialogButtonBox::Ok:QDialogButtonBox::Cancel)->click();
+                    });
+                });
+                });
+            });
+            window.ShowCurveArrayDialog();
+            require(doc.GetObjects().size()==preview_count+(accept?4:0),"Preview confirmation/cancellation left wrong objects");
+            require(window.undo_redo_.UndoCount()==undo_count+(accept?1:0),"Preview did not create exactly one undo on OK");
+            if(!accept) require(window.undo_redo_.RedoCount()==redo_count,"Cancel lost redo history");
+        }
+        require(window.undo_redo_.Undo() && doc.GetObjects().size()==preview_count,"Undo did not remove confirmed preview");
+        // Exercise a genuine spatial Bezier spline with nonuniform parameter speed.
+        auto spline=std::make_unique<CBSpline>(); spline->SetCurveType(SplineCurveType::Bezier);
+        for(auto p : {CPoint3d(0,0,0),CPoint3d(20,0,10),CPoint3d(20,40,-10),CPoint3d(30,50,20)}) spline->AddPoint(p);
+        auto* spatial=spline.get(); doc.AddObject(std::move(spline)); const auto spatial_id=spatial->m_id;
+        std::vector<CPoint3d> dense; std::vector<double> lengths{0};
+        for(int i=0;i<=2048;++i) {
+            dense.push_back(spatial->Evaluate(i/2048.f));
+            if(i) { const auto a=dense.back(), b=dense[dense.size()-2]; const CPoint3d d(a.x-b.x,a.y-b.y,a.z-b.z); lengths.push_back(lengths.back()+std::sqrt(d.x*d.x+d.y*d.y+d.z*d.z)); }
+        }
+        doc.SelectObjectById(source_id); const auto spatial_before=doc.GetObjects().size();
+        require(window.CreateCurveArray(spatial_id,7,true,true,1,{101,0,0}),"Spatial spline array failed");
+        for(size_t i=0;i<7;++i) {
+            const auto* copy=dynamic_cast<const CPolyline*>(doc.GetObjects()[spatial_before+i].get());
+            const auto a=copy->GetPoints()[0],b=copy->GetPoints()[1];
+            const CPoint3d center((a.x+b.x)/2,(a.y+b.y)/2,(a.z+b.z)/2);
+            size_t nearest=0; double best=1e30;
+            for(size_t j=0;j<dense.size();++j) { const CPoint3d d(dense[j].x-center.x,dense[j].y-center.y,dense[j].z-center.z);const double sq=d.x*d.x+d.y*d.y+d.z*d.z;if(sq<best){best=sq;nearest=j;} }
+            require(std::sqrt(best)<0.04 && std::abs(lengths[nearest]-lengths.back()*i/6)<0.04,
+                    "Spatial spline array is not spaced by arc length");
+        }
+        TopoDS_Shape shape=BRepPrimAPI_MakeBox(gp_Pnt(100,0,0),2,2,2).Shape();
+        auto solid=std::make_unique<CSolid>(shape); require(solid->ReBuldMesh(),"Cannot mesh array source");
+        auto* solid_ptr=solid.get(); doc.AddObject(std::move(solid));
+        auto group=std::make_unique<CGroup>("Source group",std::vector<unsigned long>{solid_ptr->m_id,source_id});
+        auto* group_ptr=group.get(); doc.AddObject(std::move(group)); const auto group_id=group_ptr->m_id;
+        const auto solid_id = solid_ptr->m_id;
+        doc.SelectObjectById(group_id); const auto group_before=doc.GetObjects().size();
+        const auto group_snapshot = doc.CreateSnapshot();
+        QElapsedTimer array_timer; array_timer.start();
+        require(window.CreateCurveArray(spatial_id,3,true,true,0.5,{101,1,1},false,true), "Cannot preview solid group array");
+        const auto preview_ms = array_timer.elapsed();
+        std::vector<std::pair<Vec3,Vec3>> preview_bounds;
+        for (size_t i=group_before; i<doc.GetObjects().size(); ++i) {
+            Vec3 low{}, high{};
+            require(doc.GetObjects()[i]->GetBounds(low,high), "Preview bounds missing");
+            preview_bounds.emplace_back(low,high);
+        }
+        require(doc.RestoreSnapshot(*group_snapshot), "Cannot restore solid array fixture");
+        array_timer.restart();
+        require(window.CreateCurveArray(spatial_id,3,true,true,0.5,{101,1,1}),"Cannot array a group of solid and curve");
+        std::cout << "Solid group array: preview " << preview_ms << " ms, commit " << array_timer.elapsed() << " ms\n";
+        for (size_t i=group_before; i<doc.GetObjects().size(); ++i) {
+            Vec3 low{}, high{};
+            require(doc.GetObjects()[i]->GetBounds(low,high), "Committed bounds missing");
+            const auto& expected = preview_bounds.at(i-group_before);
+            require(dot(low-expected.first,low-expected.first)<0.0001f && dot(high-expected.second,high-expected.second)<0.0001f,
+                    "Solid group preview differs from committed geometry");
+        }
+        require(doc.GetObjects().size()==group_before+9,"Group array lost or duplicated members");
+        for(auto index:doc.GetSelectedObjectIndices()) {
+            const auto* copy=dynamic_cast<const CGroup*>(doc.GetObjects()[index].get());
+            require(copy && copy->GetElementIds().size()==2,"Array group membership missing");
+            for(auto id:copy->GetElementIds()) require(id!=source_id && id!=solid_id && doc.FindObjectById(id),"Array group references original children");
+        }
+        std::cout<<"Curve array spacing, spatial spline, groups, rotation, scale, offset, closed seam, undo, persistence and dialog passed\n";
+        return EXIT_SUCCESS;
+    }
+    if (application.arguments().contains("--validate-save-only")) {
+        QTemporaryDir temporary;
+        require(temporary.isValid(), "Cannot create save-validation directory");
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, temporary.path());
+        MainWindow window;
+        auto& doc = window.document_;
+        Dom3DProjectSerializer serializer;
+        QString room, error;
+        ProjectViewState view;
+        const auto args = application.arguments();
+        require(serializer.Load(args.value(args.indexOf("--validate-save-only")+1), doc, room, view, error),
+                "Cannot load Work_Plane validation fixture");
+        require(doc.GetObjects().size() == 6 && doc.HasInvalidObjectsForSave(), "Missing empty Curve 1 fixture");
+        auto empty_spline = std::make_unique<CBSpline>();
+        auto* empty_pointer = empty_spline.get();
+        doc.AddObject(std::move(empty_spline));
+        const auto empty_id = empty_pointer->m_id;
+        doc.AddObject(std::make_unique<CSmartLine>());
+        doc.AddObject(std::make_unique<CMesh3D>());
+        doc.AddObject(std::make_unique<CSolid>());
+        auto broken = std::make_unique<CPolyline>();
+        broken->AddPoint({std::numeric_limits<double>::quiet_NaN(), 0, 0});
+        doc.AddObject(std::move(broken));
+        auto group = std::make_unique<CGroup>("Retained group", std::vector<unsigned long>{1, empty_id, 5});
+        auto* group_pointer = group.get();
+        doc.AddObject(std::move(group));
+        const auto group_id = group_pointer->m_id;
+        doc.SetGroupInteractionEnabled(false);
+        doc.SelectObjectById(5);
+        doc.SetDraftingData("{\"testSheet\":true}");
+        SetAlfaDoc(&doc);
+        const auto old_count = doc.GetObjects().size();
+        const auto old_index = doc.FindObjectIndexById(5);
+        window.active_parametric_object_.tool_id = "BSpline";
+        window.active_parametric_object_.object_index = old_index;
+        require(!window.SaveValidatedProject(temporary.filePath("missing/file.dom3d"), room, view, error),
+                "Saving to nonexistent directory unexpectedly succeeded");
+        require(doc.GetObjects().size() == old_count && doc.IsObjectSelected(old_index),
+                "Failed save changed live document or selection");
+        const QString path = temporary.filePath("clean.dom3d");
+        require(window.SaveValidatedProject(path, room, view, error), "Validated save failed");
+        require(!doc.HasInvalidObjectsForSave() && doc.GetObjects().size() == 6,
+                "Invalid geometry survived or valid hidden geometry was deleted");
+        require(GetAlfaDoc() == &doc, "Save changed current document");
+        require(doc.GetSelectedObjectCount() == 1 && doc.IsObjectSelected(doc.FindObjectIndexById(5)),
+                "Cleanup lost selected spline");
+        require(window.active_parametric_object_.object_index == doc.FindObjectIndexById(5),
+                "Cleanup left stale editor index");
+        const auto* kept_group = dynamic_cast<const CGroup*>(doc.GetObjects()[doc.FindObjectIndexById(group_id)].get());
+        require(kept_group && kept_group->GetElementIds() == std::vector<unsigned long>{5},
+                "Cleanup left dangling group members");
+        CAlfaDoc loaded;
+        require(serializer.Load(path, loaded, room, view, error), "Cannot reload sanitized project");
+        require(loaded.GetDraftingData() == doc.GetDraftingData(), "Cleanup lost drawing sheets");
+        require(loaded.GetObjects().size() == doc.GetObjects().size() && !loaded.HasInvalidObjectsForSave(),
+                "Invalid objects were serialized");
+        require(window.SaveValidatedProject(path, room, view, error) && doc.GetObjects().size() == 6,
+                "Second save was not idempotent");
+        CAlfaDoc empty;
+        empty.AddObject(std::make_unique<CPolyline>());
+        require(serializer.Save(temporary.filePath("empty.dom3d"), empty, room, view, {}, error)
+                && empty.GetObjects().empty(), "Saving an empty scene recreated a placeholder");
+        std::cout << "Save validation, failure preservation, selection and group cleanup passed" << std::endl;
+        return EXIT_SUCCESS;
+    }
+    if (application.arguments().contains("--face-selection-display-only")) {
+        CAlfaDoc doc;
+        TopoDS_Shape shape = BRepPrimAPI_MakeBox(gp_Pnt(-10,-10,-10),20,20,20).Shape();
+        auto body = std::make_unique<CSolid>(shape);
+        require(body->ReBuldMesh(), "Cannot mesh face-selection fixture");
+        auto* solid = body.get();
+        doc.AddObject(std::move(body));
+        doc.ClearSelection();
+        OpenGLViewport viewport;
+        viewport.SetDocument(&doc);
+        viewport.resize(800,600);
+        viewport.move(-30000,-30000);
+        viewport.SetFloorGridVisible(false);
+        viewport.SetCoordinateAxesVisible(false);
+        viewport.SetOrthographicProjection(true);
+        Camera camera;
+        camera.target = {0,0,0}; camera.distance = 85;
+        camera.orientation = camera_orientation_from_yaw_pitch(35,25);
+        viewport.SetCamera(camera);
+        viewport.SetSelectionMode(SelectionMode::Face);
+        viewport.show(); application.processEvents();
+        CSolid::SetDisplayMode(SolidDisplayMode::SurfacesAndEdges);
+        CSolid::SetHiddenEdgeDrawingEnabled(false);
+        CSolid::SetSurfaceTransparencyEnabled(false);
+        CMesh3D::SetSurfaceOpacity(1.f);
+        QPoint front, side;
+        require(viewport.ProjectWorldPoint({0,0,10},front) && viewport.ProjectWorldPoint({10,0,0},side),
+                "Cannot project face-selection probes");
+        auto patch = [](const QImage& frame, QPoint pixel) {
+            return frame.copy(pixel.x()-3,pixel.y()-3,7,7);
+        };
+        QDir().mkpath("output/face-selection");
+        for (auto mode : {MeshDisplayMode::SurfaceGray, MeshDisplayMode::SurfaceMaterial,
+                          MeshDisplayMode::SurfaceColored}) {
+            for (bool edges : {false,true}) {
+                CMesh3D::SetDisplayMode(mode);
+                CSolid::SetEdgeDrawingEnabled(edges);
+                doc.ClearSelection();
+                const auto baseline = viewport.CaptureSceneImage({800,600});
+                require(!baseline.isNull(), "Face-selection capture failed");
+                viewport.SelectAt(front,SelectionAction::Replace);
+                require(doc.HasSelectedSolidFace() && doc.GetSelectedObjectCount() == 0
+                        && !doc.IsObjectSelected(0), "Picking a face selected its body");
+                const auto selected = viewport.CaptureSceneImage({800,600});
+                require(patch(selected,front) != patch(baseline,front), "Selected face is not highlighted");
+                require(patch(selected,side) == patch(baseline,side), "Face selection recolored another face");
+                viewport.SelectAt(side,SelectionAction::Add);
+                require(solid->GetSelectedFaceIndices().size() == 2, "Cannot select multiple faces");
+                const auto multiple = viewport.CaptureSceneImage({800,600});
+                require(patch(multiple,front) == patch(selected,front)
+                        && patch(multiple,side) != patch(baseline,side), "Multiple face highlight is incorrect");
+                doc.ClearSelection();
+                require(viewport.CaptureSceneImage({800,600}) == baseline, "Clearing faces did not restore body appearance");
+                doc.SelectObjectById(solid->m_id);
+                const auto whole = viewport.CaptureSceneImage({800,600});
+                require(patch(whole,front) != patch(baseline,front)
+                        && patch(whole,side) != patch(baseline,side), "Whole-body selection lost highlighting");
+                if (mode == MeshDisplayMode::SurfaceGray && edges) {
+                    baseline.save("output/face-selection/plain.png");
+                    selected.save("output/face-selection/face.png");
+                    whole.save("output/face-selection/body.png");
+                }
+            }
+        }
+        viewport.SetDocument(nullptr);
+        std::cout << "Face-only display and whole-body selection passed" << std::endl;
+        return EXIT_SUCCESS;
+    }
+    if (application.arguments().contains("--work-plane-trim-scene")) {
+        QTemporaryDir settings;
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings.path());
+        MainWindow window;
+        auto& doc = window.document_;
+        Dom3DProjectSerializer serializer;
+        ProjectViewState view;
+        QString room, error;
+        const auto args = application.arguments();
+        const QString path = args.value(args.indexOf("--work-plane-trim-scene")+1);
+        require(serializer.Load(path, doc, room, view, error), "Cannot load reported Work_Plane scene");
+        for (const auto& object : doc.GetObjects()) {
+            std::cout << "Object " << object->m_id << " " << object->GetName() << " tool=" << object->GetParametricToolId() << "\n";
+        }
+        for (int tab=0; tab<window.tool_tabs_->count(); ++tab)
+            if (window.tool_tabs_->tabData(tab).toString()=="Curves") window.tool_tabs_->setCurrentIndex(tab);
+        doc.SelectObjectById(2);
+        doc.SelectObjectById(5, SelectionAction::Add);
+        window.RefreshSceneTree();
+        QPushButton* button = nullptr;
+        for (auto* candidate : window.findChildren<QPushButton*>())
+            if (candidate->property("toolKey").toString()=="CurveTrimByPlane") { button=candidate; break; }
+        require(button && button->isEnabled(), "Trim button unavailable on reported scene");
+        button->click();
+        std::cout << "Status: " << window.statusBar()->currentMessage().toStdString() << "\nSelection:";
+        for (size_t index : doc.GetSelectedObjectIndices()) std::cout << " " << doc.GetObjects()[index]->m_id;
+        std::cout << "\n";
+        require(window.viewport_->point_pick_object_id_ == 5, "Reported scene preselection was not accepted");
+        window.CancelCurveEditCommand();
+        require(doc.SelectAllVisibleObjects() == 2, "Select All Visible included invisible empty Curve 1 placeholder");
+        window.RefreshSceneTree();
+        button->click();
+        require(window.viewport_->point_pick_object_id_ == 5 && !window.waiting_curve_plane_selection_,
+                "Ctrl+A preselection in Work_Plane scene was rejected");
+        window.CancelCurveEditCommand();
+        doc.SelectObjectById(1, SelectionAction::Add);
+        button->click();
+        require(window.viewport_->point_pick_object_id_ == 5 && !window.waiting_curve_plane_selection_,
+                "Legacy selection containing empty Curve 1 still blocks trim");
+        for (bool tree : {false, true}) {
+            window.CancelCurveEditCommand();
+            doc.ClearSelection();
+            button->click();
+            require(window.waiting_curve_plane_selection_, "Trim must wait for inputs");
+            doc.SelectObjectById(2);
+            emit window.viewport_->SelectionChanged();
+            application.processEvents();
+            require(window.waiting_curve_plane_selection_, "Plane alone started trim");
+            doc.SelectObjectById(5, SelectionAction::Add);
+            if (tree) {
+                window.RefreshSceneTree();
+                QTreeWidgetItem* row = nullptr;
+                QTreeWidgetItemIterator items(window.scene_tree_);
+                while (*items) {
+                    const auto value = (*items)->data(0, Qt::UserRole+1);
+                    if (value.isValid() && value.toULongLong() == doc.FindObjectIndexById(5)) { row=*items; break; }
+                    ++items;
+                }
+                require(row != nullptr, "Cannot find reported spline tree row");
+                // Selection was already applied above; exercise the deferred tree notification.
+                QMetaObject::invokeMethod(&window, [&window]() { window.TryPrepareCurvePlaneSelection(); }, Qt::QueuedConnection);
+            } else emit window.viewport_->SelectionChanged();
+            application.processEvents();
+            require(!window.waiting_curve_plane_selection_ && window.viewport_->point_pick_object_id_ == 5,
+                    "Trim did not accept selected curve and plane without Enter");
+            require(window.statusBar()->currentMessage().contains("part of the curve"), "Trim still prompts for selection");
+        }
+        // Plain replacement clicks: the second input must not need Shift.
+        window.CancelCurveEditCommand();
+        doc.ClearSelection();
+        button->click();
+        doc.SelectObjectById(5, SelectionAction::Replace);
+        emit window.viewport_->SelectionChanged();
+        application.processEvents();
+        require(window.pending_trim_plane_face_pick_ && window.pending_trim_plane_curve_id_ == 5
+                && window.viewport_->GetSelectionMode() == SelectionMode::Face,
+                "First curve click did not enter plane/face picking");
+        window.RefreshSceneTree();
+        QTreeWidgetItem* plane_row = nullptr;
+        for (QTreeWidgetItemIterator items(window.scene_tree_); *items; ++items) {
+            const auto value = (*items)->data(0, Qt::UserRole+1);
+            if (value.isValid() && value.toULongLong() == doc.FindObjectIndexById(2)) { plane_row=*items; break; }
+        }
+        require(plane_row, "Cannot find plane tree row");
+        window.OnSceneTreeItemClicked(plane_row, 1);
+        application.processEvents();
+        require(!window.waiting_curve_plane_selection_ && window.viewport_->point_pick_object_id_ == 5,
+                "Plain plane click lost the remembered spline");
+        for (int plane = 0; plane < 3; ++plane) {
+            window.CancelCurveEditCommand();
+            doc.SelectObjectById(5);
+            button->click();
+            require(window.pending_trim_plane_face_pick_, "Curve preselection opened a dialog instead of waiting for a plane");
+            window.viewport_->SelectOriginPlane(plane);
+            application.processEvents();
+            require(!window.waiting_curve_plane_selection_ && window.pending_curve_trim_plane_points_.size() == 3
+                    && window.viewport_->point_pick_object_id_ == 5, "Origin plane click did not prepare trim");
+        }
+        window.CancelCurveEditCommand();
+        doc.Clear();
+        TopoDS_Shape cutting_body = BRepPrimAPI_MakeBox(gp_Pnt(0,0,0),20,20,20).Shape();
+        auto body = std::make_unique<CSolid>(cutting_body);
+        require(body->ReBuldMesh(), "Cannot mesh body for face trimming");
+        doc.AddObject(std::move(body));
+        auto curve = std::make_unique<CBSpline>();
+        curve->AddPoint({10,10,-10}); curve->AddPoint({10,10,30}); curve->SetDegree(1);
+        auto* curve_pointer = curve.get();
+        doc.AddObject(std::move(curve));
+        const auto curve_id = curve_pointer->m_id;
+        doc.ClearSelection();
+        button->click();
+        doc.SelectObjectById(curve_id);
+        emit window.viewport_->SelectionChanged(); application.processEvents();
+        require(window.pending_trim_plane_face_pick_, "Curve click did not wait for body face");
+        require(doc.SelectSolidFaceAtScreen({200,200}, [](Vec3 p, DomPoint& screen, float& depth) {
+            screen={static_cast<int>(100+p.x*10),static_cast<int>(100+p.y*10)}; depth=100-p.z; return true;
+        }), "Cannot select cutting body face");
+        emit window.viewport_->SelectionChanged(); application.processEvents();
+        require(!window.waiting_curve_plane_selection_ && !window.pending_trim_plane_face_pick_
+                && window.viewport_->point_pick_object_id_ == curve_id, "Body face did not prepare trim");
+        window.CompleteCurveEditPoint({10,10,30});
+        const auto* trimmed = dynamic_cast<const CBSpline*>(doc.FindObjectById(curve_id));
+        require(trimmed && std::abs(trimmed->Evaluate(1).z-20) < 0.001
+                && std::abs(trimmed->Evaluate(0).z+10) < 0.001,
+                "Face trim kept the clicked side or used the wrong plane");
+        std::cout << "Reported Work_Plane preselection and selection after tool startup passed\n";
+        return EXIT_SUCCESS;
+    }
+    if (application.arguments().contains("--trim-curve-plane-only")) {
+        QTemporaryDir settings;
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings.path());
+        MainWindow window;
+        auto& doc = window.document_;
+        Dom3DProjectSerializer serializer;
+        ProjectViewState view;
+        QString room, failure;
+        const auto args = application.arguments();
+        const QString path = args.value(args.indexOf("--trim-curve-plane-only") + 1);
+        auto load = [&] {
+            require(serializer.Load(path, doc, room, view, failure), "Cannot load plane trim fixture");
+            window.pending_curve_trim_plane_points_.clear();
+            window.undo_redo_.Reset();
+        };
+        auto verify = [&](const CBSpline& original, const CBSpline* trimmed, bool positive) {
+            require(trimmed && trimmed->GetCurveType() == original.GetCurveType(),
+                    "Plane trim must preserve B-spline/Bezier type");
+            require(trimmed->GetDegree() == original.GetDegree(), "Plane trim changed degree");
+            if (original.IsBezierChain()) require(trimmed->IsBezierChain(), "Trim broke Bezier handles");
+            const auto exact = curve_cut::Spline(original);
+            for (int i = 0; i <= 200; ++i) {
+                const auto p = trimmed->Evaluate(static_cast<float>(i) / 200);
+                require(positive ? p.x >= -0.001 : p.x <= 0.001, "Trim retained the wrong side");
+                GeomAPI_ProjectPointOnCurve projection(gp_Pnt(p.x, p.y, p.z), exact);
+                require(projection.NbPoints() && projection.LowerDistance() < 0.001,
+                        "Plane trim changed the authored curve shape");
+            }
+            const auto start = trimmed->Evaluate(0), end = trimmed->Evaluate(1);
+            require(std::min(std::abs(start.x), std::abs(end.x)) < 0.001,
+                    "Trim endpoint must lie on the plane");
+            const auto retained = positive ? end : start;
+            const auto expected = original.Evaluate(positive ? 1 : 0);
+            require(gp_Pnt(retained.x, retained.y, retained.z).Distance(
+                gp_Pnt(expected.x, expected.y, expected.z)) < 0.001, "Trim lost the retained endpoint");
+        };
+        for (auto mode : {SelectionMode::Object, SelectionMode::Face, SelectionMode::Edge, SelectionMode::Point}) {
+            load();
+            window.viewport_->SetSelectionMode(mode);
+            doc.SelectObjectById(3);
+            doc.SelectObjectById(5, SelectionAction::Add);
+            window.BeginCurveEditCommand(MainWindow::CurveEditCommand::TrimByPlane);
+            require(doc.GetSelectedObjectIndices().size() == 2, "Trim startup discarded preselected curve and plane");
+            require(window.viewport_->picking_3d_point_ && window.viewport_->point_pick_object_id_ == 3,
+                    "Trim startup did not advance to choosing the curve fragment");
+            require(window.statusBar()->currentMessage().contains("part of the curve"), "Trim startup asks to select valid inputs again");
+            window.CancelCurveEditCommand();
+        }
+        for (int tab = 0; tab < window.tool_tabs_->count(); ++tab)
+            if (window.tool_tabs_->tabData(tab).toString() == "Curves") window.tool_tabs_->setCurrentIndex(tab);
+        for (bool remove_positive : {false, true}) {
+            load();
+            const CBSpline original = *dynamic_cast<CBSpline*>(doc.FindObjectById(3));
+            // A pending spatial curve tool clears selection during cleanup.
+            window.spatial_curve_kind_ = MainWindow::SpatialCurveKind::BSpline;
+            window.spatial_curve_object_id_ = 0;
+            doc.SelectObjectById(3);
+            doc.SelectObjectById(5, SelectionAction::Add);
+            window.RefreshSceneTree();
+            QPushButton* trim_button = nullptr;
+            for (auto* button : window.findChildren<QPushButton*>())
+                if (button->property("toolKey").toString() == "CurveTrimByPlane") { trim_button = button; break; }
+            require(trim_button != nullptr, "Cannot find Trim by Plane button");
+            trim_button->click();
+            require(doc.GetSelectedObjectIndices().size() == 2 && window.viewport_->point_pick_object_id_ == 3,
+                    "Toolbar startup lost preselection while clearing previous tool");
+            require(window.statusBar()->currentMessage().contains("part of the curve"), "Toolbar did not accept preselection");
+            window.CompleteCurveEditPoint(original.Evaluate(remove_positive ? 1 : 0));
+            verify(original, dynamic_cast<CBSpline*>(doc.FindObjectById(3)), !remove_positive);
+            require(window.pending_curve_edit_command_ == MainWindow::CurveEditCommand::None, "Trim click did not finish command");
+        }
+        {
+            load();
+            doc.SelectObjectById(3);
+            doc.SelectObjectById(5, SelectionAction::Add);
+            require(doc.RotateSelectedObjects({}, {0,0,1}, 0.7f), "Cannot rotate trim fixture");
+            require(doc.MoveSelectedObjects({31,17,-9}), "Cannot translate trim fixture");
+            const CBSpline original = *dynamic_cast<CBSpline*>(doc.FindObjectById(3));
+            Vec3 origin{}, normal{};
+            require(doc.GetObjectPlane(5, origin, normal), "Cannot resolve transformed cutting plane");
+            const auto distance = [&](const CPoint3d& p) {
+                return (p.x-origin.x)*normal.x + (p.y-origin.y)*normal.y + (p.z-origin.z)*normal.z;
+            };
+            const auto keep = original.Evaluate(1);
+            require(window.TrimSelectedCurveByPlane(original.Evaluate(0)), "Cannot trim with transformed reference plane");
+            const auto* trimmed = dynamic_cast<CBSpline*>(doc.FindObjectById(3));
+            require(trimmed != nullptr, "Transformed plane trim lost spline");
+            require(std::min(std::abs(distance(trimmed->Evaluate(0))), std::abs(distance(trimmed->Evaluate(1)))) < 0.001,
+                    "Trim endpoint does not lie on transformed plane");
+            const auto exact = curve_cut::Spline(original);
+            for (int i=0; i<=100; ++i) {
+                const auto point = trimmed->Evaluate(i/100.f);
+                require(distance(point)*distance(keep) >= -0.001, "Transformed plane kept wrong side");
+                GeomAPI_ProjectPointOnCurve projection(gp_Pnt(point.x,point.y,point.z),exact);
+                require(projection.NbPoints() && projection.LowerDistance()<0.001, "Transformed plane trim changed spline shape");
+            }
+        }
+        for (unsigned long id : {3ul, 4ul}) {
+            for (bool positive : {false, true}) {
+                load();
+                const CBSpline original = *dynamic_cast<CBSpline*>(doc.FindObjectById(id));
+                const size_t count = doc.GetObjects().size();
+                doc.SelectObjectById(id);
+                if (positive) {
+                    // Exercise the alternate three-point/selected-face plane route.
+                    window.pending_curve_trim_plane_points_ = {
+                        CPoint3d(0, 0, 0), CPoint3d(0, 1, 0), CPoint3d(0, 0, 1)};
+                } else doc.SelectObjectById(5, SelectionAction::Add);
+                require(window.TrimSelectedCurveByPlane(original.Evaluate(positive ? 0 : 1)),
+                        "Trim By Plane failed on reported curve");
+                require(doc.GetObjects().size() == count, "One crossing must retain one fragment");
+                verify(original, dynamic_cast<CBSpline*>(doc.FindObjectById(id)), positive);
+                require(window.undo_redo_.Undo(), "Plane trim Undo failed");
+                const auto* restored = dynamic_cast<CBSpline*>(doc.FindObjectById(id));
+                require(restored && restored->GetPoints().size() == original.GetPoints().size(),
+                        "Plane trim Undo did not restore poles");
+                for (int i = 0; i <= 50; ++i) {
+                    const auto a = restored->Evaluate(i / 50.f), b = original.Evaluate(i / 50.f);
+                    require(gp_Pnt(a.x,a.y,a.z).Distance(gp_Pnt(b.x,b.y,b.z)) < 1.e-8,
+                            "Plane trim Undo changed source shape");
+                }
+                require(window.undo_redo_.Redo(), "Plane trim Redo failed");
+                verify(original, dynamic_cast<CBSpline*>(doc.FindObjectById(id)), positive);
+                const QString saved = settings.filePath("trimmed.dom3d");
+                require(serializer.Save(saved, doc, room, view, {}, failure), "Cannot save trimmed curves");
+                CAlfaDoc loaded;
+                require(serializer.Load(saved, loaded, room, view, failure), "Cannot reload trimmed curves");
+                verify(original, dynamic_cast<CBSpline*>(loaded.FindObjectById(id)), positive);
+            }
+        }
+        for (auto type : {SplineCurveType::BSpline, SplineCurveType::Bezier, SplineCurveType::Nurbs}) {
+            CBSpline arch;
+            arch.SetCurveType(type);
+            for (auto p : {CPoint3d(0,0,0), CPoint3d(0,10,0), CPoint3d(10,10,0), CPoint3d(10,0,0)})
+                arch.AddPoint(p);
+            if (type == SplineCurveType::Nurbs) arch.SetWeights({1,2,2,1});
+            const gp_Pln plane(gp_Pnt(0,5,0), gp_Dir(0,1,0));
+            const auto pieces = curve_cut::TrimByPlane(arch, plane, false);
+            require(pieces.size() == 2, "Plane trim must retain disconnected fragments");
+            require(curve_cut::TrimByPlane(arch, plane, true).size() == 1,
+                    "Plane trim must retain middle interval");
+            const auto original = curve_cut::Spline(arch);
+            for (const auto& piece : pieces) {
+                CBSpline result;
+                result.SetCurveType(type);
+                require(curve_cut::Assign(result, piece), "Cannot assign plane trim fragment");
+                for (int i = 0; i <= 50; ++i) {
+                    const auto p = result.Evaluate(i / 50.f);
+                    require(p.y <= 5.00001, "Plane trim joined across discarded interval");
+                    GeomAPI_ProjectPointOnCurve projection(gp_Pnt(p.x,p.y,p.z), original);
+                    require(projection.NbPoints() && projection.LowerDistance() < 1.e-5,
+                            "Multiple-crossing plane trim changed shape");
+                }
+            }
+            if (type != SplineCurveType::Nurbs)
+                require(curve_cut::TrimByPlane(arch, gp_Pln(gp_Pnt(0,7.5,0),gp_Dir(0,1,0)), false).empty(),
+                        "Tangency must not modify curve or create fragments");
+            require(curve_cut::TrimByPlane(arch, gp_Pln(gp_Pnt(0,9,0),gp_Dir(0,1,0)), false).empty(),
+                    "Crossing control poles alone must not trim the curve");
+            require(curve_cut::TrimByPlane(arch, gp_Pln(gp_Pnt(0,0,0),gp_Dir(0,0,1)), true).empty(),
+                    "Coplanar curve must remain unchanged");
+        }
+        if (args.contains("--output")) {
+            load();
+            for (unsigned long id : {3ul,4ul}) {
+                const auto* curve = dynamic_cast<const CBSpline*>(doc.FindObjectById(id));
+                const auto remove = curve->Evaluate(0);
+                doc.SelectObjectById(id);
+                doc.SelectObjectById(5, SelectionAction::Add);
+                require(window.TrimSelectedCurveByPlane(remove), "Cannot trim example");
+            }
+            require(serializer.Save(args.value(args.indexOf("--output")+1), doc, room, view, {}, failure),
+                    "Cannot save fixed plane trim example");
+        }
+        std::cout << "Trim By Plane B-spline/Bezier regressions passed" << std::endl;
+        return EXIT_SUCCESS;
+    }
+    if (application.arguments().contains("--cut-curve-only")) {
+        QTemporaryDir settings;
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings.path());
+        MainWindow window;
+        auto& doc = window.document_;
+        Dom3DProjectSerializer serializer;
+        ProjectViewState view;
+        QString room, failure;
+        const auto args = application.arguments();
+        require(serializer.Load(args.value(args.indexOf("--cut-curve-only") + 1),
+                                doc, room, view, failure), "Cannot load Cut Curve regression");
+        auto* target = dynamic_cast<CBSpline*>(doc.FindObjectById(2));
+        const auto* copy = dynamic_cast<const CBSpline*>(doc.FindObjectById(3));
+        auto* cutter = dynamic_cast<CPolyline*>(doc.FindObjectById(4));
+        require(target && copy && cutter, "Cut Curve fixture objects missing");
+        // The report was saved after the faulty cut. The translated copy still
+        // contains all original cubic poles; restore the target from that copy.
+        target->Clear();
+        target->SetDegree(copy->GetDegree());
+        for (auto p : copy->GetPoints()) { p.z = 0; target->AddPoint(p); }
+        target->SetName("B-Spline 3D");
+        auto& objects = doc.GetObjects();
+        objects.erase(std::remove_if(objects.begin(), objects.end(), [](const auto& object) {
+            return object->m_id == 5; // Remove the other fragment from the faulty cut.
+        }), objects.end());
+        const CBSpline original = *target;
+        const auto copy_points = copy->GetPoints();
+        const auto cutter_points = cutter->GetPoints();
+        auto distance = [](CPoint3d a, CPoint3d b) {
+            return gp_Pnt(a.x, a.y, a.z).Distance(gp_Pnt(b.x, b.y, b.z));
+        };
+        auto verify = [&](const CBSpline& before, const std::vector<const CBSpline*>& pieces,
+                          double endpoint_tolerance = 1.e-6) {
+            const auto exact = curve_cut::Spline(before);
+            double previous = exact->FirstParameter();
+            for (const auto* piece : pieces) {
+                require(piece->GetDegree() == before.GetDegree(), "Cut reduced spline degree");
+                GeomAPI_ProjectPointOnCurve end(
+                    gp_Pnt(piece->GetPoints().back().x, piece->GetPoints().back().y,
+                           piece->GetPoints().back().z), exact);
+                require(end.NbPoints() > 0 && end.LowerDistance() < endpoint_tolerance,
+                        "Cut endpoint moved off the original curve");
+                const double next = end.LowerDistanceParameter();
+                for (int i = 0; i <= 100; ++i) {
+                    const float t = static_cast<float>(i) / 100;
+                    require(distance(piece->Evaluate(t), before.Evaluate(
+                        static_cast<float>(previous + (next - previous) * t))) < 0.001,
+                        "Cut changed spline shape");
+                }
+                previous = next;
+            }
+            require(std::abs(previous - exact->LastParameter()) < 1.e-7,
+                    "Cut did not cover the whole source curve");
+        };
+        window.undo_redo_.Reset();
+        const size_t count = doc.GetObjects().size();
+        require(window.CutCurveWithCurve(2, 4), "Cut Curve failed on reported geometry");
+        require(doc.GetObjects().size() == count + 1, "Single intersection must create two pieces");
+        const auto* second = dynamic_cast<const CBSpline*>(doc.GetObjects().back().get());
+        require(second, "Cut must retain editable splines");
+        verify(original, {target, second});
+        const auto join = target->Evaluate(1);
+        require(distance(join, second->Evaluate(0)) < 1.e-8, "Cut fragments do not meet");
+        const gp_Lin line(gp_Pnt(cutter_points[0].x, cutter_points[0].y, cutter_points[0].z),
+            gp_Dir(cutter_points[1].x - cutter_points[0].x,
+                   cutter_points[1].y - cutter_points[0].y,
+                   cutter_points[1].z - cutter_points[0].z));
+        require(line.Distance(gp_Pnt(join.x, join.y, join.z)) < 1.e-6,
+                "Cut endpoint does not lie on cutter");
+        for (size_t i = 0; i < copy_points.size(); ++i)
+            require(distance(copy->GetPoints()[i], copy_points[i]) == 0, "Cut changed the copy");
+        for (size_t i = 0; i < cutter_points.size(); ++i)
+            require(distance(cutter->GetPoints()[i], cutter_points[i]) == 0, "Cut changed the cutter");
+        require(!window.CutCurveWithCurve(3, 4), "Projected intersection at different Z must not cut");
+        require(window.undo_redo_.Undo(), "Cut Undo failed");
+        require(doc.GetObjects().size() == count, "Cut Undo did not restore object count");
+        require(window.undo_redo_.Redo(), "Cut Redo failed");
+        verify(original, {dynamic_cast<const CBSpline*>(doc.FindObjectById(2)),
+                         dynamic_cast<const CBSpline*>(doc.GetObjects().back().get())});
+        const QString saved = settings.filePath("Cut Curve Fixed.dom3d");
+        require(serializer.Save(saved, doc, room, view, {}, failure), "Cannot save cut curves");
+        CAlfaDoc loaded;
+        require(serializer.Load(saved, loaded, room, view, failure), "Cannot reload cut curves");
+        // The project loader reads coordinates through float; allow its normal
+        // sub-micron roundoff while retaining the strict in-memory cut checks.
+        verify(original, {dynamic_cast<const CBSpline*>(loaded.FindObjectById(2)),
+                         dynamic_cast<const CBSpline*>(loaded.FindObjectById(doc.GetObjects().back()->m_id))}, 0.001);
+        if (args.contains("--output"))
+            require(serializer.Save(args.value(args.indexOf("--output") + 1),
+                                    doc, room, view, {}, failure), "Cannot save fixed example");
+
+        // Multiple intersections, explicit knots, and rational weights must
+        // preserve the authored curve too.
+        for (auto type : {SplineCurveType::BSpline, SplineCurveType::Nurbs, SplineCurveType::Bezier}) {
+            CBSpline source;
+            source.SetCurveType(type);
+            for (auto p : {CPoint3d(0, 0, 0), CPoint3d(0, 10, 0),
+                           CPoint3d(10, 10, 0), CPoint3d(10, 0, 0)}) source.AddPoint(p);
+            if (type == SplineCurveType::Nurbs) source.SetWeights({1, 2, 2, 1});
+            CPolyline tool;
+            tool.AddPoint(CPoint3d(-1, 5, 0)); tool.AddPoint(CPoint3d(11, 5, 0));
+            const auto geometry = curve_cut::Split(source, tool);
+            require(geometry.size() == 3, "Two intersections must create three fragments");
+            std::vector<CBSpline> fragments(geometry.size());
+            std::vector<const CBSpline*> pointers;
+            for (size_t i = 0; i < geometry.size(); ++i) {
+                fragments[i].SetCurveType(type);
+                require(curve_cut::Assign(fragments[i], geometry[i]), "Cannot assign cut geometry");
+                pointers.push_back(&fragments[i]);
+            }
+            verify(source, pointers);
+            tool.Translate({0, 0, 0.1f});
+            require(curve_cut::Split(source, tool).empty(), "Nearby disjoint curves must not be cut");
+        }
+        std::cout << "Cut Curve geometry and Undo/Redo regressions passed" << std::endl;
+        return EXIT_SUCCESS;
+    }
+    if(application.arguments().contains("--two-guides")) {
+        QTemporaryDir temp;QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,temp.path());
+        MainWindow window;auto& doc=window.document_;Dom3DProjectSerializer serializer;ProjectViewState view;QString room,failure;
+        const auto args=application.arguments();
+        require(serializer.Load(args.value(args.indexOf("--two-guides")+1),doc,room,view,failure),"Cannot load fairing guides");
+        TwoViewSettings s;s.guides={5,6,0};s.two_guides=true;std::string error;
+        auto shape=BuildTwoViewSurface(doc,s,error);require(!shape.IsNull(),error.c_str());
+        auto faceCount=[](const TopoDS_Shape& shape){int n=0;for(TopExp_Explorer ex(shape,TopAbs_FACE);ex.More();ex.Next())++n;return n;};
+        require(faceCount(shape)==1,"Two guides must create one conic surface");
+        s.reverse=true;auto reversed=BuildTwoViewSurface(doc,s,error);require(!reversed.IsNull(),error.c_str());
+        require(TopExp_Explorer(shape,TopAbs_FACE).Current().Orientation()!=TopExp_Explorer(reversed,TopAbs_FACE).Current().Orientation(),"Reverse Normal failed");
+        s.mirror=true;s.graphs=true;s.top_graph={.3,.4,.6,.5,.4};auto mirrored=BuildTwoViewSurface(doc,s,error);require(!mirrored.IsNull()&&faceCount(mirrored)==2,"Mirrored two-guide graph failed");
+        s.split=true;s.patches_u=3;s.patches_v=2;auto patches=BuildTwoViewSurface(doc,s,error);require(!patches.IsNull()&&faceCount(patches)==12,"Two-guide patch count incorrect");
+        auto restored=ReadTwoViewParameters(TwoViewParameters(s));require(restored.two_guides&&restored.reverse&&restored.guides[2]==0,"Two-guide parameters lost");
+        auto noMode=ReadTwoViewParameters({});require(!noMode.two_guides&&!noMode.reverse,"Legacy three-guide defaults changed");
+        const auto count=doc.GetObjects().size();window.undo_redo_.Reset();window.ActivateParametricTool("SurfaceTwoView");
+        auto* dialog=window.findChild<QDialog*>("TwoViewSurfaceDialog");auto* panel=dialog->findChild<PropertyPanel*>("TwoViewParameters");
+        panel->findChild<QComboBox*>("parameter_two.guides")->setCurrentIndex(1);application.processEvents();
+        for(auto id:{5ul,6ul}){doc.SelectObjectById(id);window.viewport_->SelectionChanged();}
+        auto okButton=[&](){QPushButton* ok=nullptr;for(auto* b:panel->findChildren<QPushButton*>())if(b->text()=="OK")ok=b;return ok;};
+        require(okButton()&&okButton()->isEnabled()&&doc.GetObjects().size()==count+1,"Two-guide OK disabled");
+        panel->findChild<QComboBox*>("parameter_two.guides")->setCurrentIndex(0);application.processEvents();
+        require(!okButton()->isEnabled()&&doc.GetObjects().size()==count,"Three-guide mode retained incomplete preview");
+        panel->findChild<QComboBox*>("parameter_two.guides")->setCurrentIndex(1);application.processEvents();
+        panel->findChild<QCheckBox*>("parameter_mirror")->setChecked(true);
+        require(okButton()->isEnabled(),"Two-guide preview did not recover");
+        okButton()->click();application.sendPostedEvents(nullptr,QEvent::DeferredDelete);
+        require(window.undo_redo_.Undo()&&doc.GetObjects().size()==count,"Two-guide Undo failed");
+        require(window.undo_redo_.Redo()&&doc.GetObjects().size()==count+1,"Two-guide Redo failed");
+        const auto saved=temp.filePath("fairing.dom3d");require(serializer.Save(saved,doc,room,view,{},failure),"Cannot save fairing");
+        CAlfaDoc loaded;require(serializer.Load(saved,loaded,room,view,failure),"Cannot load fairing");
+        auto settings=ReadTwoViewParameters(loaded.GetObjects().back()->GetParametricParameters());
+        require(settings.two_guides&&RebuildTwoViewSurface(loaded,loaded.GetObjects().size()-1,settings,error),"Saved fairing failed to rebuild");
+        if(args.contains("--output"))require(serializer.Save(args.value(args.indexOf("--output")+1),doc,room,view,{},failure),"Cannot save fairing example");
+        std::cout<<"Two guides: Helicopter fairing, mirror, reverse, graphs, patches, mode switching, Undo/Redo and saved rebuild passed\n";return 0;
+    }
+    if(application.arguments().contains("--helicopter-trim")) {
+        QTemporaryDir temp;QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,temp.path());
+        MainWindow window;auto& doc=window.document_;Dom3DProjectSerializer serializer;ProjectViewState view;QString room,failure;
+        const auto args=application.arguments();
+        require(serializer.Load(args.value(args.indexOf("--helicopter-trim")+1),doc,room,view,failure),"Cannot load Helicopter trim fixture");
+        auto area=[](const TopoDS_Shape& shape){GProp_GProps p;BRepGProp::SurfaceProperties(shape,p,1.e-9);return p.Mass();};
+        const double original=area(dynamic_cast<CSurfaceSet*>(doc.FindObjectById(9))->m_Shape);
+        for(unsigned long id:{10ul,11ul}) {
+            TopoDS_Shape outside,inside;std::string error;
+            require(BuildSurfaceSketchParts(doc,{9,id,false},outside,inside,error),error.c_str());
+            require(BRepCheck_Analyzer(outside).IsValid()&&BRepCheck_Analyzer(inside).IsValid(),"Invalid Helicopter trim topology");
+            require(std::abs(area(outside)+area(inside)-original)<original*1.e-6,"Helicopter trim lost surface area");
+            int faces=0;for(TopExp_Explorer ex(inside,TopAbs_FACE);ex.More();ex.Next())++faces;
+            require(faces>=2,"Missing opposite-side window cutout");
+            const auto count=doc.GetObjects().size();
+            window.ActivateParametricTool("SurfaceTrimSketch");auto* dialog=window.findChild<QDialog*>("SurfaceSketchTrimDialog");require(dialog,"No Surface Trim dialog");
+            doc.SelectObjectById(9);window.viewport_->SelectionChanged();doc.SelectObjectById(id);window.viewport_->SelectionChanged();
+            auto* ok=dialog->findChild<QPushButton*>("CreateSurfaceTrim");require(ok&&ok->isEnabled(),"Helicopter Trim OK is disabled");
+            dialog->findChild<QCheckBox*>("SurfaceTrimKeepCutout")->setChecked(true);
+            require(doc.GetObjects().size()==count+2,"Helicopter Keep cutout lost a result");
+            dialog->reject();application.sendPostedEvents(nullptr,QEvent::DeferredDelete);
+            require(doc.GetObjects().size()==count&&doc.FindObjectById(9)->IsVisible(),"Helicopter trim Cancel failed");
+        }
+        // Apply both user sketches in succession, retaining each glazing piece.
+        unsigned long source=9;
+        for(unsigned long id:{10ul,11ul}) {
+            SurfaceTrimSettings settings{source,id,false};TopoDS_Shape outside,inside;std::string error;
+            require(BuildSurfaceSketchParts(doc,settings,outside,inside,error),error.c_str());
+            doc.FindObjectById(source)->SetVisible(false);
+            for(bool cutout:{false,true}) {
+                auto result=std::make_unique<CSurfaceSet>(cutout?inside:outside);settings.inside=cutout;
+                result->SetName(cutout?"Window cutout":"Helicopter trimmed");
+                result->SetParametricOperation(0,"SurfaceTrimSketch","Trim By Sketch",SurfaceTrimParameters(settings));
+                require(result->ReBuldMesh(),"Cannot mesh Helicopter trim");
+                auto* raw=result.get();doc.AddObject(std::move(result));if(!cutout)source=raw->m_id;
+            }
+        }
+        const auto saved=temp.filePath("Helicopter-windows.dom3d");
+        require(serializer.Save(saved,doc,room,view,{},failure),"Cannot save Helicopter windows");
+        CAlfaDoc loaded;require(serializer.Load(saved,loaded,room,view,failure),"Cannot load Helicopter windows");
+        for(size_t i=0;i<loaded.GetObjects().size();++i) {
+            const auto params=loaded.GetObjects()[i]->GetParametricParameters();
+            if(ReadSurfaceTrimParameters(params).source) {std::string error;require(RebuildSurfaceSketchTrim(loaded,i,ReadSurfaceTrimParameters(params),error),error.c_str());}
+        }
+        if(args.contains("--output"))require(serializer.Save(args.value(args.indexOf("--output")+1),doc,room,view,{},failure),"Cannot save Helicopter example");
+        if(args.contains("--preview")) {
+            for(auto& object:doc.GetObjects())if(object->GetName()=="Window cutout")object->SetVisible(false);
+            window.resize(1100,800);window.show();window.viewport_->SetCamera(view.camera);window.viewport_->FitToDocument();
+            QElapsedTimer wait;wait.start();while(wait.elapsed()<700)application.processEvents();
+            require(window.viewport_->grabFramebuffer().save(args.value(args.indexOf("--preview")+1)),"Cannot save Helicopter holes preview");
+        }
+        std::cout<<"Helicopter: both sketches, opposite-side cutouts, enabled OK, Cancel, consecutive cuts and saved rebuild passed\n";
+        return 0;
+    }
+    if(application.arguments().contains("--surface-sketch-trim")) {
+        QTemporaryDir temp;QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,temp.path());
+        MainWindow window;auto& doc=window.document_;
+        auto plane=BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(0,0,0),gp_Dir(0,0,1)),-50,50,-50,50).Shape();
+        auto body=std::make_unique<CSurfaceSet>(plane);auto* source=body.get();doc.AddObject(std::move(body));
+        auto sketch=std::make_unique<CSmartLine>();
+        require(sketch->CreateFromWorldPoints({{-20,-20,1000},{20,-20,1000},{20,20,1000},{-20,20,1000}},true,{0,0,1000},{1,0,0},{0,1,0}),"Cannot create window Sketch");
+        auto* cutter=sketch.get();doc.AddObject(std::move(sketch));SurfaceTrimSettings settings{source->m_id,cutter->m_id,false};
+        const auto sourceId=source->m_id,sketchId=cutter->m_id;
+        auto area=[](const TopoDS_Shape& shape){GProp_GProps p;BRepGProp::SurfaceProperties(shape,p);return p.Mass();};
+        TopoDS_Shape outside,inside;std::string error;
+        require(BuildSurfaceSketchParts(doc,settings,outside,inside,error),error.c_str());
+        require(std::abs(area(inside)-1600)<1.e-5&&std::abs(area(outside)-8400)<1.e-5,"Window cut areas are incorrect");
+        require(!TopExp_Explorer(inside,TopAbs_SOLID).More(),"Cutout became a solid");
+        auto open=std::make_unique<CSmartLine>();
+        require(open->CreateFromWorldPoints({{-70,0,0},{0,10,0},{70,0,0}},false,{},{1,0,0},{0,1,0}),"Cannot create open Sketch");
+        auto* openRaw=open.get();doc.AddObject(std::move(open));auto openSettings=settings;openSettings.sketch=openRaw->m_id;
+        require(BuildSurfaceSketchParts(doc,openSettings,outside,inside,error),error.c_str());
+        require(std::abs(area(inside)+area(outside)-10000)<1.e-5,"Open Sketch lost surface area");
+        window.undo_redo_.Reset();const auto count=doc.GetObjects().size();
+        auto openDialog=[&](){window.ActivateParametricTool("SurfaceTrimSketch");auto* d=window.findChild<QDialog*>("SurfaceSketchTrimDialog");require(d,"No Surface Trim dialog");
+            doc.SelectObjectById(sourceId);window.viewport_->SelectionChanged();doc.SelectObjectById(sketchId);window.viewport_->SelectionChanged();
+            require(d->findChild<QPushButton*>("CreateSurfaceTrim")->isEnabled(),"Surface Trim preview failed");return d;};
+        auto* dialog=openDialog();require(doc.GetObjects().size()==count+1&&!doc.FindObjectById(sourceId)->IsVisible(),"Hole preview did not replace the source");
+        dialog->findChild<QCheckBox*>("SurfaceTrimKeepCutout")->setChecked(true);
+        require(doc.GetObjects().size()==count+2,"Keep cutout did not create two objects");
+        dialog->findChild<QComboBox*>("SurfaceTrimDirection")->setCurrentIndex(0);
+        require(std::abs(area(dynamic_cast<CSolid*>(doc.GetObjects()[count].get())->m_Shape)-1600)<1.e-5,"Direction did not switch pieces");
+        dialog->reject();application.sendPostedEvents(nullptr,QEvent::DeferredDelete);
+        require(doc.GetObjects().size()==count&&doc.FindObjectById(sourceId)->IsVisible(),"Cancel did not restore the original surface");
+        dialog=openDialog();dialog->findChild<QCheckBox*>("SurfaceTrimKeepCutout")->setChecked(true);dialog->accept();application.sendPostedEvents(nullptr,QEvent::DeferredDelete);
+        const auto trimId=doc.GetObjects()[count]->m_id,cutId=doc.GetObjects()[count+1]->m_id;
+        require(window.undo_redo_.Undo()&&doc.GetObjects().size()==count&&doc.FindObjectById(sourceId)->IsVisible(),"Surface trim Undo failed");
+        require(window.undo_redo_.Redo()&&doc.GetObjects().size()==count+2&&!doc.FindObjectById(sourceId)->IsVisible(),"Surface trim Redo failed");
+        Dom3DProjectSerializer serializer;ProjectViewState view;QString room,failure;auto path=temp.filePath("surface-cutout.dom3d");
+        require(serializer.Save(path,doc,room,view,{},failure),"Cannot save surface cutout");CAlfaDoc loaded;
+        require(serializer.Load(path,loaded,room,view,failure),"Cannot load surface cutout");
+        for(size_t i=count;i<count+2;++i){auto s=ReadSurfaceTrimParameters(loaded.GetObjects()[i]->GetParametricParameters());require(RebuildSurfaceSketchTrim(loaded,i,s,error),"Saved trim cannot rebuild");}
+        auto* changed=dynamic_cast<CSmartLine*>(loaded.FindObjectById(sketchId));require(changed->CreateFromWorldPoints({{-25,-20,1000},{25,-20,1000},{25,20,1000},{-25,20,1000}},true,{0,0,1000},{1,0,0},{0,1,0}),"Cannot resize Sketch");
+        ToolRegistry registry;require(registry.ReplayProfileDependents(sketchId,loaded),"Sketch did not rebuild its two surface dependents");
+        auto* cutBody=dynamic_cast<CSolid*>(loaded.FindObjectById(cutId));auto* trimBody=dynamic_cast<CSolid*>(loaded.FindObjectById(trimId));
+        require(area(cutBody->m_Shape)>1600&&std::abs(area(cutBody->m_Shape)+area(trimBody->m_Shape)-10000)<1.e-5,"Paired surfaces lost their complement after editing Sketch");
+        // Curved fuselage: keep the actual surface fragments, without planar caps.
+        const auto args=application.arguments();
+        if(args.contains("--fuselage")) {
+            CAlfaDoc curved;require(serializer.Load(args.value(args.indexOf("--fuselage")+1),curved,room,view,failure),"Cannot load fuselage guides");
+            TwoViewSettings ts;ts.guides={4,3,2};ts.mirror=true;auto shape=BuildTwoViewSurface(curved,ts,error);require(!shape.IsNull(),"Cannot build test fuselage");
+            auto fuselage=std::make_unique<CSurfaceSet>(shape);auto* f=fuselage.get();curved.AddObject(std::move(fuselage));
+            auto windowSketch=std::make_unique<CSmartLine>();require(windowSketch->CreateFromWorldPoints({{60,20,0},{100,20,0},{100,32,0},{60,32,0}},true,{},{1,0,0},{0,1,0}),"Cannot create fuselage window");
+            auto* w=windowSketch.get();curved.AddObject(std::move(windowSketch));SurfaceTrimSettings ss{f->m_id,w->m_id,false};
+            require(BuildSurfaceSketchParts(curved,ss,outside,inside,error),error.c_str());
+            require(std::abs(area(inside)+area(outside)-area(shape))/area(shape)<1.e-5,"Fuselage trim changed area");
+            for(bool keepInside:{false,true}){auto piece=keepInside?inside:outside;auto result=std::make_unique<CSurfaceSet>(piece);ss.inside=keepInside;
+                result->SetName(keepInside?"Window cutout":"Fuselage with window");
+                if(keepInside){auto glass=Material::DefaultSurface();glass.name="Window Glass";glass.diffuse={.12f,.35f,.55f};glass.alpha=.4f;glass.specular=.9f;result->SetMaterial(glass);}
+                result->SetParametricOperation(0,"SurfaceTrimSketch","Trim By Sketch",SurfaceTrimParameters(ss));require(result->ReBuldMesh(),"Cannot mesh window");curved.AddObject(std::move(result));}
+            f->SetVisible(false);
+            if(args.contains("--output"))require(serializer.Save(args.value(args.indexOf("--output")+1),curved,room,view,{},failure),"Cannot save fuselage window example");
+            if(args.contains("--preview")&&args.contains("--output")) {
+                window.OpenProjectFromPath(args.value(args.indexOf("--output")+1));window.resize(1100,800);window.show();window.viewport_->SetCamera(view.camera);window.viewport_->FitToDocument();
+                QElapsedTimer wait;wait.start();while(wait.elapsed()<700)application.processEvents();
+                require(window.viewport_->grabFramebuffer().save(args.value(args.indexOf("--preview")+1)),"Cannot save window preview");
+                window.document_.GetObjects().back()->SetVisible(false);window.viewport_->update();application.processEvents();
+                require(window.viewport_->grabFramebuffer().save(args.value(args.indexOf("--preview")+1)+".hole.png"),"Cannot save open window preview");
+
+            }
+
+        }
+        std::cout<<"Surface Trim: closed/open Sketch, Keep cutout, directions, Cancel, Undo, persistence and dependent rebuild passed\n";return 0;
+    }
+    if(application.arguments().contains("--two-view-file")) {
+        QTemporaryDir temp;QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,temp.path());
+        MainWindow window;Dom3DProjectSerializer serializer;ProjectViewState view;QString room,error;
+        const auto args=application.arguments();auto& doc=window.document_;
+        require(serializer.Load(args.value(args.indexOf("--two-view-file")+1),doc,room,view,error),"Cannot load Plane_Fuselag");
+        const bool helicopter=args.contains("--helicopter");
+        TwoViewSettings s;s.guides=helicopter?std::array<unsigned long,3>{2,4,7}:std::array<unsigned long,3>{4,3,2};s.mirror=true;std::string failure;
+        auto shape=BuildTwoViewSurface(doc,s,failure);
+        if(shape.IsNull())std::cerr<<failure<<std::endl;
+        require(!shape.IsNull(),"Spatial Middle guide was rejected");
+        auto surface=BRep_Tool::Surface(TopoDS::Face(TopExp_Explorer(shape,TopAbs_FACE).Current()));
+        require(std::abs(surface->Value(.5,1).Y())>1,"Middle guide was flattened to XZ");
+        if(helicopter) {
+            require(std::abs(surface->Value(0,1).Z())<1.e-9,"Imported nose was not normalized to XY");
+            s.mirror=false;auto half=BuildTwoViewSurface(doc,s,failure);
+            require(!half.IsNull()&&BRepCheck_Analyzer(half).IsValid(),"Helicopter half failed");
+            s.split=true;auto patches=BuildTwoViewSurface(doc,s,failure);
+            require(!patches.IsNull()&&BRepCheck_Analyzer(patches).IsValid(),"Helicopter patches failed");
+            s.split=false;s.mirror=true;
+        }
+        const auto count=doc.GetObjects().size();window.undo_redo_.Reset();window.ActivateParametricTool("SurfaceTwoView");
+        auto* dialog=window.findChild<QDialog*>("TwoViewSurfaceDialog");require(dialog,"No two-view dialog");
+        for(auto id:s.guides){doc.SelectObjectById(id);window.viewport_->SelectionChanged();}
+        auto* panel=dialog->findChild<PropertyPanel*>("TwoViewParameters");
+        panel->findChild<QCheckBox*>("parameter_mirror")->setChecked(true);
+        QPushButton* ok=nullptr;for(auto* b:panel->findChildren<QPushButton*>())if(b->text()=="OK")ok=b;
+        require(ok&&ok->isEnabled()&&doc.GetObjects().size()==count+1,"Plane_Fuselag OK is disabled");
+        if(args.contains("--preview")) {
+            window.resize(1100,800);window.show();window.viewport_->SetCamera(view.camera);window.viewport_->FitToDocument();
+            QElapsedTimer wait;wait.start();while(wait.elapsed()<700)application.processEvents();
+            const auto path=args.value(args.indexOf("--preview")+1);
+            require(window.viewport_->grabFramebuffer().save(path),"Cannot save Plane_Fuselag preview");
+            require(dialog->grab().save(path+".dialog.png"),"Cannot save Plane_Fuselag dialog");
+        }
+        ok->click();application.sendPostedEvents(nullptr,QEvent::DeferredDelete);
+        require(doc.GetObjects().size()==count+1,"Plane_Fuselag acceptance failed");
+        if(args.contains("--output"))require(serializer.Save(args.value(args.indexOf("--output")+1),doc,room,view,{},error),"Cannot save Plane_Fuselag result");
+        std::cout<<"Two-view imported spatial guide and enabled OK passed\n";return 0;
+    }
+    #include "SaddleTestCases.inc"
+    #include "Body2TestCases.inc"
+    #include "SurfaceOffsetTestCases.inc"
+    #include "SewnBodyHistoryTestCases.inc"
+    #include "OffsetBodyFilletTestCases.inc"
+    #include "ExtractSurfaceEdgeTestCases.inc"
+    #include "LoftBezierTestCases.inc"
+    #include "FilletResponsiveTestCases.inc"
+    #include "SurfaceDisplayOptionsTestCases.inc"
+    #include "SurfaceReverseNormalsTestCases.inc"
+    #include "SurfaceGraphOffsetTestCases.inc"
+    #include "SurfaceBoundaryGraphTestCases.inc"
+    #include "SurfaceSeamUITestCases.inc"
+    #include "SurfaceAlignmentUITestCases.inc"
+    #include "SurfaceTopologyTestCases.inc"
+    #include "SubdivideExtrudeTestCases.inc"
+    #include "BodyPrimitiveTestCases.inc"
+    #include "SectionGraphTestCases.inc"
+    #include "Bottle3TestCases.inc"
+    #include "Body1TestCases.inc"
+    if(application.arguments().contains("--two-view")) {
+        QTemporaryDir temp;QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,temp.path());
+        MainWindow window;auto& doc=window.document_;const auto baseCount=doc.GetObjects().size();TwoViewSettings settings;
+        const std::array<std::array<CPoint3d,4>,3> points{{
+            {{{0,0,0},{20,40,0},{70,30,0},{100,10,0}}},
+            {{{0,0,0},{20,0,-30},{70,0,-25},{100,0,-10}}},
+            {{{0,0,0},{20,-20,0},{70,-15,0},{100,-10,0}}}
+        }};
+        for(int i=0;i<3;++i){auto p=std::make_unique<CBSpline>(i==0?"Up":i==1?"Middle":"Down");
+            p->SetCurveType(SplineCurveType::Bezier);for(auto q:points[i])p->AddPoint(q);
+            auto* raw=p.get();doc.AddObject(std::move(p));settings.guides[i]=raw->m_id;}
+        std::string error;auto shape=BuildTwoViewSurface(doc,settings,error);
+        if(shape.IsNull())std::cerr<<error<<std::endl;
+        require(!shape.IsNull(),"Two-view collapsed nose failed");
+        std::vector<Handle(Geom_Surface)> surfaces;
+        for(TopExp_Explorer ex(shape,TopAbs_FACE);ex.More();ex.Next())surfaces.push_back(BRep_Tool::Surface(TopoDS::Face(ex.Current())));
+        require(surfaces.size()==2,"Expected upper and lower conic surfaces");
+        for(double u:{.1,.35,.7,.95}) {
+            const auto upper=surfaces[0],lower=surfaces[1];
+            require(upper->Value(u,1).Distance(lower->Value(u,1))<1.e-7,"Gap at Middle guide");
+            GeomLProp_SLProps a(upper,u,1,1,1.e-9),b(lower,u,1,1,1.e-9);
+            require(std::abs(a.Normal().Dot(b.Normal()))>.99999,"Conics do not meet tangentially");
+            for(double v:{0.,.25,.5,.75,1.})require(std::abs(upper->Value(u,v).X()-100*u)<1.e-6,"Conic left the X-constant section plane");
+        }
+        // Quarter-circle rho: equal height/width gives a circle, not a polynomial approximation.
+        CAlfaDoc round;TwoViewSettings circular;
+        for(int i=0;i<3;++i){auto p=std::make_unique<CBSpline>();p->SetCurveType(SplineCurveType::Bezier);
+            for(double x:{0.,33.333333333333,66.666666666667,100.})p->AddPoint({x,i==0?10.:i==2?-10.:0.,i==1?-10.:0.});
+            auto* raw=p.get();round.AddObject(std::move(p));circular.guides[i]=raw->m_id;}
+        auto cylinder=BuildTwoViewSurface(round,circular,error);require(!cylinder.IsNull(),"Circular conics failed");
+        auto circle=BRep_Tool::Surface(TopoDS::Face(TopExp_Explorer(cylinder,TopAbs_FACE).Current()));
+        for(double v:{.1,.3,.5,.8}){auto p=circle->Value(.45,v);require(std::abs(p.Y()*p.Y()+p.Z()*p.Z()-100)<1.e-6,"Rho 0.4142 is not an exact circular section");}
+        GProp_GProps original;BRepGProp::SurfaceProperties(shape,original);
+        settings.split=true;settings.patches_u=4;settings.patches_v=3;
+        auto split=BuildTwoViewSurface(doc,settings,error);require(!split.IsNull(),"Patch split failed");
+        int faces=0;for(TopExp_Explorer ex(split,TopAbs_FACE);ex.More();ex.Next())++faces;
+        require(faces==24,"Wrong patch count");GProp_GProps splitArea;BRepGProp::SurfaceProperties(split,splitArea);
+        require(std::abs(splitArea.Mass()-original.Mass())/original.Mass()<1.e-5,"Splitting changed surface geometry");
+        auto firstPatch=Handle(Geom_BSplineSurface)::DownCast(BRep_Tool::Surface(TopoDS::Face(TopExp_Explorer(split,TopAbs_FACE).Current())));
+        auto originalPatch=Handle(Geom_BSplineSurface)::DownCast(surfaces[0]);
+        require(firstPatch->NbUPoles()<originalPatch->NbUPoles(),"Patches still expose the whole surface control net");
+        settings.split=false;settings.mirror=true;auto mirrored=BuildTwoViewSurface(doc,settings,error);
+        require(!mirrored.IsNull(),"Mirrored nose failed");GProp_GProps mirrorArea;BRepGProp::SurfaceProperties(mirrored,mirrorArea);
+        require(std::abs(mirrorArea.Mass()/original.Mass()-2)<1.e-5,"Mirror does not make the second half");
+        settings.graphs=true;settings.top_graph={.3,.5,.7,.5,.4};settings.bottom_graph={.4,.3,.5,.6,.4};
+        auto variable=BuildTwoViewSurface(doc,settings,error);require(!variable.IsNull(),"Variable rho failed");
+        for(TopExp_Explorer ex(variable,TopAbs_FACE);ex.More();ex.Next()) {
+            const auto surf=BRep_Tool::Surface(TopoDS::Face(ex.Current()));
+            for(double u:{.2,.4,.6,.8})for(double v:{.1,.5,.9})
+                require(std::abs(surf->Value(u,v).X()-100*u)<1.e-6,"Variable rho moved conics outside their section plane");
+        }
+        for(auto id:settings.guides)dynamic_cast<CBSpline*>(doc.FindObjectById(id))->Reverse();
+        auto reversed=BuildTwoViewSurface(doc,settings,error);require(!reversed.IsNull(),"Reversed guides failed");
+        GProp_GProps va,ra;BRepGProp::SurfaceProperties(variable,va);BRepGProp::SurfaceProperties(reversed,ra);
+        require(std::abs(va.Mass()-ra.Mass())<1.e-5,"Reversing input direction changed geometry");
+        auto bad=settings;bad.top_graph[2]=1;require(BuildTwoViewSurface(doc,bad,error).IsNull(),"Invalid rho accepted");
+        window.undo_redo_.Reset();window.ActivateParametricTool("SurfaceTwoView");
+        auto* dialog=window.findChild<QDialog*>("TwoViewSurfaceDialog");require(dialog,"No two-view dialog");
+        for(auto id:settings.guides){doc.SelectObjectById(id);window.viewport_->SelectionChanged();}
+        if(doc.GetObjects().size()!=baseCount+4)std::cerr<<dialog->findChild<QLabel*>("TwoViewStatus")->text().toStdString()<<std::endl;
+        require(doc.GetObjects().size()==baseCount+4,"Three clicks did not create a preview");
+        dialog->reject();application.sendPostedEvents(nullptr,QEvent::DeferredDelete);
+        require(doc.GetObjects().size()==baseCount+3,"Cancel left a preview");
+        window.ActivateParametricTool("SurfaceTwoView");dialog=window.findChild<QDialog*>("TwoViewSurfaceDialog");
+        for(auto id:settings.guides){doc.SelectObjectById(id);window.viewport_->SelectionChanged();}
+        auto* panel=dialog->findChild<PropertyPanel*>("TwoViewParameters");require(panel,"Missing parameters");
+        panel->findChild<QCheckBox*>("parameter_mirror")->setChecked(true);
+        if(application.arguments().contains("--preview")) {
+            window.resize(1100,800);window.show();window.viewport_->FitToDocument();
+            QElapsedTimer wait;wait.start();while(wait.elapsed()<700)application.processEvents();
+            const auto path=application.arguments().value(application.arguments().indexOf("--preview")+1);
+            require(window.viewport_->grabFramebuffer().save(path),"Cannot save preview");
+            require(dialog->grab().save(path+".dialog.png"),"Cannot save parameter dialog preview");
+        }
+        dialog->accept();application.sendPostedEvents(nullptr,QEvent::DeferredDelete);require(doc.GetObjects().size()==baseCount+4,"Acceptance failed");
+        require(window.undo_redo_.Undo()&&doc.GetObjects().size()==baseCount+3,"Two-view Undo failed");
+        require(window.undo_redo_.Redo()&&doc.GetObjects().size()==baseCount+4,"Two-view Redo failed");
+        require(RebuildTwoViewSurface(doc,baseCount+3,settings,error),"Cannot apply rho graphs to saved surface");
+        Dom3DProjectSerializer serializer;ProjectViewState view;QString saveError,room;
+        const auto path=temp.filePath("two-view.dom3d");require(serializer.Save(path,doc,room,view,{},saveError),"Save failed");
+        CAlfaDoc loaded;require(serializer.Load(path,loaded,room,view,saveError),"Reload failed");
+        auto saved=ReadTwoViewParameters(loaded.GetObjects().back()->GetParametricParameters());
+        require(saved.guides==settings.guides&&saved.mirror&&saved.graphs&&saved.top_graph==settings.top_graph&&saved.bottom_graph==settings.bottom_graph,"Lost two-view settings");
+        require(RebuildTwoViewSurface(loaded,loaded.GetObjects().size()-1,saved,error),"Saved two-view surface cannot rebuild");
+        if(application.arguments().contains("--output"))require(serializer.Save(application.arguments().value(application.arguments().indexOf("--output")+1),doc,room,view,{},saveError),"Cannot save example");
+        std::cout<<"Two-view geometry, conics, graphs, patches, UI, Undo and persistence passed\n";return 0;
+    }
+    if(application.arguments().contains("--fillet-loft-file")) {
+        CAlfaDoc doc;Dom3DProjectSerializer serializer;ProjectViewState view;QString room,error;
+        const auto args=application.arguments();
+        require(serializer.Load(args.value(args.indexOf("--fillet-loft-file")+1),doc,room,view,error),"Cannot load Loft-3");
+        for(const auto& object:doc.GetObjects())if(auto* body=dynamic_cast<CSolid*>(object.get())) {
+            int count=0;for(TopExp_Explorer ex(body->m_Shape,TopAbs_FACE);ex.More();ex.Next())++count;
+            std::cerr<<"body "<<body->m_id<<" faces "<<count<<std::endl;
+        }
+        SurfaceFilletSettings s;s.bodies={8,13};
+        BRepAlgoAPI_Splitter split;TopTools_ListOfShape inputs;std::vector<TopoDS_Shape> inputFaces;
+        for(auto id:s.bodies) {
+            TopExp_Explorer ex(dynamic_cast<CSolid*>(doc.FindObjectById(id))->m_Shape,TopAbs_FACE);
+            inputFaces.push_back(ex.Current());inputs.Append(ex.Current());
+        }
+        split.SetArguments(inputs);split.SetNonDestructive(true);split.Build();
+        for(size_t side=0;side<2;++side) {
+            int count=0;
+            for(TopTools_ListIteratorOfListOfShape it(split.Modified(inputFaces[side]));it.More();it.Next())
+                for(TopExp_Explorer ex(it.Value(),TopAbs_FACE);ex.More();ex.Next())++count;
+            std::cerr<<"split body "<<s.bodies[side]<<" parts "<<count<<std::endl;
+        }
+        require(SurfaceFilletSolutionCount(doc,s)==2,"Loft-3 should expose two real support pairs");
+        for(double radius:{29.,69.})for(int solution=0;solution<4;++solution) {
+            s.radius=radius;s.solution=solution;std::string failure;
+            const auto shape=BuildSurfaceFillet(doc,s,failure);
+            if(radius==69)require(!shape.IsNull(),"Loft-3 R69 failed");
+            std::cerr<<"radius "<<radius<<" solution "<<solution<<" ok "<<!shape.IsNull()<<" "<<failure<<std::endl;
+            for(const auto& n:SurfaceFilletNormalGuides(doc,s,shape))std::cerr<<"normal "<<n.origin.x<<" "<<n.origin.y<<" "<<n.origin.z
+                <<" dir "<<n.direction.x<<" "<<n.direction.y<<" "<<n.direction.z<<std::endl;
+        }
+        s.radius=69;s.solution=3;std::string failure;
+        auto legacyShape=BuildSurfaceFillet(doc,s,failure);
+        auto result=std::make_unique<CSurfaceSet>(legacyShape);
+        result->SetParametricOperation(0,"SurfaceFillet","Surface Fillet",SurfaceFilletParameters(s));
+        const auto index=doc.GetObjects().size();doc.AddObject(std::move(result));
+        ToolRegistry registry;
+        const auto active=registry.ActiveObjectFromDocument(index,*doc.GetObjects()[index],0,&doc);
+        bool found=false;
+        for(const auto& p:active.parameters)if(p.id=="solution") {
+            found=true;require(p.options.size()==2&&p.value==1&&p.maximum==1,"Saved duplicate solution did not normalize");
+        }
+        require(found,"Loft-3 editor lost solution parameter");
+        s.directed_normals=true;AnchorSurfaceFilletNormal(doc,s,0);AnchorSurfaceFilletNormal(doc,s,1);
+        int available=0;
+        for(int mask=0;mask<4;++mask) {
+            s.reverse={bool(mask&1),bool(mask&2)};
+            auto firstResult=BuildSurfaceFillet(doc,s,failure);
+            auto swapped=s;
+            std::swap(swapped.bodies[0],swapped.bodies[1]);std::swap(swapped.faces[0],swapped.faces[1]);
+            std::swap(swapped.reverse[0],swapped.reverse[1]);std::swap(swapped.u[0],swapped.u[1]);std::swap(swapped.v[0],swapped.v[1]);
+            auto secondResult=BuildSurfaceFillet(doc,swapped,failure);
+            require(firstResult.IsNull()==secondResult.IsNull(),"Normal-side availability depends on pick order");
+            if(!firstResult.IsNull()) {
+                ++available;GProp_GProps a,b;BRepGProp::SurfaceProperties(firstResult,a);BRepGProp::SurfaceProperties(secondResult,b);
+                require(std::abs(a.Mass()-b.Mass())<1.e-5,"Normal-side geometry depends on pick order");
+            }
+            require(SurfaceFilletNormalGuides(doc,s,firstResult).size()==2,"Failed fillet lost anchored normals");
+            std::cerr<<"directed mask "<<mask<<" available "<<!firstResult.IsNull()<<std::endl;
+        }
+        require(available>0,"No directed fillet can be built on Loft-3");
+        return 0;
+    }
+    if(application.arguments().contains("--surface-fillet-file")) {
+        QTemporaryDir temp;
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,temp.path());
+        CAlfaDoc doc;Dom3DProjectSerializer serializer;ProjectViewState view;QString room,error;
+        const auto arg=application.arguments().indexOf("--surface-fillet-file");
+        require(serializer.Load(application.arguments().value(arg+1),doc,room,view,error),"Cannot load fillet file");
+        SurfaceFilletSettings s;s.bodies={14,18};s.radius=10;s.end_radius=20;
+        require(SurfaceFilletHasCommonEdge(doc,s),"Fixture surfaces have no common edge");
+        require(SurfaceFilletSolutionCount(doc,s)==1,"Common-edge fillet has phantom solutions");
+        for(bool variable:{false,true}) for(bool trim:{false,true}) {
+            s.variable=variable;s.trim=trim;std::string failure;
+            const auto shape=BuildSurfaceFillet(doc,s,failure);
+            std::cerr<<"variable="<<variable<<" trim="<<trim<<" "<<failure<<std::endl;
+            require(!shape.IsNull(),"Surface fillet failed");
+            const auto normals=SurfaceFilletNormalGuides(doc,s,shape);
+            require(normals.size()==2,"Missing fillet construction normals");
+        }
+        // Non-adjacent but intersecting surfaces: fillet only, trimming disabled.
+        CAlfaDoc crossing;
+        TopoDS_Shape firstShape=BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(0,0,0),gp_Dir(0,0,1)),-50,50,-50,50).Face();
+        TopoDS_Shape secondShape=BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(0,0,0),gp_Dir(0,1,0)),-50,50,-50,50).Face();
+        auto first=std::make_unique<CSurfaceSet>(firstShape);
+        auto second=std::make_unique<CSurfaceSet>(secondShape);
+        auto* a=first.get();auto* b=second.get();crossing.AddObject(std::move(first));crossing.AddObject(std::move(second));
+        // Exercise the real screen-pick path; face selection is not object selection.
+        b->SetVisible(false);
+        require(a->EnsureRenderMesh(),"Cannot mesh pick-test plane");
+        OpenGLViewport pickViewport;pickViewport.resize(900,700);pickViewport.SetDocument(&crossing);
+        pickViewport.SetSelectionMode(SelectionMode::Face);pickViewport.FitToDocument();
+        QPoint pixel;require(pickViewport.ProjectWorldPoint({17,23,0},pixel),"Cannot project pick-test point");
+        pickViewport.SelectAt(pixel,SelectionAction::Replace);
+        CPoint3d hit;
+        require(pickViewport.GetSurfaceSelectionPoint(a->m_id,0,hit),"Screen pick did not capture the selected face point");
+        require(std::abs(hit.x-17)<1&&std::abs(hit.y-23)<1&&std::abs(hit.z)<1.e-6,"Normal anchor is not the clicked point");
+        b->SetVisible(true);crossing.ClearSelection();
+        SurfaceFilletSettings cross;cross.bodies={a->m_id,b->m_id};cross.radius=5;
+        require(!SurfaceFilletHasCommonEdge(crossing,cross),"Crossing faces falsely share a boundary");
+        require(SurfaceFilletSolutionCount(crossing,cross)==4,"Crossing planes lost a side combination");
+        std::string failure;
+        const auto crossingFillet=BuildSurfaceFillet(crossing,cross,failure);
+        std::cerr<<"Crossing fillet: "<<!crossingFillet.IsNull()<<" "<<failure<<std::endl;
+        require(!crossingFillet.IsNull(),failure.c_str());
+        std::set<std::pair<int,int>> normalSides;
+        for(int solution=0;solution<4;++solution) {
+            cross.solution=solution;
+            const auto shape=BuildSurfaceFillet(crossing,cross,failure);
+            require(!shape.IsNull(),"Intersection solution failed");
+            const auto normals=SurfaceFilletNormalGuides(crossing,cross,shape);
+            require(normals.size()==2,"Missing intersection normals");
+            require(std::abs(std::abs(normals[0].direction.z)-1)<1.e-6
+                &&std::abs(std::abs(normals[1].direction.y)-1)<1.e-6,"Arrows are not support normals");
+            normalSides.insert({normals[0].direction.z>0?1:-1,normals[1].direction.y>0?1:-1});
+        }
+        require(normalSides.size()==4,"Intersection arrows do not follow the four construction sides");
+        cross.directed_normals=true;
+        require(AnchorSurfaceFilletNormal(crossing,cross,0)&&AnchorSurfaceFilletNormal(crossing,cross,1),"Cannot anchor plane normals");
+        for(int mask=0;mask<4;++mask) {
+            cross.reverse={bool(mask&1),bool(mask&2)};
+            const auto shape=BuildSurfaceFillet(crossing,cross,failure);
+            require(!shape.IsNull(),"Directed crossing-plane combination failed");
+            auto legacy=cross;legacy.directed_normals=false;
+            const auto actual=SurfaceFilletNormalGuides(crossing,legacy,shape);
+            const auto requested=SurfaceFilletNormalGuides(crossing,cross,shape);
+            require(actual.size()==2&&requested.size()==2,"Cannot verify construction sides");
+            for(int side=0;side<2;++side) {
+                const auto& x=actual[side].direction;const auto& y=requested[side].direction;
+                require(x.x*y.x+x.y*y.y+x.z*y.z>.999999,"Reverse flag changed arrow but not fillet side");
+            }
+        }
+        cross.trim=true;require(BuildSurfaceFillet(crossing,cross,failure).IsNull(),"Trim accepted without common boundary");
+
+        MainWindow window;
+        require(serializer.Load(application.arguments().value(arg+1),window.document_,room,view,error),"Cannot load UI fixture");
+        if(application.arguments().contains("--normal-preview")) {
+            window.resize(1100,800);window.show();
+            window.viewport_->SetCamera(view.camera);window.viewport_->FitToDocument();
+            QElapsedTimer timer;timer.start();
+            while(timer.elapsed()<700)application.processEvents();
+        }
+        window.undo_redo_.Reset();
+        auto& live=window.document_;
+        const auto count=live.GetObjects().size();
+        auto select=[&](unsigned long id){
+            live.SelectObjectById(id);dynamic_cast<CSolid*>(live.FindObjectById(id))->SetSelectedFace(0);
+            window.viewport_->SelectionChanged();
+        };
+        auto open=[&](){
+            window.ActivateParametricTool("SurfaceFillet");
+            auto* dialog=window.findChild<QDialog*>("SurfaceFilletDialog");require(dialog,"No surface fillet dialog");
+            select(14);
+            require(window.viewport_->surface_fillet_normals_.size()==1,"First pick does not show a normal");
+            const auto firstAnchor=window.viewport_->surface_fillet_normals_[0].origin;
+            select(18);
+            require(window.viewport_->surface_fillet_normals_.size()==2,"Second pick does not show a normal");
+            const auto secondAnchor=window.viewport_->surface_fillet_normals_[0].origin;
+            require(std::abs(firstAnchor.x-secondAnchor.x)+std::abs(firstAnchor.y-secondAnchor.y)+std::abs(firstAnchor.z-secondAnchor.z)<1.e-9,
+                "Second pick moved the first normal");
+            auto* ok=dialog->findChild<QPushButton*>("CreateSurfaceFillet");
+            for(int mask=0;mask<4&&!ok->isEnabled();++mask) {
+                dialog->findChild<QCheckBox*>("SurfaceFilletReverse1")->setChecked(mask&1);
+                dialog->findChild<QCheckBox*>("SurfaceFilletReverse2")->setChecked(mask&2);
+            }
+            if(!ok->isEnabled())std::cerr<<dialog->findChild<QLabel*>("SurfaceFilletStatus")->text().toStdString()<<std::endl;
+            require(ok->isEnabled(),"No fillet preview");return dialog;
+        };
+        auto* dialog=open();
+        const auto beforeReverse=window.viewport_->surface_fillet_normals_;
+        auto* reverse=dialog->findChild<QCheckBox*>("SurfaceFilletReverse1");reverse->toggle();
+        const auto afterReverse=window.viewport_->surface_fillet_normals_;
+        require(afterReverse.size()==2,"Reverse lost anchored normals");
+        const auto& x=beforeReverse[0];const auto& y=afterReverse[0];
+        require(std::abs(x.origin.x-y.origin.x)+std::abs(x.origin.y-y.origin.y)+std::abs(x.origin.z-y.origin.z)<1.e-9,
+            "Reverse moved the pick point");
+        require(x.direction.x*y.direction.x+x.direction.y*y.direction.y+x.direction.z*y.direction.z<-.999999,"Reverse did not flip the normal");
+        require(std::abs(beforeReverse[1].direction.x-afterReverse[1].direction.x)<1.e-9,"Reverse 1 changed normal 2");
+        reverse->toggle();
+        require(window.viewport_->surface_fillet_normals_.size()==2,"Preview normal arrows missing");
+        auto* normalsToggle=dialog->findChild<QCheckBox*>("SurfaceFilletNormals");
+        require(normalsToggle,"Normal toggle missing");
+        normalsToggle->setChecked(false);
+        require(window.viewport_->surface_fillet_normals_.empty(),"Normal arrows cannot be hidden");
+        normalsToggle->setChecked(true);
+        require(window.viewport_->surface_fillet_normals_.size()==2,"Normal arrows cannot be restored");
+        auto* trim=dialog->findChild<QCheckBox*>("SurfaceFilletTrim");require(trim->isEnabled(),"Common-edge trim disabled");
+        trim->setChecked(true);
+        require(!live.FindObjectById(14)->IsVisible()&&!live.FindObjectById(18)->IsVisible(),"Trim preview leaves original faces visible");
+        if(application.arguments().contains("--normal-preview")) {
+            QElapsedTimer timer;timer.start();
+            while(timer.elapsed()<700)application.processEvents();
+            require(window.viewport_->surface_fillet_normals_.size()==2,"Visible preview lost normal arrows");
+            const auto path=application.arguments().value(application.arguments().indexOf("--normal-preview")+1);
+            require(window.viewport_->grabFramebuffer().save(path),"Cannot save normal-arrow preview");
+        }
+        dialog->reject();application.sendPostedEvents(nullptr,QEvent::DeferredDelete);
+        require(window.viewport_->surface_fillet_normals_.empty(),"Cancel left normal arrows behind");
+        require(live.GetObjects().size()==count&&live.FindObjectById(14)->IsVisible()&&live.FindObjectById(18)->IsVisible(),"Cancel lost source surfaces");
+        dialog=open();
+        dialog->findChild<QComboBox*>("SurfaceFilletRadiusType")->setCurrentIndex(1);
+        dialog->findChild<QDoubleSpinBox*>("SurfaceFilletEndRadius")->setValue(20);
+        dialog->findChild<QCheckBox*>("SurfaceFilletTrim")->setChecked(true);
+        dialog->accept();application.sendPostedEvents(nullptr,QEvent::DeferredDelete);
+        require(live.GetObjects().size()==count+1,"Fillet was not committed");
+        require(live.GetSelectedObject()!=nullptr,"Accepted fillet is not selected");
+        const auto id=live.GetSelectedObject()->m_id;
+        require(window.undo_redo_.Undo(),"Fillet undo failed");
+        require(live.GetObjects().size()==count&&live.FindObjectById(14)->IsVisible(),"Undo did not restore sources");
+        require(window.undo_redo_.Redo(),"Fillet redo failed");
+        require(live.FindObjectById(id)&&!live.FindObjectById(14)->IsVisible(),"Redo lost trimmed fillet");
+        const auto path=temp.filePath("fillet.dom3d");
+        require(serializer.Save(path,live,room,view,{},error),"Cannot save fillet");
+        CAlfaDoc loaded;require(serializer.Load(path,loaded,room,view,error),"Cannot reload fillet");
+        size_t index=0;while(index<loaded.GetObjects().size()&&loaded.GetObjects()[index]->m_id!=id)++index;
+        require(index<loaded.GetObjects().size(),"Saved fillet missing");
+        auto settings=ReadSurfaceFilletParameters(loaded.GetObjects()[index]->GetParametricParameters());
+        require(settings.trim&&settings.variable&&settings.end_radius==20,"Fillet settings not persisted");
+        const auto originalSettings=ReadSurfaceFilletParameters(live.FindObjectById(id)->GetParametricParameters());
+        require(settings.directed_normals&&settings.anchor_valid[0]&&settings.anchor_valid[1]
+            &&settings.reverse==originalSettings.reverse&&settings.u==originalSettings.u&&settings.v==originalSettings.v,
+            "Normal directions or pick anchors were not persisted");
+        require(RebuildSurfaceFilletObject(loaded,index,settings,failure),"Saved fillet cannot rebuild");
+        ToolRegistry registry;
+        require(registry.ReplayOperations(index,loaded),"Fillet operation history cannot replay");
+        auto active=registry.ActiveObjectFromDocument(index,*loaded.GetObjects()[index],0,&loaded);
+        require(active.tool_id=="SurfaceFillet","Fillet editor is not registered");
+        OpenGLViewport editViewport;editViewport.SetDocument(&loaded);editViewport.SetSolidDimensionEdit(active);
+        require(editViewport.surface_fillet_normals_.size()==2,"Saved fillet editor has no normal arrows");
+        editViewport.ClearSolidDimensionEdit();
+        require(editViewport.surface_fillet_normals_.empty(),"Editor close left normal arrows behind");
+        for(auto& p:active.parameters)if(p.id=="radius")p.value=12;
+        registry.Rebuild(active,loaded);
+        require(ReadSurfaceFilletParameters(loaded.GetObjects()[index]->GetParametricParameters()).radius==12,
+                "Fillet radius edit was not applied");
+        const auto old=dynamic_cast<CSolid*>(loaded.GetObjects()[index].get())->m_Shape;
+        settings.radius=0;
+        require(!RebuildSurfaceFilletObject(loaded,index,settings,failure),"Invalid fillet radius accepted");
+        require(dynamic_cast<CSolid*>(loaded.GetObjects()[index].get())->m_Shape.IsSame(old),"Failed edit destroyed previous fillet");
+        if(application.arguments().contains("--output")) {
+            const auto target=application.arguments().value(application.arguments().indexOf("--output")+1);
+            require(serializer.Save(target,loaded,room,view,{},error),"Cannot save fillet example");
+        }
+        std::cout<<"Surface fillet geometry, preview, cancel, undo, save and rebuild passed\n";return 0;
+    }
+    if (application.arguments().contains("--swept-curve-input")) {
+        QVariantMap preferences;
+        if (application.arguments().contains("--user-preferences")) {
+            QSettings source(QSettings::NativeFormat,QSettings::UserScope,"Dom3D","Dom3D_Pro");
+            for (const auto& key : source.allKeys()) preferences.insert(key,source.value(key));
+        }
+        QTemporaryDir settingsDir;
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,settingsDir.path());
+        QSettings settings(QSettings::IniFormat,QSettings::UserScope,"Dom3D","Dom3D_Pro");
+        for (auto it=preferences.cbegin();it!=preferences.cend();++it) settings.setValue(it.key(),it.value());
+        settings.sync();
+        MainWindow window;
+        const int arg = application.arguments().indexOf("--swept-curve-input");
+        window.OpenProjectFromPath(application.arguments().value(arg+1));
+        auto& viewport = *window.viewport_;
+        viewport.resize(900,700);
+        // Exercise the edge extraction command before starting a fresh curve.
+        bool extracted = false;
+        for (const auto& object : window.document_.GetObjects()) {
+            auto* solid = dynamic_cast<CSolid*>(object.get());
+            if (!solid || solid->m_Shape.IsNull()) continue;
+            solid->SetVisible(true);
+            require(solid->EnsureRenderMesh(),"Cannot prepare extraction surface");
+            window.document_.SelectObjectById(solid->m_id);
+            solid->SetSelectedEdge(0,0);
+            const auto count = window.document_.GetObjects().size();
+            window.ExtractSurfaceEdge();
+            extracted = window.document_.GetObjects().size() > count;
+            break;
+        }
+        require(extracted,"Cannot extract test edge");
+        for (bool workPlane : {false,true}) for (bool snap : {false,true}) for (auto kind : {
+                MainWindow::SpatialCurveKind::Polyline, MainWindow::SpatialCurveKind::BSpline,
+                MainWindow::SpatialCurveKind::Bezier, MainWindow::SpatialCurveKind::Nurbs}) {
+            viewport.SetSnapTargetEnabled(OpenGLViewport::SnapTarget::WorkPlane,workPlane);
+            viewport.snapping_enabled_ = snap;
+            window.ActivateParametricTool(kind == MainWindow::SpatialCurveKind::Polyline ? "PolylineCurve"
+                : kind == MainWindow::SpatialCurveKind::BSpline ? "BSplineCurve"
+                : kind == MainWindow::SpatialCurveKind::Bezier ? "BezierCurve3D" : "NurbsCurve3D");
+            for (const QPoint point : {QPoint(200,200),QPoint(300,250),QPoint(400,200)}) {
+                QMouseEvent press(QEvent::MouseButtonPress,QPointF(point),QPointF(point),
+                                  Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);
+                QApplication::sendEvent(&viewport,&press);
+                QMouseEvent release(QEvent::MouseButtonRelease,QPointF(point),QPointF(point),
+                                    Qt::LeftButton,Qt::NoButton,Qt::NoModifier);
+                QApplication::sendEvent(&viewport,&release);
+            }
+            require(window.spatial_curve_point_count_ == 3,"Saved Swept project blocks spline input");
+            window.CancelSpatialCurve();
+        }
+        viewport.SetSnapTargetEnabled(OpenGLViewport::SnapTarget::WorkPlane,true);
+        viewport.SetTool(ToolMode::DrawSpline);
+        viewport.BeginDrawSplineStroke(QPoint(200,200));
+        require(!viewport.draw_spline_raw_points_.empty(),"Work plane blocks freehand spline");
+        viewport.AppendDrawSplineStroke(QPoint(300,250));
+        require(viewport.draw_spline_raw_points_.size() > 1,"Work plane blocks next freehand sample");
+        viewport.CancelDrawSplineStroke();
+        // Explicit plane picking must still reject an edge-on plane.
+        viewport.SetTool(ToolMode::Select);
+        viewport.BeginPick3DPointOnPlane({}, {0,0,1}, "Plane test");
+        CPoint3d rejected;
+        require(!viewport.ScreenToWorldPlane(QPoint(200,200),{}, {0,0,1},rejected),
+                "Explicit plane constraint was lost");
+        std::cout << "Saved Swept spline input passed\n";
+        return 0;
+    }
+    if (application.arguments().contains("--surface-bridge-file")) {
+        CAlfaDoc doc;Dom3DProjectSerializer serializer;ProjectViewState view;QString room,errorText;
+        const int arg=application.arguments().indexOf("--surface-bridge-file");
+        require(serializer.Load(application.arguments().value(arg+1),doc,room,view,errorText),"Cannot load bridge fixture");
+        std::vector<std::pair<SurfaceBridgeEdge,gp_Pnt>> edges;
+        for(const auto& object:doc.GetObjects()) {
+            auto* body=dynamic_cast<CSolid*>(object.get());if(!body)continue;
+            // Preserve the exact just-loaded BRep for this regression.
+            require(body->EnsureRenderMesh(),"Cannot initialize support edges");
+            for(int f=0;f<body->GetNumSurfaces();++f) {
+                auto* face=body->GetSurfaceFace(f);
+                for(int e=0;e<face->GetEdgeCount();++e) {
+                    BRepAdaptor_Curve c(*face->GetTopoEdge(e));
+                    auto point=c.Value((c.FirstParameter()+c.LastParameter())*.5);
+                    edges.push_back({{body->m_id,f,e,1},point});
+                }
+            }
+        }
+        SurfaceBridgeEdges refs;double best=1.e100;
+        for(const auto& a:edges)for(const auto& b:edges) if(a.first.body<b.first.body) {
+            const double distance=a.second.SquareDistance(b.second);
+            if(distance<best){best=distance;refs={a.first,b.first};}
+        }
+        require(best<1.e99,"Need two support surfaces");
+        for(const auto& object:doc.GetObjects())
+            if(object->GetParametricToolId()=="SurfaceBridge") {
+                refs=ReadSurfaceBridgeParameters(object->GetParametricParameters());break;
+            }
+        std::cout<<"Pair "<<refs[0].body<<":"<<refs[0].face<<":"<<refs[0].edge<<" / "
+            <<refs[1].body<<":"<<refs[1].face<<":"<<refs[1].edge<<std::endl;
+        for(int firstMode=0;firstMode<=2;++firstMode) for(int secondMode=0;secondMode<=2;++secondMode)
+        for(bool reversed:{false,true}) {
+            auto pair=refs;pair[0].continuity=firstMode;pair[1].continuity=secondMode;
+            if(reversed)std::swap(pair[0],pair[1]);
+            std::string error;
+            auto shape=BuildSurfaceBridge(doc,pair,error);
+            if(shape.IsNull())std::cerr<<"G"<<firstMode<<"/G"<<secondMode<<": "<<error<<std::endl;
+            require(!shape.IsNull(),"Bridge failed on curved support fixture");
+            require(BRepCheck_Analyzer(shape).IsValid(),"Invalid bridge BRep");
+            auto surface=Handle(Geom_BSplineSurface)::DownCast(BRep_Tool::Surface(TopoDS::Face(shape)));
+            require(!surface.IsNull(),"Bridge must be a natural B-spline patch");
+            double u0,u1,v0,v1;surface->Bounds(u0,u1,v0,v1);
+            int edgeCount=0;
+            for(TopExp_Explorer ex(shape,TopAbs_EDGE);ex.More();ex.Next())++edgeCount;
+            require(edgeCount==4,"Bridge must have four natural sides");
+            for(int side=0;side<2;++side) {
+                auto* solid=dynamic_cast<CSolid*>(doc.FindObjectById(pair[side].body));
+                auto* face=solid->GetSurfaceFace(pair[side].face);
+                const auto support=BRep_Tool::Surface(TopoDS::Face(face->m_Face));
+                BRepAdaptor_Curve edge(*face->GetTopoEdge(pair[side].edge));
+                for(int i=0;i<=30;++i) {
+                    const auto point=edge.Value(edge.FirstParameter()+(edge.LastParameter()-edge.FirstParameter())*i/30.);
+                    GeomAPI_ProjectPointOnSurf bridgeProjection(point,surface),supportProjection(point,support);
+                    require(bridgeProjection.NbPoints()>0 && bridgeProjection.LowerDistance()<1.e-4,"Bridge seam deviates from input edge");
+                    double u,v,x,y;bridgeProjection.LowerDistanceParameters(u,v);supportProjection.LowerDistanceParameters(x,y);
+                    require(std::abs(v-(side?v1:v0))<1.e-5,"Input edge is not a natural V boundary");
+                    GeomLProp_SLProps a(surface,u,v,2,1.e-9),b(support,x,y,2,1.e-9);
+                    if(pair[side].continuity>=1)
+                        require(std::abs(a.Normal().Dot(b.Normal()))>std::cos(.005),"G1 seam normal mismatch");
+                    if(pair[side].continuity==2) {
+                        const double sign=a.Normal().Dot(b.Normal())<0?-1.:1.;
+                        const double mean=a.MeanCurvature(),target=sign*b.MeanCurvature();
+                        require(std::abs(mean-target)<2.e-5+.03*std::abs(target),"G2 mean curvature mismatch");
+                        require(std::abs(a.GaussianCurvature()-b.GaussianCurvature())<1.e-5+.03*std::abs(b.GaussianCurvature()),"G2 Gaussian curvature mismatch");
+                    }
+                }
+            }
+        }
+        QTemporaryDir settings;QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,settings.path());
+        for(bool reverse:{false,true}) {
+            MainWindow window;auto& live=window.document_;
+            require(serializer.Load(application.arguments().value(arg+1),live,room,view,errorText),"Cannot load UI fixture");
+            for(const auto& o:live.GetObjects())if(auto* solid=dynamic_cast<CSolid*>(o.get()))solid->EnsureRenderMesh();
+            window.ActivateParametricTool("SurfaceBridge");
+            auto* dialog=window.findChild<QDialog*>("SurfaceBridgeDialog");
+            require(dialog,"Bridge dialog missing");
+            for(int i: reverse ? std::vector<int>{1,0} : std::vector<int>{0,1}) {
+                const auto& ref=refs[i];live.ClearSelection();live.SelectObjectById(ref.body);
+                dynamic_cast<CSolid*>(live.FindObjectById(ref.body))->SetSelectedEdge(ref.face,ref.edge);
+                window.viewport_->SelectionChanged();
+            }
+            auto* create=dialog->findChild<QPushButton*>("CreateSurfaceBridge");
+            auto* status=dialog->findChild<QLabel*>("SurfaceBridgeStatus");
+            require(create && create->isEnabled(),"Create unavailable for valid G1 bridge");
+            require(status && !status->text().trimmed().isEmpty(),"Missing bridge status");
+            const auto capture=qEnvironmentVariable("DOM3D_SURFACE_BRIDGE_CAPTURE");
+            if(!capture.isEmpty() && !reverse) {
+                window.show();window.viewport_->SetCamera(view.camera);window.viewport_->FitToDocument();
+                QEventLoop loop;QTimer::singleShot(100,&loop,&QEventLoop::quit);loop.exec();
+                window.viewport_->grab().save(capture);dialog->grab().save(capture+".dialog.png");
+            }
+            auto* first=dialog->findChild<QComboBox*>("SurfaceBridgeContinuity1");
+            auto* second=dialog->findChild<QComboBox*>("SurfaceBridgeContinuity2");
+            first->setCurrentIndex(2);second->setCurrentIndex(2);
+            require(create->isEnabled(),"G2 preview failed on curved support fixture");
+            first->setCurrentIndex(1);second->setCurrentIndex(1);
+            require(create->isEnabled(),"Cannot recover G1 preview after G2 failure");
+            dialog->reject();QCoreApplication::sendPostedEvents(nullptr,QEvent::DeferredDelete);
+        }
+        std::cout<<"Four-spline bridge: G1 preview, both selection orders, errors and recovery passed\n";
+        return 0;
+    }
+    if (application.arguments().contains("--surface-patch-file")) {
+        MainWindow window;auto& doc=window.document_;Dom3DProjectSerializer serializer;
+        ProjectViewState view;QString room,errorText;
+        int argument=application.arguments().indexOf("--surface-patch-file");
+        require(serializer.Load(application.arguments().value(argument+1),doc,room,view,errorText),"Cannot load user's patch fixture");
+        CSolid* patch=nullptr;size_t index=0;
+        for(size_t i=0;i<doc.GetObjects().size();++i) {
+            auto* solid=dynamic_cast<CSolid*>(doc.GetObjects()[i].get());if(!solid)continue;
+            require(solid->EnsureRenderMesh(),"Cannot mesh fixture support");
+            if(solid->GetParametricToolId()=="SurfacePatch"){patch=solid;index=i;}
+        }
+        require(patch && patch->IsParametric() && patch->GetNumOperations()>0,"Saved Patch lost parametric history");
+        auto refs=ReadSurfaceEdgePatchParameters(patch->GetParametricParameters());
+        for(const auto& ref:refs)require(ref.continuity==0,"User's successful patch should still be G0");
+        auto active=window.tool_registry_.ActiveObjectFromDocument(index,*patch,0,&doc);
+        const auto original=patch->m_Shape;
+        for(auto& parameter:active.parameters)if(parameter.id.find(".continuity")!=std::string::npos)parameter.value=1;
+        std::string error;
+        require(!window.tool_registry_.TryRebuildSurfacePatch(active,doc,error),"Incompatible G1 patch unexpectedly succeeded");
+        require(error.find("Edges ")!=std::string::npos && error.find("degrees")!=std::string::npos,"Missing numbered corner diagnosis");
+        std::cout<<error<<std::endl;
+        require(patch->m_Shape.IsSame(original),"Failed G1 replaced original patch");
+        for(const auto& ref:ReadSurfaceEdgePatchParameters(patch->GetParametricParameters()))require(ref.continuity==0,"Failed G1 changed saved continuity");
+        doc.SelectObjectById(patch->m_id);window.active_parametric_object_=active;
+        window.property_panel_->SetActiveObject(active);window.property_panel_->ParametersChanged();application.processEvents();
+        for(const auto& parameter:window.property_panel_->ActiveObject().parameters)
+            if(parameter.id.find(".continuity")!=std::string::npos)require(parameter.value==0,"UI still shows unapplied G1");
+        require(window.statusBar()->currentMessage().contains("NOT rebuilt"),"Missing failure status after property edit");
+        window.ActivateParametricTool("SurfacePatch");auto* dialog=window.findChild<QDialog*>("SurfacePatchDialog");
+        for(const auto& ref:refs){doc.ClearSelection();doc.SelectObjectById(ref.body);
+            dynamic_cast<CSolid*>(doc.FindObjectById(ref.body))->SetSelectedEdge(ref.face,ref.edge);window.viewport_->SelectionChanged();}
+        require(!dialog->findChild<QPushButton*>("CreateSurfacePatch")->isEnabled(),"Create enabled for failed preview");
+        require(dialog->findChild<QLabel*>("SurfacePatchStatus")->text().contains("NOT BUILT"),"Ambiguous failed-preview status");
+        dialog->reject();QCoreApplication::sendPostedEvents(nullptr,QEvent::DeferredDelete);
+        std::cout<<"User Patch: saved G0 history intact, G1 incompatibility diagnosed, fields restored, failed preview cannot be accepted"<<std::endl;
+        return 0;
+    }
+    if (application.arguments().contains("--surface-edge-patch")) {
+        MainWindow window;auto& doc=window.document_;doc.GetObjects().clear();
+        SurfacePatchEdges refs;
+        const double ranges[4][4]={{0,10,-8,0},{10,18,0,10},{0,10,10,18},{-8,0,0,10}};
+        const double mid[4][2]={{5,0},{10,5},{5,10},{0,5}};
+        const auto height=[](double x,double y){return .015*x*x+.01*x*y+.02*y*y;};
+        for(int side=0;side<4;++side) {
+            const auto* r=ranges[side];double dx=r[1]-r[0],dy=r[3]-r[2];
+            TColgp_Array2OfPnt poles(1,3,1,3);
+            for(int i=0;i<3;++i)for(int j=0;j<3;++j) {
+                double x=r[0]+dx*i/2.,y=r[2]+dy*j/2.;
+                poles(i+1,j+1)=gp_Pnt(x,y,height(x,y)-(i==1?.015*dx*dx/4:0)-(j==1?.02*dy*dy/4:0));
+            }
+            Handle(Geom_BezierSurface) support=new Geom_BezierSurface(poles);
+            TopoDS_Shape shape=BRepBuilderAPI_MakeFace(support,1.e-7).Shape();
+            auto object=std::make_unique<CSurfaceSet>(shape);object->SetName("Patch support");
+            require(object->ReBuldMesh(),"Cannot mesh patch support");auto* body=object.get();doc.AddObject(std::move(object));
+            refs[side].body=body->m_id;refs[side].face=0;
+            auto* face=body->GetSurfaceFace(0);gp_Pnt target(mid[side][0],mid[side][1],height(mid[side][0],mid[side][1]));
+            for(int e=0;e<face->GetEdgeCount();++e){BRepAdaptor_Curve curve(*face->GetTopoEdge(e));
+                if(curve.Value((curve.FirstParameter()+curve.LastParameter())*.5).Distance(target)<1.e-6)refs[side].edge=e;}
+            require(refs[side].edge>=0,"Missing patch boundary");
+        }
+        std::string error;
+        for(int mode=0;mode<=2;++mode) {
+            auto pair=refs;for(auto& ref:pair)ref.continuity=mode;
+            std::swap(pair[1],pair[2]); // Deliberately select a non-cyclic order.
+            auto shape=BuildSurfaceEdgePatch(doc,pair,error);
+            if(shape.IsNull())std::cerr<<"Patch G"<<mode<<": "<<error<<std::endl;
+            require(!shape.IsNull() && BRepCheck_Analyzer(shape).IsValid(),"Four-sided patch failed");
+            auto surface=Handle(Geom_BSplineSurface)::DownCast(BRep_Tool::Surface(TopoDS::Face(shape)));
+            require(!surface.IsNull(),"Patch must be natural B-spline");
+            for(const auto& ref:pair) {
+                auto* face=dynamic_cast<CSolid*>(doc.FindObjectById(ref.body))->GetSurfaceFace(0);
+                auto support=BRep_Tool::Surface(TopoDS::Face(face->m_Face));BRepAdaptor_Curve edge(*face->GetTopoEdge(ref.edge));
+                for(int i=0;i<=17;++i) {
+                    auto point=edge.Value(edge.FirstParameter()+(edge.LastParameter()-edge.FirstParameter())*i/17.);
+                    GeomAPI_ProjectPointOnSurf bp(point,surface),sp(point,support);
+                    require(bp.NbPoints()>0 && bp.LowerDistance()<1.e-4,"Patch boundary gap");
+                    double u,v,x,y;bp.LowerDistanceParameters(u,v);sp.LowerDistanceParameters(x,y);
+                    require(std::min({u,1-u,v,1-v})<1.e-5,"Patch has trimmed boundaries");
+                    GeomLProp_SLProps a(surface,u,v,2,1.e-9),b(support,x,y,2,1.e-9);
+                    if(mode)require(std::abs(a.Normal().Dot(b.Normal()))>std::cos(.005),"Patch G1 mismatch");
+                    if(mode==2){double sign=a.Normal().Dot(b.Normal())<0?-1.:1.;
+                        require(std::abs(a.MeanCurvature()-sign*b.MeanCurvature())<2.e-5+.03*std::abs(b.MeanCurvature()),"Patch G2 mismatch");}
+                }
+            }
+            std::cout<<"Patch G"<<mode<<" passed"<<std::endl;
+        }
+        auto invalid=refs;invalid[3]=invalid[0];require(BuildSurfaceEdgePatch(doc,invalid,error).IsNull() && !error.empty(),"Patch accepted duplicate edge");
+        invalid=refs;invalid[0].edge=(invalid[0].edge+1)%4;
+        require(BuildSurfaceEdgePatch(doc,invalid,error).IsNull() && !error.empty(),"Patch accepted open contour");
+        // Same boundary, but tilt one support away from its neighbours at both corners.
+        auto* tilted=dynamic_cast<CSolid*>(doc.FindObjectById(refs[1].body));const auto original=tilted->m_Shape;
+        TColgp_Array2OfPnt tiltedPoles(1,3,1,3);
+        for(int i=0;i<3;++i)for(int j=0;j<3;++j){double x=10+4*i,y=5*j;
+            tiltedPoles(i+1,j+1)=gp_Pnt(x,y,height(x,y)-(i==1?.015*64/4:0)-(j==1?.02*100/4:0)+.5*(x-10));}
+        Handle(Geom_BezierSurface) tiltedSurface=new Geom_BezierSurface(tiltedPoles);
+        tilted->m_Shape=BRepBuilderAPI_MakeFace(tiltedSurface,1.e-7).Shape();require(tilted->ReBuldMesh(),"Cannot mesh tilted support");
+        require(BuildSurfaceEdgePatch(doc,refs,error).IsNull() && error.find("corner")!=std::string::npos,"Patch accepted incompatible corner normals");
+        tilted->m_Shape=original;require(tilted->ReBuldMesh(),"Cannot restore support");
+        doc.ClearSelection();window.undo_redo_.Reset();
+        const auto pick=[&]{for(int index:{2,0,3,1}) {auto& ref=refs[index];doc.ClearSelection();doc.SelectObjectById(ref.body);
+            dynamic_cast<CSolid*>(doc.FindObjectById(ref.body))->SetSelectedEdge(ref.face,ref.edge);window.viewport_->SelectionChanged();}};
+        window.ActivateParametricTool("SurfacePatch");auto* dialog=window.findChild<QDialog*>("SurfacePatchDialog");
+        require(dialog,"Patch dialog missing");pick();
+        auto* create=dialog->findChild<QPushButton*>("CreateSurfacePatch");
+        require(create && create->isEnabled() && doc.GetObjects().size()==5,"Patch preview missing");
+        for(int i=1;i<=4;++i)dialog->findChild<QComboBox*>(QString("SurfacePatchContinuity%1").arg(i))->setCurrentIndex(2);
+        require(create->isEnabled(),"Patch G2 preview missing");create->click();QCoreApplication::sendPostedEvents(nullptr,QEvent::DeferredDelete);
+        require(window.undo_redo_.Undo() && doc.GetObjects().size()==4,"Cannot undo patch");
+        require(window.undo_redo_.Redo() && doc.GetObjects().size()==5,"Cannot redo patch");
+        for(const auto& ref:refs)require(window.tool_registry_.ReplayProfileDependents(ref.body,doc),"Patch dependency missing");
+        QTemporaryDir temporary;Dom3DProjectSerializer serializer;ProjectViewState view;QString room,loadError;
+        const auto path=temporary.filePath("patch.dom3d");
+        require(serializer.Save(path,doc,"Surfaces",view,{},loadError),"Cannot save patch");
+        CAlfaDoc loaded;require(serializer.Load(path,loaded,room,view,loadError),"Cannot load patch");
+        require(loaded.GetObjects().back()->GetParametricToolId()=="SurfacePatch","Patch history missing after load");
+        for(const auto& ref:refs)require(window.tool_registry_.ReplayProfileDependents(ref.body,loaded),"Patch lost dependencies after load");
+        window.ActivateParametricTool("SurfacePatch");pick();dialog=window.findChild<QDialog*>("SurfacePatchDialog");
+        require(doc.GetObjects().size()==6,"Second patch preview missing");dialog->reject();
+        QCoreApplication::sendPostedEvents(nullptr,QEvent::DeferredDelete);require(doc.GetObjects().size()==5,"Cancel retained patch preview");
+        const auto capture=qEnvironmentVariable("DOM3D_PATCH_CAPTURE");
+        if(!capture.isEmpty()) {
+            window.show();doc.ClearSelection();window.viewport_->FitToDocument();application.processEvents();
+            view.camera=window.viewport_->GetCamera();
+            require(serializer.Save(capture+".dom3d",doc,"Surfaces",view,{},loadError),"Cannot save patch demo");
+            require(window.viewport_->CaptureSceneImage({1000,700}).save(capture+".png"),"Cannot capture patch demo");
+        }
+        std::cout<<"Surface Patch geometry, order, invalid inputs, UI, undo, persistence and dependencies passed"<<std::endl;
+        return 0;
+    }
+    if (application.arguments().contains("--surface-bridge-complex")) {
+        const char* names[]={"DoubleCurvature","TwistedTaper","Rational","ReversedParameters"};
+        double maxGap=0,maxAngle=0,maxMeanError=0;
+        for(int scenario=0;scenario<4;++scenario) {
+            CAlfaDoc doc;SurfaceBridgeEdges refs;
+            for(int side=0;side<2;++side) {
+                TColgp_Array2OfPnt poles(1,4,1,4);TColStd_Array2OfReal weights(1,4,1,4);
+                for(int i=0;i<4;++i)for(int j=0;j<4;++j) {
+                    const double u=i/3.,v=j/3.;
+                    const double x=(side?30.:0.)+10*v;
+                    const double width=side && scenario==1?24.:36.;
+                    const double y=(u-.5)*width+(side?3.:0.);
+                    const double bend=(i==1||i==2?8.:-3.)*(side?-.7:1.);
+                    const double cross=(j==1||j==2?2.:-1.)*(side?1.:-1.);
+                    const double twist=(scenario==1?10.:3.)*(u-.5)*(v-.5)*(side?-1.:1.);
+                    const double z=(side?5.:0.)+bend+cross+twist;
+                    const int row=scenario==3 && side?4-i:i+1;
+                    poles(row,j+1)=gp_Pnt(x,y,z);
+                    weights(row,j+1)=scenario==2?1.+.25*std::sin((i+1.)*(j+1.)):1.;
+                }
+                Handle(Geom_BezierSurface) geom=new Geom_BezierSurface(poles,weights);
+                TopoDS_Shape shape=BRepBuilderAPI_MakeFace(geom,1.e-7).Shape();
+                auto body=std::make_unique<CSurfaceSet>(shape);body->SetName(side?"Support B":"Support A");
+                require(body->ReBuldMesh(),"Cannot mesh complex support");
+                auto* ptr=body.get();doc.AddObject(std::move(body));refs[side].body=ptr->m_id;refs[side].face=0;
+                const auto target=geom->Value(.5,side?0.:1.);
+                auto* face=ptr->GetSurfaceFace(0);
+                for(int e=0;e<face->GetEdgeCount();++e) {
+                    BRepAdaptor_Curve curve(*face->GetTopoEdge(e));
+                    if(curve.Value((curve.FirstParameter()+curve.LastParameter())*.5).Distance(target)<1.e-6)refs[side].edge=e;
+                }
+                require(refs[side].edge>=0,"Cannot locate complex support boundary");
+            }
+            TopoDS_Shape saved;
+            for(int first=0;first<=2;++first)for(int second=0;second<=2;++second)for(bool reversed:{false,true}) {
+                auto pair=refs;pair[0].continuity=first;pair[1].continuity=second;
+                if(reversed)std::swap(pair[0],pair[1]);
+                std::string error;auto shape=BuildSurfaceBridge(doc,pair,error);
+                if(shape.IsNull())std::cerr<<names[scenario]<<" G"<<first<<"/G"<<second<<" reverse="<<reversed<<": "<<error<<std::endl;
+                require(!shape.IsNull() && BRepCheck_Analyzer(shape).IsValid(),"Complex bridge failed");
+                auto surface=Handle(Geom_BSplineSurface)::DownCast(BRep_Tool::Surface(TopoDS::Face(shape)));
+                require(!surface.IsNull(),"Complex bridge is not B-spline");
+                for(int side=0;side<2;++side) {
+                    auto* body=dynamic_cast<CSolid*>(doc.FindObjectById(pair[side].body));auto* face=body->GetSurfaceFace(0);
+                    auto support=BRep_Tool::Surface(TopoDS::Face(face->m_Face));
+                    BRepAdaptor_Curve edge(*face->GetTopoEdge(pair[side].edge));
+                    for(int i=0;i<=40;++i) {
+                        auto point=edge.Value(edge.FirstParameter()+(edge.LastParameter()-edge.FirstParameter())*i/40.);
+                        GeomAPI_ProjectPointOnSurf bp(point,surface),sp(point,support);
+                        require(bp.NbPoints()>0 && sp.NbPoints()>0,"Cannot project seam sample");
+                        maxGap=std::max(maxGap,bp.LowerDistance());
+                        require(bp.LowerDistance()<1.e-4,"Complex bridge boundary gap");
+                        double u,v,x,y;bp.LowerDistanceParameters(u,v);sp.LowerDistanceParameters(x,y);
+                        require(std::abs(v-side)<1.e-5,"Complex bridge boundary is trimmed");
+                        GeomLProp_SLProps a(surface,u,v,2,1.e-9),b(support,x,y,2,1.e-9);
+                        if(pair[side].continuity) {
+                            const double dot=a.Normal().Dot(b.Normal());
+                            maxAngle=std::max(maxAngle,std::acos(std::min(1.,std::abs(dot))));
+                            require(std::abs(dot)>std::cos(.005),"Complex bridge G1 mismatch");
+                            if(pair[side].continuity==2) {
+                                const double target=(dot<0?-1.:1.)*b.MeanCurvature();
+                                const double diff=std::abs(a.MeanCurvature()-target);maxMeanError=std::max(maxMeanError,diff);
+                                require(diff<2.e-5+.03*std::abs(target),"Complex bridge G2 mean curvature mismatch");
+                                require(std::abs(a.GaussianCurvature()-b.GaussianCurvature())<1.e-5+.03*std::abs(b.GaussianCurvature()),"Complex bridge G2 Gaussian curvature mismatch");
+                            }
+                        }
+                    }
+                }
+                if(first==2 && second==2 && !reversed)saved=shape;
+            }
+            const auto output=qEnvironmentVariable("DOM3D_BRIDGE_COMPLEX_OUTPUT");
+            if(!output.isEmpty()) {
+                QDir().mkpath(output);auto bridge=std::make_unique<CSurfaceSet>(saved);
+                refs[0].continuity=refs[1].continuity=2;
+                bridge->SetName("Bridge G2");bridge->SetParametricDefinition("SurfaceBridge",SurfaceBridgeParameters(refs));
+                require(bridge->ReBuldMesh(),"Cannot mesh complex G2 bridge");doc.AddObject(std::move(bridge));
+                Dom3DProjectSerializer serializer;ProjectViewState view;QString error;
+                require(serializer.Save(QDir(output).filePath(QString::fromLatin1(names[scenario])+".dom3d"),doc,"Surfaces",view,{},error),"Cannot save complex bridge example");
+            }
+            std::cout<<names[scenario]<<": all 18 combinations passed"<<std::endl;
+        }
+        std::cout<<"Max seam gap="<<maxGap<<", normal angle="<<maxAngle<<" rad, mean curvature error="<<maxMeanError<<std::endl;
+        return 0;
+    }
+    if (application.arguments().contains("--surface-bridge-only")) {
+        QTemporaryDir settings;
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings.path());
+        MainWindow window;
+        auto& doc = window.document_;
+        doc.GetObjects().clear();
+        const auto add = [&](double x, double z, double edgeX) {
+            TopoDS_Shape shape = BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(x,0,z),gp_Dir(0,0,1)),0,10,0,10).Shape();
+            auto surface = std::make_unique<CSurfaceSet>(shape);
+            require(surface->ReBuldMesh(), "Cannot mesh bridge support");
+            auto* body = surface.get(); doc.AddObject(std::move(surface));
+            SurfaceBridgeEdge ref; ref.body=body->m_id; ref.face=0;
+            auto* face=body->GetSurfaceFace(0);
+            for(int i=0;i<face->GetEdgeCount();++i) {
+                BRepAdaptor_Curve curve(*face->GetTopoEdge(i));
+                auto p=curve.Value((curve.FirstParameter()+curve.LastParameter())*.5);
+                if(std::abs(p.X()-edgeX)<1.e-6) ref.edge=i;
+            }
+            require(ref.edge>=0,"Cannot locate bridge edge"); return ref;
+        };
+        SurfaceBridgeEdges refs{add(0,0,10),add(20,5,20)};
+        std::string error;
+        for(int a=0;a<=2;++a) for(int b=0;b<=2;++b) {
+            refs[0].continuity=a; refs[1].continuity=b;
+            auto shape=BuildSurfaceBridge(doc,refs,error);
+            if(shape.IsNull()) std::cerr<<a<<"/"<<b<<": "<<error<<std::endl;
+            require(!shape.IsNull() && BRepCheck_Analyzer(shape).IsValid(),"Bridge continuity combination failed");
+            TopExp_Explorer resultFaces(shape,TopAbs_FACE);
+            auto resultSurface=BRep_Tool::Surface(TopoDS::Face(resultFaces.Current()));
+            for(int i=0;i<2;++i) for(double y:{2.5,5.,7.5}) {
+                gp_Pnt point(i==0?10.:20.,y,i==0?0.:5.);
+                GeomAPI_ProjectPointOnSurf projection(point,resultSurface);
+                require(projection.NbPoints()>0 && projection.LowerDistance()<1.e-3,"Bridge does not follow source edge");
+                double u,v;projection.LowerDistanceParameters(u,v);
+                GeomLProp_SLProps props(resultSurface,u,v,2,1.e-7);
+                if(refs[i].continuity>=1) require(props.IsNormalDefined() && std::abs(props.Normal().Z())>.999,
+                    "Bridge failed independent tangent continuity check");
+                if(refs[i].continuity==2) require(props.IsCurvatureDefined() && std::abs(props.MaxCurvature())<.04
+                    && std::abs(props.MinCurvature())<.04,"Bridge failed independent curvature continuity check");
+            }
+        }
+        auto invalid=refs;invalid[1]=invalid[0];
+        require(BuildSurfaceBridge(doc,invalid,error).IsNull(),"Same edge accepted twice");
+        doc.ClearSelection(); window.undo_redo_.Reset();
+        window.ActivateParametricTool("SurfaceBridge");
+        auto* dialog=window.findChild<QDialog*>("SurfaceBridgeDialog");
+        require(dialog,"Surface Bridge dialog missing");
+        for(const auto& ref:refs) {
+            doc.ClearSelection();doc.SelectObjectById(ref.body);
+            dynamic_cast<CSolid*>(doc.FindObjectById(ref.body))->SetSelectedEdge(ref.face,ref.edge);
+            window.viewport_->SelectionChanged();
+        }
+        auto* create=dialog->findChild<QPushButton*>("CreateSurfaceBridge");
+        require(create && create->isEnabled() && doc.GetObjects().size()==3,"Bridge preview missing");
+        auto* marker=window.viewport_->findChild<QPushButton*>("SurfaceBridgeMarker1");
+        require(marker,"Edge continuity marker missing"); marker->click();
+        require(dialog->findChild<QComboBox*>("SurfaceBridgeContinuity1")->currentIndex()==2,"Marker did not select G2");
+        const auto controlsCapture=qEnvironmentVariable("DOM3D_SURFACE_BRIDGE_CAPTURE");
+        if(!controlsCapture.isEmpty()) {
+            window.show();window.viewport_->FitToDocument();
+            QEventLoop loop;QTimer::singleShot(100,&loop,&QEventLoop::quit);loop.exec();
+            require(marker->isVisible(),"Continuity marker is not visible in viewport");
+            require(window.viewport_->grab().save(controlsCapture+".controls.png"),"Cannot capture continuity markers");
+            require(dialog->grab().save(controlsCapture+".dialog.png"),"Cannot capture bridge dialog");
+        }
+        create->click(); QCoreApplication::sendPostedEvents(nullptr,QEvent::DeferredDelete);
+        require(doc.GetObjects().size()==3,"Accept lost bridge");
+        require(window.undo_redo_.Undo() && doc.GetObjects().size()==2,"Cannot undo Surface Bridge");
+        require(window.undo_redo_.Redo() && doc.GetObjects().size()==3,"Cannot redo Surface Bridge");
+        auto* bridge=dynamic_cast<CSolid*>(doc.GetObjects().back().get());
+        require(bridge && bridge->GetParametricToolId()=="SurfaceBridge","Bridge lost parameters");
+        const auto before=bridge->m_Shape;
+        require(window.tool_registry_.ReplayProfileDependents(refs[0].body,doc),"Bridge dependency missing");
+        require(!before.IsSame(bridge->m_Shape),"Bridge did not rebuild");
+        Dom3DProjectSerializer serializer; ProjectViewState view;QString room,errorText;
+        const auto path=settings.filePath("bridge.dom3d");
+        require(serializer.Save(path,doc,"Surfaces",view,{},errorText),"Cannot save bridge");
+        CAlfaDoc loaded;require(serializer.Load(path,loaded,room,view,errorText),"Cannot reload bridge");
+        require(window.tool_registry_.ReplayProfileDependents(refs[0].body,loaded),"Reloaded bridge lost dependencies");
+        window.ActivateParametricTool("SurfaceBridge");
+        dialog=window.findChild<QDialog*>("SurfaceBridgeDialog");
+        for(const auto& ref:refs) {
+            doc.ClearSelection();doc.SelectObjectById(ref.body);
+            dynamic_cast<CSolid*>(doc.FindObjectById(ref.body))->SetSelectedEdge(ref.face,ref.edge);
+            window.viewport_->SelectionChanged();
+        }
+        require(doc.GetObjects().size()==4,"Second preview missing");
+        dialog->reject();QCoreApplication::sendPostedEvents(nullptr,QEvent::DeferredDelete);
+        require(doc.GetObjects().size()==3,"Cancel retained temporary bridge");
+        const auto capture=qEnvironmentVariable("DOM3D_SURFACE_BRIDGE_CAPTURE");
+        if(!capture.isEmpty()) {
+            doc.ClearSelection();window.show();window.viewport_->FitToDocument();application.processEvents();
+            require(window.viewport_->CaptureSceneImage({1000,700}).save(capture),"Cannot capture Surface Bridge result");
+            view.camera=window.viewport_->GetCamera();
+            require(serializer.Save(capture+".dom3d",doc,"Surfaces",view,{},errorText),"Cannot save bridge demo");
+        }
+        std::cout<<"Surface Bridge geometry, picking, markers, cancel, history and persistence passed\n";
+        return 0;
+    }
+    if (application.arguments().contains("--four-curves-associative-only")) {
+        QTemporaryDir settings; QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,settings.path());
+        MainWindow window;auto& doc=window.document_;doc.GetObjects().clear();
+        std::vector<unsigned long> ids;
+        const auto add=[&](std::initializer_list<CPoint3d> points) {
+            auto curve=std::make_unique<CBSpline>("Boundary");
+            for(auto point:points)curve->AddPoint(point);
+            auto* ptr=curve.get();doc.AddObject(std::move(curve));ids.push_back(ptr->m_id);
+        };
+        add({{0,0,0},{5,0,1},{10,0,0}});add({{10,0,0},{10,5,0},{10,10,0}});
+        add({{10,10,0},{5,10,0},{0,10,0}});add({{0,10,0},{0,5,0},{0,0,0}});
+        doc.ClearSelection();for(auto id:ids)doc.SelectObjectById(id,SelectionAction::Add);
+        require(doc.CreateFourSplineSurfaceFromSelection(),"Cannot create four-curve surface");
+        const auto surfaceId=doc.GetSelectedObject()->m_id;
+        window.undo_redo_.Reset();
+        auto* surface=dynamic_cast<CSolid*>(doc.FindObjectById(surfaceId));
+        auto original=surface->m_Shape;
+        const auto center=[](const TopoDS_Shape& shape) {
+            TopExp_Explorer faces(shape,TopAbs_FACE);auto face=TopoDS::Face(faces.Current());
+            double u0,u1,v0,v1;BRepTools::UVBounds(face,u0,u1,v0,v1);
+            return BRep_Tool::Surface(face)->Value((u0+u1)*.5,(v0+v1)*.5);
+        };
+        const auto originalCenter=center(original);
+        auto* curve=dynamic_cast<CBSpline*>(doc.FindObjectById(ids[0]));
+        curve->SetPoint(1,{5,0,5});
+        doc.SelectObjectById(ids[0]);
+        window.viewport_->DocumentChanged();
+        require(!surface->m_Shape.IsSame(original),"Four-curve surface unchanged after spline edit");
+        require(center(surface->m_Shape).Distance(originalCenter)>.1,"Spline edit did not change surface geometry");
+        require(window.undo_redo_.Undo() && window.undo_redo_.Redo(),"Four-curve undo/redo failed");
+        Dom3DProjectSerializer serializer;ProjectViewState view;QString room,error;
+        auto path=settings.filePath("four.dom3d");require(serializer.Save(path,doc,"Surfaces",view,{},error),"Cannot save four-curve surface");
+        CAlfaDoc loaded;require(serializer.Load(path,loaded,room,view,error),"Cannot reload four-curve surface");
+        require(window.tool_registry_.ReplayProfileDependents(ids[0],loaded),"Reloaded surface lost spline dependencies");
+        require(window.tool_registry_.ReplayAllProfileDependents(loaded),"Bulk spline replay missed four-curve surface");
+        std::cout<<"Four-curve associative updates, history and persistence passed\n";return 0;
+    }
+    if (application.arguments().contains("--low-poly-state-only")) {
+        QTemporaryDir settingsDir;
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settingsDir.path());
+        MainWindow window;
+        auto& doc = window.document_;
+        doc.GetObjects().clear();
+        const auto add = [&](bool quadro) {
+            TopoDS_Shape shape = BRepPrimAPI_MakeBox(20, 20, 20).Shape();
+            auto body = std::make_unique<CSolid>(shape);
+            body->MeshQuadro = quadro;
+            body->MeshQuadroHoleSLX = quadro;
+            body->ptchDensity = 0.5f;
+            require(body->ReBuldMesh(2.f), "Cannot mesh Low Poly test box");
+            auto* result = body.get();
+            doc.AddObject(std::move(body));
+            return result;
+        };
+        auto* hybrid = add(false);
+        auto* quadro = add(true);
+        const auto open = [&]() {
+            window.ShowLowPolyTool();
+            auto* dialog = window.findChild<QDialog*>("SolidLowPolyDialog");
+            require(dialog, "Low Poly dialog missing");
+            return dialog;
+        };
+        const auto mode = [](QDialog* dialog, const char* text) {
+            for (auto* box : dialog->findChildren<QCheckBox*>())
+                if (box->text() == text) return box;
+            require(false, "Low Poly mesh control missing");
+            return static_cast<QCheckBox*>(nullptr);
+        };
+        const auto close = [](QDialog* dialog) {
+            dialog->close();
+            QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        };
+        for (auto* body : {hybrid, quadro, hybrid}) {
+            doc.SelectObjectById(body->m_id);
+            auto* mesh = body->GetSurfaceFace(0)->pMesh3D;
+            const auto faces = mesh->GetFaces().size();
+            auto* dialog = open();
+            require(mode(dialog, "Mesh Quadro")->isChecked() == body->MeshQuadro,
+                    "Dialog does not reflect existing body mesh");
+            require(mode(dialog, "Mesh Quadro Hole SLX")->isChecked() == body->MeshQuadroHoleSLX,
+                    "Dialog does not reflect existing SLX mode");
+            close(dialog);
+            require(body->GetSurfaceFace(0)->pMesh3D == mesh && mesh->GetFaces().size() == faces,
+                    "Opening or closing Low Poly rebuilt existing mesh");
+        }
+        doc.SelectObjectById(quadro->m_id);
+        auto* sharp_dialog=open();
+        require(!sharp_dialog->findChild<QCheckBox*>("LowPolyTrimByPline"), "Experimental TrimByPline remains in UI");
+        auto* sharp = sharp_dialog->findChild<QCheckBox*>("LowPolyAddSharpEdges");
+        auto* angle = sharp_dialog->findChild<QDoubleSpinBox*>("LowPolySharpAngle");
+        require(sharp && angle && !sharp->isChecked() && angle->isHidden(), "Sharp controls initial state");
+        auto* sharp_preview=quadro->GetSurfaceFace(0)->pMesh3D;
+        const bool trim_mode = quadro->MeshQuadroTrimByPline;
+        sharp->click();
+        require(!angle->isHidden() && angle->value()==30.0, "Angle must appear with default 30 degrees");
+        require(quadro->GetSurfaceFace(0)->pMesh3D==sharp_preview && quadro->MeshQuadroTrimByPline==trim_mode,
+            "Sharp setting rebuilt the mesh or changed the retained trim mode");
+        for(auto* button:sharp_dialog->findChildren<QPushButton*>())
+            if(button->text()=="Create Low Poly")button->click();
+        auto* sharp_mesh=dynamic_cast<CMesh3D*>(doc.GetObjects().back().get());
+        require(sharp_mesh && !sharp_mesh->GetSharpEdges().empty(), "Automatic box sharp edges missing");
+        require(quadro->GetSurfaceFace(0)->pMesh3D==sharp_preview,"Sharp assignment rebuilt accepted preview");
+        angle->setValue(100.0);
+        for(auto* button:sharp_dialog->findChildren<QPushButton*>())
+            if(button->text()=="Create Low Poly")button->click();
+        auto* smooth_mesh=dynamic_cast<CMesh3D*>(doc.GetObjects().back().get());
+        require(smooth_mesh && smooth_mesh->GetSharpEdges().empty(), "Angle threshold ignored");
+        sharp->click(); require(angle->isHidden(), "Angle remains visible when disabled");
+        close(sharp_dialog);
+        doc.SelectObjectById(hybrid->m_id);
+        auto* dialog = open();
+        window.ShowLowPolyTool();
+        require(window.findChildren<QDialog*>("SolidLowPolyDialog").size()==1,
+                "Reopening Low Poly created a second dialog");
+        bool busy_checked=false;
+        QTimer::singleShot(0,dialog,[&]() {
+            require(dialog->property("lowPolyBusy").toBool(),"Low Poly has no busy state");
+            require(!dialog->findChild<QDoubleSpinBox*>()->isEnabled(),"Density remains editable during meshing");
+            window.ShowLowPolyTool();
+            require(window.findChildren<QDialog*>("SolidLowPolyDialog").size()==1,"Busy Low Poly duplicated");
+            dialog->close();
+            require(dialog->isVisible(),"Busy Low Poly closed during calculation");
+            busy_checked=true;
+        });
+        mode(dialog, "Mesh Quadro")->click();
+        require(busy_checked && !dialog->property("lowPolyBusy").toBool(),"Busy UI was not serviced or restored");
+        require(hybrid->MeshQuadro, "Enabling Quadro did not rebuild body in Quadro mode");
+        close(dialog);
+        dialog = open();
+        require(mode(dialog, "Mesh Quadro")->isChecked(), "Reopening lost Quadro mode");
+        mode(dialog, "Mesh Quadro")->click();
+        require(!hybrid->MeshQuadro, "Disabling Quadro did not restore hybrid mode");
+        auto* ready_surface=hybrid->GetSurfaceFace(0);
+        const auto object_count=doc.GetObjects().size();
+        for (auto* button:dialog->findChildren<QPushButton*>())
+            if(button->text()=="Create Low Poly") button->click();
+        require(doc.GetObjects().size()==object_count+1 && hybrid->GetSurfaceFace(0)==ready_surface,
+                "Create Low Poly rebuilt an already valid preview");
+        close(dialog);
+        doc.SelectObjectById(hybrid->m_id);
+        dialog=open();
+        bool stopped=false;
+        QTimer::singleShot(0,dialog,[&]() {
+            auto* progress=dialog->findChild<QProgressDialog*>("LowPolyMeshProgress");
+            require(progress,"Cancelable progress missing");
+            auto* bar=progress->findChild<QProgressBar*>();
+            require(bar,"Surface progress bar missing");
+            QObject::connect(bar,&QProgressBar::valueChanged,progress,[&,progress](int value) {
+                if(value>0 && !stopped) {
+                    require(progress->maximum()==hybrid->GetNumSurfaces(),"Wrong total surface count");
+                    auto* stop=progress->findChild<QPushButton*>();
+                    require(stop && stop->isEnabled(),"Stop button is disabled");
+                    stopped=true; stop->click();
+                }
+            });
+        });
+        mode(dialog,"Mesh Quadro")->click();
+        require(stopped && !hybrid->MeshQuadro && hybrid->GetSurfaceFace(0)==ready_surface,
+                "Stopping meshing did not restore the exact previous preview");
+        require(!dialog->property("lowPolyBusy").toBool(),"Stopped dialog remains busy");
+        close(dialog);
+        doc.SelectObjectById(hybrid->m_id);
+        doc.SelectObjectById(quadro->m_id, SelectionAction::Add);
+        dialog = open();
+        require(mode(dialog, "Mesh Quadro")->checkState() == Qt::PartiallyChecked
+                && mode(dialog, "Mesh Quadro Hole SLX")->checkState() == Qt::PartiallyChecked,
+                "Different body modes must display mixed state");
+        dialog->findChild<QDoubleSpinBox*>()->setValue(0.6);
+        require(!hybrid->MeshQuadro && quadro->MeshQuadro
+                && !hybrid->MeshQuadroHoleSLX && quadro->MeshQuadroHoleSLX,
+                "Density change overwrote mixed body modes");
+        mode(dialog, "Mesh Quadro Hole SLX")->click();
+        require(hybrid->MeshQuadro && quadro->MeshQuadro
+                && mode(dialog, "Mesh Quadro")->checkState()==Qt::Checked
+                && !mode(dialog, "Mesh Quadro")->isTristate(),
+                "SLX did not enable Quadro for all mixed bodies and its checkbox");
+        require(hybrid->MeshQuadroHoleSLX && quadro->MeshQuadroHoleSLX,
+                "Choosing SLX from mixed state did not apply to all bodies");
+        const auto* previous_hybrid=hybrid->GetSurfaceFace(0);
+        const auto* previous_quadro=quadro->GetSurfaceFace(0);
+        const float previous_density=hybrid->ptchDensity;
+        bool second_body_stopped=false;
+        QTimer::singleShot(0,dialog,[&]() {
+            auto* progress=dialog->findChild<QProgressDialog*>("LowPolyMeshProgress");
+            require(progress,"Multi-body progress missing");
+            QObject::connect(progress->findChild<QProgressBar*>(),&QProgressBar::valueChanged,progress,
+                [&,progress](int value) {
+                    if(value>hybrid->GetNumSurfaces() && !second_body_stopped) {
+                        require(progress->maximum()==hybrid->GetNumSurfaces()+quadro->GetNumSurfaces(),"Multi-body total incorrect");
+                        second_body_stopped=true; progress->cancel();
+                    }
+                });
+        });
+        dialog->findChild<QDoubleSpinBox*>()->setValue(.65);
+        require(second_body_stopped && hybrid->GetSurfaceFace(0)==previous_hybrid
+            && quadro->GetSurfaceFace(0)==previous_quadro && hybrid->ptchDensity==previous_density,
+            "Cancellation did not roll back every selected body");
+        close(dialog);
+        auto* slx_body=add(false);
+        doc.SelectObjectById(slx_body->m_id);
+        dialog=open();
+        require(!mode(dialog,"Mesh Quadro")->isChecked(),"SLX test must start in hybrid mode");
+        mode(dialog,"Mesh Quadro Hole SLX")->click();
+        require(slx_body->MeshQuadro && slx_body->MeshQuadroHoleSLX
+                && mode(dialog,"Mesh Quadro")->isChecked(),
+                "SLX must enable both the Quadro checkbox and body mode");
+        mode(dialog,"Mesh Quadro Hole SLX")->click();
+        require(slx_body->MeshQuadro && !slx_body->MeshQuadroHoleSLX
+                && mode(dialog,"Mesh Quadro")->isChecked(),
+                "Disabling SLX must preserve ordinary Quadro mode");
+        close(dialog);
+        const int large_file=application.arguments().indexOf("--low-poly-large-file");
+        if (large_file>=0 && large_file+1<application.arguments().size()) {
+            doc.GetObjects().clear();
+            Dom3DProjectSerializer serializer; ProjectViewState view; QString room,error;
+            require(serializer.Load(application.arguments().at(large_file+1),doc,room,view,error),"Cannot load large Low Poly fixture");
+            CSolid* body=nullptr;
+            for (const auto& object:doc.GetObjects())
+                if (auto* candidate=dynamic_cast<CSolid*>(object.get())) { body=candidate; break; }
+            require(body,"Large Low Poly fixture has no solid");
+            const bool cylinder_step=qEnvironmentVariableIsSet("DOM3D_CYLINDER_STEP");
+            body->MeshQuadroHoleDivideFace=false;
+            if (cylinder_step) { body->MeshQuadro=true; body->MeshQuadroHoleSLX=true; }
+            doc.SelectObjectById(body->m_id);
+            dialog=open();
+            int heartbeats=0;
+            QElapsedTimer elapsed; elapsed.start();
+            qint64 last_heartbeat=0, maximum_pause=0;
+            QTimer heartbeat;
+            QObject::connect(&heartbeat,&QTimer::timeout,dialog,[&]() {
+                maximum_pause=std::max(maximum_pause,elapsed.elapsed()-last_heartbeat);
+                last_heartbeat=elapsed.elapsed();
+                ++heartbeats;
+                require(dialog->isVisible(),"Large Low Poly dialog disappeared");
+                window.ShowLowPolyTool();
+                require(window.findChildren<QDialog*>("SolidLowPolyDialog").size()==1,"Large Low Poly duplicate dialog");
+            });
+            heartbeat.start(100);
+            if (cylinder_step) {
+                for (double density : {.5,.6,.4,.6})
+                    dialog->findChild<QDoubleSpinBox*>()->setValue(density);
+            } else mode(dialog,"Mesh Quadro Hole DivideFace")->click();
+            heartbeat.stop();
+            maximum_pause=std::max(maximum_pause,elapsed.elapsed()-last_heartbeat);
+            const QString dump=qEnvironmentVariable("DOM3D_LOW_POLY_DUMP");
+            if (!dump.isEmpty()) {
+                QDir().mkpath(dump);
+                QFile info(dump+"/surfaces.txt"); info.open(QIODevice::WriteOnly|QIODevice::Text);
+                QTextStream meta(&info);
+                for (int i=0;i<body->GetNumSurfaces();++i) {
+                    auto* surface=body->GetSurfaceFace(i);
+                    if(surface && surface->pMesh3D) {
+                        surface->pMesh3D->ExportToObj((dump+QString("/surface_%1.obj").arg(i)).toStdString());
+                        if (i==13 || i==35)
+                            BRepTools::Write(surface->m_Face,(dump+QString("/surface_%1.brep").arg(i)).toStdString().c_str());
+                        GProp_GProps props; BRepGProp::SurfaceProperties(surface->m_Face,props);
+                        Vec3 center,normal; surface->GetCenterAndNormal(center,normal);
+                        meta<<i<<' '<<int(BRepAdaptor_Surface(TopoDS::Face(surface->m_Face)).GetType())
+                            <<' '<<surface->m_TypeMesh<<' '<<surface->IsTrimmed<<' '<<props.Mass()
+                            <<' '<<normal.x<<' '<<normal.y<<' '<<normal.z
+                            <<' '<<surface->m_QtyU<<' '<<surface->m_QtyV<<'\n';
+                    }
+                }
+            }
+            require(heartbeats>1,"Long calculation did not service UI events");
+            require(maximum_pause<5000,"Low Poly left the UI unserviced for five seconds");
+            require(dialog->isVisible() && !dialog->property("lowPolyBusy").toBool(),"Large Low Poly did not restore its dialog");
+            std::cout << "Large Low Poly: " << elapsed.elapsed() << " ms, UI heartbeats=" << heartbeats
+                      << ", maximum pause=" << maximum_pause << " ms\n";
+            close(dialog);
+        }
+        std::cout << "Low Poly existing mesh, reopen, toggles and mixed selection passed\n";
+        return 0;
+    }
+    if (application.arguments().contains("--rgb-opacity-only")) {
+        QTemporaryDir settingsDir;
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,settingsDir.path());
+        CAlfaDoc doc; Dom3DProjectSerializer serializer; ProjectViewState view; QString room,error;
+        require(serializer.Load(application.arguments().at(3),doc,room,view,error), "Cannot load RGB opacity fixture");
+        OpenGLViewport viewport; viewport.SetDocument(&doc); viewport.resize(900,700);
+        viewport.SetCamera(view.camera); viewport.SetOrthographicProjection(view.orthographic_projection);
+        CSolid::SetDisplayMode(SolidDisplayMode::SurfacesAndEdges);
+        CSolid::SetHiddenEdgeDrawingEnabled(false);
+        CMesh3D::SetDisplayMode(MeshDisplayMode::SurfaceColored);
+        viewport.show(); application.processEvents();
+        QDir().mkpath("output/rgb-opacity");
+        for(bool selected : {false,true}) {
+            doc.ClearSelection();if(selected)doc.SelectAllVisibleObjects();
+            CMesh3D::SetSurfaceOpacity(1.f);CSolid::SetSurfaceTransparencyEnabled(false);
+            const auto baseline=viewport.CaptureSceneImage({900,700});
+            require(!baseline.isNull(),"RGB OpenGL capture failed");
+            baseline.save(selected?"output/rgb-opacity/selected.png":"output/rgb-opacity/plain.png");
+            for(float opacity : {.91f,.5f}) {
+                CMesh3D::SetSurfaceOpacity(opacity);
+                require(viewport.CaptureSceneImage({900,700})==baseline,
+                        "RGB normals are corrupted by surface opacity");
+            }
+            CSolid::SetSurfaceTransparencyEnabled(true);
+            require(viewport.CaptureSceneImage({900,700})==baseline,
+                    "RGB normals are corrupted by transparent-solid mode");
+        }
+        doc.ClearSelection();CSolid::SetSurfaceTransparencyEnabled(false);
+        CMesh3D::SetDisplayMode(MeshDisplayMode::SurfaceGray);CMesh3D::SetSurfaceOpacity(1.f);
+        const auto opaque=viewport.CaptureSceneImage({900,700});CMesh3D::SetSurfaceOpacity(.5f);
+        require(viewport.CaptureSceneImage({900,700})!=opaque,"Ordinary shading lost transparency");
+        CMesh3D::SetSurfaceOpacity(1.f);viewport.SetDocument(nullptr);
+        std::cout<<"RGB and RGB selection ignore opacity; ordinary shading retains transparency\n";
+        return 0;
+    }
+    if (application.arguments().contains("--sketch-joints-only")) {
+        QTemporaryDir settings;
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,settings.path());
+        MainWindow window;
+        auto& doc = window.document_;
+        auto* viewport = window.viewport_;
+        Dom3DProjectSerializer serializer;
+        ProjectViewState view;
+        QString room,error;
+        const int argument = application.arguments().indexOf("--sketch-joints-only");
+        require(serializer.Load(application.arguments().value(argument+1),doc,room,view,error),
+                "Cannot load SL_Extrude joint fixture");
+        auto* sketch = dynamic_cast<CSmartLine*>(doc.FindObjectById(3));
+        require(sketch && sketch->GetNodeCount()==4, "Missing four-node Bezier sketch");
+        auto* original_body = dynamic_cast<CSolid*>(doc.FindObjectById(82));
+        require(original_body != nullptr, "Missing dependent extrusion");
+        const TopoDS_Shape original_shape = original_body->m_Shape;
+        doc.SelectObjectById(sketch->m_id);
+        viewport->resize(800,600); viewport->SetOrthographicProjection(true); viewport->SetXYView();
+        auto camera=viewport->GetCamera(); camera.target={220,180,0}; camera.distance=1200; viewport->SetCamera(camera);
+        require(viewport->BeginEditSelectedSketch(),"Cannot start sketch editing");
+        window.ShowSketchPanel();
+        auto* smooth=window.findChild<QPushButton*>("SketchConstraintButton2");
+        auto* sharp=window.findChild<QPushButton*>("SketchConstraintButton3");
+        require(smooth && sharp,"Joint buttons missing");
+        const auto click_world=[&](CPoint3d p) {
+            DomPoint screen{}; QtSceneRenderer renderer;
+            require(renderer.WorldToScreen({float(p.x),float(p.y),float(p.z)},viewport->GetCamera(),true,
+                    viewport->width(),viewport->height(),screen),"Cannot project joint");
+            const QPointF position(screen.x,screen.y);
+            QMouseEvent event(QEvent::MouseButtonPress,position,position,Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);
+            QApplication::sendEvent(viewport,&event);
+        };
+        const auto is_smooth=[](const CSmartLine& s,size_t first,size_t second) {
+            const auto a=s.GetLine(first)->GetTangent(1),b=s.GetLine(second)->GetTangent(0);
+            const double magnitude=std::hypot(a.x,a.y)*std::hypot(b.x,b.y);
+            return magnitude>1.e-12 && std::abs(a.x*b.y-a.y*b.x)/magnitude<1.e-10 && a.x*b.x+a.y*b.y>0;
+        };
+        require(!is_smooth(*sketch,2,3) && !is_smooth(*sketch,3,0), "Original left joints are unexpectedly smooth");
+        window.undo_redo_.Reset();
+        smooth->click();
+        require(viewport->CurrentTool()==ToolMode::SketchSmoothJoint,"Left button does not select smooth-node tool");
+        click_world(sketch->LocalToWorld(sketch->GetLine(2)->GetPoint(0.5)));
+        require(sketch->GetNumConstraints()==0 && window.undo_redo_.UndoCount()==0,
+                "Joint tool selected a segment interior instead of a node");
+        click_world(sketch->GetNodeWorld(2));
+        require(sketch->GetNumConstraints()==1 && is_smooth(*sketch,2,3),"Left node click did not smooth both segments");
+        require(window.undo_redo_.Undo() && !is_smooth(*sketch,2,3),"Smooth joint Undo failed");
+        require(window.undo_redo_.Redo() && is_smooth(*sketch,2,3),"Smooth joint Redo failed");
+        smooth->click(); click_world(sketch->GetNodeWorld(3));
+        require(sketch->GetNumConstraints()==2 && is_smooth(*sketch,3,0),"Closing left node click failed");
+        sharp->click();
+        require(viewport->CurrentTool()==ToolMode::SketchSharpJoint,"Right button does not remove smoothness");
+        click_world(sketch->GetNodeWorld(2));
+        require(sketch->GetNumConstraints()==1 && is_smooth(*sketch,2,3),
+                "Sharp tool must release only the picked joint without moving geometry");
+        require(window.undo_redo_.Undo() && sketch->GetNumConstraints()==2,"Sharp joint Undo failed");
+        auto* rebuilt_body = dynamic_cast<CSolid*>(doc.FindObjectById(82));
+        require(rebuilt_body && !rebuilt_body->m_Shape.IsSame(original_shape)
+                && BRepCheck_Analyzer(rebuilt_body->m_Shape).IsValid(),
+                "Smooth joint changes did not rebuild a valid dependent extrusion");
+        CAlfaDoc::LiveFilletBuildRequest fillet_request;
+        fillet_request.source_shape = fillet_request.base_shape = rebuilt_body->m_Shape;
+        double cap_height = -1.e100;
+        for (TopExp_Explorer faces(rebuilt_body->m_Shape,TopAbs_FACE); faces.More(); faces.Next()) {
+            const auto face = TopoDS::Face(faces.Current());
+            BRepAdaptor_Surface surface(face);
+            if (surface.GetType()!=GeomAbs_Plane || surface.Plane().Location().Z()<=cap_height) continue;
+            cap_height = surface.Plane().Location().Z();
+            fillet_request.edges.clear();
+            for (TopExp_Explorer edges(face,TopAbs_EDGE); edges.More(); edges.Next())
+                fillet_request.edges.push_back(TopoDS::Edge(edges.Current()));
+        }
+        require(fillet_request.edges.size()==4,"Missing tapered upper contour");
+        for (double radius : {1.0,2.0}) {
+            TopoDS_Shape filleted;
+            std::vector<int> generated;
+            require(CAlfaDoc::BuildLiveFilletShape(fillet_request,{radius},filleted,generated)
+                    && !generated.empty() && BRepCheck_Analyzer(filleted).IsValid(),
+                    "Smoothed sketch taper does not support a valid R1/R2 contour fillet");
+        }
+        const QString saved=settings.filePath("smooth.dom3d");
+        require(serializer.Save(saved,doc,room,view,{},error),"Cannot save smooth joints");
+        CAlfaDoc loaded;
+        require(serializer.Load(saved,loaded,room,view,error),"Cannot reload smooth joints");
+        auto* restored=dynamic_cast<CSmartLine*>(loaded.FindObjectById(3));
+        require(restored && restored->GetNumConstraints()==2 && is_smooth(*restored,2,3) && is_smooth(*restored,3,0),
+                "Saved project lost smooth joint constraints");
+        require(restored->MoveBezierControlPointWorld(6,restored->LocalToWorld({-300,-10,0})) && is_smooth(*restored,2,3),
+                "Reloaded joint did not retain bidirectional control");
+        const QString output=qEnvironmentVariable("DOM3D_SMOOTH_SKETCH_OUTPUT");
+        if(!output.isEmpty()) require(serializer.Save(output,doc,room,view,{},error),"Cannot save corrected sketch project");
+        std::cout<<"SL_Extrude node picking, smooth/sharp, Undo/Redo and persistence passed\n";
+        return 0;
+    }
+    if (application.arguments().contains("--extrude-contour-fillet")
+        || application.arguments().contains("--prism-hollow-fillet-ui")) {
+        const bool hollow_prism = application.arguments().contains("--prism-hollow-fillet-ui");
+        QTemporaryDir settings_dir;
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings_dir.path());
+        const int argument = application.arguments().indexOf(
+            hollow_prism ? "--prism-hollow-fillet-ui" : "--extrude-contour-fillet");
+        MainWindow window;
+        auto& doc = window.document_;
+        Dom3DProjectSerializer serializer;
+        ProjectViewState view;
+        QString room, error;
+        require(serializer.Load(application.arguments().value(argument + 1), doc, room, view, error),
+                "Cannot load extruded contour fixture");
+        CSolid* body = nullptr;
+        for (const auto& object : doc.GetObjects())
+            if (auto* solid = dynamic_cast<CSolid*>(object.get())) body = solid;
+        require(body != nullptr, "Missing extruded body");
+        require(body->ReBuldMesh(), "Cannot initialize extruded body display edges");
+        const auto id = body->m_id;
+        int top = -1;
+        double height = -1.e100;
+        for (int face = 0; face < body->GetNumSurfaces(); ++face) {
+            BRepAdaptor_Surface surface(TopoDS::Face(body->GetSurfaceFace(face)->m_Face));
+            if (surface.GetType() == GeomAbs_Plane && surface.Plane().Location().Z() > height) {
+                height = surface.Plane().Location().Z(); top = face;
+            }
+        }
+        require(top >= 0, "Missing top planar face");
+        window.viewport_->SetSelectionMode(SelectionMode::Face);
+        doc.SelectObjectById(id);
+        body->SetSelectedFace(top);
+        std::cout << "Top face=" << top << " height=" << height << " edges=" << body->GetSurfaceFace(top)->GetEdgeCount()
+                  << " selected=" << (doc.GetSelectedSolid() == body) << " face=" << body->HasSelectedFace() << std::endl;
+        window.last_fillet_radius_ = 1.0;
+        window.ActivateParametricTool("fillet_edge");
+        std::cout << "Live refs=" << doc.GetLiveFilletEdgeRefs().size() << " status=" << window.statusBar()->currentMessage().toStdString() << std::endl;
+        require(doc.GetLiveFilletEdgeRefs().size() == (hollow_prism ? 18 : 4),
+                "Top face did not select all contour edges");
+        QElapsedTimer fillet_wait; fillet_wait.start();
+        while ((window.live_fillet_build_pending_ || window.live_fillet_build_running_)
+               && fillet_wait.elapsed() < 30000)
+            application.processEvents(QEventLoop::AllEvents, 50);
+        require(doc.IsLiveFilletPreviewValid(), "Top contour fillet preview failed");
+        window.AcceptActiveProperties();
+        require(window.active_parametric_object_.tool_id.empty(), "Top contour fillet did not commit");
+        body = doc.GetSelectedSolid();
+        require(body && BRepCheck_Analyzer(body->m_Shape).IsValid(), "Committed contour is invalid");
+        if (hollow_prism) {
+            auto active = window.tool_registry_.ActiveObjectFromDocument(
+                doc.GetSelectedObjectIndex(), *body, body->GetNumOperations() - 1, &doc);
+            require(active.tool_id == "fillet_edge", "Hollow prism lost fillet history");
+            window.tool_registry_.Rebuild(active, doc);
+            body = doc.GetSelectedSolid();
+            require(body && BRepCheck_Analyzer(body->m_Shape).IsValid(),
+                    "Hollow prism fillet history rebuilt an invalid shell");
+        }
+        const QString output = application.arguments().value(argument + 2);
+        if (!output.isEmpty()) require(serializer.Save(output, doc, room, view, {}, error), "Cannot save filleted project");
+        require(window.undo_redo_.Undo(), "Cannot undo contour fillet");
+        require(window.undo_redo_.Redo(), "Cannot redo contour fillet");
+        std::cout << "Extruded top contour R1 fillet, commit, undo and redo passed\n";
+        return 0;
+    }
     if (application.arguments().contains("--bridge-defaults-only")) {
         QTemporaryDir settingsDir;
         QSettings::setDefaultFormat(QSettings::IniFormat);
@@ -191,7 +2798,268 @@ int TestScenePersistence(int argc, char** argv) {
         CPoint3d grid(camera.target.x,camera.target.y,camera.target.z); float distance=10000;
         require(viewport.SnapSketchGridPoint(QPoint(500,350),camera.target,{1,0,0},{0,1,0},grid,distance),
                 "Visible grid snapping no longer works");
-        std::cout<<"Hidden grid and curve snapping checks passed.\n"; return 0;
+        // Use a real visible XY grid node in 3D as well as in the XY view.
+        // The former XZ snap plane could pass the helper-only check above.
+        document.GetObjects().clear();
+        camera.target={0,0,0}; camera.distance=300;
+        viewport.SetCamera(camera);
+        viewport.grid_step_=100; viewport.grid_subdivisions_=4;
+        for(int i=0;i<int(Target::Count);++i)
+            viewport.SetSnapTargetEnabled(static_cast<Target>(i),false);
+        viewport.SetSnapTargetEnabled(Target::Grid,true);
+        const Vec3 node{50,25,0};
+        const auto atNode=[&](CPoint3d p) {
+            const Vec3 delta=vec(p)-node; return dot(delta,delta)<1.e-8f;
+        };
+        for(bool ortho:{true,false}) for(bool xy:{false,true}) {
+            if(xy && !ortho) continue; // The XY view always uses orthographic projection.
+            viewport.xy_plane_view_enabled_=xy;
+            viewport.SetOrthographicProjection(ortho);
+            DomPoint screen{};
+            require(viewport.renderer_.WorldToScreen(node,camera,ortho,1000,700,screen),
+                    "Cannot project visible grid node");
+            const QPoint pixel(screen.x+2,screen.y+2);
+            for(Kind kind:{Kind::Polyline,Kind::BSpline,Kind::Bezier,Kind::Nurbs}) {
+                viewport.SetTool(kind==Kind::Polyline?ToolMode::DrawCurve:ToolMode::DrawBSpline);
+                viewport.BeginSpatialCurvePreview(kind);
+                CPoint3d p;
+                require(viewport.PickModelingPoint(pixel,p) && atNode(p),
+                        "First curve point did not snap to visible XY grid");
+                viewport.SetSpatialCurvePreviewPoints({CPoint3d(-50,-25,0)});
+                require(viewport.PickModelingPoint(pixel,p) && atNode(p),
+                        "Following curve point did not snap to visible XY grid");
+                viewport.SetSnapTargetEnabled(Target::Grid,false);
+                require(viewport.PickModelingPoint(pixel,p) && !atNode(p),
+                        "Disabled grid snap still captures curve points");
+                viewport.SetSnapTargetEnabled(Target::Grid,true);
+                viewport.snapping_enabled_=false;
+                require(viewport.PickModelingPoint(pixel,p) && !atNode(p),
+                        "Disabled global snapping still captures curve points");
+                viewport.snapping_enabled_=true;
+                for(bool constant_x:{true,false}) {
+                    const Vec3 line_point=constant_x ? Vec3{50,12.5f,0} : Vec3{37.5f,25,0};
+                    DomPoint line_screen{};
+                    require(viewport.renderer_.WorldToScreen(line_point,camera,ortho,1000,700,line_screen),
+                            "Cannot project grid line midpoint");
+                    const QPoint line_pixel(line_screen.x+1,line_screen.y+1);
+                    require(viewport.PickModelingPoint(line_pixel,p)
+                            && std::abs(p.z)<1.e-6
+                            && std::abs((constant_x?p.x:p.y)-(constant_x?50:25))<1.e-6
+                            && std::abs((constant_x?p.y:p.x)-(constant_x?12.5:37.5))<2,
+                            "Curve point did not snap along grid line between nodes");
+                    viewport.SetSnapTargetEnabled(Target::Grid,false);
+                    require(!viewport.SnapCreationPoint(line_pixel,p,false),
+                            "Disabled grid still captures its lines");
+                    viewport.SetSnapTargetEnabled(Target::Grid,true);
+                    viewport.SetFloorGridVisible(false);
+                    require(!viewport.SnapCreationPoint(line_pixel,p,false),
+                            "Hidden grid still captures its lines");
+                    viewport.SetFloorGridVisible(true);
+                }
+                viewport.EndSpatialCurvePreview();
+            }
+            viewport.SetTool(ToolMode::DrawSpline);
+            viewport.BeginDrawSplineStroke(pixel);
+            require(!viewport.draw_spline_raw_points_.empty()
+                    && atNode(viewport.draw_spline_raw_points_.front()),
+                    "Pencil stroke did not snap to visible grid");
+            viewport.CancelDrawSplineStroke();
+        }
+        viewport.xy_plane_view_enabled_=false;
+        viewport.SetSnapTargetEnabled(Target::Grid,false);
+        viewport.SetSnapTargetEnabled(Target::AuxLine,true);
+        viewport.SetWorkPlane({0,0,0},{0,0,1});
+        for(bool ortho:{true,false}) {
+            viewport.SetOrthographicProjection(ortho);
+            viewport.SetTool(ToolMode::DrawCurve);
+            viewport.BeginSpatialCurvePreview(Kind::Polyline);
+            viewport.SetSpatialCurvePreviewPoints({{3,7,0},{80,7,0},{80,60,0}});
+            for(bool vertical:{true,false}) {
+                const Vec3 target=vertical ? Vec3{3,-40,0} : Vec3{-40,7,0};
+                DomPoint screen{};
+                require(viewport.renderer_.WorldToScreen(target,camera,ortho,1000,700,screen),
+                        "Cannot project first-point auxiliary guide");
+                const QPoint pixel(screen.x+1,screen.y+1);
+                CPoint3d p;
+                require(viewport.SnapCreationPoint(pixel,p,false)
+                        && std::abs(vertical?p.x-3:p.y-7)<1.e-4
+                        && std::abs(p.z)<1.e-4,
+                        "Aux Line did not capture alignment with the first polyline point");
+                require(viewport.auxiliary_guide_visible_
+                        && std::abs(viewport.auxiliary_guide_origin_.x-3)<1.e-4
+                        && std::abs(viewport.auxiliary_guide_origin_.y-7)<1.e-4,
+                        "Captured auxiliary guide is not available for rendering");
+                viewport.SetSnapTargetEnabled(Target::AuxLine,false);
+                require(!viewport.SnapCreationPoint(pixel,p,false) && !viewport.auxiliary_guide_visible_,
+                        "Disabled auxiliary guide remains active");
+                viewport.SetSnapTargetEnabled(Target::AuxLine,true);
+            }
+            viewport.EndSpatialCurvePreview();
+            require(!viewport.auxiliary_guide_visible_,"Completed curve retained an auxiliary guide");
+            viewport.BeginSpatialCurvePreview(Kind::Polyline);
+            viewport.SetSpatialCurvePreviewPoints({{3,7,0},{80,7,0},{80,60,0}});
+            DomPoint previous_screen{};
+            require(viewport.renderer_.WorldToScreen({80,-40,0},camera,ortho,1000,700,previous_screen),
+                    "Cannot project previous-point alignment");
+            CPoint3d previous_snap;
+            require(viewport.SnapCreationPoint(QPoint(previous_screen.x+1,previous_screen.y+1),previous_snap,false)
+                    && std::abs(previous_snap.x-80)<1.e-4,
+                    "Previous-point alignment no longer snaps");
+            require(!viewport.auxiliary_guide_visible_,"Previous point must not display a dashed guide");
+            viewport.EndSpatialCurvePreview();
+        }
+        // A joined spline's second pole follows the source endpoint tangent.
+        for(auto type:{SplineCurveType::BSpline,SplineCurveType::Bezier,SplineCurveType::Nurbs}) {
+            auto source=std::make_unique<CBSpline>("Tangent source");
+            source->SetCurveType(type); source->SetDegree(3); // Effective degree is 2 for three poles.
+            source->AddPoint({-60,-20,0}); source->AddPoint({-17,-13,0}); source->AddPoint({3,7,0});
+            if(type==SplineCurveType::Nurbs) source->SetWeights({1,2,1});
+            auto* source_ptr=source.get(); document.AddObject(std::move(source));
+            for(bool ortho:{true,false}) for(bool at_start:{true,false}) {
+                viewport.SetOrthographicProjection(ortho);
+                viewport.BeginSpatialCurvePreview(Kind::BSpline);
+                const CPoint3d joint=at_start?CPoint3d(-60,-20,0):CPoint3d(3,7,0);
+                const Vec3 direction=normalize(at_start?Vec3{-43,-7,0}:Vec3{20,20,0});
+                viewport.SetSpatialCurvePreviewPoints({joint});
+                DomPoint screen{};
+                require(viewport.renderer_.WorldToScreen(vec(joint)+direction*40,camera,ortho,1000,700,screen),
+                        "Cannot project tangent guide");
+                const QPoint pixel(screen.x+1,screen.y+1);
+                CPoint3d snapped;
+                require(viewport.SnapCreationPoint(pixel,snapped,false) && viewport.tangent_guide_visible_,
+                        "Joined spline did not capture its endpoint tangent");
+                const Vec3 delta=vec(snapped)-vec(joint);
+                const Vec3 perpendicular=delta-direction*dot(delta,direction);
+                require(dot(perpendicular,perpendicular)<1.e-6f && dot(delta,direction)>0,
+                        "Second pole does not give a smooth outward continuation");
+                viewport.SetSpatialCurvePreviewPoints({joint,snapped});
+                viewport.SnapCreationPoint(pixel,snapped,false);
+                require(!viewport.tangent_guide_visible_,"Tangent guide remained active after the second pole");
+                viewport.SetSpatialCurvePreviewPoints({joint});
+                source_ptr->SetVisible(false);
+                viewport.SnapCreationPoint(pixel,snapped,false);
+                require(!viewport.tangent_guide_visible_,"Hidden spline supplied a tangent guide");
+                source_ptr->SetVisible(true);
+                viewport.SetSnapTargetEnabled(Target::AuxLine,false);
+                viewport.SnapCreationPoint(pixel,snapped,false);
+                require(!viewport.tangent_guide_visible_,"Disabled Aux Line still supplied a tangent");
+                viewport.SetSnapTargetEnabled(Target::AuxLine,true);
+                viewport.EndSpatialCurvePreview();
+            }
+            document.GetObjects().clear();
+        }
+        {
+            auto source=std::make_unique<CBSpline>("Dwell tangent");
+            source->SetDegree(2);
+            source->AddPoint({-60,-20,0}); source->AddPoint({-17,-13,0}); source->AddPoint({3,7,0});
+            document.AddObject(std::move(source));
+            const auto id=document.GetSelectedObject()->m_id;
+            viewport.SetOrthographicProjection(true);
+            viewport.BeginSpatialCurvePreview(Kind::BSpline);
+            viewport.SetSpatialCurvePreviewPoints({{-90,90,0},{-50,80,0}});
+            DomPoint end_pixel{},start_pixel{},tangent_pixel{};
+            require(viewport.renderer_.WorldToScreen({3,7,0},camera,true,1000,700,end_pixel)
+                    && viewport.renderer_.WorldToScreen({-60,-20,0},camera,true,1000,700,start_pixel)
+                    && viewport.renderer_.WorldToScreen({33,37,0},camera,true,1000,700,tangent_pixel),"Dwell projection failed");
+            const auto wait_ms=[&](int ms) {
+                QEventLoop loop; QTimer::singleShot(ms,Qt::PreciseTimer,&loop,&QEventLoop::quit); loop.exec();
+            };
+            viewport.UpdateTangentHover(QPoint(end_pixel.x,end_pixel.y),true);
+            wait_ms(300);
+            require(!viewport.active_tangent_id_,"Tangent activated before 0.5 seconds");
+            viewport.UpdateTangentHover(QPoint(0,0),true);
+            wait_ms(250);
+            require(!viewport.active_tangent_id_,"Passing over endpoint activated a tangent");
+            viewport.UpdateTangentHover(QPoint(end_pixel.x,end_pixel.y),true);
+            wait_ms(550);
+            require(viewport.active_tangent_id_==id && !viewport.active_tangent_start_,"Dwell failed to activate endpoint");
+            viewport.UpdateTangentHover(QPoint(tangent_pixel.x,tangent_pixel.y),true);
+            CPoint3d snapped;
+            require(viewport.SnapCreationPoint(QPoint(tangent_pixel.x,tangent_pixel.y),snapped,false)
+                    && viewport.tangent_guide_visible_ && std::abs((snapped.x-3)-(snapped.y-7))<1.e-4,
+                    "Activated endpoint tangent did not remain available away from node");
+            viewport.UpdateTangentHover(QPoint(start_pixel.x,start_pixel.y),true);
+            wait_ms(550);
+            require(viewport.active_tangent_id_==id && viewport.active_tangent_start_,"Dwell did not switch endpoints");
+            QKeyEvent escape(QEvent::KeyPress,Qt::Key_Escape,Qt::NoModifier);
+            QApplication::sendEvent(&viewport,&escape);
+            require(!viewport.active_tangent_id_ && !viewport.pending_tangent_id_,"Escape retained tangent activation");
+            viewport.EndSpatialCurvePreview();
+            document.GetObjects().clear();
+        }
+        if (application.arguments().contains("--render-aux-guide")) {
+            viewport.SetTool(ToolMode::DrawCurve);
+            viewport.SetOrthographicProjection(true);
+            viewport.SetFloorGridVisible(false);
+            viewport.show_coordinate_axes_=false;
+            viewport.show();
+            application.processEvents();
+            viewport.BeginSpatialCurvePreview(Kind::Polyline);
+            viewport.SetSpatialCurvePreviewPoints({{3,7,0},{80,7,0},{80,60,0}});
+            viewport.BeginPick3DPoint("Guide render regression");
+            DomPoint screen{};
+            require(viewport.renderer_.WorldToScreen({3,-40,0},camera,true,1000,700,screen),"Guide projection failed");
+            const QPoint pixel(screen.x+1,screen.y+1);
+            QMouseEvent hover(QEvent::MouseMove,pixel,pixel,Qt::NoButton,Qt::NoButton,Qt::NoModifier);
+            QApplication::sendEvent(&viewport,&hover);
+            require(viewport.auxiliary_guide_visible_ && viewport.creation_snap_active_,"Hover lost guide state");
+            const QImage with_guide=viewport.grabFramebuffer();
+            viewport.auxiliary_guide_visible_=false;
+            const QImage without_guide=viewport.grabFramebuffer();
+            require(!with_guide.isNull() && with_guide.size()==without_guide.size(),"No OpenGL render for guide check");
+            int changed=0;
+            for(int y=0;y<with_guide.height();++y) for(int x=0;x<with_guide.width();++x) {
+                const QColor a=with_guide.pixelColor(x,y), b=without_guide.pixelColor(x,y);
+                if(a.red()>b.red()+30 && a.green()>b.green()+30 && a.blue()>b.blue()+30) ++changed;
+            }
+            with_guide.save("output/aux-guide-render.png");
+            require(changed>150,"Auxiliary guide state is active but its dashed line is not rendered");
+            auto tangent_source=std::make_unique<CBSpline>("Rendered tangent");
+            tangent_source->SetDegree(2);
+            tangent_source->AddPoint({-60,-20,0}); tangent_source->AddPoint({-17,-13,0}); tangent_source->AddPoint({3,7,0});
+            document.AddObject(std::move(tangent_source));
+            viewport.SetTool(ToolMode::DrawBSpline);
+            viewport.BeginSpatialCurvePreview(Kind::BSpline);
+            viewport.SetSpatialCurvePreviewPoints({{3,7,0}});
+            viewport.BeginPick3DPoint("Tangent guide render regression");
+            require(viewport.renderer_.WorldToScreen({33,37,0},camera,true,1000,700,screen),"Tangent projection failed");
+            const QPoint tangent_pixel(screen.x+1,screen.y+1);
+            QMouseEvent tangent_hover(QEvent::MouseMove,tangent_pixel,tangent_pixel,Qt::NoButton,Qt::NoButton,Qt::NoModifier);
+            QApplication::sendEvent(&viewport,&tangent_hover);
+            require(viewport.tangent_guide_visible_,"Hover lost tangent guide state");
+            const QImage tangent_image=viewport.grabFramebuffer();
+            int purple=0;
+            for(int y=0;y<tangent_image.height();++y) for(int x=0;x<tangent_image.width();++x) {
+                const QColor color=tangent_image.pixelColor(x,y);
+                if(color.red()>80 && color.blue()>100 && color.blue()>color.red()*.9
+                    && color.green()<color.red()*.8) ++purple;
+            }
+            require(purple>150,"Purple tangent guide is not rendered");
+            tangent_image.save("output/tangent-guide-render.png");
+            viewport.BeginSpatialCurvePreview(Kind::BSpline);
+            viewport.SetSpatialCurvePreviewPoints({{-90,90,0},{-50,80,0}});
+            require(viewport.renderer_.WorldToScreen({3,7,0},camera,true,1000,700,screen),"Dwell render projection failed");
+            viewport.UpdateTangentHover(QPoint(screen.x,screen.y),true);
+            QEventLoop dwell_loop;
+            QTimer::singleShot(550,Qt::PreciseTimer,&dwell_loop,&QEventLoop::quit);
+            dwell_loop.exec();
+            require(viewport.active_tangent_id_,"Visible endpoint failed dwell activation");
+            viewport.UpdateTangentHover(QPoint(80,80),true);
+            CPoint3d free_point;
+            viewport.SnapCreationPoint(QPoint(80,80),free_point,false);
+            viewport.SetCreationSnapCursor(false);
+            const QImage persistent_image=viewport.grabFramebuffer();
+            purple=0;
+            for(int y=0;y<persistent_image.height();++y) for(int x=0;x<persistent_image.width();++x) {
+                const QColor color=persistent_image.pixelColor(x,y);
+                if(color.red()>80 && color.blue()>100 && color.blue()>color.red()*.9
+                    && color.green()<color.red()*.8) ++purple;
+            }
+            persistent_image.save("output/tangent-dwell-render.png");
+            require(purple>150,"Activated tangent disappeared when cursor left it");
+            viewport.hide();
+        }
+        std::cout<<"Grid and auxiliary curve snapping checks passed.\n"; return 0;
     }
     if (application.arguments().contains("--curve-plane-only")) {
         QTemporaryDir settingsDir;
@@ -1139,6 +4007,71 @@ int TestScenePersistence(int argc, char** argv) {
     MainWindow window;
     window.auto_save_timer_->stop();
     auto& document = window.document_;
+    #include "FilletEdgeIdentityTestCases.inc"
+    if(application.arguments().contains("--solid-extrude-gizmo")) {
+        document.GetObjects().clear();
+        auto defaults=window.tool_registry_.Find("SolidBox")->defaults;for(auto& p:defaults){if(p.id=="width")p.value=40;if(p.id=="height")p.value=30;if(p.id=="depth")p.value=20;}
+        auto active=window.tool_registry_.CreateParametricObject("SolidBox",document,defaults);auto* source=dynamic_cast<CSolid*>(document.GetObjects().back().get());require(source,"Cannot create parametric fixture");const auto id=source->m_id;auto shape=source->m_Shape;require(source->GetNumOperations()==1,"Missing base history");window.undo_redo_.Reset();
+        std::vector<int> selected;for(int i=0;i<source->GetNumSurfaces();++i){Vec3 c,n;source->GetFaceCenterAndNormal(i,c,n);if(n.z>.9||n.x>.9)selected.push_back(i);}require(selected.size()==2,"Missing adjacent faces");
+        window.resize(1100,800);window.show();window.viewport_->FitToDocument();application.processEvents();
+        auto open=[&]{window.viewport_->SetSelectionMode(SelectionMode::Face);document.ClearSelection();document.SelectObjectById(id);for(int i:selected)source->AddSelectedFace(i);window.ActivateParametricTool("SolidExtrudeGizmo");application.processEvents();auto* d=window.findChild<QDialog*>("HybridExtrudeDialog");require(d&&d->property("solidOnly").toBool()&&d->windowTitle()=="Solid Extrude with Gizmo","Missing solid extrusion command");return d;};
+        for(bool accept:{false,true}){
+            auto* d=open();d->findChild<QDoubleSpinBox*>("HybridExtrudeValue1")->setValue(8);d->findChild<QDoubleSpinBox*>("HybridExtrudeValue4")->setValue(5);d->findChild<QDoubleSpinBox*>("HybridExtrudeValue6")->setValue(.9);
+            require(d->findChild<QPushButton*>("HybridExtrudeAccept")->isEnabled(),d->findChild<QLabel*>("HybridExtrudeStatus")->text().toStdString().c_str());
+            auto* result=dynamic_cast<CSolid*>(document.GetObjects().back().get());require(result&&result!=source&&BRepCheck_Analyzer(result->m_Shape).IsValid(),"Invalid solid extrusion preview");int solids=0;for(TopExp_Explorer e(result->m_Shape,TopAbs_SOLID);e.More();e.Next())++solids;require(solids==1,"Extrusion is not one closed solid");require(source->m_Shape.IsSame(shape),"Extrusion mutated source");
+            const int output=application.arguments().indexOf("--output");if(output>=0){application.processEvents();window.viewport_->grabFramebuffer().save(application.arguments().value(output+1));}
+            if(!accept){d->reject();require(window.viewport_->GetSelectionMode()==SelectionMode::Face && !document.HasSelection(),"Gizmo Cancel changed Face mode or selected body");application.sendPostedEvents(nullptr,QEvent::DeferredDelete);if(document.GetObjects().size()!=1||!source->IsVisible())std::cerr<<"Cancel objects="<<document.GetObjects().size()<<" visible="<<source->IsVisible()<<"\n";require(document.GetObjects().size()==1&&source->IsVisible(),"Solid extrusion Cancel failed");}
+            else {d->accept();require(window.viewport_->GetSelectionMode()==SelectionMode::Face && !document.HasSelection(),"Gizmo OK changed Face mode or selected body");application.sendPostedEvents(nullptr,QEvent::DeferredDelete);require(window.undo_redo_.CanUndo(),"Extrusion not recorded in Undo");window.UndoDocumentChange();require(document.GetObjects().size()==1&&document.FindObjectById(id)->IsVisible(),"Solid extrusion Undo failed");window.RedoDocumentChange();require(document.GetObjects().size()==1&&document.FindObjectById(id)->IsVisible(),"Solid extrusion Redo failed");}
+        }
+        auto* restored=dynamic_cast<CSolid*>(document.FindObjectById(id));require(restored&&restored->GetNumOperations()==2&&restored->GetOperation(0)->ToolId=="SolidBox"&&restored->GetOperation(1)->ToolId=="SolidExtrudeGizmo","Parametric history lost");
+        GProp_GProps before;BRepGProp::VolumeProperties(restored->m_Shape,before);require(window.tool_registry_.ReplayOperations(document.FindObjectIndexById(id),document),"Gizmo operation replay failed");restored=dynamic_cast<CSolid*>(document.FindObjectById(id));GProp_GProps replayed;BRepGProp::VolumeProperties(restored->m_Shape,replayed);require(std::abs(before.Mass()-replayed.Mass())<1.e-5,"Replay changed result");
+        auto edit=window.tool_registry_.ActiveObjectFromDocument(document.FindObjectIndexById(id),*restored,1,&document);for(auto& p:edit.parameters)if(p.id=="move.y")p.value=12;window.tool_registry_.Rebuild(edit,document);restored=dynamic_cast<CSolid*>(document.FindObjectById(id));GProp_GProps edited;BRepGProp::VolumeProperties(restored->m_Shape,edited);require(std::abs(edited.Mass()-replayed.Mass())>1,"Editing gizmo parameters has no effect");
+        QString failure,room="Solid";ProjectViewState view;const auto file=temporary.filePath("gizmo-history.dom3d");require(window.dom3d_serializer_.Save(file,document,room,view,{},failure),"Cannot save gizmo history");CAlfaDoc loaded;require(window.dom3d_serializer_.Load(file,loaded,room,view,failure),"Cannot reload gizmo history");require(window.tool_registry_.ReplayOperations(loaded.FindObjectIndexById(id),loaded),"Reloaded gizmo history cannot replay");auto* loadedBody=dynamic_cast<CSolid*>(loaded.FindObjectById(id));GProp_GProps saved;BRepGProp::VolumeProperties(loadedBody->m_Shape,saved);require(std::abs(saved.Mass()-edited.Mass())<1.e-5,"Reload changed edited extrusion");SetAlfaDoc(&document);
+        auto face=TopoDS::Face(TopExp_Explorer(shape,TopAbs_FACE).Current());TopoDS_Shape openShape=face;auto sheet=std::make_unique<CSolid>(openShape);auto* openBody=sheet.get();require(sheet->ReBuldMesh(),"Cannot mesh open fixture");document.AddObject(std::move(sheet),false);document.ClearSelection();document.SelectObjectById(openBody->m_id);openBody->AddSelectedFace(0);window.ActivateParametricTool("SolidExtrudeGizmo");application.processEvents();auto* dialog=window.findChild<QDialog*>("HybridExtrudeDialog");require(dialog&&!dialog->findChild<QPushButton*>("HybridExtrudeAccept")->isEnabled()&&dialog->findChild<QLabel*>("HybridExtrudeStatus")->text().contains("closed solid"),"Solid command accepted open surface");dialog->reject();
+        std::cout<<"Solid Extrude with Gizmo connected faces, Move/Rotate/Scale, closed result, Cancel, Undo/Redo and open-surface rejection passed\n";return 0;
+    }
+    if(application.arguments().contains("--extrude-taper-preview")) {
+        {ExtrudeFaceDialog dialog;dialog.findChild<QDoubleSpinBox*>()->setValue(12.5);dialog.accept();}
+        {ExtrudeFaceDialog dialog;require(dialog.TaperAngle()==12.5,"Taper angle not remembered");dialog.SetCurvedFace(true);require(dialog.TaperAngle()==12.5,"Curved face reset remembered angle");dialog.findChild<QDoubleSpinBox*>()->setValue(-7);dialog.reject();}
+        {ExtrudeFaceDialog dialog;require(dialog.TaperAngle()==12.5,"Cancel overwrote remembered angle");}
+        auto shape=BRepPrimAPI_MakeBox(40,30,20).Shape();auto body=std::make_unique<CSolid>(shape);auto* solid=body.get();require(solid->ReBuldMesh(),"Cannot mesh taper fixture");document.AddObject(std::move(body),false);
+        const auto pick=[&]{return document.SelectSolidFaceAtScreen({200,150},[](Vec3 p,DomPoint& screen,float& depth){screen={int(p.x*10),int(p.y*10)};depth=100-p.z;return true;});};
+        window.resize(1100,800);window.show();window.viewport_->FitToDocument();window.viewport_->SetTool(ToolMode::FaceExtrude);QApplication::processEvents();
+        for(double angle:{-12.,12.})for(float distance:{-4.f,8.f}) {
+            require(pick(),"Cannot select taper face");const auto face=solid->GetTopoFace(solid->GetSelectedFaceIndex());Vec3 center,normal;require(document.GetSelectedSolidFaceCenterAndNormal(center,normal),"Missing taper normal");
+            require(document.BeginLiveExtrudeSelectedSolidFace(angle),"Cannot start taper preview");
+            QElapsedTimer timer;timer.start();for(int i=1;i<=5;++i)require(document.PreviewLiveExtrudeSelectedSolidFace(distance*i/5),"Taper preview failed");std::cout<<"5 planar taper previews: "<<timer.elapsed()<<" ms\n";
+            std::string error;auto expected=BuildExtrudedFaceSolid(shape,face,normal,distance,angle,error);require(!expected.IsNull(),error.c_str());GProp_GProps actualVolume,expectedVolume;BRepGProp::VolumeProperties(solid->m_Shape,actualVolume);BRepGProp::VolumeProperties(expected,expectedVolume);require(std::abs(actualVolume.Mass()-expectedVolume.Mass())<1.e-5,"Taper preview differs from final geometry");
+            auto straight=BuildExtrudedFaceSolid(shape,face,normal,distance,0,error);GProp_GProps straightVolume;BRepGProp::VolumeProperties(straight,straightVolume);if(distance>0)require(std::abs(actualVolume.Mass()-straightVolume.Mass())>1,"Preview ignored taper angle");Vec3 moved,n;require(document.GetSelectedSolidFaceCenterAndNormal(moved,n),"Preview lost gizmo");auto delta=moved-(center+normal*distance);require(dot(delta,delta)<1.e-6,"Gizmo did not follow tapered preview");
+            const int output=application.arguments().indexOf("--output");if(output>=0 && angle>0 && distance>0){QApplication::processEvents();window.viewport_->grabFramebuffer().save(application.arguments().value(output+1));}
+            require(document.UpdateLiveExtrudeSelectedSolidFace(distance),"Taper final build failed");document.CancelLiveExtrudeSelectedSolidFace();require(solid->m_Shape.IsSame(shape),"Taper Cancel did not restore source");
+        }
+        std::cout<<"Extrude taper settings, positive/negative preview, gizmo and Cancel passed\n";return 0;
+    }
+    if (application.arguments().contains("--universal-transform")) {
+        auto shape=BRepPrimAPI_MakeBox(40,25,15).Shape();auto body=std::make_unique<CSolid>(shape);
+        require(body->ReBuldMesh(),"Cannot mesh transform fixture");auto* solid=body.get();document.AddObject(std::move(body),false);document.SelectObjectById(solid->m_id);
+        window.resize(1100,800);window.show();window.viewport_->FitToDocument();QApplication::processEvents();
+        window.BeginTransformTool(TransformOperation::Universal);auto* viewport=window.viewport_;
+        require(window.active_tool_key_=="transform" && viewport->universal_transform_,"Transform activates Move instead of universal mode");
+        for(auto desired:{TransformOperation::Move,TransformOperation::Rotate,TransformOperation::Scale}) {
+            QPoint picked;bool found=false;
+            for(int y=10;y<viewport->height()-10&&!found;y+=5)for(int x=10;x<viewport->width()-10&&!found;x+=5){TransformOperation operation;auto axis=viewport->HitTestTransformGizmo(QPoint(x,y),&operation);if(axis!=TransformAxis::None&&operation==desired&&(desired!=TransformOperation::Move||axis==TransformAxis::X)){picked=QPoint(x,y);found=true;}}
+            require(found,"Universal gizmo handle missing");
+            GProp_GProps before;BRepGProp::VolumeProperties(solid->m_Shape,before);
+            viewport->HandleTransformClick(picked,false);require(viewport->dragging_transform_&&viewport->transform_operation_==desired,"Wrong operation selected by gizmo");
+            viewport->HandleTransformDrag(picked+QPoint(27,-19),Qt::NoModifier);require(viewport->transform_drag_has_preview_,"Universal drag has no preview");
+            if(desired==TransformOperation::Rotate)require(std::abs(viewport->transform_drag_rotation_angle_)>.001,"Rotation handle did not rotate");
+            QMouseEvent release(QEvent::MouseButtonRelease,QPointF(picked+QPoint(27,-19)),QPointF(picked+QPoint(27,-19)),Qt::LeftButton,Qt::NoButton,Qt::NoModifier);QApplication::sendEvent(viewport,&release);
+            GProp_GProps after;BRepGProp::VolumeProperties(solid->m_Shape,after);
+            if(desired==TransformOperation::Move)require(before.CentreOfMass().Distance(after.CentreOfMass())>.001,"Move handle did not move geometry");
+            if(desired==TransformOperation::Scale)require(after.Mass()>before.Mass()*1.1,"Scale handle did not scale geometry");
+            require(viewport->universal_transform_&&window.active_tool_key_=="transform","Drag left universal Transform mode");
+        }
+        const int output=application.arguments().indexOf("--output");if(output>=0&&output+1<application.arguments().size()){QApplication::processEvents();viewport->grabFramebuffer().save(application.arguments()[output+1]);}
+        window.BeginTransformTool(TransformOperation::Move);require(!viewport->universal_transform_&&window.active_tool_key_=="move","Dedicated Move did not leave universal mode");
+        std::cout<<"Universal Transform move/rotate/scale geometry and command state passed\n";return 0;
+    }
     if (application.arguments().contains("--group-transform-only")) {
         const int option = application.arguments().indexOf("--group-transform-only");
         require(option + 1 < application.arguments().size(), "Missing group fixture");

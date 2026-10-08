@@ -76,6 +76,7 @@ std::unique_ptr<CAlfaObject> CReferenceImage::Clone() const {
     auto copy = std::make_unique<CReferenceImage>(GetName() + " Copy");
     copy->SetGeometry(GetVertices(), GetFaces(), GetUVs(), GetNormals());
     copy->SetGroupName(GetGroupName());
+    copy->SetFrozen(IsFrozen());
     copy->SetVisible(IsVisible());
     copy->SetColor(GetColor());
     copy->SetMaterial(GetMaterial());

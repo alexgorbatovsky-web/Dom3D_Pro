@@ -2,6 +2,7 @@
 
 #include "Solid.h"
 #include "SurfaceFace.h"
+#include "MeshBuildProgress.h"
 #include <Standard_Failure.hxx>
 #include <algorithm>
 #include <vector>
@@ -30,6 +31,7 @@ inline Completion CompleteWithTriangles(CSolid& solid, float step)
 {
     Completion result;
     for (int i = 0; i < solid.GetNumSurfaces(); ++i) {
+        MeshBuildProgress();
         auto* surface = solid.GetSurfaceFace(i);
         if (HasMesh(surface)) {
             ++result.retained;

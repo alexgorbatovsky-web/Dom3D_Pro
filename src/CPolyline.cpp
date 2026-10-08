@@ -1,3 +1,5 @@
+#include "Diagnostics.h"
+#include "CurveAppearance.h"
 #include "CPolyline.h"
 #include "SystemCoord.h"
 #include "OpenGLCompat.h"
@@ -64,13 +66,15 @@ std::filesystem::path obj_output_path(const std::string& name) {
 CPolyline::CPolyline()
     : CAlfaObject("Polyline") {
     IsReversed = false;
-    SetColor(kDefaultCurveColor);
+    SetColor(kDefaultStraightColor);
+    SetLineWidth(kDefaultCurveWidth);
 }
 
 CPolyline::CPolyline(std::string name)
     : CAlfaObject(std::move(name)) {
     IsReversed = false;
-    SetColor(kDefaultCurveColor);
+    SetColor(kDefaultStraightColor);
+    SetLineWidth(kDefaultCurveWidth);
 }
 
 const std::vector<CPoint3d>& CPolyline::GetPoints() const {
@@ -123,6 +127,7 @@ size_t CPolyline::np() const {
 }
 
 void CPolyline::Clear() {
+    if (same_curve_color(GetColor(), kDefaultPolylineColor)) SetColor(kDefaultStraightColor);
     points_.clear();
     vertex_radii_.clear();
     closed_ = false;
@@ -130,6 +135,8 @@ void CPolyline::Clear() {
 
 void CPolyline::AddPoint(CPoint3d point) {
     closed_ = false;
+    if (points_.size() == 2 && same_curve_color(GetColor(), kDefaultStraightColor))
+        SetColor(kDefaultPolylineColor);
     points_.push_back(point);
     vertex_radii_.push_back(0.0);
 }
@@ -143,6 +150,8 @@ bool CPolyline::InsertPoint(size_t index, CPoint3d point) {
         return false;
     }
 
+    if (points_.size() == 2 && same_curve_color(GetColor(), kDefaultStraightColor))
+        SetColor(kDefaultPolylineColor);
     points_.insert(points_.begin() + static_cast<std::vector<CPoint3d>::difference_type>(index), point);
     vertex_radii_.resize(points_.size() - 1, 0.0);
     vertex_radii_.insert(vertex_radii_.begin() + static_cast<std::vector<double>::difference_type>(index), 0.0);
@@ -284,6 +293,7 @@ bool CPolyline::ExportToObj(const std::string& name) const {
 }
 
 bool CPolyline::printToFile(const std::string& name) const {
+    if constexpr (!Dom3DDiagnosticsEnabled) return false;
     if (name.empty() || points_.empty()) {
         return false;
     }
@@ -371,6 +381,8 @@ bool CPolyline::RemovePoint(size_t index) {
         return false;
     }
 
+    if (points_.size() == 3 && same_curve_color(GetColor(), kDefaultPolylineColor))
+        SetColor(kDefaultStraightColor);
     points_.erase(points_.begin() + static_cast<std::vector<CPoint3d>::difference_type>(index));
     if (index < vertex_radii_.size()) {
         vertex_radii_.erase(vertex_radii_.begin() + static_cast<std::vector<double>::difference_type>(index));
@@ -650,6 +662,7 @@ std::unique_ptr<CAlfaObject> CPolyline::Clone() const {
     copy->locked_plane_point_ = locked_plane_point_;
     copy->locked_plane_normal_ = locked_plane_normal_;
     copy->SetGroupName(GetGroupName());
+    copy->SetFrozen(IsFrozen());
     copy->SetVisible(IsVisible());
     copy->SetColor(GetColor());
     copy->SetLineWidth(GetLineWidth());

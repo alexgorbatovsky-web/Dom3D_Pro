@@ -1,5 +1,6 @@
 #include "CAlfaDoc.h"
 #include "CBSpline.h"
+#include "CPolyline.h"
 #include "UndoRedo.h"
 #include "Dom3DProjectSerializer.h"
 #include <QApplication>
@@ -18,6 +19,77 @@ bool same(const CPoint3d& a, const CPoint3d& b) {
 }
 int TestCurveEndpointLinks(int argc, char** argv) {
     QApplication app(argc, argv);
+    for (auto type : {SplineCurveType::BSpline,SplineCurveType::Nurbs}) {
+        CBSpline curve;
+        curve.SetCurveType(type);
+        curve.AddPoint({0,0,0}); curve.AddPoint({10,0,0});
+        curve.SetDegree(1); // Degree assigned by the two-point creation tool.
+        if (type==SplineCurveType::Nurbs) curve.SetWeights({1,3});
+        std::vector<CPoint3d> before;
+        for(int i=0;i<=20;++i) before.push_back(curve.Evaluate(float(i)/20));
+        check(curve.InsertShapePreservingPoint(0.5) && curve.GetDegree()==2 && curve.GetPointCount()==3,
+            "Two-point subdivision must create a quadratic spline");
+        for(int i=0;i<=20;++i) check(same(before[i],curve.Evaluate(float(i)/20)),"Degree elevation changed the line parameterization");
+        auto middle=curve.GetPoints()[1]; middle.y=6;
+        check(curve.SetPoint(1,middle),"Cannot move new spline pole");
+        check(curve.Evaluate(0.5f).y>0 && curve.Evaluate(0.5f).y<6,"Moved pole produced a linear kink");
+        before.clear();
+        for(int i=0;i<=20;++i) before.push_back(curve.Evaluate(float(i)/20));
+        check(curve.InsertShapePreservingPoint(0.37),"Second spline subdivision failed");
+        for(int i=0;i<=20;++i) check(same(before[i],curve.Evaluate(float(i)/20)),"Further insertion changed smooth spline shape");
+        CAlfaDoc saved; saved.GetObjects().clear(); saved.AddObject(curve.Clone());
+        const auto id=saved.GetSelectedObject()->m_id;
+        QTemporaryDir temp; Dom3DProjectSerializer serializer;
+        QString error,room; ProjectViewState view;
+        const auto path=temp.filePath("subdivided.dom3d");
+        check(serializer.Save(path,saved,"",view,{},error),"Spline save failed");
+        CAlfaDoc restored;
+        check(serializer.Load(path,restored,room,view,error),"Spline load failed");
+        const auto* loaded=dynamic_cast<const CBSpline*>(restored.FindObjectById(id));
+        check(loaded && loaded->GetDegree()==2,"Reload lost elevated spline degree");
+        check(loaded->GetKnots()==curve.GetKnots(),"Reload lost inserted knots");
+        // Project loading currently reads control coordinates as floats.
+        for(int i=0;i<=20;++i) {
+            const auto a=curve.Evaluate(float(i)/20),b=loaded->Evaluate(float(i)/20);
+            check(std::hypot(std::hypot(a.x-b.x,a.y-b.y),a.z-b.z)<1e-5,"Reload changed subdivided spline");
+        }
+    }
+    {
+        CBSpline curve;
+        curve.AddPoint({0,0,0}); curve.AddPoint({5,6,0}); curve.AddPoint({10,0,0});
+        std::vector<CPoint3d> before;
+        for(int i=0;i<=20;++i) before.push_back(curve.Evaluate(float(i)/20));
+        check(curve.InsertShapePreservingPoint(0.4) && curve.GetDegree()==2,"Insertion increased effective degree");
+        // The implicit-knot evaluator uses float arithmetic; the explicit
+        // knot evaluator uses doubles after insertion.
+        for(int i=0;i<=20;++i) {
+            const auto a=before[i],b=curve.Evaluate(float(i)/20);
+            check(std::hypot(std::hypot(a.x-b.x,a.y-b.y),a.z-b.z)<1e-5,"Three-pole insertion changed the curve");
+        }
+    }
+    {
+        CPolyline line;
+        line.AddPoint(CPoint3d(0, 0, 0));
+        line.AddPoint(CPoint3d(10, 0, 0));
+        check(line.GetColor().b > 0.9f && line.GetColor().r < 0.2f,
+            "A new straight line must be blue");
+        line.AddPoint(CPoint3d(10, 10, 0));
+        check(line.GetColor().r > 0.9f && line.GetColor().g > 0.5f && line.GetColor().b < 0.1f,
+            "The third point must turn a default line orange despite RGB quantization");
+        line.RemovePoint(2);
+        check(line.GetColor().b > 0.9f && line.GetColor().r < 0.2f,
+            "Returning to a straight line must restore default blue");
+        line.SetColor({0.4f, 0.2f, 0.6f});
+        const Color custom = line.GetColor();
+        line.AddPoint(CPoint3d(10, 10, 0));
+        check(line.GetColor().r == custom.r && line.GetColor().g == custom.g && line.GetColor().b == custom.b,
+            "Adding a point must preserve a custom color");
+        CBSpline spline;
+        spline.SetCurveType(SplineCurveType::Bezier);
+        spline.SetCurveType(SplineCurveType::Nurbs);
+        check(spline.GetColor().g > 0.9f && spline.GetColor().r < 0.2f,
+            "Changing default curve type must recognize the stored RGB color");
+    }
     CAlfaDoc doc;
     doc.GetObjects().clear();
     const auto add = [&](CPoint3d a, CPoint3d b) {

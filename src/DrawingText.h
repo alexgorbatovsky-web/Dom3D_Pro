@@ -21,6 +21,8 @@ public:
     const CPoint3d& GetInsertion() const;
     const std::string& GetFontFamily() const;
     double GetLineAdvance() const;
+    // Letters -> closed contours -> cubic Bezier control points (3n + 1).
+    std::vector<std::vector<std::vector<CPoint3d>>> BuildBezierLetters() const;
     void SetText(std::string text);
     void SetHeight(double height);
     void SetRotationDegrees(double rotation_degrees);

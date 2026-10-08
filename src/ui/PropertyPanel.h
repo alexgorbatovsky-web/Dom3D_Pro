@@ -15,6 +15,7 @@ public:
                            bool additional_parameters = false);
 
     void Clear();
+    void SetBottleModelValue(int graph,int knot,double value,bool notify=true);
     void SetActiveObject(const ActiveParametricObject& active_object);
     void UpdateParameterValue(const std::string& parameter_id, double value);
     void SetMaterialParameterValue(const std::string& parameter_id,

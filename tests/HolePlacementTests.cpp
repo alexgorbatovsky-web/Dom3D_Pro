@@ -101,7 +101,7 @@ void TestHolePlacement() {
     const auto* box_tool = tools.Find("SolidBox");
     const auto* hole_tool = tools.Find("SolidHole");
     check(box_tool && hole_tool, "Hole test tools are missing.");
-    for (int type : {0, 1}) {
+    for (int type : {0, 1}) for (double chamfer : {0.0, 1.0, 2.0}) {
         CAlfaDoc document;
         auto box_parameters = box_tool->defaults;
         set(box_parameters, "width", 100); set(box_parameters, "height", 60); set(box_parameters, "depth", 20);
@@ -120,6 +120,8 @@ void TestHolePlacement() {
         check(face_index >= 0, "Missing top face.");
         auto parameters = hole_tool->defaults;
         set(parameters, "diameter", 8); set(parameters, "hole_type", type); set(parameters, "depth", 5);
+        set(parameters, "base_chamfer", chamfer > 0 ? 1 : 0);
+        set(parameters, "base_chamfer_size", chamfer > 0 ? chamfer : 1);
         const double before = volume(*body);
         const CPoint3d picked(minimum.x + 35, minimum.y + 24, maximum.z);
         auto rejected_parameters = parameters;
@@ -149,7 +151,8 @@ void TestHolePlacement() {
         check(!operation.tool_id.empty() && body->GetNumOperations() == 2,
               "One-click hole did not create exactly one history operation.");
         check(BRepCheck_Analyzer(body->m_Shape).IsValid(), "One-click hole produced an invalid solid.");
-        const double expected_removed = std::acos(-1.0) * 16 * (type == 0 ? 20 : 5);
+        const double expected_removed = std::acos(-1.0) * (16 * (type == 0 ? 20 : 5)
+            + 4 * chamfer * chamfer + chamfer * chamfer * chamfer / 3);
         check(std::fabs((before - volume(*body)) - expected_removed) < 0.01,
               "One-click hole diameter, outward normal or depth is incorrect.");
         check(history.CommitChange("Create hole") && history.Undo(), "Hole undo failed.");
@@ -171,7 +174,7 @@ void TestHolePlacement() {
         bool moved_circle = false;
         for (TopExp_Explorer edges(body->m_Shape, TopAbs_EDGE); edges.More(); edges.Next()) {
             BRepAdaptor_Curve curve(TopoDS::Edge(edges.Current()));
-            if (curve.GetType() == GeomAbs_Circle && std::fabs(curve.Circle().Radius() - 4) < 1.e-6) {
+            if (curve.GetType() == GeomAbs_Circle && std::fabs(curve.Circle().Radius() - (4 + chamfer)) < 1.e-6) {
                 const gp_Pnt center = curve.Circle().Location();
                 if (std::fabs(center.Z() - maximum.z) < 1.e-5 && std::fabs(center.Distance(old_center) - 3) < 1.e-4)
                     moved_circle = true;

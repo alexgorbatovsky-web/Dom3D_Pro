@@ -48,8 +48,11 @@ size_t check_net(CSolid& solid, float tolerance)
 }
 }
 
+void TestSteppedCylinderSpacing();
+
 int TestSurfaceDisplayNet()
 {
+    TestSteppedCylinderSpacing();
     TColgp_Array2OfPnt poles(1, 4, 1, 4);
     for (int u = 1; u <= 4; ++u) {
         for (int v = 1; v <= 4; ++v) {
@@ -98,6 +101,369 @@ int TestSurfaceDisplayNet()
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepTools.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
+#include <BRepClass_FaceClassifier.hxx>
+#include <ElSLib.hxx>
+#include <gp_Torus.hxx>
+#include "StepIO.h"
+#include "solid/LowPolyCompletion.h"
+#include <BRep_Tool.hxx>
+#include <Geom2d_Curve.hxx>
+#include <filesystem>
+#include <fstream>
+#include "solid/QuadroBodyMesher.h"
+#include "solid/PlanarTrimRecovery.h"
+#include <Geom_CylindricalSurface.hxx>
+#include <Geom_Circle.hxx>
+#include <BRepBuilderAPI_MakeEdge.hxx>
+#include <BRepBuilderAPI_MakeWire.hxx>
+#include <ShapeFix_Edge.hxx>
+
+void TestSteppedCylinderSpacing()
+{
+    const double pi=std::acos(-1.);
+    for(double scale : {1.,100.}) for(double notch : {.125,.0125}) for(int segments : {8,16}) {
+        const double radius=22.225*scale, height=38.1*scale, shoulder=12.7*scale;
+        Handle(Geom_CylindricalSurface) geometry=new Geom_CylindricalSurface(gp_Ax3(),radius);
+        std::vector<gp_Pnt2d> contour{{0,0},{pi,0},{pi,shoulder},{pi-notch,shoulder},
+            {pi-notch,height},{notch,height},{notch,shoulder},{0,shoulder}};
+        for(auto& point:contour)point.SetX(point.X()+0.4);
+        BRepBuilderAPI_MakeWire wire;
+        for(size_t i=0;i<contour.size();++i) {
+            const auto a=contour[i],b=contour[(i+1)%contour.size()];
+            TopoDS_Edge edge;
+            if(a.Y()==b.Y()) {
+                Handle(Geom_Circle) circle=new Geom_Circle(gp_Ax2(gp_Pnt(0,0,a.Y()),gp_Dir(0,0,1)),radius);
+                edge=BRepBuilderAPI_MakeEdge(circle,std::min(a.X(),b.X()),std::max(a.X(),b.X()));
+                if(b.X()<a.X())edge.Reverse();
+            } else edge=BRepBuilderAPI_MakeEdge(geometry->Value(a.X(),a.Y()),geometry->Value(b.X(),b.Y()));
+            wire.Add(edge);
+        }
+        auto shape=BRepBuilderAPI_MakeFace(geometry,wire.Wire(),true).Shape();
+        ShapeFix_Edge edge_fixer;
+        for(TopExp_Explorer it(shape,TopAbs_EDGE);it.More();it.Next())
+            edge_fixer.FixAddPCurve(TopoDS::Edge(it.Current()),TopoDS::Face(shape),false,1.e-7);
+        shape=BRepBuilderAPI_MakeFace(geometry,wire.Wire(),true).Shape();
+        CSolid body(shape);body.MeshQuadro=true;
+        check(body.InitSurfaces() && body.InitEdges(),"Stepped cylinder initialization");
+        auto* surface=body.GetSurfaceFace(0);
+        check(surface->InitEdges3DCoat(),"Stepped cylinder UV preparation");
+        surface->PrepareEdges(1.f);
+        for(int i=0;i<surface->GetPreparedPolylineCount();++i) {
+            TopoDS_Edge edge;check(surface->GetPreparedTopoEdge(i,edge),"Missing cylinder CAD edge");
+            const BRepAdaptor_Curve curve(edge);
+            const bool long_arc=curve.GetType()==GeomAbs_Circle && curve.LastParameter()-curve.FirstParameter()>1.;
+            surface->SetPreparedPolylinePointCount(i,long_arc?segments+1:3);
+        }
+        quadro::BuildSteppedCylinderFaces(body);
+        check(surface->IsInitMesh,"Stepped cylinder mesher declined the domain");
+        const auto& mesh=*surface->pMesh3D;
+        double area=0;
+        size_t cells=0;
+        for(const auto& cell:mesh.GetFaces()) if(!cell.deleted) {
+            ++cells;check(cell.corners.size()==4,"Stepped cylinder lost its quads");
+            for(size_t i=0;i<cell.corners.size();++i) {
+                const auto a=mesh.GetUVs()[cell.corners[i].uv],b=mesh.GetUVs()[cell.corners[(i+1)%cell.corners.size()].uv];
+                area+=double(a.u)*b.v-double(b.u)*a.v;
+                BRepClass_FaceClassifier classifier(TopoDS::Face(shape),gp_Pnt2d(a.u,a.v),1.e-5*scale);
+                check(classifier.State()!=TopAbs_OUT,"Cylinder grid crossed a shoulder");
+            }
+        }
+        const double expected=pi*height-2*notch*(height-shoulder);
+        check(std::abs(std::abs(area)*.5-expected)<expected*1.e-5,"Cylinder grid lost domain area");
+        check(cells<=size_t(segments*6+16),"Tiny shoulder propagated its spacing over the entire cylinder");
+    }
+}
+
+void TestCylinderStep(const char* path, const char* output)
+{
+    CAlfaDoc document; Dom3DProjectSerializer serializer;
+    QString room,error; ProjectViewState view;
+    std::vector<std::unique_ptr<CSolid>> imported;
+    std::vector<CSolid*> bodies;
+    if (std::filesystem::path(path).extension()==".dom3d") {
+        check(serializer.Load(QString::fromLocal8Bit(path),document,room,view,error),"Cannot load cylinder fixture");
+        for (const auto& object:document.GetObjects())
+            if (auto* body=dynamic_cast<CSolid*>(object.get())) bodies.push_back(body);
+    } else {
+        StepIO io; std::string message;
+        check(io.Import(path,imported,message),message.c_str());
+        for (auto& body:imported) bodies.push_back(body.get());
+    }
+    check(!bodies.empty(),"Cylinder fixture has no solids");
+    std::filesystem::create_directories(output);
+    std::ofstream report(std::filesystem::path(output)/"surfaces.txt");
+    int body_index=0,stepped_cylinders=0;
+    const float density=qEnvironmentVariableIsSet("DOM3D_TEST_PANEL_DENSITY")
+        ? qEnvironmentVariable("DOM3D_TEST_PANEL_DENSITY").toFloat() : .6f;
+    for (auto* body:bodies) {
+        if (body->GetNumSurfaces()==0) continue; // STEP PMI curves are not meshable bodies.
+        body->MeshQuadro=true; body->MeshQuadroHoleSLX=true; body->MeshQuadroHoleDivideFace=false;
+        if(qEnvironmentVariableIsSet("DOM3D_TEST_REGULAR_PANEL")) {
+            body->MeshQuadroHoleSLX=false;body->MeshQuadroHoleDivideFace=true;
+            body->MeshQuadroTrimByPline=true;
+        }
+        if(qEnvironmentVariableIsSet("DOM3D_TEST_TRIM_OUTER_SLX")) {
+            body->MeshQuadroHoleSLX=true;body->MeshQuadroHoleDivideFace=false;body->MeshQuadroTrimByPline=true;
+        }
+        if(qEnvironmentVariableIsSet("DOM3D_TEST_DIVIDE_ONLY")) {
+            body->MeshQuadroHoleSLX=false;body->MeshQuadroHoleDivideFace=true;
+        }
+        body->ReBuldMesh(1.f/density);
+        check(body->GetNumSurfaces()>127 && body->GetSurfaceFace(127)->IsInitMesh,
+            "NIST lettering wall fell back to CAD triangulation");
+        check(body->GetSurfaceFace(127)->m_UsedRegularOuterTrim==body->MeshQuadroTrimByPline,
+            "NIST panel ignored the outer TrimByPline switch");
+        const auto completion=lowpoly::CompleteWithTriangles(*body,1.f/density);
+        check(completion.complete(),"Cylinder fixture rebuild failed");
+        std::cout<<"Retained="<<completion.retained<<" fallback="<<completion.triangulated.size()<<'\n';
+        for (int i=0;i<body->GetNumSurfaces();++i) {
+            auto* surface=body->GetSurfaceFace(i);
+            check(surface && surface->pMesh3D,"Cylinder fixture missing mesh");
+            BRepAdaptor_Surface geometry(TopoDS::Face(surface->m_Face));
+            double u0,u1,v0,v1; BRepTools::UVBounds(TopoDS::Face(surface->m_Face),u0,u1,v0,v1);
+            const auto name=std::to_string(body_index)+"_"+std::to_string(i);
+            surface->pMesh3D->ExportToObj((std::filesystem::path(output)/(name+".obj")).string());
+            if(i==127) {
+                const auto& mesh=*surface->pMesh3D;
+                std::vector<std::vector<SurfacePatchPoint>> loops;
+                size_t outer=0;double largest=0;
+                for(const auto& boundary:surface->m_LastIslandBoundariesUV) {
+                    std::vector<SurfacePatchPoint> loop;double area=0;
+                    for(size_t k=0;k<boundary.size();++k) {
+                        const auto a=boundary[k],b=boundary[(k+1)%boundary.size()];
+                        loop.push_back({a.x,a.y});area+=a.x*b.y-a.y*b.x;
+                    }
+                    if(std::abs(area)>largest){largest=std::abs(area);outer=loops.size();}
+                    loops.push_back(std::move(loop));
+                }
+                std::vector<Vec3> points;
+                for(const auto uv:mesh.GetUVs())points.push_back({uv.u,uv.v,0});
+                auto cells=mesh.GetFaces();size_t quads=0,triangles=0;
+                for(auto& cell:cells)if(!cell.deleted) {
+                    if(cell.corners.size()==4)++quads;else ++triangles;
+                    for(auto& corner:cell.corners)corner.v=corner.uv;
+                }
+                CMesh3D flat;
+                check(flat.SetGeometry(std::move(points),std::move(cells)),"NIST lettering UV mesh invalid");
+                if(body->MeshQuadroTrimByPline) {
+                    std::set<size_t> used;
+                    for(const auto& cell:flat.GetFaces())if(!cell.deleted)for(auto corner:cell.corners)used.insert(corner.v);
+                    // Grid intersections may subdivide a CAD segment, but may
+                    // neither move it nor introduce an unmatched interior edge.
+                    for(auto& loop:loops) {
+                        std::vector<SurfacePatchPoint> split;
+                        for(size_t k=0;k<loop.size();++k) {
+                            const auto a=loop[k],b=loop[(k+1)%loop.size()];
+                            const double dx=b.u-a.u,dy=b.v-a.v,len2=dx*dx+dy*dy;
+                            std::vector<std::pair<double,SurfacePatchPoint>> nodes{{0,a}};
+                            for(const auto index:used) {
+                                const auto p=flat.GetVertices()[index];
+                                const double t=((p.x-a.u)*dx+(p.y-a.v)*dy)/len2;
+                                if(t>1.e-5 && t<1-1.e-5
+                                    && std::hypot(p.x-a.u-t*dx,p.y-a.v-t*dy)<1.e-4)
+                                    nodes.push_back({t,{p.x,p.y}});
+                            }
+                            std::sort(nodes.begin(),nodes.end(),[](const auto& x,const auto& y){return x.first<y.first;});
+                            double previous=-1;
+                            for(const auto& node:nodes)if(node.first-previous>1.e-5){split.push_back(node.second);previous=node.first;}
+                        }
+                        double scale=1;for(auto p:split)scale=std::max({scale,std::abs(p.u),std::abs(p.v)});
+                        const auto key=[&](SurfacePatchPoint p){return std::make_pair(std::llround(double(float(p.u))/(scale*2.e-6)),std::llround(double(float(p.v))/(scale*2.e-6)));};
+                        loop.clear();for(auto p:split)if(loop.empty() || key(loop.back())!=key(p))loop.push_back(p);
+                        if(loop.size()>1 && key(loop.front())==key(loop.back()))loop.pop_back();
+                    }
+                }
+                flat.ExportToObj((std::filesystem::path(output)/"panel-uv.obj").string());
+                std::ofstream contour_report(std::filesystem::path(output)/"panel-loops.txt");
+                contour_report.precision(17);contour_report<<outer<<'\n';
+                for(const auto& loop:loops){contour_report<<loop.size()<<'\n';for(auto p:loop)contour_report<<p.u<<' '<<p.v<<'\n';}
+                contour_report.close();
+                check(loops.size()>=3 && quadro::ValidatePlanarTrim(loops,outer,flat),
+                    "NIST lettering lost a boundary, area, convexity or manifold topology");
+                check(quads>triangles,"NIST lettering recovery did not retain a quad majority");
+                std::cout<<"NIST lettering: "<<quads<<" quads, "<<triangles<<" triangles, validated contours\n";
+            }
+            if (geometry.GetType()==GeomAbs_Cylinder && surface->GetPreparedPolylineCount()==8
+                && std::abs(geometry.Cylinder().Radius()-22.225)<1.e-4 && std::abs(v1-v0-38.1)<1.e-4) {
+                ++stepped_cylinders;
+                const auto& mesh=*surface->pMesh3D;
+                size_t cells=0;double area=0;
+                for(const auto& cell:mesh.GetFaces())if(!cell.deleted) {
+                    ++cells;if(!body->MeshQuadroTrimByPline)
+                        check(cell.corners.size()==4,"NIST stepped cylinder contains non-quads");
+                    for(size_t j=0;j<cell.corners.size();++j) {
+                        const auto a=mesh.GetUVs()[cell.corners[j].uv],b=mesh.GetUVs()[cell.corners[(j+1)%cell.corners.size()].uv];
+                        area+=double(a.u)*b.v-double(b.u)*a.v;
+                        BRepClass_FaceClassifier classifier(TopoDS::Face(surface->m_Face),gp_Pnt2d(a.u,a.v),1.e-5);
+                        check(classifier.State()!=TopAbs_OUT,"NIST cylinder cells escaped the CAD boundary");
+                    }
+                }
+                GProp_GProps properties;BRepGProp::SurfaceProperties(surface->m_Face,properties);
+                check(std::abs(std::abs(area)*.5*geometry.Cylinder().Radius()-properties.Mass())<properties.Mass()*1.e-5,
+                    "NIST cylinder mesh lost CAD area");
+                check(cells<=size_t(body->MeshQuadroTrimByPline?300:64),"NIST cylinder still has excessive narrow strips");
+            }
+            report<<name<<" type="<<int(geometry.GetType())<<" qty="<<surface->m_QtyU<<","<<surface->m_QtyV
+                <<" uv="<<u0<<","<<u1<<","<<v0<<","<<v1;
+            if (geometry.GetType()==GeomAbs_Cylinder) report<<" R="<<geometry.Cylinder().Radius();
+            report<<" edges:";
+            for (int e=0;e<surface->GetPreparedPolylineCount();++e) {
+                TopoDS_Edge edge; if (!surface->GetPreparedTopoEdge(e,edge)) continue;
+                double first,last; auto curve=BRep_Tool::CurveOnSurface(edge,TopoDS::Face(surface->m_Face),first,last);
+                if (curve.IsNull()) continue;
+                const auto a=curve->Value(first),b=curve->Value(last);
+                report<<" ["<<surface->GetPreparedPolylinePointCount(e)<<":"<<a.X()<<","<<a.Y()<<"->"<<b.X()<<","<<b.Y()<<"]";
+            }
+            report<<'\n';
+        }
+        if(body->MeshQuadroTrimByPline) {
+            using Key=std::array<long long,3>;using Edge=std::pair<Key,Key>;
+            const auto key=[](Vec3 p){return Key{std::llround(p.x*1000.),std::llround(p.y*1000.),std::llround(p.z*1000.)};};
+            std::map<Edge,int> all_edges,panel_edges;
+            for(int i=0;i<body->GetNumSurfaces();++i) {
+                const auto& mesh=*body->GetSurfaceFace(i)->pMesh3D;
+                for(const auto& cell:mesh.GetFaces())if(!cell.deleted)
+                    for(size_t k=0;k<cell.corners.size();++k) {
+                        auto a=key(mesh.GetVertices()[cell.corners[k].v]),b=key(mesh.GetVertices()[cell.corners[(k+1)%cell.corners.size()].v]);
+                        const Edge edge=std::minmax(a,b);++all_edges[edge];if(i==127)++panel_edges[edge];
+                    }
+            }
+            for(const auto& [edge,count]:panel_edges)if(count==1)
+                check(all_edges[edge]==2,"Regular panel has an unmatched neighbour boundary");
+        }
+        ++body_index;
+    }
+    check(stepped_cylinders==4,"NIST regression must exercise all four stepped cylinders");
+    std::cout<<"Four NIST stepped cylinders: bounded spacing and complete CAD coverage\n";
+}
+
+void TestRibQuadro(const char* path, const char* output)
+{
+    CAlfaDoc doc; Dom3DProjectSerializer serializer;
+    QString room,error; ProjectViewState view;
+    check(serializer.Load(QString::fromLocal8Bit(path),doc,room,view,error),"Cannot load Rib fixture");
+    CSolid* solid=nullptr;
+    for(const auto& object:doc.GetObjects())if(auto* body=dynamic_cast<CSolid*>(object.get())) {
+        check(!solid,"Expected one Rib solid");solid=body;
+    }
+    check(solid && solid->GetNumSurfaces()==15,"Rib fixture topology changed");
+    solid->MeshQuadro=true;solid->MeshQuadroHoleSLX=false;
+    for(float density:{.2f,1.f,.5f}) {
+        check(solid->ReBuldMesh(1/density),"Rib still needs triangle fallback");
+        using Key=std::array<long long,3>;
+        std::map<std::pair<Key,Key>,int> edges;
+        const auto key=[](const Vec3& p){return Key{std::llround(p.x*1000.),std::llround(p.y*1000.),std::llround(p.z*1000.)};};
+        for(int i=0;i<solid->GetNumSurfaces();++i) {
+            const auto* s=solid->GetSurfaceFace(i);
+            check(s->IsInitMesh && s->pMesh3D && !s->pMesh3D->GetFaces().empty(),"Missing Rib face mesh");
+            const auto& vertices=s->pMesh3D->GetVertices();
+            for(const auto& f:s->pMesh3D->GetFaces())if(!f.deleted) {
+                if(i==12)check(f.corners.size()==4,"Rib front face is not quad meshed");
+                for(size_t k=0;k<f.corners.size();++k) {
+                    auto a=key(vertices[f.corners[k].v]),b=key(vertices[f.corners[(k+1)%f.corners.size()].v]);
+                    check(a!=b,"Rib has a collapsed mesh edge");if(b<a)std::swap(a,b);++edges[{a,b}];
+                }
+            }
+        }
+        for(const auto& e:edges)check(e.second==2,"Rib contains an open seam or nonmanifold edge");
+        std::cout<<"Rib density="<<density<<": 15 meshed faces, closed seams, no triangle fallback\n";
+    }
+    std::vector<const CMesh3D*> parts;
+    for(int i=0;i<solid->GetNumSurfaces();++i)parts.push_back(solid->GetSurfaceFace(i)->pMesh3D);
+    auto mesh=CMesh3D::CreateWelded(parts);check(bool(mesh),"Cannot create Rib Low Poly snapshot");
+    mesh->SetName("Rib - Quadro 0.50");solid->SetVisible(false);
+    const auto* saved=mesh.get();doc.AddMesh(std::move(mesh));
+    QTemporaryDir temp;
+    const QString destination=output?QString::fromLocal8Bit(output):temp.filePath("Rib.dom3d");
+    check(serializer.Save(destination,doc,room,view,{},error),"Cannot save Rib mesh");
+    CAlfaDoc loaded;check(serializer.Load(destination,loaded,room,view,error),"Cannot reopen Rib mesh");
+    const auto* reopened=dynamic_cast<CMesh3D*>(loaded.GetObjects().back().get());
+    check(reopened && saved->GetVertices().size()==reopened->GetVertices().size()
+        && saved->GetFaces().size()==reopened->GetFaces().size(),"Saved Rib mesh topology changed");
+    for(size_t i=0;i<saved->GetVertices().size();++i) {
+        const auto delta=saved->GetVertices()[i]-reopened->GetVertices()[i];check(dot(delta,delta)<1.e-10,"Saved Rib coordinates changed");
+    }
+}
+
+void TestPeriodicBandMesh(const char* path, const char* output)
+{
+    CAlfaDoc doc; Dom3DProjectSerializer serializer;
+    QString room,error; ProjectViewState view;
+    check(serializer.Load(QString::fromLocal8Bit(path),doc,room,view,error),"Cannot load periodic band fixture");
+    int tested=0;
+    std::unique_ptr<CMesh3D> snapshot;
+    for(const auto& object:doc.GetObjects())if(auto* solid=dynamic_cast<CSolid*>(object.get())) {
+        ++tested;
+        const auto verify=[&]() {
+            using Key=std::array<long long,3>;
+            std::map<std::pair<Key,Key>,int> edgeUse;
+            int bandCount=0;
+            for(int i=0;i<solid->GetNumSurfaces();++i) {
+                const auto* s=solid->GetSurfaceFace(i);check(s && s->pMesh3D,"Missing surface mesh");
+                const auto face=TopoDS::Face(s->m_Face);BRepAdaptor_Surface a(face);
+                double u0,u1,v0,v1;BRepTools::UVBounds(face,u0,u1,v0,v1);
+                const bool band=(a.GetType()==GeomAbs_Torus || a.GetType()==GeomAbs_Cylinder) && std::abs(u1-u0-2*std::acos(-1.))<1.e-6;
+                bandCount+=band;
+                const auto& vertices=s->pMesh3D->GetVertices();
+                const auto key=[](const Vec3& p){return Key{std::llround(p.x*100.),std::llround(p.y*100.),std::llround(p.z*100.)};};
+                for(const auto& f:s->pMesh3D->GetFaces())if(!f.deleted) {
+                    check(f.corners.size()>=3,"Invalid mesh face");
+                    for(size_t k=0;k<f.corners.size();++k) {
+                        auto p=key(vertices[f.corners[k].v]),q=key(vertices[f.corners[(k+1)%f.corners.size()].v]);
+                        check(p!=q,"Collapsed mesh edge");if(q<p)std::swap(p,q);++edgeUse[{p,q}];
+                    }
+                    if(!band)continue;
+                    check(f.corners.size()==4,"Periodic band contains non-quads");
+                    const auto p=vertices[f.corners[0].v],q=vertices[f.corners[1].v],r=vertices[f.corners[2].v],t=vertices[f.corners[3].v];
+                    const auto n=cross(q-p,r-p);
+                    check(dot(n,cross(r-p,t-p))>0,"Folded periodic quad");
+                    const auto center=(p+q+r+t)*.25f;
+                    double u,v;
+                    if(a.GetType()==GeomAbs_Torus)ElSLib::Parameters(a.Torus(),gp_Pnt(center.x,center.y,center.z),u,v);
+                    else ElSLib::Parameters(a.Cylinder(),gp_Pnt(center.x,center.y,center.z),u,v);
+                    u+=std::round(((u0+u1)*.5-u)/(2*std::acos(-1.)))*2*std::acos(-1.);
+                    if(a.GetType()==GeomAbs_Torus)v+=std::round(((v0+v1)*.5-v)/(2*std::acos(-1.)))*2*std::acos(-1.);
+                    BRepClass_FaceClassifier classifier(face,gp_Pnt2d(u,v),1.e-6);
+                    check(classifier.State()==TopAbs_IN || classifier.State()==TopAbs_ON,"Band quad outside CAD face");
+                    gp_Pnt point;gp_Vec du,dv;a.D1(u,v,point,du,dv);auto normal=du.Crossed(dv);
+                    if(face.Orientation()==TopAbs_REVERSED)normal.Reverse();
+                    check(normal.Dot(gp_Vec(n.x,n.y,n.z))>0,"Reversed band winding");
+                    for(const auto& c:f.corners) {
+                        const auto xyz=vertices[c.v];const auto uv=s->pMesh3D->GetUVs()[c.uv];
+                        check(a.Value(uv.u,uv.v).Distance(gp_Pnt(xyz.x,xyz.y,xyz.z))<.002,"Band vertex left CAD surface");
+                    }
+                }
+            }
+            check(bandCount==3,"Fixture lost its cylinder and two torus bands");
+            for(const auto& e:edgeUse)check(e.second==2,"Open edge, T-junction, or nonmanifold periodic boss");
+        };
+        solid->MeshQuadro=true;solid->MeshQuadroHoleSLX=false;
+        for(float density:{.2f,1.f,.5f}) {
+            check(solid->ReBuldMesh(1/density),"Periodic boss rebuild failed");verify();
+            std::cout<<"Periodic boss density="<<density<<": quad bands, closed, CAD-conforming, consistent winding\n";
+        }
+        std::vector<const CMesh3D*> parts;
+        for(int i=0;i<solid->GetNumSurfaces();++i)parts.push_back(solid->GetSurfaceFace(i)->pMesh3D);
+        snapshot=CMesh3D::CreateWelded(parts);
+        check(bool(snapshot),"Cannot create Low Poly snapshot");
+        snapshot->SetName("Box And Cylinder - Quadro 0.50");
+        solid->SetVisible(false);
+    }
+    check(tested==1,"Expected one imported solid");
+    const auto* savedMesh=snapshot.get();
+    doc.AddMesh(std::move(snapshot));
+    QTemporaryDir temp;
+    const QString destination=output?QString::fromLocal8Bit(output):temp.filePath("periodic-bands.dom3d");
+    check(serializer.Save(destination,doc,room,view,{},error),"Cannot save repaired periodic bands");
+    CAlfaDoc loaded;
+    check(serializer.Load(destination,loaded,room,view,error),"Cannot reopen repaired periodic bands");
+    const auto* reopened=dynamic_cast<CMesh3D*>(loaded.GetObjects().back().get());
+    check(reopened && savedMesh->GetVertices().size()==reopened->GetVertices().size()
+        && savedMesh->GetFaces().size()==reopened->GetFaces().size(),"Saved mesh topology changed");
+    for(size_t k=0;k<savedMesh->GetVertices().size();++k) {
+        const auto d=savedMesh->GetVertices()[k]-reopened->GetVertices()[k];check(dot(d,d)<1.e-8,"Saved mesh coordinates changed");
+    }
+}
 
 void TestPeriodicBSpline(const char* path)
 {
@@ -141,14 +507,16 @@ void TestPeriodicBSpline(const char* path)
     check(copied && copied->UsesLegacyClosedInterpolation(),"Clone lost legacy mode");
     std::vector<CPoint3d> old_points;
     for(int i=0;i<=40;++i)old_points.push_back(legacy->Evaluate(i/40.f));
-    const auto new_index=doc.GetObjects().size(); doc.AddObject(curve.Clone());
+    doc.AddObject(curve.Clone());
+    const auto periodic_id=doc.GetObjects().back()->m_id;
     QTemporaryDir temp;
     check(serializer.Save(temp.filePath("curves.dom3d"),doc,room,view,QImage(),error),"Cannot save curve project");
     CAlfaDoc loaded;
     check(serializer.Load(temp.filePath("curves.dom3d"),loaded,room,view,error),"Cannot reload curve project");
     legacy=dynamic_cast<CBSpline*>(loaded.FindObjectById(7));
+    check(legacy != nullptr,"Legacy curve missing after roundtrip");
     for(int i=0;i<=40;++i)check(points_close(legacy->Evaluate(i/40.f),old_points[i]),"Legacy shape changed after roundtrip");
-    auto* periodic=dynamic_cast<CBSpline*>(loaded.GetObjects()[new_index].get());
+    auto* periodic=dynamic_cast<CBSpline*>(loaded.FindObjectById(periodic_id));
     check(periodic && !periodic->UsesLegacyClosedInterpolation() && points_close(periodic->Evaluate(0),{10,2,0}),"Project lost periodic mode");
     legacy->Open(); legacy->Close();
     check(!legacy->UsesLegacyClosedInterpolation(),"Explicit reclosure must use the new mode");
@@ -360,8 +728,12 @@ void TestFilletMeshNormals(const char* path)
         auto* solid=dynamic_cast<CSolid*>(object.get());
         if(!solid)continue;
         check(solid->InitSurfaces(),"Cannot initialize fillet faces");
-        solid->MeshQuadro=false;
-        for(float deflection:{0.25f,1.f,5.f}) {
+        for(int mode : {0,1,2}) {
+        solid->MeshQuadro=mode!=0;
+        solid->MeshQuadroHoleSLX=mode==2;
+        const std::vector<float> deflections = mode==0
+            ? std::vector<float>{0.25f,1.f,5.f} : std::vector<float>{5.f,2.f,1.f};
+        for(float deflection:deflections) {
         check(solid->ReBuldMesh(deflection),"Cannot rebuild hybrid fillet mesh");
         for(int i=0;i<solid->GetNumSurfaces();++i) {
             auto* face=solid->GetSurfaceFace(i);
@@ -371,23 +743,35 @@ void TestFilletMeshNormals(const char* path)
             const auto& mesh=*face->pMesh3D;
             int wrong=0,checked=0;
             for(const auto& cell:mesh.GetFaces()) {
-                if(cell.deleted||cell.corners.size()!=3)continue;
+                if(cell.deleted||cell.corners.size()<3)continue;
                 const auto a=mesh.GetVertices()[cell.corners[0].v];
                 const auto b=mesh.GetVertices()[cell.corners[1].v];
                 const auto c=mesh.GetVertices()[cell.corners[2].v];
                 const gp_Vec n=gp_Vec(gp_Pnt(a.x,a.y,a.z),gp_Pnt(b.x,b.y,b.z)).Crossed(gp_Vec(gp_Pnt(a.x,a.y,a.z),gp_Pnt(c.x,c.y,c.z)));
-                if(n.SquareMagnitude()<1.e-20)continue;
+                // A collapsed pole side can make the first triangle of a
+                // quad degenerate. Its corner normals still reach rendering.
                 for(const auto& corner:cell.corners) {
                     check(corner.n<mesh.GetNormals().size(),"Missing corner normal");
                     const auto normal=mesh.GetNormals()[corner.n];
+                    const auto vertex=mesh.GetVertices().at(corner.v);
+                    gp_Vec radial(cad.Sphere().Location(),gp_Pnt(vertex.x,vertex.y,vertex.z));
+                    radial.Normalize();
+                    if(!cad.Sphere().Position().Direct())radial.Reverse();
+                    if(face->m_Face.Orientation()==TopAbs_REVERSED)radial.Reverse();
+                    check(radial.Dot(gp_Vec(normal.x,normal.y,normal.z))>0.9999,
+                          "Spherical fillet normal differs from analytic radial normal");
                     ++checked;
-                    if(n.Dot(gp_Vec(normal.x,normal.y,normal.z))<=0)++wrong;
+                    // Preserve the triangulator winding regression. Quadro's
+                    // normals are checked independently against the CAD sphere
+                    // above, including cells with collapsed pole sides.
+                    if(mode==0 && n.SquareMagnitude()>=1.e-20 && n.Dot(gp_Vec(normal.x,normal.y,normal.z))<=0)++wrong;
                 }
             }
             std::cout<<"sphere face="<<i<<" direct="<<cad.Sphere().Position().Direct()<<" reversed="<<(face->m_Face.Orientation()==TopAbs_REVERSED)<<" checked="<<checked<<" wrong="<<wrong<<std::endl;
             failures+=wrong;
             if(checked>0)++triangulated;
         }
+    }
     }
     }
     check(spherical>=4&&triangulated>=12,"Missing triangulated rounded corners in fixture");

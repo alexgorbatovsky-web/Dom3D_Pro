@@ -1,3 +1,4 @@
+#include "Diagnostics.h"
 // Circle3D.cpp : implementation file
 //
 //	This is a part of the CAD/CAM/CAE "Alpha".
@@ -301,6 +302,7 @@ void CCircle3D::mod_coord_ma(CSystemCoord* sc)
 
 void CCircle3D::print(FILE* strm)
 {
+    if (!Dom3DDiagnosticsEnabled && !strm) return;
 if(this==NULL)
     return;
 	int file_null=0;
@@ -329,6 +331,7 @@ if(this==NULL)
 
 void CCircle3D::print(LPCTSTR text, FILE* strm)
 {
+    if (!Dom3DDiagnosticsEnabled && !strm) return;
 if(this==NULL)
     return;
 	CString str;

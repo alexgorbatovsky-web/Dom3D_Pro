@@ -627,7 +627,7 @@ void QtSceneRenderer::DrawTransformGizmo(const CAlfaDoc& document,
     }
     glEnd();
 
-    if (operation == TransformOperation::Move) {
+    if (operation == TransformOperation::Move || operation == TransformOperation::Universal) {
         glLineWidth(3.2f);
         glBegin(GL_LINES);
         for (TransformAxis axis : axes) {
@@ -644,9 +644,13 @@ void QtSceneRenderer::DrawTransformGizmo(const CAlfaDoc& document,
             camera_up,
             size * TransformGizmoGeometry::kMoveCenterRingRadiusScale,
             highlighted_axis == TransformAxis::ScreenPlane);
+    }
+    if (operation == TransformOperation::Universal) {
+        draw_center_cube(center, size * .075f, highlighted_axis == TransformAxis::UniformScale);
     } else if (operation == TransformOperation::Scale) {
         draw_center_cube(center, size * 0.075f, highlighted_axis == TransformAxis::UniformScale);
-    } else if (operation == TransformOperation::Rotate) {
+    }
+    if (operation == TransformOperation::Rotate || operation == TransformOperation::Universal) {
         glLineWidth(4.0f);
         for (TransformAxis axis : axes) {
             const Vec3 direction = axis_vector(axis);

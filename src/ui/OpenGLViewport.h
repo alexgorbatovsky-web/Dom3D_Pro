@@ -1,11 +1,17 @@
+class TopoDS_Face;
 #pragma once
 
 #include "QtSceneRenderer.h"
 #include "ToolRegistry.h"
+#include "../SurfaceFilletNormalGuide.h"
+#include <memory>
+struct Body1Settings;
+#include <QElapsedTimer>
 
 #include "../Material.h"
 #include "../Dimens.h"
 #include "../Point3d.h"
+#include "../SketchGeometry.h"
 
 #include <QOpenGLWidget>
 #include <QColor>
@@ -14,6 +20,7 @@
 #include <QString>
 #include <QStringList>
 
+#include <array>
 #include <cstddef>
 #include <vector>
 
@@ -25,6 +32,8 @@ class CSmartLine;
 class OpenGLViewport : public QOpenGLWidget {
     Q_OBJECT
     friend int TestScenePersistence(int argc, char** argv);
+    friend int TestMultiSketch(int argc, char** argv);
+    friend int TestSolidPrimitiveTool(int argc, char** argv);
 
 public:
     enum class SpatialCurvePreviewKind {
@@ -38,6 +47,7 @@ public:
     enum class SnapTarget { Grid, AuxLine, Knot, Line, AuxLine45, WorkPlane, Surface, Count };
     bool IsSnapTargetEnabled(SnapTarget target) const;
     void SetSnapTargetEnabled(SnapTarget target, bool enabled);
+    void SetSolidBoxCentered(bool centered);
 
     enum class SketchPlane {
         XY,
@@ -48,6 +58,7 @@ public:
     explicit OpenGLViewport(QWidget* parent = nullptr);
 
     void SetDocument(CAlfaDoc* document);
+    void RemapObjectIndices(const std::vector<unsigned long>& previous_ids);
     void SetTool(ToolMode tool);
     void SetDrawSplineSimplification(int percent);
     void SetTransformOperation(TransformOperation operation);
@@ -60,6 +71,8 @@ public:
                                  float rotation_angle_degrees = 0.0f,
                                  Vec3 custom_rotation_axis = {});
     void ClearTransformDialogGuide();
+    void SetSubdivisionPreview(const TopoDS_Face& face,int u,int v);
+    void ClearSubdivisionPreview();
     void BeginFaceExtrudeTool(double taper_angle_degrees = 0.0);
     void BeginDraftFaceTool();
     void BeginThickSolidTool(double thickness);
@@ -117,13 +130,21 @@ public:
     void SetSketchRectangleTool();
     void SetSketchPolylineTool();
     void SetSketchBezierTool();
+    // 1: circle, 2: ellipse, 3: regular polygon.
+    void SetSketchShapeTool(int kind, int sides = 6);
     void BeginSketchConvertLineToBezier();
     void BeginSketchConvertLineToArc();
     void BeginSketchFillet(double radius);
     void BeginSketchConstraintHorizontal();
     void BeginSketchConstraintVertical();
-    void BeginSketchConstraintTangentStart();
-    void BeginSketchConstraintTangentEnd();
+    bool IsCurveNodeEditing() const { return tool_==ToolMode::EditPoint || (tool_==ToolMode::Select && editing_polyline_); }
+    bool IsCurvePointDragging() const { return dragging_polyline_point_; }
+    bool ApplyCurvePointCoordinates(CPoint3d point);
+    void BeginSketchUnion();
+    void BeginSketchCut();
+    void BeginSketchBoolean(BooleanOperation operation);
+    void BeginSketchSmoothJoint();
+    void BeginSketchSharpJoint();
     void SetSketchFilletRadius(double radius);
     void BeginSolidBoxRectangle(SketchPlane plane);
     void BeginSolidBoxFaceSelection();
@@ -131,6 +152,15 @@ public:
     void BeginSolidCylinderFaceSelection();
     void SetSolidPrimitivePlacement(SketchPlane plane, bool on_face);
     void SetReferencePlaneSelection(bool enabled);
+    bool IsOriginPlaneVisible(int plane) const;
+    void SetOriginPlaneVisible(int plane, bool visible);
+    void SelectOriginPlane(int plane);
+    int SelectedOriginPlane() const { return selected_origin_plane_; }
+    void SetWorkPlane(Vec3 origin, Vec3 normal, unsigned long source_object_id = 0);
+    bool RefreshWorkPlane();
+    void ClearWorkPlane();
+    bool IsWorkPlane(Vec3 origin, Vec3 normal) const;
+
     void SetSolidDimensionEdit(
         const ActiveParametricObject& active_object,
         const QString& primary_parameter = {});
@@ -139,6 +169,9 @@ public:
         size_t primary_operation_index);
     void SetCabinetPreviewVisible(bool visible);
     void ClearSolidDimensionEdit();
+    void SetBottleModelEdit(const ActiveParametricObject& active);
+    void SetSurfaceFilletNormals(std::vector<SurfaceFilletNormalGuide> guides);
+    bool GetSurfaceSelectionPoint(unsigned long id,int face,CPoint3d& point) const;
     void BeginPickXYPoint(const QString& prompt = {});
     void BeginPick3DPoint(const QString& prompt = {});
     void BeginSpatialCurvePreview(SpatialCurvePreviewKind kind);
@@ -148,12 +181,17 @@ public:
     void BeginPickSolidSurface(unsigned long object_id);
     void CancelSolidSurfacePick();
     void SetSheetBendGuide(const std::vector<CPoint3d>& arc);
+    void SetSurfaceSplitPreview(std::vector<CPoint3d> points);
+    void SetSurfaceAlignmentPreview(std::vector<std::vector<CPoint3d>> lines);
     void BeginPick3DPointOnObject(unsigned long object_id, const QString& prompt = {});
     void BeginPick3DPointOnPlane(CPoint3d plane_origin,
                                  Vec3 plane_normal,
                                  const QString& prompt = {});
     void BeginPickArchitectureWall(const QString& prompt = {});
     void CancelArchitectureWallPick();
+    bool ProjectWorldPoint(Vec3 point, QPoint& screen) const;
+    bool PickSurfacePoint(const QPoint& screen, CPoint3d& point, unsigned long id) const { return PickVisibleSurface(screen,point,id); }
+    void SetSurfaceBoundaryHandles(std::vector<CPoint3d> points,int selected=-1) { surface_boundary_handles_=std::move(points);surface_boundary_selected_=selected;update(); }
     void SetPointPickMarkers(const std::vector<CPoint3d>& points);
     void ClearPointPickMarkers();
     bool TakeSketchEditChange(unsigned long& id, std::shared_ptr<CSmartLine>& before, std::shared_ptr<CSmartLine>& after);
@@ -180,9 +218,12 @@ public:
 
 signals:
     void FirstFrameRendered();
+    void DraftFaceEditStarted();
+    void DraftFaceEditFinished(bool accepted);
     void DocumentChanged();
     void SelectionChanged();
     void CurveNodeDeleteRequested();
+    void CurveNodeTypeCycleRequested();
     void SelectionConfirmed();
     void SelectionCommandCanceled();
     void StatusTextChanged(const QString& text);
@@ -212,7 +253,11 @@ signals:
     void ReferencePlaneSelectionCanceled();
     void SolidCylinderCircleFinished(std::vector<ToolParameter> parameters);
     void SketchFaceSelectionFinished(bool selected);
+    void BottleModelDragStarted(unsigned long object_id);
+    void BottleModelDragFinished(bool canceled);
+    void BottleModelValueChanged(unsigned long object_id, int graph, int knot, double value);
     void SolidDimensionEditRequested(int operation_index, QString parameter_id, double current_value);
+    void CylinderCenterChanged(int operation_index, CPoint3d origin, bool finished);
     void SolidDimensionGripChanged(int operation_index, QString parameter_id, double value, bool finished, bool move_base = false);
     void EdgeQuickMenuRequested(QPoint global_position);
     void FaceQuickMenuRequested(QPoint global_position);
@@ -228,6 +273,7 @@ protected:
     void initializeGL() override;
     void resizeGL(int width, int height) override;
     void paintGL() override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseDoubleClickEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
@@ -254,6 +300,15 @@ private:
     QPolygonF ReferencePlanePolygon(int plane) const;
     int HitReferencePlane(const QPoint& point) const;
     void DrawReferencePlanes();
+    std::array<bool, 3> origin_planes_visible_{{false, false, false}};
+    int selected_origin_plane_ = -1;
+    bool work_plane_assigned_ = false;
+    unsigned long work_plane_source_id_ = 0;
+    bool ResolveWorkPlane();
+    Vec3 work_plane_origin_{};
+    Vec3 work_plane_normal_{0, 0, 1};
+    bool ReferencePlanePickerActive() const;
+    void ApplyWorkPlaneFrame();
     bool reference_plane_pending_ = false;
     bool reference_plane_dialog_ = false;
     int hovered_reference_plane_ = -1;
@@ -269,7 +324,8 @@ private:
         Node,
         Fillet,
         BezierControl,
-        ArcControl
+        ArcControl,
+        Primitive
     };
 
     void SelectAt(const QPoint& point, SelectionAction action);
@@ -288,16 +344,30 @@ private:
     void HandleSketchBezierClick(const QPoint& point);
     void HandleSketchConvertLineToBezierClick(const QPoint& point);
     void HandleSketchConvertLineToArcClick(const QPoint& point);
-    void HandleSolidBoxRectangleClick(const QPoint& point);
+    void HandleSolidBoxRectangleClick(const QPoint& point, Qt::KeyboardModifiers modifiers = Qt::NoModifier);
+    void ConstrainPrimitiveBase(CPoint3d& point, Qt::KeyboardModifiers modifiers) const;
+    bool UpdatePrimitiveBase(const QPoint& point, Qt::KeyboardModifiers modifiers);
+    void UpdatePrimitiveHeight(const QPoint& point);
+    void FinishPrimitiveCreation();
+    void DrawPrimitiveHeightPreview();
     void HandleSolidCylinderCircleClick(const QPoint& point);
     void HandleSketchFilletClick(const QPoint& point);
+    void HandleSketchBooleanClick(const QPoint& point);
     void HandleSketchConstraintClick(const QPoint& point);
     bool ScreenToSketchPlane(const QPoint& point, CPoint3d& result) const;
     void ReprojectSolidPrimitiveAnchor();
     bool SnapCreationPoint(const QPoint& point,
                            CPoint3d& result,
                            bool require_sketch_plane) const;
+    bool PickPointOnPlane(const QPoint& point, Vec3 origin, Vec3 normal,
+                          CPoint3d& result, bool* snapped = nullptr) const;
+    CSolid* PickArchitecturePoint(const QPoint& point, CPoint3d& result,
+                                 bool* snapped = nullptr) const;
+    bool PickRequestedPoint(const QPoint& point, CPoint3d& result, bool* snapped = nullptr) const;
     bool PickModelingPoint(const QPoint& point, CPoint3d& result) const;
+    void UpdateTangentHover(const QPoint& point, bool eligible);
+    bool PickNavigationPoint(const QPoint& point, Vec3& result) const;
+    Vec3 NavigationSceneCenter() const;
     bool HitTestRotationAxisLine(
         const QPoint& point, Vec3& start, Vec3& end) const;
     void DrawRotationAxisPickPreview();
@@ -315,6 +385,22 @@ private:
     bool IsNearSelectedSketchFirstPoint(const QPoint& point) const;
     bool CommitSketchPolyline(bool closed);
     bool CommitSketchBezier();
+    bool CreateSessionPolyline(const std::vector<CPoint3d>& points, bool closed);
+    bool StoreSketchContour(const CSmartLine& contour);
+    void HandleSketchShapeClick(const QPoint& point);
+    std::unique_ptr<CSmartLine> BuildSketchShape(CPoint3d cursor) const;
+    int sketch_shape_kind_ = 0;
+    bool sketch_shape_circle_ = false;
+    int sketch_polygon_sides_ = 6;
+    std::vector<CPoint3d> sketch_shape_points_;
+    CSmartLine* EditableSketch() const;
+    void PickSketchContour(const QPoint& point);
+    void NotifyDocumentChanged();
+    mutable unsigned long edit_sketch_parent_id_ = 0;
+    mutable std::uint64_t edit_contour_id_ = 0;
+    mutable const CSmartLine* edit_contour_source_ = nullptr;
+    mutable std::shared_ptr<CSmartLine> edit_contour_;
+    mutable SketchRevisions edit_contour_revisions_{};
     void ApplyPendingSketchAttachment();
     std::vector<ToolParameter> SolidBoxParametersFromRectangle(const CPoint3d& first, const CPoint3d& second) const;
     std::vector<ToolParameter> SolidCylinderParametersFromCircle(const CPoint3d& center, const CPoint3d& radius_point) const;
@@ -338,7 +424,8 @@ private:
     void HandleMeasurePointToPointClick(const QPoint& point);
     void HandleTransformDrag(const QPoint& point, Qt::KeyboardModifiers modifiers);
     void CommitTransformDrag();
-    TransformAxis HitTestTransformGizmo(const QPoint& point) const;
+    TransformAxis HitTestTransformGizmo(const QPoint& point, TransformOperation* operation = nullptr) const;
+    TransformAxis HitTestTransformGizmoForOperation(const QPoint& point, TransformOperation operation) const;
     bool HitTestSelectedPolylineHandle(const QPoint& point, size_t* point_index = nullptr) const;
     bool HitTestSelectedSketchHandle(const QPoint& point, SketchHandleKind& kind, size_t& index) const;
     void DrawSketchEditHandles();
@@ -364,6 +451,19 @@ private:
     void DrawCoordinateAxisLabels();
     void DrawCabinetPreview();
     void DrawSolidDimensions();
+    void DrawBottleModelControls();
+    bool BottleControlPoint(int graph,double t,CPoint3d& point,double& derivative) const;
+    bool ProjectBottlePoint(CPoint3d point,QPointF& pixel) const;
+    bool BeginBottleModelDrag(const QPoint& point);
+    bool MoveBottleModelDrag(const QPoint& point,bool finish=false);
+    unsigned long bottle_model_id_=0;
+    std::shared_ptr<Body1Settings> bottle_model_settings_;
+    int bottle_drag_graph_=-1,bottle_drag_knot_=-1;
+    QPoint bottle_drag_mouse_;
+    QPointF bottle_drag_direction_;
+    double bottle_drag_start_=0,bottle_drag_current_=0;
+    QElapsedTimer bottle_drag_timer_;
+
     void DrawPointToPointMeasurement();
     void DrawPointPickMarkers();
     struct WalkRoomFootprint {
@@ -396,8 +496,11 @@ private:
     QtSceneRenderer renderer_;
     Camera camera_;
     Vec3 rotation_pivot_previous_target_{};
+    Vec3 rotation_pivot_point_{};
+    Vec3 orbit_drag_pivot_{};
     bool rotation_pivot_enabled_ = false;
     ToolMode tool_ = ToolMode::Orbit;
+    bool universal_transform_ = false;
     TransformOperation transform_operation_ = TransformOperation::Move;
     BooleanOperation boolean_operation_ = BooleanOperation::Union;
     SelectionMode selection_mode_ = SelectionMode::Object;
@@ -419,6 +522,10 @@ private:
     bool xy_plane_view_enabled_ = false;
     bool show_curve_points_ = false;
     bool dragging_transform_ = false;
+    std::vector<std::vector<Vec3>> subdivision_u_,subdivision_v_;
+    void DrawSubdivisionPreview();
+    void DrawFaceExtrudePreviewWalls();
+    std::vector<std::vector<Vec3>> face_extrude_boundary_;
     bool dragging_face_extrude_ = false;
     bool dragging_draft_face_ = false;
     bool editing_polyline_ = false;
@@ -465,10 +572,18 @@ private:
     bool picking_xy_point_ = false;
     bool picking_solid_surface_ = false;
     std::vector<CPoint3d> sheet_bend_guide_;
+    std::vector<CPoint3d> surface_split_preview_;
+    std::vector<std::vector<CPoint3d>> surface_alignment_preview_;
+    std::vector<CPoint3d> surface_boundary_handles_;
+    int surface_boundary_selected_=-1;
     bool PickSolidSurface(const QPoint& point, CPoint3d& result) const;
     bool PickVisibleSurface(const QPoint& point, CPoint3d& result,
-                            unsigned long object_id = 0) const;
+                            unsigned long object_id = 0,int face_index = -1) const;
+    unsigned long surface_pick_body_=0;
+    int surface_pick_face_=-1;
+    CPoint3d surface_pick_point_;
     void DrawSheetBendGuide();
+    void DrawSurfaceSplitPreview();
     bool picking_3d_point_ = false;
     bool point_pick_plane_enabled_ = false;
     Vec3 point_pick_plane_origin_{};
@@ -537,9 +652,22 @@ private:
     unsigned long material_drop_before_id_ = 0;
     Material material_drop_after_;
     unsigned long material_drop_after_id_ = 0;
+    unsigned long sketch_boolean_parent_ = 0;
+    std::uint64_t sketch_boolean_first_ = 0;
+    BooleanOperation sketch_boolean_operation_ = BooleanOperation::Union;
     bool sketch_active_ = false;
+    bool multi_sketch_session_ = false;
+    unsigned long multi_sketch_id_ = 0;
     bool sketch_waiting_for_face_ = false;
     bool solid_box_waiting_for_face_ = false;
+    bool solid_box_centered_ = false;
+    bool primitive_height_active_ = false;
+    bool primitive_base_pressed_ = false;
+    bool primitive_second_press_ = false;
+    QPoint primitive_press_point_;
+    QPoint primitive_height_start_;
+    double primitive_height_ = 0.0;
+    std::shared_ptr<CSolid> primitive_preview_solid_;
     unsigned long solid_box_target_body_id_ = 0;
     bool sketch_rectangle_has_first_point_ = false;
     bool sketch_rectangle_preview_valid_ = false;
@@ -553,6 +681,15 @@ private:
     bool snap_targets_[static_cast<int>(SnapTarget::Count)] = {true, true, true, true, false, false, false};
     int capture_distance_pixels_ = 6;
     bool creation_snap_active_ = false;
+    mutable bool auxiliary_guide_visible_ = false;
+    mutable bool tangent_guide_visible_ = false;
+    unsigned long active_tangent_id_ = 0;
+    bool active_tangent_start_ = false;
+    unsigned long pending_tangent_id_ = 0;
+    bool pending_tangent_start_ = false;
+    unsigned int tangent_hover_generation_ = 0;
+    mutable Vec3 auxiliary_guide_origin_{};
+    mutable Vec3 auxiliary_guide_direction_{};
     bool measurement_waiting_for_second_point_ = false;
     bool measurement_visible_ = false;
     bool measurement_preview_valid_ = false;
@@ -585,7 +722,17 @@ private:
         size_t source_index = 0;
         bool move_base = false;
     };
+    struct CylinderCenterGrip {
+        CPoint3d origin, center;
+        Vec3 local_u, local_v, world_u, world_v;
+        int operation_index = -1;
+    };
+    std::vector<CylinderCenterGrip> cylinder_center_grips_;
+    CylinderCenterGrip cylinder_center_drag_;
+    CPoint3d cylinder_center_drag_start_, cylinder_center_drag_value_;
     ActiveParametricObject solid_dimension_object_;
+    std::vector<SurfaceFilletNormalGuide> surface_fillet_normals_;
+    void DrawSurfaceFilletNormals();
     std::vector<ActiveParametricObject> solid_dimension_objects_;
     std::vector<CDimens3D> solid_dimensions_;
     std::vector<SolidDimensionHit> solid_dimension_hits_;

@@ -32,5 +32,6 @@ private:
                         float height,
                         const gp_Pnt& origin,
                         const gp_Dir& normal,
-                        const gp_Dir& u_direction) const;
+                        const gp_Dir& u_direction,
+                        double entrance_chamfer) const;
 };

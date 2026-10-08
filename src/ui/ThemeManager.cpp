@@ -26,10 +26,11 @@
 namespace Themes {
 namespace {
 struct Field { const char* key; const char* label; QColor Scheme::*member; };
-const std::array<Field, 6> fields{{
+const std::array<Field, 7> fields{{
     {"window", "Panels", &Scheme::window}, {"base", "Input fields", &Scheme::base},
     {"button", "Buttons", &Scheme::button}, {"text", "Text", &Scheme::text},
-    {"accent", "Accent", &Scheme::accent}, {"border", "Borders", &Scheme::border}
+    {"accent", "Accent", &Scheme::accent}, {"border", "Borders", &Scheme::border},
+    {"activeButton", "Active buttons", &Scheme::activeButton}
 }};
 Scheme current;
 QColor contrastingText(const QColor& color) {
@@ -41,10 +42,10 @@ QColor contrastingText(const QColor& color) {
 
 QVector<Scheme> Presets() {
     return {
-        {"light", "Studio Light", QColor("#ededf0"), QColor("#ffffff"), QColor("#e2e3e8"), QColor("#242730"), QColor("#276ac4"), QColor("#a5a9b2")},
-        {"graphite", "Graphite", QColor("#242527"), QColor("#191a1c"), QColor("#343638"), QColor("#e2e4e6"), QColor("#009e78"), QColor("#515458")},
-        {"midnight", "Midnight", QColor("#222a38"), QColor("#171e2a"), QColor("#303c50"), QColor("#e0e7f2"), QColor("#6ca8f5"), QColor("#4c5d75")},
-        {"warm", "Warm Gray", QColor("#302d2a"), QColor("#24211f"), QColor("#423d37"), QColor("#eee7de"), QColor("#dca45e"), QColor("#62594f")}
+        {"light", "Studio Light", QColor("#ededf0"), QColor("#ffffff"), QColor("#e2e3e8"), QColor("#242730"), QColor("#276ac4"), QColor("#a5a9b2"), QColor("#276ac4")},
+        {"graphite", "Graphite", QColor("#242527"), QColor("#191a1c"), QColor("#343638"), QColor("#e2e4e6"), QColor("#009e78"), QColor("#515458"), QColor("#38c9a1")},
+        {"midnight", "Midnight", QColor("#222a38"), QColor("#171e2a"), QColor("#303c50"), QColor("#e0e7f2"), QColor("#6ca8f5"), QColor("#4c5d75"), QColor("#82b8ff")},
+        {"warm", "Warm Gray", QColor("#302d2a"), QColor("#24211f"), QColor("#423d37"), QColor("#eee7de"), QColor("#dca45e"), QColor("#62594f"), QColor("#efb96e")}
     };
 }
 
@@ -127,6 +128,8 @@ bool LoadFile(const QString& path, Scheme& scheme, QString& error) {
         if (preset.id == object["preset"].toString()) loaded = preset;
     const auto colors = object["colors"].toObject();
     for (const auto& field : fields) {
+        // Version 1 files saved before active-button colors remain compatible.
+        if (field.member == &Scheme::activeButton && !colors.contains(field.key)) continue;
         const QColor color(colors[field.key].toString());
         if (!color.isValid() || color.alpha() != 255) {
             error = DomTranslate("Invalid theme file."); return false;
@@ -149,7 +152,29 @@ void Apply(const Scheme& s) {
     }
     for (const auto& sheet : sheets)
         if (sheet.first) sheet.first->setStyleSheet({});
+    qApp->setStyleSheet({});
     qApp->setPalette(Palette(s));
+    const QColor active = s.activeButton.isValid() ? s.activeButton : s.accent;
+    qApp->setStyleSheet(QString(
+        "QPushButton[checkable=\"true\"], QToolButton[checkable=\"true\"] {"
+        " background-color: palette(button); color: palette(button-text);"
+        " border: 1px solid palette(mid); border-radius: 2px; padding: 3px 6px; }"
+        "QPushButton[checkable=\"true\"]:enabled:hover, QToolButton[checkable=\"true\"]:enabled:hover {"
+        " background-color: palette(midlight); }"
+        "QPushButton:checked:enabled, QToolButton:checked:enabled {"
+        " background-color: %1; color: %2;"
+        " border: 1px solid %1; border-radius: 2px; }"
+        "QPushButton:checked:enabled:hover, QToolButton:checked:enabled:hover {"
+        " background-color: %3; color: %4; border-color: %2; }"
+        "QPushButton:checked:enabled:pressed, QToolButton:checked:enabled:pressed {"
+        " background-color: %5; color: %6; }"
+        "QPushButton[checkable=\"true\"]:focus, QToolButton[checkable=\"true\"]:focus {"
+        " border-color: palette(text); }"
+        "QPushButton:checked:enabled:focus, QToolButton:checked:enabled:focus {"
+        " border-color: %2; }")
+        .arg(active.name(), contrastingText(active).name(),
+             active.lighter(110).name(), contrastingText(active.lighter(110)).name(),
+             active.darker(110).name(), contrastingText(active.darker(110)).name()));
     for (const auto& sheet : sheets)
         if (sheet.first) sheet.first->setStyleSheet(sheet.second);
 }
@@ -179,7 +204,7 @@ void ShowDialog(QWidget* parent) {
     for (const auto& s : schemes) presets->addItem(DomTranslate(s.name), s.id);
     presets->setCurrentIndex(presets->findData(draft.id));
     form->addRow(DomTranslate("Color scheme"), presets);
-    std::array<QPushButton*, 6> swatches{};
+    std::array<QPushButton*, fields.size()> swatches{};
     auto refresh = [&]() {
         for (size_t i = 0; i < fields.size(); ++i) {
             const QColor color = draft.*(fields[i].member);

@@ -79,6 +79,11 @@ TopoDS_Shape BuildFrameSolidShape(const CSmartLine& profile,
                                   double width,
                                   double height);
 
-TopoDS_Shape BuildWireSolidShape(const CPolyline& path, double radius, TopoDS_Wire* center_path = nullptr);
-TopoDS_Shape BuildWireSolidShape(const CAlfaObject& path, double radius, TopoDS_Wire* center_path = nullptr);
+TopoDS_Shape BuildWireSolidShape(const CPolyline& path, double radius, TopoDS_Wire* center_path = nullptr, double thickness = 0.0);
+TopoDS_Shape BuildWireSolidShape(const CAlfaObject& path, double radius, TopoDS_Wire* center_path = nullptr, double thickness = 0.0);
 TopoDS_Wire BuildSolidCenterPath(const CAlfaObject& path);
+bool SweepGuideHasKinks(const CAlfaObject& guide);
+TopoDS_Shape BuildSweptSurfaceShape(const CAlfaObject& section, const CAlfaObject& guide,
+    int transition_mode, double delta_x = 0, double delta_y = 0, double angle_degrees = 0,
+    const std::vector<double>& width_scales = {}, const std::vector<double>& height_scales = {},
+    bool auto_orientation = true, double twist_angle = 0, double end_scale = 1);

@@ -1,3 +1,4 @@
+#include "Diagnostics.h"
 // BezierSpline.cpp: implementation of the CBezierSpline class.
 //
 //////////////////////////////////////////////////////////////////////
@@ -413,6 +414,7 @@ BOOL CBezierSpline::EditFirstPoint(CPoint3d* p)
 
 void CBezierSpline::print(FILE* strm)
 {
+    if (!Dom3DDiagnosticsEnabled && !strm) return;
 	int file_null=0;
 	if(!strm){
 		fopen_s(&strm, "c:\\stdout.txt","a+");

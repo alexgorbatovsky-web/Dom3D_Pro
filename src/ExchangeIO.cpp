@@ -19,9 +19,11 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <filesystem>
 #include <functional>
 #include <iomanip>
 #include <limits>
+#include <map>
 #include <set>
 #include <sstream>
 #include <unordered_set>
@@ -1907,7 +1909,7 @@ bool StlIO::Import(const std::string& path,
                    std::string& error) const
 {
     meshes.clear();
-    std::ifstream file(path, std::ios::binary);
+    std::ifstream file(std::filesystem::u8path(path), std::ios::binary);
     if (!file) { error = "Could not open STL file."; return false; }
     file.seekg(0, std::ios::end);
     const std::streamoff size = file.tellg();
@@ -1915,6 +1917,15 @@ bool StlIO::Import(const std::string& path,
     std::vector<Vec3> vertices;
     std::vector<CMesh3D::Face> faces;
     bool binary = false;
+    // STL stores triangle corners, not shared vertex indices. Reconstruct exact
+    // connectivity on import without closing intentional gaps by a tolerance.
+    std::map<std::array<float, 3>, size_t> vertex_indices;
+    const auto vertex_index = [&](Vec3 point) {
+        const auto [entry, inserted] = vertex_indices.emplace(
+            std::array<float, 3>{point.x, point.y, point.z}, vertices.size());
+        if (inserted) vertices.push_back(point);
+        return entry->second;
+    };
     if (size >= 84) {
         std::array<char,80> header{};
         uint32_t count = 0;
@@ -1934,7 +1945,7 @@ bool StlIO::Import(const std::string& path,
                 for (int i = 0; i < 3; ++i) {
                     Vec3 point{values[3+i*3], values[4+i*3], values[5+i*3]};
                     if (!finite_vec(point)) { error = "STL contains invalid coordinates."; return false; }
-                    face.corners.push_back({vertices.size(),0,0}); vertices.push_back(point);
+                    face.corners.push_back({vertex_index(point),0,0});
                 }
                 faces.push_back(std::move(face));
             }
@@ -1951,7 +1962,7 @@ bool StlIO::Import(const std::string& path,
             triangle.push_back(point);
             if (triangle.size() == 3) {
                 CMesh3D::Face face;
-                for (Vec3 vertex : triangle) { face.corners.push_back({vertices.size(),0,0}); vertices.push_back(vertex); }
+                for (Vec3 vertex : triangle) face.corners.push_back({vertex_index(vertex),0,0});
                 faces.push_back(std::move(face)); triangle.clear();
             }
         }
@@ -1980,7 +1991,7 @@ bool StlIO::Export(const std::string& path, const CAlfaDoc& document,
     if (triangles.size() > std::numeric_limits<uint32_t>::max()) {
         error = "STL contains too many triangles."; return false;
     }
-    std::ofstream file(path, std::ios::binary);
+    std::ofstream file(std::filesystem::u8path(path), std::ios::binary);
     if (!file) { error = "Could not create STL file."; return false; }
     std::array<char,80> header{};
     const char text[] = "Dom3D Pro Binary STL";

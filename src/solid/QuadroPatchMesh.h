@@ -32,7 +32,7 @@ struct LogicalBoundaryPlan {
     std::vector<std::vector<Id>> cornerOccurrences;
 };
 LogicalBoundaryPlan PlanLogicalBoundary(const std::shared_ptr<const BoundarySnapshot>& boundary,const SamplingOptions& options);
-StructuredBodyPlan PlanStructuredBody(const BoundarySnapshot& topology, double density);
+StructuredBodyPlan PlanStructuredBody(const BoundarySnapshot& topology, double density, bool sixFaceShell = false);
 StructuredPatch BuildStructuredPatch(const FaceBoundaryInput& input,
     const std::vector<Id>& cornerOccurrences, bool splitCornerEdges);
 // Logical corners are indices in the unchanged chart loop, not new CAD vertices.

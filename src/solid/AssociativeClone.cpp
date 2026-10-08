@@ -45,6 +45,7 @@ std::unique_ptr<CAlfaObject> CAssociativeClone::Clone() const {
     copy->CopyCenterlinesFrom(*this);
     copy->SetName(GetName() + " Copy");
     copy->SetGroupName(GetGroupName());
+    copy->SetFrozen(IsFrozen());
     copy->SetVisible(IsVisible());
     copy->SetColor(GetColor());
     copy->SetMaterial(GetMaterial());
@@ -73,11 +74,23 @@ void CAssociativeClone::Rotate(Vec3 center, Vec3 axis, float angle) {
 }
 
 void CAssociativeClone::Scale(Vec3 center, Vec3 axis, float factor) {
-    if (dot(axis, axis) <= 0.000001f && factor > 0.000001f) {
-        gp_Trsf transform;
-        transform.SetScale(gp_Pnt(center.x, center.y, center.z), factor);
-        Prepend(transform);
+    if (factor <= 0.000001f || std::fabs(factor - 1.0f) <= 0.000001f) return;
+    const Vec3 unit = normalize(axis);
+    const bool uniform = dot(unit, unit) <= 0.000001f;
+    const double u[] = {unit.x, unit.y, unit.z};
+    const double c[] = {center.x, center.y, center.z};
+    gp_GTrsf transform;
+    for (int row = 0; row < 3; ++row) {
+        double offset = c[row];
+        for (int col = 0; col < 3; ++col) {
+            const double value = (row == col ? 1.0 : 0.0)
+                + (factor - 1.0) * (uniform ? (row == col ? 1.0 : 0.0) : u[row] * u[col]);
+            transform.SetValue(row + 1, col + 1, value);
+            offset -= value * c[col];
+        }
+        transform.SetValue(row + 1, 4, offset);
     }
+    placement_.PreMultiply(transform);
     CSolid::Scale(center, axis, factor);
 }
 
@@ -89,4 +102,48 @@ void CAssociativeClone::Mirror(Vec3 plane_point, Vec3 plane_normal) {
                                gp_Dir(unit.x, unit.y, unit.z)));
     Prepend(transform);
     CSolid::Mirror(plane_point, plane_normal);
+}
+
+bool CAssociativeClone::CommitPreviewTranslate(Vec3 delta, bool record_operation) {
+    if (!CSolid::CommitPreviewTranslate(delta, record_operation)) return false;
+    gp_Trsf transform;
+    transform.SetTranslation(gp_Vec(delta.x, delta.y, delta.z));
+    Prepend(transform);
+    return true;
+}
+
+bool CAssociativeClone::CommitPreviewRotate(Vec3 center, Vec3 axis, float angle) {
+    if (!CSolid::CommitPreviewRotate(center, axis, angle)) return false;
+    if (std::fabs(angle) <= 0.000001f) return true;
+    const Vec3 unit = normalize(axis);
+    gp_Trsf transform;
+    transform.SetRotation(gp_Ax1(gp_Pnt(center.x, center.y, center.z),
+                                gp_Dir(unit.x, unit.y, unit.z)), angle);
+    Prepend(transform);
+    return true;
+}
+
+bool CAssociativeClone::ApplyAffineTransform(const std::array<double, 16>& matrix) {
+    if (!CSolid::ApplyAffineTransform(matrix)) return false;
+    gp_GTrsf transform;
+    for (int row = 0; row < 3; ++row)
+        for (int col = 0; col < 4; ++col)
+            transform.SetValue(row + 1, col + 1, matrix[row * 4 + col]);
+    placement_.PreMultiply(transform);
+    return true;
+}
+
+std::unique_ptr<CAssociativeClone> CAssociativeClone::FromSource(const CSolid& source) {
+    auto copy = std::make_unique<CAssociativeClone>(source.m_Shape, source.m_id);
+    copy->CopyCenterlinesFrom(source);
+    copy->SetName(source.GetName() + " Linked Copy");
+    copy->SetGroupName(source.GetGroupName());
+    copy->SetVisible(source.IsVisible());
+    copy->SetColor(source.GetColor());
+    copy->SetMaterial(source.GetMaterial());
+    copy->SetMaterialId(source.GetMaterialId());
+    copy->m_LayerID = source.m_LayerID;
+    copy->InitSurfaces();
+    copy->ReBuldMesh();
+    return copy;
 }

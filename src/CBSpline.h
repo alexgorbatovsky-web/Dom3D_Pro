@@ -23,6 +23,8 @@
 #include <string>
 #include <vector>
 
+enum class CurveNodeType { Corner, Control, Smooth };
+
 enum class SplineCurveType {
     BSpline,
     Bezier,
@@ -60,6 +62,10 @@ public:
     bool RemoveNode(size_t index);
     void Reverse();
     bool ExtendEndpoint(bool at_start, double distance);
+    bool HasNodeTypes() const { return !node_types_.empty() && node_types_.size()==points_.size(); }
+    const std::vector<CurveNodeType>& GetNodeTypes() const { return node_types_; }
+    bool SetNodeTypes(std::vector<CurveNodeType> types);
+    CBSpline BuildNodeBezier() const;
     CPoint3d Evaluate(float t) const;
     SplineCurveType GetCurveType() const;
     void SetCurveType(SplineCurveType type);
@@ -94,6 +100,7 @@ private:
     void DrawPointBox(const CPoint3d& point, bool selected,
                       bool point_selected, bool bezier_control = false) const;
 
+    std::vector<CurveNodeType> node_types_;
     std::vector<CPoint3d> points_;
     std::vector<double> weights_;
     // Expanded knot vector, including repeated knots. Empty means the

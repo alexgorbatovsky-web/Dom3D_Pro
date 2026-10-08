@@ -323,6 +323,7 @@ void CAlfaObject::ApplyLineAppearance(
     } else if (line_style_ == "DIVIDE" || line_style_ == "DIVIDE2") {
         pattern = 0x2525;
     }
+    if (IsFrozen()) { pattern = 0x5555; factor = 1; }
     if (pattern == 0xffff) {
         glDisable(GL_LINE_STIPPLE);
     } else {

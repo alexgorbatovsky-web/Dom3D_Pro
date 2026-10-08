@@ -45,7 +45,7 @@ bool CConstraintBezierTangent::Apply(CSmartLine& sketch) const {
             ? GetLineIndex() - 1
             : sketch.IsClosed() ? sketch.GetNumLines() - 1 : sketch.GetNumLines();
         const CLinkLine* previous = sketch.GetLine(previous_index);
-        if (!previous) {
+        if (!previous || sketch.GetEndpointId(previous_index, 1) != sketch.GetEndpointId(GetLineIndex(), 0)) {
             return false;
         }
         CPoint3d direction = previous->GetTangent(1.0);
@@ -66,7 +66,7 @@ bool CConstraintBezierTangent::Apply(CSmartLine& sketch) const {
         ? GetLineIndex() + 1
         : sketch.IsClosed() ? 0 : sketch.GetNumLines();
     const CLinkLine* next = sketch.GetLine(next_index);
-    if (!next) {
+    if (!next || sketch.GetEndpointId(GetLineIndex(), 1) != sketch.GetEndpointId(next_index, 0)) {
         return false;
     }
     CPoint3d direction = next->GetTangent(0.0);

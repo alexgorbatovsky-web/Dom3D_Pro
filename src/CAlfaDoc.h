@@ -85,7 +85,7 @@ public:
     bool CreateFrameSolid(unsigned long profile_id,
                           double width,
                           double height);
-    bool CreateWireSolid(unsigned long path_id, double radius);
+    bool CreateWireSolid(unsigned long path_id, double radius, double thickness = 0.0);
     bool CreatePolyhedronSolid(unsigned long profile_id,
                                int axis_index,
                                int turns);
@@ -100,7 +100,8 @@ public:
     bool CreatePolylineFromSelectedCurveByLength(
         double segment_length,
         std::string* error_message = nullptr);
-    bool BeginLiveExtrudeSelectedPolyline(double distance, bool reverse, double taper_angle_degrees);
+    bool BeginLiveExtrudeSelectedPolyline(double distance, bool reverse, double taper_angle_degrees,
+                                         std::string* error = nullptr);
     bool HasLivePolylineExtrude() const;
     bool UpdateLiveExtrudeSelectedPolyline(double distance, bool reverse, double taper_angle_degrees);
     bool FinishLiveExtrudeSelectedPolyline();
@@ -170,6 +171,7 @@ public:
     bool PreviewExtrudeSelectedSolidFace(Vec3 delta);
     bool BeginLiveExtrudeSelectedSolidFace(double taper_angle_degrees = 0.0);
     bool IsLiveExtrudeSelectedSolidFaceActive() const;
+    bool PreviewLiveExtrudeSelectedSolidFace(float distance);
     bool UpdateLiveExtrudeSelectedSolidFace(float distance);
     void FinishLiveExtrudeSelectedSolidFace();
     void CancelLiveExtrudeSelectedSolidFace();
@@ -275,11 +277,12 @@ public:
                    bool select_object = true);
     void AddMesh(std::unique_ptr<CMesh3D> mesh);
     bool CreateGroupFromSelection();
+    size_t ConvertTextToCurves(unsigned long text_id);
     bool CreateAssemblyFromSelection();
     bool UngroupSelection();
-    bool DuplicateSelectedObject();
+    bool DuplicateSelectedObject(bool make_clone = false);
     bool CreateAssociativeCloneFromSelection();
-    bool RebuildAssociativeClones(unsigned long source_id = 0);
+    bool RebuildAssociativeClones(unsigned long source_id = 0, const Snapshot* before = nullptr);
     bool CreateSolidFromTwoSelectedSketches();
     bool RebuildTwoSketchSolid(size_t object_index);
     bool MirrorSelectedObjects(Vec3 plane_point, Vec3 plane_normal);
@@ -309,7 +312,7 @@ public:
                         std::string* error_message = nullptr) const;
     size_t CreateSurfaceIntersectionCurves();
     size_t ProjectSelectedCurveToSurface(Vec3 direction);
-    size_t ExtractSelectedSurfaceEdges();
+    size_t ExtractSelectedSurfaceEdges(double tolerance = 0.002);
     bool CreateRuledSurfaceFromSpline(unsigned long curve_id,
                                       double length,
                                       int direction_axis,
@@ -322,12 +325,12 @@ public:
     bool CreateShellFromSurface(unsigned long surface_id,
                                 int face_index,
                                 double distance,
-                                std::string* error_message = nullptr);
+                                std::string* error_message = nullptr, bool whole_body = false);
     bool RebuildShellFromSurface(size_t object_index,
                                  unsigned long surface_id,
                                  int face_index,
                                  double distance,
-                                 std::string* error_message = nullptr);
+                                 std::string* error_message = nullptr, bool whole_body = false);
     bool CreateFourSplineSurfaceFromSelection();
     bool RebuildFourSplineSurface(size_t object_index,
                                   unsigned long first_id,
@@ -349,6 +352,8 @@ public:
                                     std::string* error_message = nullptr,
                                     double* used_tolerance = nullptr);
     int RebuildVisibleObjectMeshes(float mesh_deflection);
+    bool HasInvalidObjectsForSave() const;
+    size_t RemoveInvalidObjectsForSave();
     bool DeleteSelectedObject();
     bool DeleteSelectedPoint();
     bool MoveSelectedPoint(CurvePoint point);
@@ -419,6 +424,7 @@ public:
     bool BeginLiveChamferSelectedEdges();
     bool HasLiveChamfer() const;
     std::vector<std::pair<int, int>> GetLiveChamferEdgeRefs() const;
+    std::vector<TopoDS_Edge> GetLiveChamferEdges() const;
     std::vector<int> GetLiveChamferCreatedSurfaceIndices() const;
     bool UpdateLiveChamfer(double distance);
     void FinishLiveChamfer();
@@ -451,6 +457,7 @@ public:
     bool SetWorkLayer(int layer_id);
     bool IsLayerVisible(int layer_id) const;
     bool IsLayerSelectable(int layer_id) const;
+    void SetObjectFrozen(unsigned long object_id, bool frozen);
     bool IsObjectVisible(const CAlfaObject& object) const;
     void SetObjectVisibility(unsigned long objectId, bool visible);
     bool IsObjectSelectable(const CAlfaObject& object) const;

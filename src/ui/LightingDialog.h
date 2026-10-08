@@ -11,6 +11,7 @@ class LightingDialog : public QDialog {
 
 public:
     explicit LightingDialog(QWidget* parent = nullptr);
+    void RefreshLightDirection();
 
 signals:
     void LightingChanged();
@@ -31,6 +32,8 @@ private:
     void ResetDefaults();
 
     class QFormLayout* form_ = nullptr;
+    bool refreshing_ = false;
+    QCheckBox* blinn_phong_ = nullptr;
     QDoubleSpinBox* light_x_ = nullptr;
     QDoubleSpinBox* light_y_ = nullptr;
     QDoubleSpinBox* light_z_ = nullptr;

@@ -98,6 +98,7 @@ bool CGroup::Save(std::ostream& stream) const {
 std::unique_ptr<CAlfaObject> CGroup::Clone() const {
     auto copy = std::make_unique<CGroup>(GetName() + " Copy", m_Elem);
     copy->SetGroupName(GetGroupName());
+    copy->SetFrozen(IsFrozen());
     copy->SetVisible(IsVisible());
     copy->CAlfaObject::SetColor(GetColor());
     copy->SetMaterial(GetMaterial());

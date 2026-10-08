@@ -12,7 +12,7 @@ bool TrimSolidByFace(const TopoDS_Shape& body,
                      TopoDS_Shape& result);
 
 bool TrimSolidByClosedProfile(const TopoDS_Shape& body,
-                              const TopoDS_Face& profile,
+                              const TopoDS_Shape& profile,
                               Vec3 extrusion_normal,
                               bool keep_inside,
                               TopoDS_Shape& result);

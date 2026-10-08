@@ -1,3 +1,4 @@
+#include "ObjSharpEdges.h"
 #include "materials/ProceduralPlasterShader.h"
 #include "materials/ProceduralFabricShader.h"
 #include "materials/ProceduralPerforationShader.h"
@@ -120,6 +121,7 @@ QOpenGLShaderProgram* mesh_shader_program() {
         uniform bool useMetallicTexture;
         uniform bool useDisplacementTexture;
         uniform bool pbrMaterial;
+        uniform bool blinnPhong;
         uniform bool diagnosticColor;
         uniform bool selectedObject;
         uniform bool flatColor;
@@ -183,13 +185,35 @@ QOpenGLShaderProgram* mesh_shader_program() {
             vec3 coatNormal = n;
             mat3 tangentFrame = cotangentFrame(n, eyePosition, MaterialMappedUV(textureUV));
             vec2 uv = MaterialMappedUV(textureUV);
-            if (useDisplacementTexture) {
-                float height = texture2D(displacementTexture, uv).r - 0.5;
+            bool heightRelief = useDisplacementTexture && displacementScale > 0.000001;
+            if (heightRelief) {
+                // Trace the view ray through a centered height field instead
+                // of offsetting UV once using an unrelated surface sample.
                 vec3 tangentView = vec3(dot(viewDirection, tangentFrame[0]),
                                         dot(viewDirection, tangentFrame[1]),
                                         dot(viewDirection, tangentFrame[2]));
-                uv -= tangentView.xy / max(abs(tangentView.z), 0.25)
-                    * height * displacementScale;
+                vec2 ray = tangentView.xy / max(abs(tangentView.z), 0.25)
+                    * displacementScale;
+                float layers = mix(32.0, 12.0, clamp(abs(tangentView.z), 0.0, 1.0));
+                float stepDepth = 1.0 / layers;
+                vec2 stepUV = ray * stepDepth;
+                vec2 currentUV = uv + ray * 0.5;
+                vec2 previousUV = currentUV;
+                float depth = 0.0;
+                float surfaceDepth = 1.0 - texture2D(displacementTexture, currentUV).r;
+                float previousSurfaceDepth = surfaceDepth;
+                for (int layer = 0; layer < 32; ++layer) {
+                    if (depth >= surfaceDepth) break;
+                    previousUV = currentUV;
+                    previousSurfaceDepth = surfaceDepth;
+                    currentUV -= stepUV;
+                    depth += stepDepth;
+                    surfaceDepth = 1.0 - texture2D(displacementTexture, currentUV).r;
+                }
+                float after = depth - surfaceDepth;
+                float before = previousSurfaceDepth - (depth - stepDepth);
+                float weight = clamp(after / max(after + before, 0.000001), 0.0, 1.0);
+                uv = mix(currentUV, previousUV, weight);
             }
             if (useNormalTexture) {
                 vec3 mapNormal = texture2D(normalTexture, uv).xyz * 2.0 - 1.0;
@@ -208,9 +232,15 @@ QOpenGLShaderProgram* mesh_shader_program() {
                 gl_FragColor = source;
                 return;
             }
-            float roughness = clamp(useRoughnessTexture
-                ? texture2D(roughnessTexture, uv).r : materialRoughness,
-                0.04, 1.0);
+            float roughness = clamp(materialRoughness, 0.04, 1.0);
+            if (useRoughnessTexture) {
+                float mapped = clamp(texture2D(roughnessTexture, uv).r, 0.04, 1.0);
+                // 0.5 preserves the authored map. The slider can move the
+                // complete textured material toward polished or matte.
+                roughness = materialRoughness <= 0.5
+                    ? mix(0.04, mapped, clamp((materialRoughness - 0.04) / 0.46, 0.0, 1.0))
+                    : mix(mapped, 1.0, clamp((materialRoughness - 0.5) / 0.5, 0.0, 1.0));
+            }
             float metallic = clamp(useMetallicTexture
                 ? texture2D(metallicTexture, uv).r : materialMetallic,
                 0.0, 1.0);
@@ -222,20 +252,48 @@ QOpenGLShaderProgram* mesh_shader_program() {
                 source.rgb=sampled.baseColor;n=sampled.normal;coatNormal=n;
                 roughness=sampled.roughness;metallic=sampled.metallic;proceduralAO=sampled.ao;
             }
+    )" R"(
             vec3 light = normalize(lightDirection);
+            float reliefVisibility = 1.0;
+            if (heightRelief) {
+                vec3 tangentLight = vec3(dot(light, tangentFrame[0]),
+                                        dot(light, tangentFrame[1]),
+                                        dot(light, tangentFrame[2]));
+                if (tangentLight.z > 0.05) {
+                    float startHeight = texture2D(displacementTexture, uv).r;
+                    float rise = (1.0 - startHeight) / 8.0;
+                    vec2 stepUV = tangentLight.xy / max(tangentLight.z, 0.25)
+                        * displacementScale * rise;
+                    float occlusion = 0.0;
+                    for (int step = 1; step <= 8; ++step) {
+                        float obstruction = texture2D(displacementTexture, uv + stepUV * float(step)).r
+                            - (startHeight + rise * float(step));
+                        occlusion = max(occlusion, smoothstep(0.02, 0.10, obstruction));
+                    }
+                    reliefVisibility = 1.0 - 0.7 * occlusion;
+                }
+            }
             float incidence = dot(n, light);
             float wrapped = clamp((incidence + lightingA.y)
                                   / (1.0 + lightingA.y), 0.0, 1.0);
-            float shade = lightingA.x + lightingA.z * wrapped;
-            vec3 halfVector = normalize(light + viewDirection);
-            if (!pbrMaterial) {
-                float gloss = pow(max(0.0, dot(n, halfVector)),
-                                  max(4.0, materialShininess * lightingB.x));
+            float shade = lightingA.x + lightingA.z * wrapped * reliefVisibility;
+            vec3 halfSum = light + viewDirection;
+            vec3 halfVector = halfSum / max(length(halfSum), 0.00001);
+            if (!pbrMaterial || blinnPhong) {
+                // Map PBR roughness to a Blinn exponent while retaining the
+                // authored shininess of legacy materials.
+                float exponent = pbrMaterial
+                    ? clamp(2.0 / max(pow(roughness, 4.0), 0.0001) - 2.0, 4.0, 2048.0)
+                    : materialShininess;
+                float gloss = incidence > 0.0 && dot(n, viewDirection) > 0.0
+                    ? pow(max(0.0, dot(n, halfVector)), max(4.0, exponent * lightingB.x))
+                    : 0.0;
                 float rim = pow(max(0.0, 1.0 - abs(dot(n, viewDirection))), 3.0);
                 float highlight = min(0.75,
-                    materialSpecular * lightingA.w * gloss + lightingB.y * rim);
+                    materialSpecular * lightingA.w * gloss * reliefVisibility + lightingB.y * rim);
                 float boost = selectedObject ? 1.08 : 1.0;
-                vec3 lit = max(source.rgb * shade * boost + vec3(highlight),
+                vec3 highlightColor = pbrMaterial ? mix(vec3(1.0), source.rgb, metallic) : vec3(1.0);
+                vec3 lit = max(source.rgb * shade * boost * proceduralAO + highlightColor * highlight,
                                vec3(0.0));
                 lit = pow(lit, vec3(lightingB.z));
                 gl_FragColor = vec4(lit, source.a);
@@ -289,8 +347,16 @@ QOpenGLShaderProgram* mesh_shader_program() {
                 environmentSpecular *= environmentStrength;
                 environmentDiffuse *= environmentStrength;
             }
+            // Metals have no diffuse lobe, but still reflect the ambient light.
+            // With IBL disabled (or zero strength) they previously lost that
+            // illumination entirely and became black except for a point highlight.
+            if (!useStudioEnvironment || environmentStrength <= 0.0001) {
+                vec3 reflected = reflect(-viewDirection, n);
+                float hemisphere = 0.65 + 0.70 * (reflected.y * 0.5 + 0.5);
+                environmentSpecular = vec3(lightingA.x * hemisphere);
+            }
             vec3 highlight = min(vec3(0.85),
-                directSpecular * nDotL * lightingA.w
+                directSpecular * nDotL * lightingA.w * reliefVisibility
                 // Image-based reflections are the main illumination for
                 // metals. Do not attenuate the whole studio environment by
                 // the comparatively low direct-specular slider.
@@ -734,9 +800,9 @@ Color shaded_color(Color base,
         1.0f);
     const float shade = lighting.ambient + lighting.diffuse * wrapped_incidence;
     const Vec3 half_vector = normalize(light + view_dir);
-    const float gloss = std::pow(
+    const float gloss = incidence > 0.0f && dot(n, view_dir) > 0.0f ? std::pow(
         std::max(0.0f, dot(n, half_vector)),
-        std::max(4.0f, shininess * lighting.shininess_scale));
+        std::max(4.0f, shininess * lighting.shininess_scale)) : 0.0f;
     const float rim = std::pow(
         std::max(0.0f, 1.0f - std::fabs(dot(n, view_dir))), 3.0f);
     const float highlight = std::min(
@@ -2825,6 +2891,8 @@ std::string CMesh3D::DefaultEnvironmentPath() {
 void CMesh3D::ReloadLightingSettings() {
     QSettings settings("Dom3D", "Dom3D_Pro");
     ViewportLightingSettings defaults;
+    s_LightingSettings.blinn_phong = settings.value(
+        "view/lighting/blinnPhong", defaults.blinn_phong).toBool();
     s_LightingSettings.light_x = std::clamp(
         settings.value("view/lighting/lightX", defaults.light_x).toFloat(), -1.0f, 1.0f);
     s_LightingSettings.light_y = std::clamp(
@@ -2869,6 +2937,7 @@ CMesh3D::~CMesh3D() {
 }
 
 void CMesh3D::InvalidateGpuCache() const {
+    evaluated_mesh_.reset();
     gpu_cache_dirty_ = true;
 }
 
@@ -3028,6 +3097,7 @@ const std::vector<Edge>& CMesh3D::GetSharpEdges() const {
 }
 
 void CMesh3D::SetSharpEdges(std::vector<Edge> edges) {
+    InvalidateGpuCache();
     sharp_edges_.clear();
     for (const Edge& edge : edges) {
         if (edge.v1 < 0 || edge.v2 < 0) continue;
@@ -3048,11 +3118,13 @@ bool CMesh3D::AddSharpEdge(size_t first_vertex, size_t second_vertex) {
     if (std::find(sharp_edges_.begin(), sharp_edges_.end(), edge)
         == sharp_edges_.end()) {
         sharp_edges_.push_back(edge);
+        InvalidateGpuCache();
     }
     return true;
 }
 
 void CMesh3D::ClearSharpEdges() {
+    InvalidateGpuCache();
     sharp_edges_.clear();
 }
 
@@ -3766,31 +3838,41 @@ bool CMesh3D::ExportToObj(const std::string& name) const {
     for (const UV& uv : uvs_) {
         stream << "vt " << uv.u << " " << uv.v << "\n";
     }
-    for (const Vec3& normal : normals_) {
+    std::vector<size_t> position_ids(vertices_.size()); std::iota(position_ids.begin(),position_ids.end(),0);
+    const bool use_sharp_edges=!sharp_edges_.empty();
+    const auto sharp_data=use_sharp_edges ? objsharp::Build(*this,position_ids) : objsharp::Data{};
+    if (!sharp_data.valid) return false;
+    if(use_sharp_edges) objsharp::WriteEdges(stream,sharp_data);
+    const auto& obj_normals=use_sharp_edges ? sharp_data.normals : normals_;
+    for (const Vec3& normal : obj_normals) {
         stream << "vn " << normal.x << " " << normal.y << " " << normal.z << "\n";
     }
 
-    for (const Face& face : faces_) {
+    for (size_t face_index=0;face_index<faces_.size();++face_index) {
+        const auto& face=faces_[face_index];
         if (face.deleted || face.corners.size() < 3) {
             continue;
         }
 
+        if(use_sharp_edges) stream << "s " << sharp_data.groups[face_index] << "\n";
         stream << "f";
-        for (const MeshCorner& corner : face.corners) {
+        for (size_t c=0;c<face.corners.size();++c) {
+            const auto& corner=face.corners[c];
+            const size_t normal_index=use_sharp_edges ? sharp_data.corner_normals[face_index][c] : corner.n;
             if (corner.v >= vertices_.size()
                 || (!uvs_.empty() && corner.uv >= uvs_.size())
-                || (!normals_.empty() && corner.n >= normals_.size())) {
+                || (!obj_normals.empty() && normal_index >= obj_normals.size())) {
                 return false;
             }
 
             stream << " " << corner.v + 1;
-            if (!uvs_.empty() || !normals_.empty()) {
+            if (!uvs_.empty() || !obj_normals.empty()) {
                 stream << "/";
                 if (!uvs_.empty()) {
                     stream << corner.uv + 1;
                 }
-                if (!normals_.empty()) {
-                    stream << "/" << corner.n + 1;
+                if (!obj_normals.empty()) {
+                    stream << "/" << normal_index + 1;
                 }
             }
         }
@@ -3894,6 +3976,7 @@ std::unique_ptr<CMesh3D> CMesh3D::CreateWelded(
     std::vector<UV> uvs;
     std::vector<Vec3> normals;
     std::vector<Face> faces;
+    std::vector<Edge> sharp_edges;
     vertices.reserve(source_vertex_count);
     // Only open-edge vertices enter the lookup. Interior vertices must never
     // become weld candidates, even when another sheet lies very close to them.
@@ -3963,6 +4046,13 @@ std::unique_ptr<CMesh3D> CMesh3D::CreateWelded(
                 boundary_vertex[index]);
         }
 
+        for (const auto& edge : mesh->sharp_edges_) {
+            if (edge.v1 < 0 || edge.v2 < 0 || size_t(edge.v1) >= remapped_vertices.size()
+                || size_t(edge.v2) >= remapped_vertices.size()) continue;
+            const size_t a = remapped_vertices[edge.v1], b = remapped_vertices[edge.v2];
+            if (a != b) sharp_edges.emplace_back(int(a), int(b));
+        }
+
         // Materialize the same smooth fallback used to display the source mesh.
         // Do this before joining positions so separate surfaces retain their
         // normal seams, while polygons within each surface remain smooth.
@@ -4015,6 +4105,7 @@ std::unique_ptr<CMesh3D> CMesh3D::CreateWelded(
             std::move(uvs), std::move(normals))) {
         return nullptr;
     }
+    result->SetSharpEdges(std::move(sharp_edges));
     if (welded_vertex_count)
         *welded_vertex_count = source_vertex_count - result->vertices_.size();
     return result;
@@ -4056,6 +4147,33 @@ void CMesh3D::Render() {
 }
 
 void CMesh3D::Render3d(bool selected) const {
+    if (subdivision_level_ > 0) {
+        const CMesh3D& evaluated = GetEvaluatedMesh();
+        if (&evaluated != this) {
+            const Material material = GetDisplayMode() == MeshDisplayMode::SurfaceGray
+                ? material_Defailt : GetMaterial();
+            evaluated.RenderFaces(false, selected, &material);
+            if (selected) {
+                const Color wire{0.06f, 0.07f, 0.08f};
+                evaluated.RenderWire(false, false, &wire);
+                glPushAttrib(GL_ENABLE_BIT | GL_CURRENT_BIT | GL_LINE_BIT | GL_POINT_BIT | GL_DEPTH_BUFFER_BIT);
+                glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LEQUAL); glDepthMask(GL_FALSE);
+                glDisable(GL_LIGHTING); glDisable(GL_TEXTURE_2D);
+                glColor3f(0.0f, 0.9f, 0.95f); glLineWidth(1.5f);
+                glBegin(GL_LINES);
+                for (const auto& e : evaluated.subdivision_cage_edges_) {
+                    for (int index : {e.v1, e.v2}) {
+                        const Vec3 p = evaluated.vertices_[index]; glVertex3f(p.x, p.y, p.z);
+                    }
+                }
+                glEnd(); glColor3f(wire.r, wire.g, wire.b); glPointSize(3.0f);
+                glBegin(GL_POINTS);
+                for (const Vec3 p : evaluated.vertices_) glVertex3f(p.x, p.y, p.z);
+                glEnd(); glPopAttrib();
+            }
+            return;
+        }
+    }
     const MeshDisplayMode mode = GetDisplayMode();
     const bool shaded_mode = mode == MeshDisplayMode::SurfaceMaterial
         || mode == MeshDisplayMode::SurfaceMaterialWithMesh
@@ -4119,6 +4237,13 @@ void CMesh3D::RenderFaces(bool selected,
                           bool flat_color,
                           const Vec3* object_min,
                           const Vec3* object_max) const {
+    const CMesh3D& evaluated = GetEvaluatedMesh();
+    if (&evaluated != this) {
+        const Material material = material_override ? *material_override : GetMaterial();
+        evaluated.RenderFaces(selected, offset_fill, &material, diagnostic_rgb,
+                              flat_color, object_min, object_max);
+        return;
+    }
     if (vertices_.empty() || faces_.empty()) {
         return;
     }
@@ -4131,7 +4256,9 @@ void CMesh3D::RenderFaces(bool selected,
         ? std::min(material.alpha + 0.04f, 1.0f)
         : material.alpha;
     const bool zebra = IsZebraAnalysisTarget() && !flat_color;
-    const float alpha = zebra
+    // Normal diagnostics must show the nearest surface normal, without
+    // blending rear faces into its RGB value or disabling depth writes.
+    const float alpha = (zebra || diagnostic_rgb)
         ? 1.0f
         : flat_color
         ? std::clamp(material_alpha, 0.0f, 1.0f)
@@ -4157,7 +4284,7 @@ void CMesh3D::RenderFaces(bool selected,
         || material.coat_weight > 0.0001f
         || std::fabs(material.roughness - 0.5f) > 0.0001f
         || material.metallic > 0.0001f;
-    const std::array<GLuint, 3> studio_environment = pbr_material
+    const std::array<GLuint, 3> studio_environment = pbr_material && !s_LightingSettings.blinn_phong
         ? studio_environment_texture_ids() : std::array<GLuint, 3>{};
     const bool use_studio_environment =
         studio_environment[0] != 0 && studio_environment[1] != 0
@@ -4258,6 +4385,7 @@ void CMesh3D::RenderFaces(bool selected,
         fast_program->setUniformValue("useMetallicTexture", !material.perforation.enabled && !material.plaster.enabled && !material.fabric.enabled && (metallic_texture != 0));
         fast_program->setUniformValue("useDisplacementTexture", !material.perforation.enabled && !material.plaster.enabled && !material.fabric.enabled && (displacement_texture != 0));
         fast_program->setUniformValue("pbrMaterial", pbr_material);
+        fast_program->setUniformValue("blinnPhong", s_LightingSettings.blinn_phong);
         fast_program->setUniformValue("proceduralPlaster",material.plaster.enabled);
         fast_program->setUniformValue("plasterSeed",QVector2D(float(material.plaster.seed&65535),float(material.plaster.seed>>16)));
         fast_program->setUniformValue("plasterHighQuality",material.plaster.highQuality);
@@ -4714,6 +4842,8 @@ void CMesh3D::Render2d(float center_x, float center_y, float scale) const {
 }
 
 bool CMesh3D::HitTest(CurvePoint point, float tolerance) const {
+    const CMesh3D& evaluated = GetEvaluatedMesh();
+    if (&evaluated != this) return evaluated.HitTest(point, tolerance);
     bool has_projected_face_hit = false;
     for (const Face& face : faces_) {
         if (!IsValidFace(face, vertices_.size())) {
@@ -4776,6 +4906,9 @@ bool CMesh3D::HitTestMeshScreen(DomPoint point,
                                 const std::function<bool(Vec3, DomPoint&, float&)>& project_world,
                                 float& depth) const
 {
+    const CMesh3D& evaluated = GetEvaluatedMesh();
+    if (&evaluated != this) return evaluated.HitTestMeshScreen(point, project_world, depth);
+
     bool hit = false;
     float best_depth = std::numeric_limits<float>::max();
 
@@ -4833,7 +4966,10 @@ std::unique_ptr<CAlfaObject> CMesh3D::Clone() const {
     copy->normals_ = normals_;
     copy->faces_ = faces_;
     copy->sharp_edges_ = sharp_edges_;
+    copy->subdivision_level_ = subdivision_level_;
+    copy->shading_mode_ = shading_mode_;
     copy->SetGroupName(GetGroupName());
+    copy->SetFrozen(IsFrozen());
     copy->SetVisible(IsVisible());
     copy->SetColor(GetColor());
     copy->SetMaterial(GetMaterial());
@@ -4958,6 +5094,10 @@ bool CMesh3D::ApplyAffineTransform(const std::array<double, 16>& matrix) {
 }
 
 bool CMesh3D::GetBounds(Vec3& min_point, Vec3& max_point) const {
+    if (subdivision_level_ > 0) {
+        const CMesh3D& evaluated = GetEvaluatedMesh();
+        if (&evaluated != this) return evaluated.GetBounds(min_point, max_point);
+    }
     if (vertices_.empty()) {
         return false;
     }
@@ -4981,7 +5121,10 @@ bool CMesh3D::Save(std::ostream& stream) const {
     stream << "Mesh3D \"" << GetName() << "\" "
            << material.diffuse.r << " " << material.diffuse.g << " " << material.diffuse.b << " "
            << material.alpha << " " << material.specular << " " << material.shininess << " "
-           << vertices_.size() << " " << faces_.size() << "\n";
+           << vertices_.size() << " " << faces_.size();
+    if (subdivision_level_ != 0 || shading_mode_ != 0)
+        stream << " " << subdivision_level_ << " " << shading_mode_;
+    stream << "\n";
     for (const Vec3& vertex : vertices_) {
         stream << vertex.x << " " << vertex.y << " " << vertex.z << "\n";
     }
@@ -5029,7 +5172,7 @@ bool CMesh3D::Load(std::istream& stream) {
     if (values.size() == 2) {
         vertex_count = static_cast<size_t>(values[0]);
         face_count = static_cast<size_t>(values[1]);
-    } else if (values.size() == 5) {
+    } else if (values.size() == 5 || values.size() == 7) {
         material.alpha = values[0];
         material.specular = values[1];
         material.shininess = values[2];
@@ -5095,7 +5238,10 @@ bool CMesh3D::Load(std::istream& stream) {
         loaded_faces.push_back(std::move(face));
     }
 
-    return SetGeometry(std::move(loaded_vertices), std::move(loaded_faces));
+    if (!SetGeometry(std::move(loaded_vertices), std::move(loaded_faces))) return false;
+    subdivision_level_ = 0;
+    SetShadingMode(values.size() == 7 ? int(values[6]) : 0);
+    return SetSubdivisionLevel(values.size() == 7 ? int(values[5]) : 0);
 }
 
 bool CMesh3D::Create(CPolyline* pline, CVector3d dir, float dist) {
@@ -5141,6 +5287,392 @@ bool CMesh3D::Create(CPolyline* pline, CVector3d dir, float dist) {
     SetName(pline->GetName() + " Mesh");
     SetMaterial(colored_mesh_material());
     return SetGeometry(std::move(created_vertices), std::move(created_faces));
+}
+
+bool CMesh3D::TrimByDivideFace(CPolyline* pLine, CPoint3d pc) {
+    if (!pLine || faces_.empty() || vertices_.empty()) return false;
+    auto cut = make_cut_2d(pLine);
+    if (cut.size() < 2) return false;
+    for (const auto& p : cut) if (!std::isfinite(p.x) || !std::isfinite(p.y)) return false;
+    double coordinate_scale = 1.0;
+    for (const auto& v : vertices_) coordinate_scale = std::max({coordinate_scale, std::abs(double(v.x)), std::abs(double(v.y))});
+    const double eps = coordinate_scale * 2.0e-7;
+    // Commit only a complete cut. A failure must leave the previous mesh intact.
+    auto vertices = vertices_;
+    auto faces = faces_;
+    // Sparse coordinate buckets replace repeated scans of every mesh vertex.
+    // Search neighbouring buckets and choose the lowest index, preserving the
+    // original deterministic welding order at bucket boundaries.
+    std::map<std::pair<long long,long long>,std::vector<size_t>> node_buckets;
+    for (size_t i=0;i<vertices.size();++i)
+        node_buckets[point_key_2d(mesh_vertex_2d(vertices,i),eps)].push_back(i);
+    const auto find_node = [&](const cVec2& p) {
+        const auto key=point_key_2d(p,eps);
+        size_t result=vertices.size();
+        for (int dx=-1;dx<=1;++dx) for (int dy=-1;dy<=1;++dy) {
+            const auto bucket=node_buckets.find({key.first+dx,key.second+dy});
+            if (bucket==node_buckets.end()) continue;
+            for (size_t i:bucket->second)
+                if (i<result && EqualPoint2(mesh_vertex_2d(vertices,i),p,eps)) result=i;
+        }
+        return result;
+    };
+    const auto node = [&](const cVec2& p, double z) {
+        const size_t found=find_node(p);
+        if (found<vertices.size()) return found;
+        vertices.push_back({float(p.x), float(p.y), float(z)});
+        node_buckets[point_key_2d(mesh_vertex_2d(vertices,vertices.size()-1),eps)].push_back(vertices.size()-1);
+        return vertices.size() - 1;
+    };
+    struct Bounds { double x0=0,y0=0,x1=0,y1=0; bool valid=false; };
+    std::vector<Bounds> bounds(faces.size());
+    // Splitting only shrinks a cell; inserting points on its edges does not
+    // enlarge it. Cached parent bounds remain conservative after either edit.
+    const auto cell_bounds = [&](size_t i) {
+        if (bounds.size()<faces.size()) bounds.resize(faces.size());
+        auto& b=bounds[i];
+        if (!b.valid) {
+            b.x0=b.y0=std::numeric_limits<double>::max();
+            b.x1=b.y1=std::numeric_limits<double>::lowest();
+            for (auto c:faces[i].corners) {
+                const auto p=mesh_vertex_2d(vertices,c.v);
+                b.x0=std::min(b.x0,p.x); b.x1=std::max(b.x1,p.x);
+                b.y0=std::min(b.y0,p.y); b.y1=std::max(b.y1,p.y);
+            }
+            b.valid=true;
+        }
+        return b;
+    };
+    const auto contains_bounds = [&](size_t i,const cVec2& p) {
+        const auto b=cell_bounds(i);
+        return p.x>=b.x0-eps && p.x<=b.x1+eps && p.y>=b.y0-eps && p.y<=b.y1+eps;
+    };
+    // Insert into BOTH owners of an edge. Keep collinear corners until all
+    // segments are processed, so the shared edge cannot acquire a T-junction.
+    const auto insert_edge_node = [&](const cVec2& p) {
+        for (size_t index=0;index<faces.size();++index) {
+            auto& face=faces[index];
+            if (face.deleted || !contains_bounds(index,p)) continue;
+            for (size_t e = 0; e < face.corners.size(); ++e) {
+                const size_t a = face.corners[e].v;
+                const size_t b = face.corners[(e + 1) % face.corners.size()].v;
+                const cVec2 pa = mesh_vertex_2d(vertices, a), pb = mesh_vertex_2d(vertices, b);
+                if (EqualPoint2(p, pa, eps) || EqualPoint2(p, pb, eps)
+                    || !point_on_cut_segment(p, pa, pb, eps)) continue;
+                const double length = std::hypot(pb.x-pa.x, pb.y-pa.y);
+                const double t = std::hypot(p.x-pa.x, p.y-pa.y) / length;
+                const size_t v = node(p, vertices[a].z * (1-t) + vertices[b].z * t);
+                if (std::any_of(face.corners.begin(),face.corners.end(),[v](const auto& c) { return c.v==v; })) continue;
+                face.corners.insert(face.corners.begin() + e + 1, {v, v, v});
+                break;
+            }
+        }
+    };
+    // Plan against the ORIGINAL cells, before any point has made a fan.
+    // Otherwise the second point is classified in one of the first point's
+    // triangles and the two-node / enclosed-loop cases are lost.
+    const size_t original_count = faces.size();
+    const size_t cut_count = cut.size() - (cut_is_closed(cut) ? 1 : 0);
+    const auto cross = [](cVec2 a, cVec2 b) { return a.x*b.y-a.y*b.x; };
+    const auto convex_piece = [&](const Face& f, double sign) {
+        if (sign*trim_face_twice_area(f,vertices) <= eps*eps) return false;
+        for (size_t k=0;k<f.corners.size();++k) {
+            const auto a=mesh_vertex_2d(vertices,f.corners[k].v);
+            const auto b=mesh_vertex_2d(vertices,f.corners[(k+1)%f.corners.size()].v);
+            const auto c=mesh_vertex_2d(vertices,f.corners[(k+2)%f.corners.size()].v);
+            if (sign*cross(b-a,c-b) <= eps*eps) return false;
+        }
+        return true;
+    };
+    const auto quality = [&](const Face& f) {
+        double lengths=0;
+        for (size_t k=0;k<f.corners.size();++k)
+            lengths+=Length2(mesh_vertex_2d(vertices,f.corners[k].v)
+                -mesh_vertex_2d(vertices,f.corners[(k+1)%f.corners.size()].v));
+        return lengths/std::abs(trim_face_twice_area(f,vertices));
+    };
+    for (size_t cell=0;cell<original_count;++cell) {
+        const Face source=faces[cell];
+        if (source.deleted || source.corners.size()<3) continue;
+        const auto polygon=make_face_2d(source,vertices);
+        std::vector<size_t> contained;
+        for (size_t k=0;k<cut_count;++k)
+            if (contains_bounds(cell,cut[k]) && ClassifyPointInFace2(polygon,cut[k],eps)==PFP_INSIDE
+                && std::none_of(contained.begin(),contained.end(),[&](size_t j) { return EqualPoint2(cut[j],cut[k],eps); }))
+                contained.push_back(k);
+        const double sign=trim_face_twice_area(source,vertices)>0 ? 1 : -1;
+        if (cut_is_closed(cut) && contained.size()==cut_count && cut_count>=3) {
+            // Zip the outer cell and the complete inner loop directly. The
+            // dynamic program advances along either ring (triangle) or both
+            // (quad). A four-corner window therefore produces four quads,
+            // without first filling the cell with successive point fans.
+            std::vector<MeshCorner> inner;
+            for (size_t k=0;k<cut_count;++k) {
+                const size_t v=node(cut[k],vertices[source.corners[0].v].z);
+                inner.push_back({v,v,v});
+            }
+            Face inner_face=source; inner_face.corners=inner;
+            if (sign*trim_face_twice_area(inner_face,vertices)<0) {
+                std::reverse(inner.begin(),inner.end()); inner_face.corners=inner;
+            }
+            const Face2D hole=make_face_2d(inner_face,vertices);
+            const auto valid = [&](const Face& piece) {
+                if (!convex_piece(piece,sign)) return false;
+                const auto xy=make_face_2d(piece,vertices);
+                for (const auto& p:hole.verts)
+                    if (ClassifyPointInFace2(xy,p,eps)==PFP_INSIDE) return false;
+                for (size_t e=0;e<xy.verts.size();++e) {
+                    const auto a=xy.verts[e], b=xy.verts[(e+1)%xy.verts.size()];
+                    const auto middle=(a+b)*.5;
+                    if (ClassifyPointInFace2(polygon,middle,eps)==PFP_OUTSIDE
+                        || ClassifyPointInFace2(hole,middle,eps)==PFP_INSIDE) return false;
+                    for (const Face2D* ring : {&polygon,&hole}) {
+                        CellCutInfo hits;
+                        AnalyzeFaceCut(*ring,{a,b},hits,eps);
+                        for (const auto& hit:hits.hits)
+                            if (!EqualPoint2(hit.pt,a,eps) && !EqualPoint2(hit.pt,b,eps)) return false;
+                        // Do not jump over a collinear ring vertex.
+                        for (const auto& p:ring->verts)
+                            if (!EqualPoint2(p,a,eps) && !EqualPoint2(p,b,eps)
+                                && point_on_cut_segment(p,a,b,eps)) return false;
+                    }
+                }
+                return true;
+            };
+            const size_t m=source.corners.size(), n=inner.size(), columns=n+1;
+            double best=std::numeric_limits<double>::infinity();
+            std::vector<Face> best_pieces;
+            // A cyclic start changes the DP coordinates, not the geometric
+            // transition. Validate each possible triangle/quad only once.
+            std::vector<double> piece_cost(m*n*3,std::numeric_limits<double>::quiet_NaN());
+            for (size_t start=0;start<n;++start) {
+                const auto make_piece = [&](size_t i,size_t j,int step) {
+                    const auto a=source.corners[i%m], b=source.corners[(i+1)%m];
+                    const auto c=inner[(start+j)%n], d=inner[(start+j+1)%n];
+                    Face f=source; f.m_Trimmed=true;
+                    if (step==1) f.corners={a,b,c};
+                    else if (step==2) f.corners={a,d,c};
+                    else f.corners={a,b,d,c};
+                    return f;
+                };
+                std::vector<double> cost((m+1)*columns,std::numeric_limits<double>::infinity());
+                std::vector<int> previous(cost.size(),0);
+                cost[0]=0;
+                for (size_t i=0;i<=m;++i) for (size_t j=0;j<=n;++j) {
+                    const size_t here=i*columns+j;
+                    if (!std::isfinite(cost[here])) continue;
+                    for (int step=1;step<=3;++step) {
+                        const size_t di=step!=2, dj=step!=1;
+                        if (i+di>m || j+dj>n) continue;
+                        const auto piece=make_piece(i,j,step);
+                        double& weight=piece_cost[((i%m)*n+(start+j)%n)*3+step-1];
+                        if (std::isnan(weight)) weight=valid(piece) ? 1+.001*quality(piece)
+                            : std::numeric_limits<double>::infinity();
+                        if (!std::isfinite(weight)) continue;
+                        const size_t next=(i+di)*columns+j+dj;
+                        const double candidate=cost[here]+weight;
+                        if (candidate<cost[next]) { cost[next]=candidate; previous[next]=step; }
+                    }
+                }
+                if (cost.back()>=best || !std::isfinite(cost.back())) continue;
+                std::vector<Face> pieces;
+                for (size_t i=m,j=n;i || j;) {
+                    const int step=previous[i*columns+j];
+                    i-=step!=2; j-=step!=1;
+                    pieces.push_back(make_piece(i,j,step));
+                }
+                double area=trim_face_twice_area(inner_face,vertices);
+                for (const auto& f:pieces) area+=trim_face_twice_area(f,vertices);
+                if (std::abs(area-trim_face_twice_area(source,vertices))>eps*coordinate_scale) continue;
+                best=cost.back(); best_pieces=std::move(pieces);
+            }
+            if (!best_pieces.empty()) {
+                faces[cell].deleted=true;
+                faces.insert(faces.end(),best_pieces.begin(),best_pieces.end());
+                faces.push_back(std::move(inner_face));
+                continue;
+            }
+        }
+        if (source.corners.size()==4 && contained.size()==2) {
+            // Two nodes share one internal edge: two end triangles and two
+            // side quads. Try all orientations and choose valid, compact cells.
+            const size_t p=node(cut[contained[0]],vertices[source.corners[0].v].z);
+            const size_t q=node(cut[contained[1]],vertices[source.corners[0].v].z);
+            double best=std::numeric_limits<double>::infinity();
+            std::vector<Face> best_pieces;
+            for (int r=0;r<4;++r) for (bool swap : {false,true}) {
+                const auto a=source.corners[r], b=source.corners[(r+1)%4];
+                const auto c=source.corners[(r+2)%4], d=source.corners[(r+3)%4];
+                const size_t u=swap?q:p,v=swap?p:q;
+                const MeshCorner x{u,u,u},y{v,v,v};
+                std::vector<Face> pieces(4,source);
+                pieces[0].corners={d,a,x}; pieces[1].corners={b,c,y};
+                pieces[2].corners={a,b,y,x}; pieces[3].corners={x,y,c,d};
+                double score=0;
+                for (auto& f:pieces) {
+                    f.m_Trimmed=true;
+                    if (!convex_piece(f,sign)) { score=std::numeric_limits<double>::infinity(); break; }
+                    score+=quality(f);
+                }
+                if (score<best) { best=score; best_pieces=std::move(pieces); }
+            }
+            if (!best_pieces.empty()) {
+                faces[cell].deleted=true;
+                faces.insert(faces.end(),best_pieces.begin(),best_pieces.end());
+            }
+        }
+    }
+    // Stage 1, insert_FACES_POINT_3: a point strictly inside a cell makes
+    // a fan; a point already on its boundary is shared with its neighbours.
+    for (const cVec2& p : cut) {
+        insert_edge_node(p);
+        const size_t count = faces.size();
+        for (size_t i = 0; i < count; ++i) {
+            const Face source = faces[i];
+            if (source.deleted || !contains_bounds(i,p) || ClassifyPointInFace2(make_face_2d(source, vertices), p, eps)
+                != PFP_INSIDE) continue;
+            const size_t v = node(p, vertices[source.corners[0].v].z);
+            faces[i].deleted = true;
+            for (size_t e = 0; e < source.corners.size(); ++e) {
+                Face piece = source;
+                piece.corners = {source.corners[e], source.corners[(e+1)%source.corners.size()], {v,v,v}};
+                piece.m_Trimmed = true;
+                faces.push_back(std::move(piece));
+            }
+        }
+    }
+    // Mesh coordinates are floats. Use the inserted representation of each
+    // endpoint for the cut too: intersecting the original double endpoint
+    // with a very narrow fan can otherwise create a second, spurious node.
+    for (auto& p : cut) {
+        const size_t v=find_node(p);
+        if (v<vertices.size()) p=mesh_vertex_2d(vertices,v);
+    }
+    // Stage 2, divide_SELL_LINE: finite segments only, never their infinite
+    // supporting lines. Snapshot each pass so appended pieces wait for the
+    // next segment, just as in the old reverse cell loop.
+    for (size_t s = 0; s + 1 < cut.size(); ++s) {
+        if (EqualPoint2(cut[s], cut[s+1], eps)) continue;
+        const std::vector<cVec2> segment{cut[s], cut[s+1]};
+        const auto overlaps = [&](size_t i) {
+            const auto b=cell_bounds(i);
+            return std::max(segment[0].x,segment[1].x)>=b.x0-eps
+                && std::min(segment[0].x,segment[1].x)<=b.x1+eps
+                && std::max(segment[0].y,segment[1].y)>=b.y0-eps
+                && std::min(segment[0].y,segment[1].y)<=b.y1+eps;
+        };
+        std::vector<cVec2> intersections;
+        for (size_t i=0;i<faces.size();++i) {
+            const Face& face=faces[i];
+            if (face.deleted || !overlaps(i)) continue;
+            CellCutInfo info;
+            AnalyzeFaceCut(make_face_2d(face, vertices), segment, info, eps);
+            for (const auto& hit : info.hits)
+                if (std::none_of(intersections.begin(),intersections.end(),[&](const auto& p) { return EqualPoint2(p,hit.pt,eps); }))
+                    intersections.push_back(hit.pt);
+        }
+        for (const auto& p : intersections) insert_edge_node(p);
+        for (size_t i = faces.size(); i-- > 0;) {
+            if (faces[i].deleted || !overlaps(i)) continue;
+            std::vector<int> positions;
+            for (int e = 0; e < static_cast<int>(faces[i].corners.size()); ++e)
+                if (point_on_cut_segment(mesh_vertex_2d(vertices, faces[i].corners[e].v), segment[0], segment[1], eps)) positions.push_back(e);
+            if (positions.size() != 2) continue;
+            const cVec2 a = mesh_vertex_2d(vertices, faces[i].corners[positions[0]].v);
+            const cVec2 b = mesh_vertex_2d(vertices, faces[i].corners[positions[1]].v);
+            if (ClassifyPointInFace2(make_face_2d(faces[i], vertices), (a+b)*0.5, eps)
+                != PFP_INSIDE) continue;
+            SplitFaceByLine(faces, i, positions[0], positions[1]);
+        }
+    }
+    // Adjacent-edge cuts can produce pentagons. Clip valid ears until at
+    // most four corners remain, retaining the unaffected original quads.
+    for (size_t i = 0; i < faces.size(); ++i) {
+        if (faces[i].deleted) continue;
+        while (faces[i].corners.size() > 4) {
+            const Face source = faces[i];
+            const double sign = trim_face_twice_area(source, vertices) >= 0 ? 1 : -1;
+            bool split = false;
+            for (size_t e = 0; e < source.corners.size(); ++e) {
+                const size_t a = (e+source.corners.size()-1)%source.corners.size();
+                const size_t b = (e+1)%source.corners.size();
+                Face ear = source;
+                ear.corners = {source.corners[a],source.corners[e],source.corners[b]};
+                if (sign * trim_face_twice_area(ear, vertices) <= eps*eps) continue;
+                const auto triangle = make_face_2d(ear, vertices);
+                bool blocked = false;
+                for (size_t k = 0; k < source.corners.size(); ++k)
+                    if (k != a && k != e && k != b
+                        && ClassifyPointInFace2(triangle, mesh_vertex_2d(vertices,source.corners[k].v),eps)
+                            != PFP_OUTSIDE) blocked = true;
+                if (blocked) continue;
+                faces[i].corners.erase(faces[i].corners.begin()+e);
+                faces.push_back(std::move(ear));
+                split = true;
+                break;
+            }
+            if (!split) return false;
+        }
+        if (faces[i].corners.size() == 4) {
+            const Face source = faces[i];
+            const double sign = trim_face_twice_area(source,vertices) >= 0 ? 1 : -1;
+            bool convex = true;
+            for (int e=0;e<4;++e) {
+                Face corner = source;
+                corner.corners = {source.corners[e],source.corners[(e+1)%4],source.corners[(e+2)%4]};
+                if (sign*trim_face_twice_area(corner,vertices) <= eps*eps) convex = false;
+            }
+            if (!convex) {
+                bool split = false;
+                for (int e=0;e<2 && !split;++e) {
+                    Face a=source,b=source;
+                    a.corners={source.corners[e],source.corners[(e+1)%4],source.corners[(e+2)%4]};
+                    b.corners={source.corners[e],source.corners[(e+2)%4],source.corners[(e+3)%4]};
+                    if (sign*trim_face_twice_area(a,vertices)>eps*eps && sign*trim_face_twice_area(b,vertices)>eps*eps)
+                        split=SplitFaceByLine(faces,i,e,e+2);
+                }
+                if (!split) return false;
+            }
+        }
+    }
+    if (cut_is_closed(cut)) {
+        Face2D polygon;
+        polygon.verts = cut;
+        polygon.verts.pop_back();
+        if (polygon.verts.size() < 3) return false;
+        const bool inside = ClassifyPointInFace2(polygon, {pc.x,pc.y}, eps) != PFP_OUTSIDE;
+        for (auto& face : faces) if (!face.deleted)
+            face.deleted = (ClassifyPointInFace2(polygon, face_center_2d(face, vertices), eps)
+                != PFP_OUTSIDE) != inside;
+    } else {
+        std::map<EdgeCoordKey, std::vector<size_t>> edges;
+        for (size_t i = 0; i < faces.size(); ++i) if (!faces[i].deleted)
+            for (size_t e = 0; e < faces[i].corners.size(); ++e) {
+                const auto a = mesh_vertex_2d(vertices,faces[i].corners[e].v);
+                const auto b = mesh_vertex_2d(vertices,faces[i].corners[(e+1)%faces[i].corners.size()].v);
+                if (!edge_blocked_by_cut(a,b,cut,eps)) edges[edge_coord_key(a,b,eps)].push_back(i);
+            }
+        std::vector<std::vector<size_t>> neighbors(faces.size());
+        for (const auto& entry : edges) if (entry.second.size() == 2) {
+            const auto a = entry.second[0], b = entry.second[1];
+            neighbors[a].push_back(b); neighbors[b].push_back(a);
+        }
+        size_t start = faces.size();
+        for (size_t i = 0; i < faces.size(); ++i)
+            if (!faces[i].deleted && ClassifyPointInFace2(make_face_2d(faces[i],vertices),{pc.x,pc.y},eps)
+                != PFP_OUTSIDE) { start = i; break; }
+        if (start == faces.size()) return false;
+        std::vector<bool> keep(faces.size(), false);
+        std::vector<size_t> queue{start}; keep[start] = true;
+        for (size_t j = 0; j < queue.size(); ++j)
+            for (size_t next : neighbors[queue[j]]) if (!keep[next]) {
+                keep[next] = true; queue.push_back(next);
+            }
+        for (size_t i = 0; i < faces.size(); ++i) faces[i].deleted = !keep[i];
+    }
+    faces.erase(std::remove_if(faces.begin(), faces.end(), [](const Face& f) { return f.deleted; }), faces.end());
+    if (faces.empty()) { Clear(); return true; }
+    return SetGeometry(std::move(vertices), std::move(faces));
 }
 
 bool CMesh3D::TrimByPline(CPolyline* pLine, CPoint3d pc, bool preserve_boundary) {

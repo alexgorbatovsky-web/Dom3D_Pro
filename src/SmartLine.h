@@ -6,6 +6,8 @@
 #include "LinkLine.h"
 
 #include <cstddef>
+#include <algorithm>
+#include <cmath>
 #include <functional>
 #include <iosfwd>
 #include <memory>
@@ -26,8 +28,24 @@ struct SketchFaceAttachment {
     int face_index = -1;
 };
 
+// Whole-figure definition in sketch UV coordinates. Links are derived geometry
+// for existing rendering/profile consumers, not independently editable pieces.
+struct SketchPrimitive {
+    int kind = 0; // 0: ordinary contour, 1: circle, 2: ellipse, 3: regular polygon
+    double u = 0, v = 0, radius = 1, minor_radius = 1, angle = 0;
+    int sides = 6;
+    double start_angle = 0, sweep_angle = 6.28318530717958647692;
+    bool pie = false;
+    bool IsFullConic() const { return sweep_angle >= 6.28318530717958647692-1e-10; }
+    int ConicSpanCount() const { return std::max(1, int(std::ceil(sweep_angle/1.57079632679489661923))); }
+};
+
 class CSmartLine final : public CAlfaObject {
 public:
+    const SketchPrimitive& GetPrimitive() const { return primitive_; }
+    bool SetPrimitive(const SketchPrimitive& primitive);
+    // Retain the circular interval counterclockwise, yielding one exact arc.
+    bool TrimCircle(double start_angle, double sweep);
     CSmartLine();
     explicit CSmartLine(std::string name);
     CSmartLine(CSmartLine&&) noexcept = default;
@@ -92,6 +110,8 @@ public:
     bool ConstrainVertical(std::size_t line_index);
     bool ConstrainBezierTangentAtStart(std::size_t line_index);
     bool ConstrainBezierTangentAtEnd(std::size_t line_index);
+    // A joint belongs to the shared node, including the closing node.
+    bool SetNodeSmooth(std::size_t node_index, bool smooth);
     bool ApplyConstraints();
     std::size_t GetNumConstraints() const;
     const CConstraint* GetConstraint(std::size_t index) const;
@@ -129,6 +149,8 @@ public:
     bool GetBounds(Vec3& min_point, Vec3& max_point) const override;
 
 private:
+    SketchPrimitive primitive_;
+    bool FindNodeJoint(std::size_t node_index, std::size_t& incoming, std::size_t& outgoing) const;
     bool ExecuteEdit(const std::function<bool()>& operation, unsigned kind);
     void BindGeometry();
     void RestoreGeometry(CSmartLine& source);

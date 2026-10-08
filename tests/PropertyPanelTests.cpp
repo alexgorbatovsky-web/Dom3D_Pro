@@ -9,6 +9,7 @@
 #include <QPushButton>
 #include <QTimer>
 #include <QKeyEvent>
+#include <QMouseEvent>
 #include <QLineEdit>
 #include "ui/DefaultDialogAccept.h"
 
@@ -255,6 +256,32 @@ int main(int argc, char** argv) {
             "Hole first-edge distance drag slider was not created.");
     require(has_drag_label("Distance to Edge 2"),
             "Hole second-edge distance drag slider was not created.");
+
+    // Exercise the shared drag control, not just its arrow glyphs.
+    for (QLabel* label : labels) {
+        if (!label->text().startsWith(QChar(0x25c0))) continue;
+        const auto before = hole_panel.ActiveObject().parameters;
+        const QPointF origin(20, 10), destination(40, 10);
+        QMouseEvent press(QEvent::MouseButtonPress, origin, origin,
+            Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(label, &press);
+        QMouseEvent move(QEvent::MouseMove, destination, destination,
+            Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(label, &move);
+        QMouseEvent release(QEvent::MouseButtonRelease, destination, destination,
+            Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(label, &release);
+        const auto& after = hole_panel.ActiveObject().parameters;
+        int changed = 0;
+        for (size_t i = 0; i < before.size(); ++i) {
+            if (before[i].value != after[i].value) {
+                ++changed;
+                require(after[i].value > before[i].value,
+                    "Dragging a parameter right must increase its value.");
+            }
+        }
+        require(changed == 1, "Each drag label must change exactly its own parameter.");
+    }
 
     return EXIT_SUCCESS;
 }

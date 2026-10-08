@@ -157,6 +157,21 @@ int main() {
                 < 1.0e-5,
             "Closed sketch trim did not partition the body.");
 
+    // A reversed solid remains BRep-valid, but denotes its infinite outside.
+    // Neither operand's orientation may make the cutter appear in the result.
+    for (bool reverse_body : {false, true}) for (bool reverse_profile : {false, true}) {
+        const auto operand = reverse_body ? box.Reversed() : box;
+        const auto cutter = reverse_profile ? TopoDS::Face(circle_face.Reversed()) : circle_face;
+        for (bool inside : {false, true}) {
+            TopoDS_Shape trimmed;
+            Require(TrimSolidByClosedProfile(operand, cutter, {0,0,1}, inside, trimmed),
+                    "Trim rejected reversed operands.");
+            Require(std::abs(Volume(trimmed)-Volume(inside?profile_inside:profile_outside))<1e-5,
+                    "Reversed operand changed the retained trim volume.");
+        }
+        Require((Volume(operand)<0)==reverse_body,"Trim mutated source orientation.");
+    }
+
     BRepBuilderAPI_MakeWire open_wire;
     open_wire.Add(BRepBuilderAPI_MakeEdge(
         gp_Pnt(-20.0, 0.0, 0.0), gp_Pnt(20.0, 0.0, 0.0)).Edge());

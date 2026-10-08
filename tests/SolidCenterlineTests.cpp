@@ -1,4 +1,5 @@
 #include "CAlfaDoc.h"
+#include <QSettings>
 #include "CPolyline.h"
 #include "Dom3DProjectSerializer.h"
 #include "solid/Solid.h"
@@ -51,6 +52,9 @@ void same(const std::vector<SolidCenterline>& a, const std::vector<SolidCenterli
 int TestSolidCenterlines(int argc, char** argv) try {
     QApplication app(argc, argv);
     QTemporaryDir temporary;
+    // The snap assertion must not inherit the user's disabled snapping.
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, temporary.path());
     const QString out = argc > 2 ? QString::fromLocal8Bit(argv[2]) : temporary.path();
     check(QDir().mkpath(out), "Cannot create centerline test output");
     CAlfaDoc doc;

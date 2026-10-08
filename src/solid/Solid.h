@@ -93,6 +93,20 @@ class CSolid :public CAlfaObject {
 
 
 public:
+	// Keep the previous preview alive until a complete replacement is accepted.
+	class MeshRebuildTransaction {
+	public:
+		explicit MeshRebuildTransaction(CSolid& owner);
+		~MeshRebuildTransaction();
+		void Commit() { committed_ = true; }
+		MeshRebuildTransaction(const MeshRebuildTransaction&) = delete;
+		MeshRebuildTransaction& operator=(const MeshRebuildTransaction&) = delete;
+	private:
+		CSolid& owner_;
+		std::vector<CSurfaceFace*> original_;
+		bool committed_ = false, quadro_, slx_, divide_, trim_outer_, surfaces_init_, edges_init_;
+		float density_;
+	};
 	const std::vector<SolidCenterline>& GetCenterlines() const { return m_Centerlines; }
 	const std::vector<SolidCenterline>& GetDisplayCenterlines() const { return m_PreviewCenterlines.empty() ? m_Centerlines : m_PreviewCenterlines; }
 	void PreviewCenterlines(const gp_GTrsf& transform);
@@ -131,6 +145,7 @@ public:
 	static Color GetHiddenLineBackgroundColor();
 
 	void Render3d(bool selected) const override;
+    void RenderBody3d(bool selected) const;
 	void RenderHiddenLineDepth() const;
 	void RenderCenterlines(bool selected) const;
 	void RenderHiddenLineEdges(bool hidden) const;
@@ -157,12 +172,12 @@ public:
 	static TopoDS_Shape CopyShape(TopoDS_Shape& shape);
 	static TopoDS_Shape Shell(CSurfaceFace* surf, double dist,
 	                         std::string* error = nullptr);
-	bool ApplyAffineTransform(const std::array<double, 16>& matrix);
+	virtual bool ApplyAffineTransform(const std::array<double, 16>& matrix);
 	void PreviewTranslate(Vec3 delta);
 	void PreviewRotate(Vec3 center, Vec3 axis, float angle);
 	void PreviewScale(Vec3 center, Vec3 axis, float factor);
-	bool CommitPreviewTranslate(Vec3 delta, bool record_operation = true);
-	bool CommitPreviewRotate(Vec3 center, Vec3 axis, float angle);
+	virtual bool CommitPreviewTranslate(Vec3 delta, bool record_operation = true);
+	virtual bool CommitPreviewRotate(Vec3 center, Vec3 axis, float angle);
 	bool ReverseNormals();
 	bool GetBounds(Vec3& min_point, Vec3& max_point) const override;
 
@@ -268,6 +283,8 @@ public:
 	bool DrawNet;
 	bool MeshQuadro;
 	bool MeshQuadroHoleSLX;
+	bool MeshQuadroHoleDivideFace = false;
+	bool MeshQuadroTrimByPline = false;
 	bool MeshQuadroOld;
 	int m_TypeGeom;
 

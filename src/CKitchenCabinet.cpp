@@ -3742,6 +3742,7 @@ std::unique_ptr<CAlfaObject> CKitchenCabinet::Clone() const {
     auto copy = std::make_unique<CKitchenCabinet>(
         GetName() + " Copy", GetElementIds(), definition_);
     copy->SetGroupName(GetGroupName());
+    copy->SetFrozen(IsFrozen());
     copy->CAlfaObject::SetVisible(IsVisible());
     copy->CAlfaObject::SetColor(GetColor());
     copy->SetMaterial(GetMaterial());

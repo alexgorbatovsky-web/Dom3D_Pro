@@ -1,3 +1,4 @@
+#include "Diagnostics.h"
 // Vector.cpp: implementation of the Vector class.
 //
 //	This is a part of the CAD/CAM/CAE "Alpha".
@@ -563,6 +564,7 @@ int CVector::GetTwoAngleRotateVz(CVector* v2, double* alfa, double* beta)
 
 void CVector::print(void)
 {
+    if constexpr (!Dom3DDiagnosticsEnabled) return;
 	FILE* strm = NULL;
 	fopen_s(&strm, "c:\\temp\\stdout.txt", "a+");
     if(strm==NULL)
@@ -573,6 +575,7 @@ void CVector::print(void)
 
 void CVector::print(LPCTSTR text)
 {
+    if constexpr (!Dom3DDiagnosticsEnabled) return;
 	FILE* strm = NULL;
 	fopen_s(&strm, "c:\\temp\\stdout.txt", "a+");
     if(strm==NULL)

@@ -60,6 +60,7 @@ int TestDraftFace(const char* path) {
     size_t index = 0;
     while (index < doc.GetObjects().size() && !dynamic_cast<CSolid*>(doc.GetObjects()[index].get())) ++index;
     check(index < doc.GetObjects().size(), "No draft body");
+    const auto body_id = body(doc,index).m_id;
     const TopoDS_Shape expected = body(doc,index).m_Shape;
     for (int i=0; i<3; ++i) {
         check(tools.ReplayOperations(index,doc), "Draft history failed to replay");
@@ -111,6 +112,7 @@ int TestDraftFace(const char* path) {
     check(serializer.Save(savedPath,doc,room,view,{},error), "Draft save failed");
     CAlfaDoc loaded;
     check(serializer.Load(savedPath,loaded,room,view,error), "Draft reload failed");
+    index=loaded.FindObjectIndexById(body_id);
     check(tools.ReplayOperations(index,loaded), "Reloaded draft replay failed");
     same(expected,body(loaded,index).m_Shape);
     return 0;

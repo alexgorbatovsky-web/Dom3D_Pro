@@ -794,6 +794,7 @@ MaterialEditorDialog::MaterialEditorDialog(const QString& library_path,
     shininess_spin_ = add_spin(1.0, 256.0, 1.0, 0);
     reflectivity_spin_ = add_spin(0.0, 1.0, 0.02, 2);
     roughness_spin_ = add_spin(0.04, 1.0, 0.02, 2);
+    roughness_spin_->setToolTip("0.04: polished; 1.00: matte. With a roughness map, 0.50 keeps the original map.");
     metallic_spin_ = add_spin(0.0, 1.0, 0.02, 2);
     coat_weight_spin_ = add_spin(0.0, 1.0, 0.05, 2);
     coat_roughness_spin_ = add_spin(0.01, 1.0, 0.01, 2);

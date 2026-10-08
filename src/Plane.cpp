@@ -1,3 +1,4 @@
+#include "Diagnostics.h"
 ////////////////////Plane.c++
 ////
 #include "Plane.h"
@@ -162,6 +163,7 @@ CPoint3d p1,p2,p3;
 
 void CPlane::print(FILE* fil)
 {
+    if (!Dom3DDiagnosticsEnabled && !fil) return;
 	int file_null=0;
 	if(!fil){
 		fopen_s(&fil, "c:\\stdout.txt","a+");
@@ -175,6 +177,7 @@ void CPlane::print(FILE* fil)
 }
 void CPlane::print(const char* text, FILE* fil)
 {
+    if (!Dom3DDiagnosticsEnabled && !fil) return;
 	int file_null=0;
 	if(!fil){
 		fopen_s(&fil, "c:\\stdout.txt","a+");

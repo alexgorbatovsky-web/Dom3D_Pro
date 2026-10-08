@@ -22,6 +22,7 @@
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepAlgoAPI_Common.hxx>
+#include <BRepAlgoAPI_Cut.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_GTransform.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
@@ -38,6 +39,8 @@
 #include <BRep_Builder.hxx>
 #include <Bnd_Box.hxx>
 #include <BRepTools.hxx>
+#include <BRepTools_WireExplorer.hxx>
+#include <BRepAdaptor_Curve.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepGProp.hxx>
 #include <GeomAPI_PointsToBSpline.hxx>
@@ -376,17 +379,28 @@ TopoDS_Wire place_scaled_section(const TopoDS_Wire& source_wire,
                                  double height_scale,
                                  double delta_x,
                                  double delta_y,
-                                 double angle_degrees) {
+                                 double angle_degrees,
+                                 bool auto_orientation = true) {
     CPoint3d target_origin;
     CPoint3d target_z;
     CPoint3d guide_normal;
     if (!guide_frame_at(guide, parameter, target_origin, target_z, guide_normal)) {
         return {};
     }
-    CPoint3d base_x = cross(guide_normal, target_z);
-    if (!normalize(base_x)) return {};
-    CPoint3d base_y = cross(target_z, base_x);
-    if (!normalize(base_y)) return {};
+    CPoint3d base_x,base_y;
+    if (auto_orientation) {
+        base_x=cross(guide_normal,target_z);
+        if(!normalize(base_x))return {};
+        base_y=cross(target_z,base_x);
+        if(!normalize(base_y))return {};
+    } else {
+        const auto& frame=section.GetCoordinateSystem();
+        base_x=frame.x_axis;base_y=frame.y_axis;target_z=frame.normal;
+        CPoint3d start,tangent,binormal;
+        if(!guide_frame_at(guide,0,start,tangent,binormal))return {};
+        target_origin=add(frame.origin,subtract(target_origin,start));
+        delta_x=0;delta_y=0;
+    }
     target_origin = add(target_origin,
                         add(multiply(base_x, delta_x), multiply(base_y, delta_y)));
 
@@ -452,12 +466,22 @@ TopoDS_Wire build_polyline_wire(const std::vector<CPoint3d>& points, bool close)
 }
 
 TopoDS_Wire build_bspline_wire(const CBSpline& spline) {
+    if(spline.HasNodeTypes())return build_bspline_wire(spline.BuildNodeBezier());
     if (spline.IsClosed() || spline.GetPointCount() < 2) {
         return {};
     }
 
-    const std::vector<double>& expanded_knots = spline.GetKnots();
-    const int degree = spline.GetDegree();
+    std::vector<double> expanded_knots = spline.GetKnots();
+    const int degree = std::clamp(spline.GetDegree(), 1, static_cast<int>(spline.GetPointCount()) - 1);
+    // Open B-splines without explicit knots use a clamped uniform vector in
+    // CBSpline::EvaluateOpen. Preserve those poles/knots instead of fitting
+    // sampled points: fitting can introduce curvature waves near repeated poles.
+    if (expanded_knots.empty() && spline.GetCurveType() != SplineCurveType::Bezier) {
+        const int count = static_cast<int>(spline.GetPointCount());
+        for (int i = 0; i < count + degree + 1; ++i)
+            expanded_knots.push_back(i <= degree ? 0.0 : i >= count ? 1.0
+                : static_cast<double>(i - degree) / (count - degree));
+    }
     if ((spline.GetCurveType() == SplineCurveType::Nurbs
          || !expanded_knots.empty())
         && expanded_knots.size()
@@ -1189,8 +1213,8 @@ TopoDS_Shape BuildSweptSolidShape(const CSmartLine& section,
     }
 
     try {
-        const bool variable_scale = !scale_graph_is_neutral(width_scales)
-            || !scale_graph_is_neutral(height_scales);
+        const bool variable_scale = !SweepGuideHasKinks(guide)
+            && (!scale_graph_is_neutral(width_scales) || !scale_graph_is_neutral(height_scales));
         if (variable_scale) {
             // MakePipeShell is allowed to determine section locations on the
             // spine automatically.  With many nearby scaled sections that
@@ -1244,6 +1268,78 @@ TopoDS_Shape BuildSweptSolidShape(const CSmartLine& section,
     } catch (const Standard_Failure&) {
         return {};
     }
+}
+
+bool SweepGuideHasKinks(const CAlfaObject& guide) {
+    try {
+        const auto wire=BuildSolidCenterPath(guide);
+        if(wire.IsNull())return true;
+        gp_Vec previous;bool havePrevious=false;
+        const auto discontinuous=[](const gp_Vec& a,const gp_Vec& b) {
+            return a.SquareMagnitude()<1e-20||b.SquareMagnitude()<1e-20
+                ||a.Dot(b)/(a.Magnitude()*b.Magnitude())<1-1e-8;
+        };
+        for(BRepTools_WireExplorer edge(wire);edge.More();edge.Next()) {
+            BRepAdaptor_Curve curve(edge.Current());
+            const bool reverse=edge.Current().Orientation()==TopAbs_REVERSED;
+            const int count=curve.NbIntervals(GeomAbs_C1);
+            TColStd_Array1OfReal intervals(1,count+1);curve.Intervals(intervals,GeomAbs_C1);
+            for(int i=0;i<count;++i) {
+                const int k=reverse?count-i:i+1;
+                const double lo=intervals(k),hi=intervals(k+1),epsilon=(hi-lo)*1e-8;
+                gp_Pnt p;gp_Vec start,end;
+                curve.D1(reverse?hi-epsilon:lo+epsilon,p,start);
+                curve.D1(reverse?lo+epsilon:hi-epsilon,p,end);
+                if(reverse){start.Reverse();end.Reverse();}
+                if(havePrevious&&discontinuous(previous,start))return true;
+                previous=end;havePrevious=true;
+            }
+        }
+        return !havePrevious;
+    } catch(const Standard_Failure&) {return true;}
+}
+
+TopoDS_Shape BuildSweptSurfaceShape(const CAlfaObject& section,const CAlfaObject& guide,
+    int transition,double dx,double dy,double angle,const std::vector<double>& widths,const std::vector<double>& heights,
+    bool auto_orientation,double twist_angle,double end_scale) {
+    if(&section==&guide||!std::isfinite(twist_angle)||!std::isfinite(end_scale)||end_scale<=0)return {};
+    try {
+        const auto source=BuildSolidCenterPath(section),spine=BuildSolidCenterPath(guide);
+        if(source.IsNull()||spine.IsNull())return {};
+        CPoint3d origin,x,normal;
+        if(!initial_guide_frame(section,origin,x,normal))return {};
+        if(const auto* sketch=dynamic_cast<const CSmartLine*>(&section)) {
+            const auto& frame=sketch->GetCoordinateSystem();origin=frame.origin;x=frame.x_axis;normal=frame.normal;
+        }
+        CSmartLine frame("Sweep profile frame");
+        if(!frame.SetCoordinateSystem(origin,x,normal))return {};
+        TopoDS_Shape result;
+        const bool smooth=!SweepGuideHasKinks(guide);
+        if(!auto_orientation||std::abs(twist_angle)>1e-9||std::abs(end_scale-1)>1e-9
+            ||(smooth&&(!scale_graph_is_neutral(widths)||!scale_graph_is_neutral(heights)))) {
+            BRepOffsetAPI_ThruSections loft(false,false,1e-6);loft.CheckCompatibility(true);
+            const int stations=int(std::clamp(std::ceil(std::abs(twist_angle)/10)+1,25.0,361.0));
+            for(int i=0;i<stations;++i) {
+                const double t=double(i)/(stations-1),scale=1+(end_scale-1)*t;
+                auto wire=place_scaled_section(source,frame,guide,t,scale*(smooth?evaluate_scale_graph(widths,t):1),
+                    scale*(smooth?evaluate_scale_graph(heights,t):1),dx,dy,(auto_orientation?angle:0)+twist_angle*t,auto_orientation);
+                if(wire.IsNull())return {};loft.AddWire(wire);
+            }
+            loft.Build();if(!loft.IsDone())return {};result=loft.Shape();
+        } else {
+            const auto placed=place_section_at_guide_start(source,frame,guide,dx,dy,angle);
+            if(placed.IsNull())return {};
+            CPoint3d guideOrigin,tangent,binormal;
+            if(!initial_guide_frame(guide,guideOrigin,tangent,binormal))return {};
+            BRepOffsetAPI_MakePipeShell sweep(spine);
+            sweep.SetMode(gp_Dir(binormal.x,binormal.y,binormal.z));
+            sweep.SetTransitionMode(transition_mode_from_index(transition));
+            sweep.Add(placed,false,false);
+            if(!sweep.IsReady())return {};sweep.Build();
+            if(!sweep.IsDone())return {};result=sweep.Shape();
+        }
+        return !result.IsNull()&&BRepCheck_Analyzer(result).IsValid()?result:TopoDS_Shape{};
+    } catch(const Standard_Failure&) {return {};}
 }
 
 TopoDS_Shape BuildFrameSolidShape(const CSmartLine& profile,
@@ -1325,9 +1421,35 @@ TopoDS_Wire BuildSolidCenterPath(const CAlfaObject& path) {
     return wire;
 }
 
-TopoDS_Shape BuildWireSolidShape(const CPolyline& path, double radius, TopoDS_Wire* center_path) {
+namespace {
+TopoDS_Shape HollowWire(const TopoDS_Shape& outer, const TopoDS_Wire& spine,
+                       const gp_Ax2& frame, double radius, double thickness) {
+    if (thickness == 0.0) return outer;
+    BRepBuilderAPI_MakeEdge inner_edge(gp_Circ(frame, radius - thickness));
+    BRepBuilderAPI_MakeWire inner_wire(inner_edge.Edge());
+    BRepOffsetAPI_MakePipeShell inner(spine);
+    inner.SetMode(false);
+    inner.SetTransitionMode(BRepBuilderAPI_RoundCorner);
+    inner.Add(inner_wire.Wire(), false, false);
+    if (!inner.IsReady()) return {};
+    inner.Build();
+    if (!inner.IsDone() || !inner.MakeSolid()) return {};
+    BRepAlgoAPI_Cut cut(outer, inner.Shape());
+    if (!cut.IsDone() || cut.Shape().IsNull()
+        || !BRepCheck_Analyzer(cut.Shape()).IsValid()) return {};
+    return cut.Shape();
+}
+bool ValidWireSection(double radius, double thickness) {
+    return std::isfinite(radius) && std::isfinite(thickness)
+        && radius > kGeometryTolerance && thickness >= 0.0
+        && (thickness == 0.0 || (thickness > kGeometryTolerance
+            && radius - thickness > kGeometryTolerance));
+}
+}
+
+TopoDS_Shape BuildWireSolidShape(const CPolyline& path, double radius, TopoDS_Wire* center_path, double thickness) {
     if (center_path) center_path->Nullify();
-    if (radius <= kGeometryTolerance || path.GetPointCount() < 2) return {};
+    if (!ValidWireSection(radius, thickness) || path.GetPointCount() < 2) return {};
     const TopoDS_Wire spine = build_rounded_polyline_wire(path);
     if (spine.IsNull()) return {};
     const std::vector<CPoint3d> rounded = path.GetRoundedPathPoints();
@@ -1348,51 +1470,43 @@ TopoDS_Shape BuildWireSolidShape(const CPolyline& path, double radius, TopoDS_Wi
         if (!sweep.IsReady()) return {};
         sweep.Build();
         if (!sweep.IsDone() || !sweep.MakeSolid()) return {};
-        if (center_path) *center_path = spine;
-        return sweep.Shape();
+        const TopoDS_Shape result = HollowWire(sweep.Shape(), spine, frame, radius, thickness);
+        if (!result.IsNull() && center_path) *center_path = spine;
+        return result;
     } catch (const Standard_Failure&) {
         return {};
     }
 }
 
-TopoDS_Shape BuildWireSolidShape(const CAlfaObject& path, double radius, TopoDS_Wire* center_path) {
+TopoDS_Shape BuildWireSolidShape(const CAlfaObject& path, double radius, TopoDS_Wire* center_path, double thickness) {
     if (center_path) center_path->Nullify();
     if (const auto* polyline = dynamic_cast<const CPolyline*>(&path)) {
-        return BuildWireSolidShape(*polyline, radius, center_path);
+        return BuildWireSolidShape(*polyline, radius, center_path, thickness);
     }
-    if (radius <= kGeometryTolerance) return {};
+    if (!ValidWireSection(radius, thickness)) return {};
 
     TopoDS_Wire spine;
-    std::vector<CPoint3d> path_points;
     if (const auto* sketch = dynamic_cast<const CSmartLine*>(&path)) {
         if (sketch->IsClosed() || !BuildOpenSketchProfileWire(*sketch, spine)) return {};
-        path_points = sketch->GetProfilePointsWorld();
     } else if (const auto* spline = dynamic_cast<const CBSpline*>(&path)) {
         if (spline->IsClosed() || spline->GetPointCount() < 2) return {};
         spine = build_bspline_wire(*spline);
-        constexpr int tangent_samples = 100;
-        path_points.reserve(tangent_samples + 1);
-        for (int i = 0; i <= tangent_samples; ++i) {
-            path_points.push_back(spline->Evaluate(static_cast<float>(i) / tangent_samples));
-        }
     } else {
         return {};
     }
-    if (spine.IsNull() || path_points.size() < 2) return {};
-
-    size_t next_index = 1;
-    CPoint3d tangent;
-    while (next_index < path_points.size()) {
-        tangent = subtract(path_points[next_index], path_points.front());
-        if (normalize(tangent)) break;
-        ++next_index;
-    }
-    if (next_index >= path_points.size()) return {};
+    if (spine.IsNull()) return {};
 
     try {
-        const CPoint3d& origin = path_points.front();
-        const gp_Ax2 frame(gp_Pnt(origin.x, origin.y, origin.z),
-                           gp_Dir(tangent.x, tangent.y, tangent.z));
+        BRepTools_WireExplorer first(spine);
+        if (!first.More()) return {};
+        BRepAdaptor_Curve guide(first.Current());
+        const bool reversed = first.Current().Orientation() == TopAbs_REVERSED;
+        gp_Pnt origin;
+        gp_Vec tangent;
+        guide.D1(reversed ? guide.LastParameter() : guide.FirstParameter(), origin, tangent);
+        if (reversed) tangent.Reverse();
+        if (tangent.SquareMagnitude() <= 1e-20) return {};
+        const gp_Ax2 frame(origin, gp_Dir(tangent));
         BRepBuilderAPI_MakeEdge circle_edge(gp_Circ(frame, radius));
         if (!circle_edge.IsDone()) return {};
         BRepBuilderAPI_MakeWire circle_wire(circle_edge.Edge());
@@ -1404,8 +1518,9 @@ TopoDS_Shape BuildWireSolidShape(const CAlfaObject& path, double radius, TopoDS_
         if (!sweep.IsReady()) return {};
         sweep.Build();
         if (!sweep.IsDone() || !sweep.MakeSolid()) return {};
-        if (center_path) *center_path = spine;
-        return sweep.Shape();
+        const TopoDS_Shape result = HollowWire(sweep.Shape(), spine, frame, radius, thickness);
+        if (!result.IsNull() && center_path) *center_path = spine;
+        return result;
     } catch (const Standard_Failure&) {
         return {};
     }

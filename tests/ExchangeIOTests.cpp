@@ -9,10 +9,12 @@
 #include "CFurnitureAssemblies.h"
 #include "SketchArcLine.h"
 #include "SmartLine.h"
+#include "Dom3DProjectSerializer.h"
 
 #include <QCoreApplication>
 #include <QApplication>
 #include <QDir>
+#include <QFile>
 #include <QStringList>
 #include <QTemporaryDir>
 
@@ -24,8 +26,18 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <map>
 
 namespace {
+size_t boundary_edges(const CMesh3D& mesh) {
+    std::map<std::pair<size_t,size_t>, size_t> uses;
+    for (const auto& face : mesh.GetFaces()) {
+        if (face.deleted) continue;
+        for (size_t i = 0; i < face.corners.size(); ++i)
+            ++uses[std::minmax(face.corners[i].v, face.corners[(i+1)%face.corners.size()].v)];
+    }
+    return std::count_if(uses.begin(), uses.end(), [](const auto& edge) { return edge.second != 2; });
+}
 void require(bool condition, const std::string& message)
 {
     if (!condition) {
@@ -47,6 +59,46 @@ int main(int argc, char** argv)
     // Diagnostic entry point for checking real-world packages with the same
     // importer as the application, without adding private models to the suite.
     const auto arguments = application.arguments();
+    if (arguments.size() == 3 && arguments[1] == "--check-closed-mesh") {
+        std::vector<std::unique_ptr<CMesh3D>> meshes;
+        std::string error;
+        const auto path = arguments[2].toStdString();
+        require(arguments[2].endsWith(".obj") ? ObjIO().Import(path, meshes, error)
+                                               : StlIO().Import(path, meshes, error), error);
+        size_t boundary = 0;
+        for (const auto& mesh : meshes) {
+            const size_t count = boundary_edges(*mesh);
+            boundary += count;
+            std::cout << mesh->GetVertices().size() << " vertices, " << mesh->GetFaces().size()
+                      << " faces, " << count << " boundary/nonmanifold edges\n";
+        }
+        return boundary == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
+    if (arguments.size() == 4 && arguments[1] == "--export-project-meshes") {
+        CAlfaDoc document;
+        QString room, load_error;
+        ProjectViewState view;
+        require(Dom3DProjectSerializer().Load(arguments[2], document, room, view, load_error),
+                load_error.toStdString());
+        bool success = true;
+        const auto check_export = [&](const char* extension, const auto& io) {
+            const auto path = arguments[3] + extension;
+            std::string error;
+            const bool exported = io.Export(path.toStdString(), document, error);
+            std::cout << extension << ": " << (exported ? "OK" : error) << '\n';
+            success &= exported;
+            if (exported) {
+                std::vector<std::unique_ptr<CMesh3D>> meshes;
+                const bool imported = io.Import(path.toStdString(), meshes, error);
+                std::cout << "Reimport: " << (imported ? std::to_string(meshes.size()) + " meshes" : error) << '\n';
+                success &= imported;
+            }
+        };
+        check_export(".obj", ObjIO());
+        check_export(".stl", StlIO());
+        check_export(".3mf", ThreeMfIO());
+        return success ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
     if (arguments.size()==3&&arguments[1]=="--export-kitchen-glb") {
         CAlfaDoc kitchen;
         for(auto& part:CNikaKitchenFurniture::BuildParts(NikaKitchenDefinition{})) {
@@ -109,6 +161,67 @@ int main(int argc, char** argv)
     }
     QTemporaryDir directory;
     require(directory.isValid(), "Could not create the temporary exchange directory.");
+    {
+        CAlfaDoc closed_document;
+        auto cube = std::make_unique<CMesh3D>("Closed UV seam cube");
+        const std::vector<Vec3> vertices{{0,0,0},{10,0,0},{10,10,0},{0,10,0},
+                                         {0,0,10},{10,0,10},{10,10,10},{0,10,10}};
+        const size_t indices[6][4]{{0,3,2,1},{4,5,6,7},{0,1,5,4},
+                                   {1,2,6,5},{2,3,7,6},{3,0,4,7}};
+        const std::vector<Vec3> normals{{0,0,-1},{0,0,1},{0,-1,0},{1,0,0},{0,1,0},{-1,0,0}};
+        std::vector<CMesh3D::Face> faces;
+        std::vector<UV> uvs;
+        for (size_t f = 0; f < 6; ++f) {
+            CMesh3D::Face face;
+            for (size_t c = 0; c < 4; ++c) {
+                face.corners.push_back({indices[f][c], f, uvs.size()});
+                uvs.push_back({float(f) / 6.f, float(c) / 4.f});
+            }
+            faces.push_back(face);
+        }
+        require(cube->SetGeometry(vertices, faces, uvs, normals), "Cannot create seam cube");
+        closed_document.AddMesh(std::move(cube));
+        std::string error;
+        const auto stem = directory.path().toStdString() + "/closed";
+        std::vector<std::unique_ptr<CMesh3D>> restored;
+        require(ObjIO().Export(stem + ".obj", closed_document, error), error);
+        require(ObjIO().Import(stem + ".obj", restored, error), error);
+        require(restored.size() == 1 && restored[0]->GetVertices().size() == 8
+                    && restored[0]->GetFaces().size() == 6 && boundary_edges(*restored[0]) == 0,
+                "OBJ UV seams disconnected a closed mesh");
+        for (size_t f = 0; f < 6; ++f) for (size_t c = 0; c < 4; ++c) {
+            const auto& corner = restored[0]->GetFaces()[f].corners[c];
+            const auto uv = restored[0]->GetUVs()[corner.uv];
+            const auto normal = restored[0]->GetNormals()[corner.n];
+            require(std::abs(uv.u - uvs[f*4+c].u) < 0.00001f
+                        && std::abs(uv.v - uvs[f*4+c].v) < 0.00001f,
+                    "OBJ welding changed corner UVs");
+            const auto delta = normal - normals[f];
+            require(dot(delta, delta) < 1e-10f, "OBJ welding changed corner normals");
+        }
+        require(StlIO().Export(stem + ".stl", closed_document, error), error);
+        require(StlIO().Import(stem + ".stl", restored, error), error);
+        require(restored.size() == 1 && restored[0]->GetVertices().size() == 8
+                    && restored[0]->GetFaces().size() == 12 && boundary_edges(*restored[0]) == 0,
+                "Binary STL import disconnected a closed mesh");
+        {
+            std::ofstream ascii(stem + "-ascii.stl");
+            ascii << "solid cube\n";
+            for (const auto& face : faces) for (size_t t = 1; t < 3; ++t) {
+                ascii << "facet normal 0 0 0\nouter loop\n";
+                for (size_t c : {size_t(0), t, t+1}) {
+                    const auto p = vertices[face.corners[c].v];
+                    ascii << "vertex " << p.x << ' ' << p.y << ' ' << p.z << '\n';
+                }
+                ascii << "endloop\nendfacet\n";
+            }
+            ascii << "endsolid cube\n";
+        }
+        require(StlIO().Import(stem + "-ascii.stl", restored, error), error);
+        require(restored.size() == 1 && restored[0]->GetVertices().size() == 8
+                    && restored[0]->GetFaces().size() == 12 && boundary_edges(*restored[0]) == 0,
+                "ASCII STL import disconnected a closed mesh");
+    }
     for (bool legacy : {false, true}) {
         const std::string stem = directory.path().toStdString() + (legacy ? "/legacy" : "/standard");
         {
@@ -691,6 +804,39 @@ int main(int argc, char** argv)
     require(stl.Import(base + ".stl", stl_meshes, error), "STL import failed: " + error);
     require(stl_meshes.size() == 1 && stl_meshes.front()->GetFaces().size() == 1,
             "STL round-trip produced an unexpected triangle count.");
+
+    // UTF-8 names must survive both the Windows filesystem boundary and the
+    // OBJ -> MTL relative reference. Use escapes independently of source encoding.
+    const QString unicode_directory = directory.path() + QString::fromUtf8(u8"/\u0414\u0435\u043d\u0438\u0441");
+    require(QDir().mkpath(unicode_directory), "Could not create Unicode exchange directory");
+    const QString unicode_stem = unicode_directory + QString::fromUtf8(u8"/\u0422\u0440\u043e\u0439\u043d\u0438\u043a");
+    CAlfaDoc unicode_document;
+    auto unicode_mesh = std::make_unique<CMesh3D>("Unicode mesh");
+    CMesh3D::Face unicode_face;
+    unicode_face.corners = {{0,0,0},{1,0,0},{2,0,0}};
+    require(unicode_mesh->SetGeometry({{0,0,0},{20,0,0},{0,30,0}}, {unicode_face}),
+            "Could not create Unicode mesh fixture");
+    Material unicode_material = unicode_mesh->GetMaterial();
+    unicode_material.diffuse = {0.25f, 0.5f, 0.75f};
+    unicode_mesh->SetMaterial(unicode_material);
+    unicode_document.AddMesh(std::move(unicode_mesh));
+    const auto unicode_roundtrip = [&](const auto& io, const char* extension) {
+        const QString path = unicode_stem + extension;
+        error.clear();
+        require(io.Export(path.toStdString(), unicode_document, error), "Unicode export failed: " + error);
+        require(QFile::exists(path), "Export did not preserve the Unicode filename");
+        std::vector<std::unique_ptr<CMesh3D>> imported;
+        require(io.Import(path.toStdString(), imported, error), "Unicode import failed: " + error);
+        require(imported.size() == 1 && imported.front()->GetFaces().size() == 1,
+                "Unicode mesh round-trip changed geometry");
+        require(std::abs(imported.front()->GetMaterial().diffuse.r - unicode_material.diffuse.r) < 0.005f
+                    || std::string(extension) == ".stl",
+                "Unicode mesh round-trip lost its material");
+    };
+    unicode_roundtrip(ObjIO(), ".obj");
+    require(QFile::exists(unicode_stem + ".mtl"), "Unicode OBJ material library is missing");
+    unicode_roundtrip(stl, ".stl");
+    unicode_roundtrip(ThreeMfIO(), ".3mf");
 
     TestThreeMfIO(directory.path());
     TestFbxIO(directory.path());

@@ -6,7 +6,7 @@
 #include <Standard_Failure.hxx>
 
 namespace quadro {
-StructuredBodyPlan PlanStructuredBody(const BoundarySnapshot& s,double density) {
+StructuredBodyPlan PlanStructuredBody(const BoundarySnapshot& s,double density,bool sixFaceShell) {
     StructuredBodyPlan p;
     if(!s.topologyValid()||s.faces().empty()||!std::isfinite(density)||density<=0) return p;
     bool hasEight=false;
@@ -47,13 +47,20 @@ StructuredBodyPlan PlanStructuredBody(const BoundarySnapshot& s,double density) 
     // for simple solids and spherical quilts outside this rollout.
     const auto euler=static_cast<long long>(s.vertices().size())
         -static_cast<long long>(s.edges().size())+static_cast<long long>(s.faces().size());
-    if(!hasEight&&euler!=0) return p;
+    // A thickened four-sided surface is a topological hexahedron even when
+    // its trimming curves run diagonally across the underlying UV charts.
+    // Use common CAD edge samples and boundary-following patches for it.
+    const bool shellPatch = sixFaceShell && s.faces().size()==6
+        && s.edges().size()==12 && s.vertices().size()==8 && euler==2;
+    if(!hasEight&&euler!=0&&!shellPatch) return p;
     gp_Pnt lo=s.vertices().front().xyz,hi=lo;
     for(const auto& v:s.vertices())for(int k=1;k<=3;++k){lo.SetCoord(k,std::min(lo.Coord(k),v.xyz.Coord(k)));hi.SetCoord(k,std::max(hi.Coord(k),v.xyz.Coord(k)));}
     const double diagonal=lo.Distance(hi);
     if(!(diagonal>0)) return p;
     density=std::clamp(density,0.01,1.0);
-    p.sampling.minimumSegments=4;p.sampling.maximumSegments=256;
+    // Short straight shell-thickness edges need only one cell. Length and
+    // chord-error refinement still add samples where the CAD geometry needs them.
+    p.sampling.minimumSegments=shellPatch?1:4;p.sampling.maximumSegments=256;
     p.sampling.maxSegmentLength=diagonal/(12+24*density);
     p.sampling.chordTolerance=diagonal*0.002/(0.25+density);
     p.eligible=true;return p;
@@ -97,7 +104,7 @@ StructuredPatch BuildStructuredPatchAtCorners(const FaceBoundaryInput& input,
     }
     if(side[0].size()!=side[2].size()||side[1].size()!=side[3].size())return fail("Opposite CAD sides have incompatible segment counts");
     const Id nu=side[0].size()-1,nv=side[1].size()-1;
-    if(nu<2||nv<2||nu>512||nv>512)return fail("Structured patch size outside budget");
+    if(nu<1||nv<1||nu>512||nv>512)return fail("Structured patch size outside budget");
     p.columns=nu+1;p.rows=nv+1;
     p.uv.resize((nu+1)*(nv+1));p.xyz.resize(p.uv.size());p.masterNodes.assign(p.uv.size(),invalidId);
     const auto index=[&](Id i,Id j){return j*(nu+1)+i;};

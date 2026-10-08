@@ -1,9 +1,11 @@
+#include "CurveAppearance.h"
 #include "CBSpline.h"
 
 #include "OpenGLCompat.h"
 #include "CurveDirectionMarker.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <istream>
 #include <memory>
@@ -14,11 +16,13 @@
 CBSpline::CBSpline()
     : CAlfaObject("B-Spline") {
     SetColor(kDefaultCurveColor);
+    SetLineWidth(kDefaultCurveWidth);
 }
 
 CBSpline::CBSpline(std::string name)
     : CAlfaObject(std::move(name)) {
     SetColor(kDefaultCurveColor);
+    SetLineWidth(kDefaultCurveWidth);
 }
 
 const std::vector<CPoint3d>& CBSpline::GetPoints() const {
@@ -65,6 +69,7 @@ size_t CBSpline::GetPointCount() const {
 }
 
 void CBSpline::Clear() {
+    node_types_.clear();
     legacy_closed_interpolation_ = false;
     points_.clear();
     weights_.clear();
@@ -73,6 +78,7 @@ void CBSpline::Clear() {
 }
 
 void CBSpline::AddPoint(CPoint3d point) {
+    if(HasNodeTypes())node_types_.push_back(CurveNodeType::Corner);
     legacy_closed_interpolation_ = false;
     closed_ = false;
     knots_.clear();
@@ -82,7 +88,8 @@ void CBSpline::AddPoint(CPoint3d point) {
 
 void CBSpline::SetBezierInterpolationPoints(
     const std::vector<CPoint3d>& interpolation_points) {
-    curve_type_ = SplineCurveType::Bezier;
+    node_types_.clear();
+    SetCurveType(SplineCurveType::Bezier);
     degree_ = 3;
     closed_ = false;
     knots_.clear();
@@ -180,7 +187,8 @@ void CBSpline::SetClosedBezierInterpolationPoints(
         return;
     }
 
-    curve_type_ = SplineCurveType::Bezier;
+    node_types_.clear();
+    SetCurveType(SplineCurveType::Bezier);
     degree_ = 3;
     knots_.clear();
     points_.clear();
@@ -230,6 +238,7 @@ void CBSpline::SetClosedBezierInterpolationPoints(
 }
 
 bool CBSpline::IsBezierChain() const {
+    if(HasNodeTypes())return false;
     return curve_type_ == SplineCurveType::Bezier
         && points_.size() >= 4
         && (points_.size() - 1) % 3 == 0;
@@ -239,6 +248,7 @@ bool CBSpline::InsertPoint(size_t index, CPoint3d point, double weight) {
     if (index > points_.size()) {
         return false;
     }
+    if(HasNodeTypes())node_types_.insert(node_types_.begin()+index,CurveNodeType::Corner);
     points_.insert(
         points_.begin() + static_cast<std::vector<CPoint3d>::difference_type>(index),
         point);
@@ -253,7 +263,8 @@ bool CBSpline::InsertPoint(size_t index, CPoint3d point, double weight) {
 }
 
 bool CBSpline::InsertShapePreservingPoint(double parameter) {
-    if (points_.size() < 2) {
+    if(HasNodeTypes())return false;
+    if (points_.size() < 2 || !std::isfinite(parameter)) {
         return false;
     }
     const double normalized = std::clamp(parameter, 0.0, 1.0);
@@ -295,6 +306,23 @@ bool CBSpline::InsertShapePreservingPoint(double parameter) {
         const size_t segment = std::min(
             static_cast<size_t>(normalized * count), count - 1);
         return InsertPoint(segment + 1, Evaluate(static_cast<float>(normalized)));
+    }
+
+    if (points_.size() == 2) {
+        // A two-pole spline is linear. Knot insertion alone would retain
+        // degree 1 and create a corner when its new pole is moved. Elevate
+        // the line to degree 2 in homogeneous coordinates instead, retaining
+        // its exact shape and parameterization (also for rational weights).
+        const double w0 = weights_.empty() ? 1.0 : std::max(1e-6, weights_[0]);
+        const double w1 = weights_.size() < 2 ? 1.0 : std::max(1e-6, weights_[1]);
+        const CPoint3d middle = points_[0]*(w0/(w0+w1)) + points_[1]*(w1/(w0+w1));
+        const double first = knots_.size() == 4 ? knots_[1] : 0.0;
+        const double last = knots_.size() == 4 ? knots_[2] : 1.0;
+        points_.insert(points_.begin()+1,middle);
+        weights_ = {w0,(w0+w1)*0.5,w1};
+        degree_ = 2;
+        knots_ = {first,first,first,last,last,last};
+        return true;
     }
 
     struct HomogeneousPoint {
@@ -389,6 +417,8 @@ bool CBSpline::InsertShapePreservingPoint(double parameter) {
         weights_[index] = weight;
     }
     knots_ = std::move(inserted_knots);
+    // Adding a pole must not implicitly raise a previously clamped degree.
+    degree_ = degree;
     return true;
 }
 
@@ -461,6 +491,7 @@ bool CBSpline::RemovePoint(size_t index) {
     if (index >= points_.size()) {
         return false;
     }
+    if(index<node_types_.size())node_types_.erase(node_types_.begin()+index);
     points_.erase(points_.begin() + static_cast<std::vector<CPoint3d>::difference_type>(index));
     if (index < weights_.size()) {
         weights_.erase(weights_.begin() + static_cast<std::vector<double>::difference_type>(index));
@@ -508,6 +539,7 @@ bool CBSpline::RemoveNode(size_t index) {
 }
 
 void CBSpline::Reverse() {
+    std::reverse(node_types_.begin(),node_types_.end());
     std::reverse(points_.begin(), points_.end());
     std::reverse(weights_.begin(), weights_.end());
     if (!knots_.empty()) {
@@ -537,7 +569,57 @@ bool CBSpline::ExtendEndpoint(bool at_start, double distance) {
     return true;
 }
 
+bool CBSpline::SetNodeTypes(std::vector<CurveNodeType> types) {
+    if(!types.empty() && (types.size()!=points_.size() || std::any_of(types.begin(),types.end(),[](auto t){return int(t)<0 || int(t)>2;})))return false;
+    node_types_=std::move(types);
+    if(!node_types_.empty()) {
+        // Mixed authored nodes form cubic spans; old pole weights and knot
+        // parameterization no longer describe this curve.
+        curve_type_=SplineCurveType::BSpline;degree_=3;knots_.clear();
+        weights_.assign(points_.size(),1.0);legacy_closed_interpolation_=false;
+        ClearParametricDefinition();
+    }
+    return true;
+}
+
+namespace {
+std::array<CPoint3d,4> node_span(const std::vector<CPoint3d>& points,
+    const std::vector<CurveNodeType>& types,bool closed,size_t i) {
+    const size_t count=points.size();
+    const auto previous=[&](size_t k){return k?k-1:(closed?count-1:0);};
+    const auto next=[&](size_t k){return k+1<count?k+1:(closed?0:count-1);};
+    const auto anchor=[&](size_t k){
+        if(types[k]!=CurveNodeType::Control || (!closed && (k==0 || k+1==count)))return points[k];
+        return (points[previous(k)]+points[k]*2+points[next(k)])*.25;
+    };
+    const auto tangent=[&](size_t k){return (points[next(k)]-points[previous(k)])*.5;};
+    const size_t j=(i+1)%count;const auto a=anchor(i),b=anchor(j);
+    const auto da=types[i]==CurveNodeType::Corner ? (types[j]==CurveNodeType::Control?points[j]-a:b-a):tangent(i);
+    const auto db=types[j]==CurveNodeType::Corner ? (types[i]==CurveNodeType::Control?b-points[i]:b-a):tangent(j);
+    return {a,a+da*(1.0/3),b-db*(1.0/3),b};
+}
+}
+CBSpline CBSpline::BuildNodeBezier() const {
+    CBSpline result;result.SetCurveType(SplineCurveType::Bezier);
+    if(!HasNodeTypes() || points_.size()<2)return result;
+    const size_t spans=IsClosed()?points_.size():points_.size()-1;
+    for(size_t i=0;i<spans;++i) {
+        const auto poles=node_span(points_,node_types_,IsClosed(),i);
+        if(i==0)result.AddPoint(poles[0]);
+        for(size_t k=1;k<4;++k)result.AddPoint(poles[k]);
+    }
+    result.SetClosed(IsClosed());return result;
+}
+
 CPoint3d CBSpline::Evaluate(float t) const {
+    if(HasNodeTypes() && points_.size()>1) {
+        const size_t spans=IsClosed()?points_.size():points_.size()-1;
+        const double scaled=std::clamp(double(t),0.0,1.0)*spans;
+        const size_t span=std::min(size_t(scaled),spans-1);const double u=scaled-span;
+        auto poles=node_span(points_,node_types_,IsClosed(),span);
+        for(size_t level=1;level<4;++level)for(size_t k=0;k<4-level;++k)poles[k]=poles[k]*(1-u)+poles[k+1]*u;
+        return poles[0];
+    }
     if (curve_type_ == SplineCurveType::Bezier) {
         return EvaluateBezier(t);
     }
@@ -555,6 +637,12 @@ CPoint3d CBSpline::Evaluate(float t) const {
 SplineCurveType CBSpline::GetCurveType() const { return curve_type_; }
 
 void CBSpline::SetCurveType(SplineCurveType type) {
+    const auto default_color = [](SplineCurveType kind) {
+        return kind == SplineCurveType::Bezier ? kDefaultBezierColor
+            : kind == SplineCurveType::Nurbs ? kDefaultNurbsColor : kDefaultCurveColor;
+    };
+    if (same_curve_color(GetColor(), default_color(curve_type_)))
+        SetColor(default_color(type));
     curve_type_ = type;
     if (curve_type_ != SplineCurveType::BSpline) {
         closed_ = false;
@@ -896,7 +984,7 @@ void CBSpline::Render3d(bool selected, bool has_selected_point, size_t selected_
 
     const Color color = GetColor();
     glDisable(GL_DEPTH_TEST);
-    glLineWidth(selected ? 4.0f : 3.0f);
+    ApplyLineAppearance(selected);
     glColor3f(selected ? 1.0f : color.r, selected ? 0.12f : color.g, selected ? 0.18f : color.b);
     glBegin(GL_LINE_STRIP);
     const int samples = std::max(2, static_cast<int>(points_.size()) * 24);
@@ -944,6 +1032,7 @@ void CBSpline::Render3d(bool selected, bool has_selected_point, size_t selected_
                          bezier_control);
         }
     }
+    ResetLineAppearance();
     glEnable(GL_DEPTH_TEST);
 }
 
@@ -952,7 +1041,7 @@ void CBSpline::Render2d(float center_x, float center_y, float scale) const {
         return;
     }
     const Color color = GetColor();
-    glLineWidth(2.0f);
+    ApplyLineAppearance(false);
     glColor3f(color.r, color.g, color.b);
     glBegin(GL_LINE_STRIP);
     const int samples = std::max(2, static_cast<int>(points_.size()) * 24);
@@ -961,6 +1050,7 @@ void CBSpline::Render2d(float center_x, float center_y, float scale) const {
         glVertex2f(center_x + static_cast<float>(point.x) * scale, center_y + static_cast<float>(point.z) * scale);
     }
     glEnd();
+    ResetLineAppearance();
 }
 
 bool CBSpline::HitTest(CurvePoint point, float tolerance) const {
@@ -981,6 +1071,7 @@ bool CBSpline::HitTest(CurvePoint point, float tolerance) const {
 
 std::unique_ptr<CAlfaObject> CBSpline::Clone() const {
     auto copy = std::make_unique<CBSpline>(GetName() + " Copy");
+    copy->node_types_ = node_types_;
     copy->points_ = points_;
     copy->weights_ = weights_;
     copy->knots_ = knots_;
@@ -989,8 +1080,11 @@ std::unique_ptr<CAlfaObject> CBSpline::Clone() const {
     copy->closed_ = closed_;
     copy->legacy_closed_interpolation_ = legacy_closed_interpolation_;
     copy->SetGroupName(GetGroupName());
+    copy->SetFrozen(IsFrozen());
     copy->SetVisible(IsVisible());
     copy->SetColor(GetColor());
+    copy->SetLineWidth(GetLineWidth());
+    copy->SetLineStyle(GetLineStyle());
     copy->SetMaterial(GetMaterial());
     copy->SetMaterialId(GetMaterialId());
     copy->SetParametricDefinition(
@@ -1032,6 +1126,7 @@ void CBSpline::Scale(Vec3 center, Vec3 axis, float factor) {
 }
 
 bool CBSpline::GetBounds(Vec3& min_point, Vec3& max_point) const {
+    if(HasNodeTypes())return BuildNodeBezier().GetBounds(min_point,max_point);
     if (points_.empty()) {
         return false;
     }
@@ -1059,12 +1154,16 @@ bool CBSpline::Save(std::ostream& stream) const {
            << material.alpha << " " << material.specular << " " << material.shininess << " "
            << (IsClosed() ? 1 : 0) << " "
            << static_cast<int>(curve_type_) << " " << GetDegree() << " "
-           << points_.size() << " " << (legacy_closed_interpolation_ ? 1 : 0) << "\n";
+           << points_.size() << " " << (legacy_closed_interpolation_ ? 1 : 0);
+    if(HasNodeTypes())stream << " 1";
+    stream << "\n";
     for (size_t index = 0; index < points_.size(); ++index) {
         const CPoint3d& point = points_[index];
         const double weight = index < weights_.size() ? weights_[index] : 1.0;
         stream << point.x << " " << point.y << " " << point.z << " "
-               << weight << "\n";
+               << weight;
+        if(HasNodeTypes())stream << " " << int(node_types_[index]);
+        stream << "\n";
     }
     return static_cast<bool>(stream);
 }
@@ -1111,7 +1210,7 @@ bool CBSpline::Load(std::istream& stream) {
         material.shininess = values[2];
         closed_ = values[3] != 0.0f;
         count = static_cast<size_t>(values[4]);
-    } else if (values.size() == 7 || values.size() == 8) {
+    } else if (values.size() == 7 || values.size() == 8 || values.size() == 9) {
         material.alpha = values[0];
         material.specular = values[1];
         material.shininess = values[2];
@@ -1133,6 +1232,7 @@ bool CBSpline::Load(std::istream& stream) {
     }
     SetMaterial(material);
 
+    node_types_.clear();
     std::vector<CPoint3d> loaded;
     std::vector<double> loaded_weights;
     loaded.reserve(count);
@@ -1147,6 +1247,7 @@ bool CBSpline::Load(std::istream& stream) {
         if (!stream) {
             return false;
         }
+        if(values.size()==9 && values[8]!=0) {int type=0;stream>>type;if(type<0 || type>2)return false;node_types_.push_back(CurveNodeType(type));}
         loaded.push_back(point);
         loaded_weights.push_back(weight);
     }

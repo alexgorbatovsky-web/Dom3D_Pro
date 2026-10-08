@@ -56,6 +56,7 @@ std::unique_ptr<CAlfaObject> CSurfaceSet::Clone() const {
     auto copy = std::make_unique<CSurfaceSet>(shape_copy);
     copy->SetName(GetName() + " Copy");
     copy->SetGroupName(GetGroupName());
+    copy->SetFrozen(IsFrozen());
     copy->SetVisible(IsVisible());
     copy->SetColor(GetColor());
     copy->SetMaterial(GetMaterial());

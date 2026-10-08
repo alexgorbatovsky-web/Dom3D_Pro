@@ -46,6 +46,13 @@ LightingDialog::LightingDialog(QWidget* parent)
     language.BindText(group, "ViewportLighting", "Viewport lighting");
     form_ = new QFormLayout(group);
 
+    blinn_phong_ = new QCheckBox(group);
+    blinn_phong_->setObjectName("blinnPhongLighting");
+    language.BindText(blinn_phong_, "BlinnPhongLighting", "Blinn-Phong for all surfaces and meshes");
+    language.BindToolTip(blinn_phong_, "BlinnPhongLighting_HINT",
+        "Use Blinn-Phong instead of PBR lighting in the viewport. Adjust Specular and Shininess scale to control highlights.");
+    form_->addRow(blinn_phong_);
+
     light_x_ = AddControl(
         "LightX", "Light X", "LightX_HINT",
         "Horizontal light direction. Controls whether the model is lit from the left or right.",
@@ -185,6 +192,7 @@ QDoubleSpinBox* LightingDialog::AddControl(const QString& text_id,
 void LightingDialog::LoadSettings() {
     QSettings settings("Dom3D", "Dom3D_Pro");
     const ViewportLightingSettings defaults;
+    blinn_phong_->setChecked(settings.value("view/lighting/blinnPhong", defaults.blinn_phong).toBool());
     light_x_->setValue(settings.value("view/lighting/lightX", defaults.light_x).toDouble());
     light_y_->setValue(settings.value("view/lighting/lightY", defaults.light_y).toDouble());
     light_z_->setValue(settings.value("view/lighting/lightZ", defaults.light_z).toDouble());
@@ -249,6 +257,8 @@ void LightingDialog::BrowseEnvironment() {
 }
 
 void LightingDialog::ConnectLiveUpdates() {
+    connect(blinn_phong_, &QCheckBox::toggled,
+            this, [this](bool) { SaveAndApply(); });
     const QDoubleSpinBox* controls[] = {
         light_x_, light_y_, light_z_, ambient_, wrap_light_, diffuse_,
         specular_, shininess_scale_, rim_, gamma_};
@@ -266,8 +276,19 @@ void LightingDialog::ConnectLiveUpdates() {
             this, [this](double) { SaveAndApply(); });
 }
 
+void LightingDialog::RefreshLightDirection() {
+    const auto& light = CMesh3D::GetLightingSettings();
+    refreshing_ = true;
+    light_x_->setValue(light.light_x);
+    light_z_->setValue(light.light_z);
+    environment_rotation_->setValue(light.environment_rotation_degrees);
+    refreshing_ = false;
+}
+
 void LightingDialog::SaveAndApply() {
+    if (refreshing_) return;
     QSettings settings("Dom3D", "Dom3D_Pro");
+    settings.setValue("view/lighting/blinnPhong", blinn_phong_->isChecked());
     settings.setValue("view/lighting/lightX", light_x_->value());
     settings.setValue("view/lighting/lightY", light_y_->value());
     settings.setValue("view/lighting/lightZ", light_z_->value());
@@ -292,6 +313,7 @@ void LightingDialog::SaveAndApply() {
 
 void LightingDialog::ResetDefaults() {
     const ViewportLightingSettings defaults;
+    blinn_phong_->setChecked(defaults.blinn_phong);
     light_x_->setValue(defaults.light_x);
     light_y_->setValue(defaults.light_y);
     light_z_->setValue(defaults.light_z);

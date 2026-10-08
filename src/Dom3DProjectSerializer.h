@@ -11,6 +11,7 @@
 class QIODevice;
 
 struct ProjectViewState {
+    bool origin_tree_expanded = false;
     Camera camera{};
     bool has_camera = false;
     bool orthographic_projection = false;
@@ -33,6 +34,12 @@ public:
     // An empty result means serialization failed and must never imply clean.
     QByteArray DocumentFingerprint(const CAlfaDoc& document) const;
 
+    bool Save(const QString& path,
+              CAlfaDoc& document,
+              const QString& active_room,
+              const ProjectViewState& view_state,
+              const QImage& thumbnail,
+              QString& error) const;
     bool Save(const QString& path,
               const CAlfaDoc& document,
               const QString& active_room,

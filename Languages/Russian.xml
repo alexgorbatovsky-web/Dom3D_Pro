@@ -1,5 +1,13 @@
-<?xml version='1.0' encoding='UTF-8'?>
+﻿<?xml version='1.0' encoding='UTF-8'?>
 <ClassArray.TextItem>
+  <TextItem>
+    <ID>BlinnPhongLighting</ID>
+    <Text>Blinn-Phong для всех поверхностей и сеток</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BlinnPhongLighting_HINT</ID>
+    <Text>Использовать освещение Blinn-Phong вместо PBR в окне модели. Сила бликов и масштаб блеска управляют яркостью и размером блика.</Text>
+  </TextItem>
   <TextItem>
     <ID>LanguageName</ID>
     <Text>Русский</Text>
@@ -10527,12 +10535,11 @@
   <TextItem><ID>SurfaceLoft_HINT</ID><Text>Выберите минимум два B-сплайна как последовательные поперечные сечения и запустите инструмент. Он построит поверхность через сечения; подходят открытые и замкнутые сплайны.</Text></TextItem>
   <TextItem><ID>SurfaceTangentCap_HINT</ID><Text>Выберите замкнутый сплайн и примыкающую поверхность. Инструмент закроет контур поверхностью с касательным переходом на границе. Настройте параметры крышки и нажмите OK.</Text></TextItem>
   <TextItem><ID>SurfaceSweepTwoRails_HINT</ID><Text>Выберите три кривые: один открытый или замкнутый профиль и две открытые направляющие. Подтвердите выбор. Профиль проходит вдоль обеих направляющих и образует поверхность; проверьте соответствие концов профиля направляющим.</Text></TextItem>
-  <TextItem><ID>SurfaceJoin_HINT</ID><Text>Выберите минимум две соприкасающиеся поверхности и подтвердите выбор. Инструмент объединит их в набор поверхностей. Их соединяемые границы должны совпадать.</Text></TextItem>
-  <TextItem><ID>SurfaceReverseNormals_HINT</ID><Text>Выберите поверхности и запустите инструмент, чтобы развернуть их нормали. Форма не меняется, лицевая и обратная стороны меняются местами. От нормали зависит направление смещения и толщины.</Text></TextItem>
+  <TextItem><ID>SurfaceJoin_HINT</ID><Text>Выберите минимум две соприкасающиеся поверхности и подтвердите выбор. Общие рёбра сшиваются в одно поверхностное тело без сглаживания. Для промежутков используйте Bridge.</Text></TextItem>
+  <TextItem><ID>SurfaceReverseNormals_HINT</ID><Text>Запустите инструмент и щёлкайте по поверхностям для разворота нормалей. Можно заранее выбрать несколько поверхностей и развернуть их вместе. Повторный клик разворачивает обратно. Esc завершает инструмент. Форма поверхности не меняется.</Text></TextItem>
   <TextItem><ID>SurfaceRevolve_HINT</ID><Text>Выберите кривую профиля. Укажите ось и угол вращения, проверьте предварительный результат и нажмите OK. Кривая вращается вокруг оси и создаёт поверхность.</Text></TextItem>
   <TextItem><ID>SurfaceSweep_HINT</ID><Text>Эта кнопка пока не подключена и не создаёт геометрию. Для поверхности по профилю и двум направляющим используйте Sweep Surface (2 Rails).</Text></TextItem>
   <TextItem><ID>SurfacePatch_HINT</ID><Text>Эта кнопка пока не подключена и не создаёт геометрию. Для четырёхстороннего контура используйте Surface by 4 Splines, для замкнутого сплайна с примыкающей поверхностью — Tangent Cap.</Text></TextItem>
-  <TextItem><ID>SurfaceOffset_HINT</ID><Text>Эта кнопка пока не подключена и не смещает поверхности. Чтобы придать поверхности толщину, используйте Shell в комнате Solid.</Text></TextItem>
   <TextItem><ID>PlaneIntersection_HINT</ID><Text>Выберите или укажите тело, затем задайте секущую плоскость одним из предложенных способов. Инструмент создаст кривые сечения в местах пересечения плоскости с телом.</Text></TextItem>
   <TextItem><ID>SurfaceIntersection_HINT</ID><Text>Выберите две пересекающиеся поверхности и подтвердите выбор. Инструмент создаст кривые вдоль линии их пересечения. Для разнесённых поверхностей результата пересечения нет.</Text></TextItem>
   <TextItem><ID>ProjectCurveToSurface_HINT</ID><Text>Выберите одну кривую и целевую поверхность, затем подтвердите выбор. Задайте вектор проекции X, Y, Z и нажмите OK. Проекция строится там, где лучи этого направления попадают на поверхность.</Text></TextItem>
@@ -10638,4 +10645,616 @@
     <ID>ToolbarHiddenEdges</ID>
     <Text>Скрытые кромки</Text>
   </TextItem>
+  <TextItem>
+    <ID>ThemeActiveButtons</ID>
+    <Text>Активные кнопки</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SketchSmoothJoint</ID>
+    <Text>Гладкий стык: укажите узел</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SketchSharpJoint</ID>
+    <Text>Острый стык: снять гладкость в узле</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SketchSmoothJointPick</ID>
+    <Text>Гладкий стык: укажите узел соединения двух звеньев</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SketchSharpJointPick</ID>
+    <Text>Острый стык: укажите узел для снятия гладкости</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SketchJointMiss</ID>
+    <Text>Стык: укажите точнее узел соединения двух звеньев</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SketchSmoothJointInvalid</ID>
+    <Text>Гладкий стык: нужен общий узел со звеном Безье и ненулевыми рычагами</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SketchSharpJointInvalid</ID>
+    <Text>Острый стык: укажите общий узел двух соседних звеньев</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SketchSmoothJointDone</ID>
+    <Text>Гладкий стык задан: два звена связаны общей касательной</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SketchSharpJointDone</ID>
+    <Text>Острый стык: гладкость снята, рычаги независимы</Text>
+  </TextItem>
+  <TextItem>
+    <ID>HelpSplashScreen</ID>
+    <Text>Заставка...</Text>
+  </TextItem>
+  <TextItem><ID>SurfaceBridge</ID><Text>Мостик поверхностей</Text></TextItem>
+  <TextItem><ID>SurfaceBridge_HINT</ID><Text>Выберите две кромки поверхностей. Значками G0/G1/G2 задайте для каждой кромки соединение по положению, касательной или кривизне, затем создайте мостик.</Text></TextItem>
+  <TextItem><ID>SurfaceSweptTool</ID><Text>Swept-1</Text></TextItem>
+  <TextItem><ID>SurfaceSweptTool_HINT</ID><Text>Сначала выберите сплайн профиля, затем незамкнутый сплайн направляющей. Создаёт поверхность без торцевых крышек. Настройте автоориентацию, смещение профиля, угол, закручивание и конечный масштаб.</Text></TextItem>
+  <TextItem><ID>SurfaceFillet</ID><Text>Скругление поверхностей</Text></TextItem>
+  <TextItem><ID>SurfaceFillet_HINT</ID><Text>Выберите две поверхности. Задайте постоянный радиус или радиусы в начале и конце. При общей кромке доступна обрезка обеих поверхностей.</Text></TextItem>
+  <TextItem><ID>Body2</ID><Text>Body-2 (две пространственные кривые)</Text></TextItem>
+  <TextItem><ID>Body2_HINT</ID><Text>Тело по двум пространственным сплайнам. Guide Up и Guide Dwn независимо задают высоту и ширину. Вторая сторона зеркальна относительно Z=0.</Text></TextItem>
+  <TextItem><ID>SurfaceSaddle</ID><Text>Седло</Text></TextItem>
+  <TextItem><ID>SurfaceSaddle_HINT</ID><Text>Седловая поверхность с противоположной кривизной вдоль X и Z. Настройте ширину, длину, подъём и прогиб.</Text></TextItem>
+  <TextItem><ID>Body1</ID><Text>Тело Body-1</Text></TextItem>
+  <TextItem><ID>Body1_HINT</ID><Text>Создать тело по Guide Up, Guide Dwn и Guide Left. Редактируйте исходные сплайны для изменения формы. Кривизна задаёт выпуклость передних и задних генераторов.</Text></TextItem>
+  <TextItem><ID>SurfaceTwoView</ID><Text>Поверхность по двум видам</Text></TextItem>
+  <TextItem><ID>SurfaceTwoView_HINT</ID><Text>Выберите режим Up, Middle для двух направляющих или Up, Middle, Down для трёх. Up/Down лежат в XY, Middle — пространственная. Форма коников задаётся rho или графиками. Доступны зеркало Z и разбиение на патчи.</Text></TextItem>
+  <TextItem><ID>SurfaceTrimSketch</ID><Text>Обрезать эскизом</Text></TextItem>
+  <TextItem><ID>SurfaceTrimSketch_HINT</ID><Text>Выберите поверхность и эскиз. Keep cutout сохраняет вырез отдельной поверхностью для стекла или другого материала. Проекция идёт в обе стороны по нормали эскиза.</Text></TextItem>
+  <TextItem><ID>RotateLightButton</ID><Text>Свет</Text></TextItem>
+  <TextItem><ID>RotateLightButton_HINT</ID><Text>Удерживайте левую кнопку мыши и двигайте влево или вправо для вращения освещения. Также можно использовать клавиши со стрелками.</Text></TextItem>
+  <TextItem>
+    <ID>Array Along Curve</ID>
+    <Text>Массив вдоль кривой</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Place on curve</ID>
+    <Text>Разместить на кривой</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Rotate along curve</ID>
+    <Text>Поворачивать вдоль кривой</Text>
+  </TextItem>
+  <TextItem>
+    <ID>End scale factor</ID>
+    <Text>Масштаб последнего элемента</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Anchor point</ID>
+    <Text>Точка привязки</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Scale changes from 1 at the start to the end factor. With Place on curve off, the original is the first member.</ID>
+    <Text>Масштаб плавно меняется от 1 до заданного значения. Если размещение на кривой выключено, исходный объект — первый элемент массива.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Select source objects and a separate nonzero-length guide curve.</ID>
+    <Text>Выберите исходные объекты и отдельную направляющую кривую ненулевой длины.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Preview paused: about %1 objects (preview limit: %2). Reduce quantity to resume, or press OK to create the full array.</ID>
+    <Text>Предпросмотр приостановлен: около %1 объектов (лимит предпросмотра: %2). Уменьшите количество для продолжения или нажмите OK, чтобы создать весь массив.</Text>
+  </TextItem>
+  <TextItem><ID>ProfilePrimitives</ID><Text>Профильные примитивы</Text></TextItem>
+  <TextItem><ID>ProfilePrimitives_HINT</ID><Text>Создать профильный примитив. Выберите тип и настройте направляющие и параметры профилей.</Text></TextItem>
+  <TextItem><ID>ProfilePrimitiveType</ID><Text>Тип примитива</Text></TextItem>
+  <TextItem><ID>ProfilePrimitiveReset</ID><Text>Сбросить параметры профилей</Text></TextItem>
+  <TextItem><ID>ProfilePrimitiveGuides</ID><Text>Создать стандартные направляющие</Text></TextItem>
+  <TextItem><ID>ProfilePrimitiveReady</ID><Text>Предпросмотр готов. После подтверждения редактируйте направляющие для изменения формы.</Text></TextItem>
+  <TextItem><ID>BodyBlade</ID><Text>Лопасть</Text></TextItem>
+  <TextItem><ID>BodyAdapter</ID><Text>Переходник</Text></TextItem>
+  <TextItem><ID>BodyBoat</ID><Text>Лодка</Text></TextItem>
+  <TextItem><ID>BodyTower</ID><Text>Башня</Text></TextItem>
+  <TextItem><ID>BodyConic</ID><Text>Коническое тело</Text></TextItem>
+  <TextItem><ID>BodyCar</ID><Text>Автомобиль</Text></TextItem>
+  <TextItem><ID>BodySUP</ID><Text>SUP-доска</Text></TextItem>
+  <TextItem><ID>BodyShip</ID><Text>Корабль</Text></TextItem>
+  <TextItem><ID>BodyVehicle</ID><Text>Транспорт</Text></TextItem>
+  <TextItem><ID>BodyComb</ID><Text>Массажная расчёска</Text></TextItem>
+  <TextItem><ID>BodyBottle1</ID><Text>Бутылка-1</Text></TextItem>
+  <TextItem><ID>BodyBottle2</ID><Text>Бутылка-2</Text></TextItem>
+  <TextItem><ID>BodyMouse</ID><Text>Мышь</Text></TextItem>
+  <TextItem><ID>BodyCockpit</ID><Text>Кабина</Text></TextItem>
+  <TextItem><ID>BladeTipTwist</ID><Text>Закрутка конца</Text></TextItem>
+  <TextItem><ID>BodyHandle</ID><Text>Изогнутая рукоять</Text></TextItem>
+  <TextItem><ID>BodyCanopy</ID><Text>Козырёк</Text></TextItem>
+  <TextItem><ID>BodyCrestedDrop</ID><Text>Капля с гребнем</Text></TextItem>
+  <TextItem><ID>PrimitiveAxisGuide</ID><Text>Ось (3D)</Text></TextItem>
+  <TextItem><ID>PrimitiveWidthGuide</ID><Text>Полуширина (XZ)</Text></TextItem>
+  <TextItem><ID>PrimitiveThicknessGuide</ID><Text>Полутолщина (XY)</Text></TextItem>
+  <TextItem><ID>PrimitiveFrontGuide</ID><Text>Передняя граница</Text></TextItem>
+  <TextItem><ID>PrimitiveRearGuide</ID><Text>Задняя граница</Text></TextItem>
+  <TextItem><ID>PrimitiveSilhouetteGuide</ID><Text>Боковой силуэт (XY)</Text></TextItem>
+  <TextItem><ID>PrimitiveRidgeGuide</ID><Text>Линия гребня (XY)</Text></TextItem>
+  <TextItem><ID>PrimitiveAxisBend</ID><Text>Изгиб оси</Text></TextItem>
+  <TextItem><ID>PrimitiveWidthScale</ID><Text>Масштаб ширины</Text></TextItem>
+  <TextItem><ID>PrimitiveThicknessScale</ID><Text>Масштаб толщины</Text></TextItem>
+  <TextItem><ID>PrimitiveTransverseBulge</ID><Text>Поперечная выпуклость</Text></TextItem>
+  <TextItem><ID>PrimitiveCanopyThickness</ID><Text>Толщина козырька</Text></TextItem>
+  <TextItem><ID>PrimitiveRidgeScale</ID><Text>Масштаб высоты гребня</Text></TextItem>
+  <TextItem><ID>PrimitiveLowerDepth</ID><Text>Масштаб глубины низа</Text></TextItem>
+  <TextItem><ID>BodyLegTapered</ID><Text>Ножка — прямая сужающаяся</Text></TextItem>
+  <TextItem><ID>BodyLegSaber</ID><Text>Ножка — саблевидная</Text></TextItem>
+  <TextItem><ID>BodyLegCabriole</ID><Text>Ножка — кабриоль</Text></TextItem>
+  <TextItem><ID>ChairLegAxis</ID><Text>Ось ножки (3D)</Text></TextItem>
+  <TextItem><ID>ChairLegHeight</ID><Text>Высота ножки</Text></TextItem>
+  <TextItem><ID>ChairLegLeanX</ID><Text>Смещение верха по X</Text></TextItem>
+  <TextItem><ID>ChairLegLeanY</ID><Text>Смещение верха по Y</Text></TextItem>
+  <TextItem><ID>ChairLegCircle</ID><Text>Круг</Text></TextItem>
+  <TextItem><ID>ChairLegOval</ID><Text>Овал</Text></TextItem>
+  <TextItem><ID>ChairLegRoundedRect</ID><Text>Скруглённый прямоугольник</Text></TextItem>
+  <TextItem><ID>ChairLeg0shape</ID><Text>Пятка: сечение</Text></TextItem>
+  <TextItem><ID>ChairLeg0width</ID><Text>Пятка: ширина</Text></TextItem>
+  <TextItem><ID>ChairLeg0depth</ID><Text>Пятка: глубина</Text></TextItem>
+  <TextItem><ID>ChairLeg0rounding</ID><Text>Пятка: скругление</Text></TextItem>
+  <TextItem><ID>ChairLeg0rotation</ID><Text>Пятка: поворот</Text></TextItem>
+  <TextItem><ID>ChairLeg1shape</ID><Text>Шейка: сечение</Text></TextItem>
+  <TextItem><ID>ChairLeg1width</ID><Text>Шейка: ширина</Text></TextItem>
+  <TextItem><ID>ChairLeg1depth</ID><Text>Шейка: глубина</Text></TextItem>
+  <TextItem><ID>ChairLeg1rounding</ID><Text>Шейка: скругление</Text></TextItem>
+  <TextItem><ID>ChairLeg1rotation</ID><Text>Шейка: поворот</Text></TextItem>
+  <TextItem><ID>ChairLeg2shape</ID><Text>Колено: сечение</Text></TextItem>
+  <TextItem><ID>ChairLeg2width</ID><Text>Колено: ширина</Text></TextItem>
+  <TextItem><ID>ChairLeg2depth</ID><Text>Колено: глубина</Text></TextItem>
+  <TextItem><ID>ChairLeg2rounding</ID><Text>Колено: скругление</Text></TextItem>
+  <TextItem><ID>ChairLeg2rotation</ID><Text>Колено: поворот</Text></TextItem>
+  <TextItem><ID>ChairLeg3shape</ID><Text>Крепление: сечение</Text></TextItem>
+  <TextItem><ID>ChairLeg3width</ID><Text>Крепление: ширина</Text></TextItem>
+  <TextItem><ID>ChairLeg3depth</ID><Text>Крепление: глубина</Text></TextItem>
+  <TextItem><ID>ChairLeg3rounding</ID><Text>Крепление: скругление</Text></TextItem>
+  <TextItem><ID>ChairLeg3rotation</ID><Text>Крепление: поворот</Text></TextItem>
+  <TextItem><ID>ChairLegEditSection</ID><Text>Редактировать сечение</Text></TextItem>
+  <TextItem><ID>ChairLegFootStation</ID><Text>Пятка (пол)</Text></TextItem>
+  <TextItem><ID>ChairLegNeckStation</ID><Text>Шейка (22% высоты)</Text></TextItem>
+  <TextItem><ID>ChairLegKneeStation</ID><Text>Колено (68% высоты)</Text></TextItem>
+  <TextItem><ID>ChairLegSeatStation</ID><Text>Крепление к сиденью</Text></TextItem>
+  <TextItem><ID>ChairLegReady</ID><Text>Торцы закреплены в плоскостях пола и сиденья. Выберите сечение для настройки. Для круга ширина задаёт диаметр.</Text></TextItem>
+  <TextItem><ID>BodySole</ID><Text>Подошва</Text></TextItem>
+  <TextItem><ID>SurfaceShoeUpper</ID><Text>Верх мужской туфли (поверхности)</Text></TextItem>
+  <TextItem><ID>SurfaceShoeUpper_HINT</ID><Text>Создать открытый верх туфли по замкнутым контурам подошвы, формы и горловины.</Text></TextItem>
+  <TextItem><ID>ShoeOutline</ID><Text>Контур подошвы (XY)</Text></TextItem>
+  <TextItem><ID>ShoeForm</ID><Text>Контур формы верха</Text></TextItem>
+  <TextItem><ID>ShoeCollar</ID><Text>Горловина</Text></TextItem>
+  <TextItem><ID>ShoeThickness</ID><Text>Толщина подошвы</Text></TextItem>
+  <TextItem><ID>ShoeHeelRise</ID><Text>Подъём пятки</Text></TextItem>
+  <TextItem><ID>ShoeArchStart</ID><Text>Начало свода</Text></TextItem>
+  <TextItem><ID>ShoeHeelStart</ID><Text>Начало каблука</Text></TextItem>
+  <TextItem><ID>ShoeFullness</ID><Text>Полнота верха</Text></TextItem>
+  <TextItem><ID>ShoeHeight</ID><Text>Масштаб высоты верха</Text></TextItem>
+  <TextItem><ID>ShoePick</ID><Text>Выберите замкнутый контур обуви.</Text></TextItem>
+  <TextItem><ID>ShoeUpperReady</ID><Text>Верх туфли готов. Три замкнутых контура задают нижнюю границу, объём формы и открытую горловину.</Text></TextItem>
+  <TextItem><ID>ShoeSoleReady</ID><Text>Подошва готова. Изменяйте её замкнутый контур XY, чтобы настраивать носок, сужение и пятку.</Text></TextItem>
+  <TextItem><ID>SurfaceMatch</ID><Text>Согласовать поверхности</Text></TextItem>
+  <TextItem><ID>SurfaceSplitIso</ID><Text>Разделить поверхность по изолинии</Text></TextItem>
+  <TextItem><ID>TopologyWholeBody</ID><Text>Всё поверхностное тело</Text></TextItem>
+  <TextItem><ID>TopologyFirst</ID><Text>Изменять первую</Text></TextItem>
+  <TextItem><ID>TopologySecond</ID><Text>Изменять вторую</Text></TextItem>
+  <TextItem><ID>TopologyBoth</ID><Text>Изменять обе</Text></TextItem>
+  <TextItem><ID>TopologyContinuity</ID><Text>Гладкость стыка</Text></TextItem>
+  <TextItem><ID>TopologyIsoline</ID><Text>Изолиния</Text></TextItem>
+  <TextItem><ID>TopologyPosition</ID><Text>Положение</Text></TextItem>
+  <TextItem><ID>TopologyModify</ID><Text>Изменять</Text></TextItem>
+  <TextItem><ID>TopologyG1</ID><Text>G1 — касательные</Text></TextItem>
+  <TextItem><ID>TopologyG2</ID><Text>G2 — кривизна</Text></TextItem>
+  <TextItem><ID>TopologyPick</ID><Text>Выберите грани поверхностей.</Text></TextItem>
+  <TextItem><ID>TopologyReset</ID><Text>Выбрать заново</Text></TextItem>
+  <TextItem><ID>TopologyU</ID><Text>U = постоянная</Text></TextItem>
+  <TextItem><ID>TopologyV</ID><Text>V = постоянная</Text></TextItem>
+  <TextItem><ID>SurfaceMatch_HINT</ID><Text>Согласовать касательные или кривизну вдоль общей полной границы сплайновых поверхностей.</Text></TextItem>
+  <TextItem><ID>SurfaceSplitIso_HINT</ID><Text>Разделить прямоугольную поверхность по изолинии U или V без изменения формы.</Text></TextItem>
+  <TextItem><ID>TopologyMatchHelp</ID><Text>Выберите две поверхности с общей полной границей. Порядок указан ниже. G1/G2 изменяет ближайшие ряды полюсов; противоположная граница сохраняется. Рациональные и обрезанные поверхности пока не поддерживаются.</Text></TextItem>
+  <TextItem><ID>TopologySplitHelp</ID><Text>Выберите полную прямоугольную поверхность. Шов предпросмотра показывает разрез. Будут созданы две независимые поверхности.</Text></TextItem>
+  <TextItem><ID>TopologyFirstPicked</ID><Text>Первая: объект %1, грань %2. Выберите вторую грань.</Text></TextItem>
+  <TextItem><ID>TopologyMatched</ID><Text>Предпросмотр: две отдельные грани, согласование %1. Для сшивки используйте Join.</Text></TextItem>
+  <TextItem><ID>TopologySplitReady</ID><Text>Предпросмотр: две независимые части поверхности; форма сохранена.</Text></TextItem>
+  <TextItem><ID>TopologyTrimError</ID><Text>Пока требуется полная прямоугольная область UV без обрезанных границ и отверстий.</Text></TextItem>
+  <TextItem><ID>TopologyRationalError</ID><Text>Согласование рациональных поверхностей пока не поддерживается.</Text></TextItem>
+  <TextItem><ID>TopologyBoundaryError</ID><Text>Выберите поверхности с общей полной границей и согласованной параметризацией. Для промежутка используйте Bridge.</Text></TextItem>
+  <TextItem><ID>TopologySewn</ID><Text>Сшито граней: %1. Одно поверхностное тело; форма сохранена</Text></TextItem>
+  <TextItem><ID>SurfaceOffset</ID><Text>Смещение поверхности</Text></TextItem>
+  <TextItem><ID>SurfaceOffset_HINT</ID><Text>Выберите грань поверхности и задайте смещение по нормали. Исходная поверхность сохраняется.</Text></TextItem>
+  <TextItem><ID>SurfaceOffsetHint</ID><Text>Выберите грань поверхности. Положительное расстояние — по нормали, отрицательное — в обратную сторону. Исходная поверхность сохраняется.</Text></TextItem>
+  <TextItem><ID>SurfaceOffsetSelect</ID><Text>Выберите грань поверхности.</Text></TextItem>
+  <TextItem><ID>SurfaceOffsetCreate</ID><Text>Создать смещённую поверхность</Text></TextItem>
+  <TextItem><ID>SurfaceOffsetReady</ID><Text>Предпросмотр смещения готов.</Text></TextItem>
+  <TextItem><ID>SurfaceOffsetZero</ID><Text>Расстояние смещения должно отличаться от нуля.</Text></TextItem>
+  <TextItem><ID>SurfaceOffsetFailed</ID><Text>Не удалось сместить поверхность. Уменьшите расстояние или выберите отдельную грань.</Text></TextItem>
+  <TextItem><ID>SurfaceOffsetSource</ID><Text>Выберите поверхность или отдельную грань тела.</Text></TextItem>
+  <TextItem><ID>SurfaceOffsetReverse</ID><Text>Сменить направление</Text></TextItem>
+  <TextItem><ID>SurfaceDisplayMenu</ID><Text>Отображение поверхностей</Text></TextItem>
+  <TextItem><ID>SurfaceDisplayIsoline</ID><Text>Изолинии UV</Text></TextItem>
+  <TextItem><ID>SurfaceDisplayNormal</ID><Text>Нормаль</Text></TextItem>
+  <TextItem><ID>SurfaceReverseClickHint</ID><Text>Реверс нормалей: щёлкните по поверхности; Esc — завершить.</Text></TextItem>
+  <TextItem><ID>SurfaceReverseClickDone</ID><Text>Нормали перевёрнуты. Щёлкните по следующей поверхности; Esc — завершить.</Text></TextItem>
+  <TextItem><ID>SurfaceReverseFinished</ID><Text>Реверс нормалей завершён.</Text></TextItem>
+  <TextItem><ID>TextToCurvesTitle</ID><Text>Текст в кривые</Text></TextItem>
+  <TextItem><ID>TextToCurvesHint</ID><Text>Текст в кривые: щёлкните по тексту; Esc — отмена.</Text></TextItem>
+  <TextItem><ID>TextToCurvesEmpty</ID><Text>Текст в кривые: у этого текста нет контуров.</Text></TextItem>
+  <TextItem><ID>TextToCurvesDone</ID><Text>Текст преобразован в плоские эскизы.</Text></TextItem>
+  <TextItem><ID>Section graphs (rounded rectangle)</ID><Text>Графики сечения — прямоугольник со скруглениями</Text></TextItem>
+  <TextItem><ID>Drag points. Double-click to add a point.</ID><Text>Перетаскивайте точки. Двойной щелчок добавляет точку.</Text></TextItem>
+  <TextItem><ID>Add point</ID><Text>Добавить точку</Text></TextItem>
+  <TextItem><ID>Remove point</ID><Text>Удалить точку</Text></TextItem>
+  <TextItem><ID>Section count</ID><Text>Количество сечений</Text></TextItem>
+  <TextItem><ID>Section Sketch</ID><Text>Эскиз сечения</Text></TextItem>
+  <TextItem><ID>Section Sketch created. Double-click to edit its contour.</ID><Text>Эскиз сечения создан. Двойной щелчок — редактировать контур.</Text></TextItem>
+  <TextItem><ID>Bottle-3 (Bezier sections)</ID><Text>Bottle-3 — сечения Безье</Text></TextItem>
+  <TextItem><ID>Upper guide (YZ)</ID><Text>Верхняя направляющая (YZ)</Text></TextItem>
+  <TextItem><ID>Lower guide (YZ)</ID><Text>Нижняя направляющая (YZ)</Text></TextItem>
+  <TextItem><ID>Top drop / height</ID><Text>Верхний перепад / высота</Text></TextItem>
+  <TextItem><ID>Bottom rise / height</ID><Text>Нижний перепад / высота</Text></TextItem>
+  <TextItem><ID>Bottom run / width</ID><Text>Нижний участок / ширина</Text></TextItem>
+  <TextItem><ID>Top bulge / height</ID><Text>Выпуклость сверху / высота</Text></TextItem>
+  <TextItem><ID>Bottom bulge / height</ID><Text>Выпуклость снизу / высота</Text></TextItem>
+  <TextItem><ID>Left bulge / width</ID><Text>Выпуклость слева / ширина</Text></TextItem>
+  <TextItem><ID>Right bulge / width</ID><Text>Выпуклость справа / ширина</Text></TextItem>
+  <TextItem><ID>Top left radius / smaller size</ID><Text>Радиус слева сверху / меньший размер</Text></TextItem>
+  <TextItem><ID>Bottom left radius / smaller size</ID><Text>Радиус слева снизу / меньший размер</Text></TextItem>
+  <TextItem><ID>Bottom right radius / smaller size</ID><Text>Радиус справа снизу / меньший размер</Text></TextItem>
+  <TextItem><ID>Top right radius / smaller size</ID><Text>Радиус справа сверху / меньший размер</Text></TextItem>
+  <TextItem><ID>Bezier sections ready. Graphs use percentages; both guides define the frame mirrored across Z=0.</ID><Text>Сечения Безье готовы. Графики задают проценты; две направляющие определяют основу с отражением относительно Z=0.</Text></TextItem>
+  <TextItem><ID>Catmull-Clark Subdivision...</ID><Text>Подразделение Catmull–Clark...</Text></TextItem>
+  <TextItem><ID>Shading</ID><Text>Затенение</Text></TextItem>
+  <TextItem><ID>Shade Smooth</ID><Text>Гладкое затенение</Text></TextItem>
+  <TextItem><ID>Shade Flat</ID><Text>Плоское затенение</Text></TextItem>
+  <TextItem><ID>Subdivision level (0 disables smoothing):</ID><Text>Уровень сглаживания (0 — отключить):</Text></TextItem>
+  <TextItem><ID>Cannot subdivide this mesh. Check manifold topology or reduce the level (limit: 1,000,000 faces).</ID><Text>Не удалось подразделить сетку. Проверьте топологию или уменьшите уровень (предел: 1 000 000 граней).</Text></TextItem>
+  <TextItem><ID>Add Sharp Edges</ID><Text>Добавить острые рёбра</Text></TextItem>
+  <TextItem><ID>Minimum angle between adjacent surface normals.</ID><Text>Минимальный угол между нормалями соседних поверхностей.</Text></TextItem>
+  <TextItem><ID>Angle</ID><Text>Угол</Text></TextItem>
+  <TextItem><ID>Drag: orange top, blue bottom, yellow seam. Release to rebuild. Esc cancels.</ID><Text>Оранжевый — верх, голубой — низ, жёлтый — кромка. Отпустите для перестроения. Esc — отмена.</Text></TextItem>
+  <TextItem><ID>Upper seam / width</ID><Text>Верхняя кромка / ширина</Text></TextItem>
+  <TextItem>
+    <ID>Freeze</ID>
+    <Text>Заморозка</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Unfreeze object</ID>
+    <Text>Разморозить объект</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Freeze object (visible, not selectable or editable)</ID>
+    <Text>Заморозить объект (виден, но недоступен для выбора и редактирования)</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Make Clone</ID>
+    <Text>Make Clone</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Link solid copies to the source body. Other objects are copied normally.</ID>
+    <Text>Связать копии тел с исходным телом. Остальные объекты копируются как обычно.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>Associative Clone: click a solid; Esc to cancel</ID>
+    <Text>Clone: выберите тело щелчком; Esc — отмена</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceAlignment</ID>
+    <Text>Smart Hybrid — параметризация</Text>
+  </TextItem>
+  <TextItem>
+    <ID>AlignmentUBias</ID>
+    <Text>Распределение по U</Text>
+  </TextItem>
+  <TextItem>
+    <ID>AlignmentVBias</ID>
+    <Text>Распределение по V</Text>
+  </TextItem>
+  <TextItem>
+    <ID>AlignmentReset</ID>
+    <Text>Сбросить распределение</Text>
+  </TextItem>
+  <TextItem>
+    <ID>AlignmentPreview</ID>
+    <Text>Грань принята. Меняйте U/V и наблюдайте за жёлтой сеткой. Форма и стыки сохраняются. Нажмите OK для применения.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>AlignmentHint</ID>
+    <Text>1. Нажмите на грань поверхности или тела. 2. Меняйте U или V — жёлтые линии сетки будут перемещаться. Ноль сохраняет исходный шаг; плюс сгущает линии к началу, минус — к концу. 3. Нажмите OK. Форма и стыки сохраняются, тело остаётся целым.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>AlignmentPickFace</ID>
+    <Text>Нажмите на грань в окне модели. На принятой грани появится жёлтая сетка.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceMoveSeam</ID>
+    <Text>Перенос стыка поверхностей</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SeamPosition</ID>
+    <Text>Положение стыка</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SeamHint</ID>
+    <Text>Выберите две соседние грани одного тела. 50% — исходный стык; меньшее значение уменьшает первую грань, большее — расширяет. Жёлтая линия показывает новый стык. Внешний контур пары и форма тела сохраняются.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SeamPick</ID>
+    <Text>Выберите первую грань, затем соседнюю грань того же тела.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SeamSameBody</ID>
+    <Text>Выберите вторую грань на том же теле.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SeamReady</ID>
+    <Text>Предпросмотр готов. Измените положение стыка и нажмите OK. 50% возвращает исходную границу.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceBoundaryGraph</ID>
+    <Text>Граница на поверхности</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BoundaryCapture</ID>
+    <Text>Использовать выделенную область</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BoundaryHint</ID>
+    <Text>Выделите связную область граней и нажмите «Использовать выделенную область». Выберите сторону и измените график. Коэффициент движения усиливает весь профиль; отрицательное значение уменьшает область. Форма поверхности сохраняется.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BoundaryRegionSide</ID>
+    <Text>Сторона области</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BoundaryMovement</ID>
+    <Text>Коэффициент движения</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BoundaryUStart</ID>
+    <Text>Начало U</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BoundaryUEnd</ID>
+    <Text>Конец U</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BoundaryVStart</ID>
+    <Text>Начало V</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BoundaryVEnd</ID>
+    <Text>Конец V</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BoundaryReset</ID>
+    <Text>Сбросить график</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BoundarySelectFaces</ID>
+    <Text>Выделите грани в окне модели.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BoundaryOneBody</ID>
+    <Text>Выберите область на одном теле.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BoundaryReady</ID>
+    <Text>Область: %1 граней. Голубой пунктир — исходная сторона. Жёлтая линия — новая граница (0–100% вдоль графика). Отпустите точку графика для обновления предпросмотра.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceBoundaryTitle</ID>
+    <Text>Граница на поверхности</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceBoundaryPick</ID>
+    <Text>Выбрать границу на модели</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceBoundarySettings</ID>
+    <Text>Настройки графика</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceBoundaryHint</ID>
+    <Text>Выберите связную область. Укажите её границу на модели, затем ставьте точки сплайна щелчками по поверхности. Перетаскивайте точки для изменения границы. Форма корпуса сохраняется.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceBoundaryPickHint</ID>
+    <Text>Щёлкните по краю выбранной области. Вращение вида — обычными средствами навигации.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceBoundaryOuter</ID>
+    <Text>Щёлкните рядом с внешним краем выбранной области.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceBoundaryLimit</ID>
+    <Text>Достигнут предел числа точек. Переместите или удалите существующую точку.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceBoundaryReady</ID>
+    <Text>Область: %1 граней. Щелчок по поверхности добавляет точку; перетаскивание перемещает её. Delete удаляет внутреннюю точку. Голубая линия — исходная граница, жёлтая — новый сплайн. Грани обновляются после отпускания мыши.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BoundarySymmetry</ID>
+    <Text>Симметрия</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BoundarySavedMissing</ID>
+    <Text>Не найдены сохранённые параметры границы или исходная поверхность. Существующее тело сохранено.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BoundaryMirrorMissing</ID>
+    <Text>На теле не найдены соответствующие зеркальные грани. Выберите другую плоскость симметрии.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>BoundaryMirrorOverlap</ID>
+    <Text>Выбранная и зеркальная полосы перекрываются. Выберите область с одной стороны плоскости симметрии.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceGraphOffset</ID>
+    <Text>Смещение региона по графикам</Text>
+  </TextItem>
+  <TextItem>
+    <ID>GraphOffsetHint</ID>
+    <Text>Выберите прямоугольную область граней в один или несколько рядов. Смещение по нормали = коэффициент × график U × график V. Периметр закреплён. Оба графика действуют на всю область.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>GraphOffsetCoefficient</ID>
+    <Text>Коэффициент смещения</Text>
+  </TextItem>
+  <TextItem>
+    <ID>GraphOffsetU</ID>
+    <Text>Вдоль области (U)</Text>
+  </TextItem>
+  <TextItem>
+    <ID>GraphOffsetV</ID>
+    <Text>Поперёк области (V)</Text>
+  </TextItem>
+  <TextItem>
+    <ID>GraphOffsetReady</ID>
+    <Text>Предпросмотр готов. U направлен вдоль области, V — поперёк. Концы графиков закреплены на нуле.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>GraphOffsetMissing</ID>
+    <Text>Не найдены сохранённые параметры смещения или исходная поверхность.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>GraphOffsetStrip</ID>
+    <Text>Выберите целую прямоугольную область без пропусков и ответвлений.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>GraphOffsetFit</ID>
+    <Text>Не удалось построить плавное смещение. Уменьшите коэффициент или упростите графики.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>GraphOffsetGap</ID>
+    <Text>Смещение создаёт щель на границе области. Уменьшите коэффициент.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>GraphOffsetQuad</ID>
+    <Text>Выберите прямоугольную область четырёхсторонних граней без отверстий.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceKnots</ID>
+    <Text>Увеличить число узлов поверхности</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceKnotsHint</ID>
+    <Text>Выберите одну или несколько NURBS-граней. Добавьте узлы в каждый существующий интервал U и V. Форма, границы и степень сохраняются. Жёлтым показана контрольная сетка; она может выходить за поверхность.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceKnotsU</ID>
+    <Text>Новых узлов на интервал U</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceKnotsV</ID>
+    <Text>Новых узлов на интервал V</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceKnotsReady</ID>
+    <Text>Граней: %1. Контрольных точек: %2 → %3. Форма и степень сохранены.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceKnotsCount</ID>
+    <Text>Добавьте хотя бы один узел по U или V (не более 8 на интервал).</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceKnotsNurbs</ID>
+    <Text>Для вставки узлов требуется NURBS-поверхность.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceKnotsLimit</ID>
+    <Text>Слишком много контрольных точек. Уменьшите число добавляемых узлов.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfaceShowPoints</ID>
+    <Text>Показать точки</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfacePointTransform</ID>
+    <Text>Smart Hybrid Transform</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfacePointTransformCapture</ID>
+    <Text>Использовать выбранную поверхность</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfacePointTransformApply</ID>
+    <Text>Применить смещение</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfacePointTransformSoft</ID>
+    <Text>Мягкое выделение</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfacePointTransformHint</ID>
+    <Text>Выберите целую NURBS-грань и нажмите «Использовать выбранную поверхность». Выделяйте точки щелчком или рамкой. Shift добавляет, Ctrl переключает. Тяните оси X/Y/Z; поверхность обновится при отпускании. Два крайних ряда закреплены.</Text>
+  </TextItem>
+  <TextItem>
+    <ID>SurfacePointTransformStatus</ID>
+    <Text>Выбрано: %1. Серые: закреплены. Красные: выбраны. От синего к жёлтому: мягкое влияние.</Text>
+  </TextItem>
+
+  <TextItem><ID>PointInfluenceGraph</ID><Text>График влияния: слева — край радиуса, справа — выбранные точки</Text></TextItem>
+  <TextItem><ID>PointResetGraph</ID><Text>Сбросить график</Text></TextItem>
+  <TextItem><ID>PointInfluenceStatus</ID><Text>Выбрано: %1. Мягкое влияние: %2. Зелёный: 0%, жёлтый: 50%, красный: 100%. Серый: закреплено.</Text></TextItem>
+<TextItem><ID>SelectionInteriorGraph</ID><Text>График влияния: слева — край выделения, справа — центр</Text></TextItem>
+<TextItem><ID>SelectionMoveCoefficient</ID><Text>Коэффициент перемещения</Text></TextItem>
+<TextItem><ID>SelectionInteriorStatus</ID><Text>Выбрано: %1. Двигаются только выбранные точки. Зелёный: 0%, жёлтый: 50%, красный: 100%. Серый: закреплено.</Text></TextItem>
+<TextItem><ID>PointSmoothCurvature</ID><Text>Сглаживать кривизну</Text></TextItem>
+<TextItem><ID>PointSmoothCurvatureHint</ID><Text>Сглаживает профиль перемещения выбранных точек. Невыделенные точки остаются на месте.</Text></TextItem>
+<TextItem><ID>HybridExtrudeTitle</ID><Text>Smart Hybrid Extrude</Text></TextItem>
+<TextItem><ID>HybridExtrudeHint</ID><Text>Выберите смежные грани одного тела. Стрелки — перемещение, кольца — поворот, белый квадрат — равномерный масштаб. Стенки строятся по внешнему контуру. Предпросмотр обновляется при отпускании.</Text></TextItem>
+<TextItem><ID>HybridExtrudeReady</ID><Text>Выдавливание готово. Перемещайте, поворачивайте и масштабируйте верхнюю часть.</Text></TextItem>
+<TextItem><ID>HybridExtrudeStart</ID><Text>Переместите верхнюю часть от поверхности, затем поворачивайте или масштабируйте её.</Text></TextItem>
+<TextItem><ID>SketchPrimitive.U</ID><Text>Центр U</Text></TextItem>
+<TextItem><ID>SketchPrimitive.V</ID><Text>Центр V</Text></TextItem>
+<TextItem><ID>SketchPrimitive.Axis1</ID><Text>Первая полуось</Text></TextItem>
+<TextItem><ID>SketchPrimitive.Axis2</ID><Text>Вторая полуось</Text></TextItem>
+<TextItem><ID>SketchPrimitive.Angle</ID><Text>Поворот (градусы)</Text></TextItem>
+<TextItem><ID>SketchPrimitive.Sides</ID><Text>Число сторон</Text></TextItem>
+<TextItem><ID>SketchPrimitive.EditHint</ID><Text>Эскиз: двойной щелчок по фигуре — параметры, по обычному контуру — редактирование узлов.</Text></TextItem>
+<TextItem><ID>SketchPrimitive.Circle</ID><Text>Окружность</Text></TextItem>
+<TextItem><ID>SketchPrimitive.Ellipse</ID><Text>Эллипс</Text></TextItem>
+<TextItem><ID>SketchPrimitive.Polygon</ID><Text>Многоугольник</Text></TextItem>
+<TextItem><ID>SketchPrimitive.CombinedTool</ID><Text>Эллипс / Окружность: укажите центр, затем угол рамки. Shift — окружность.</Text></TextItem>
+<TextItem><ID>SketchPrimitive.CornerPrompt</ID><Text>Укажите угол рамки. Shift — окружность.</Text></TextItem>
+<TextItem><ID>SketchPrimitive.LiveTitle</ID><Text>Параметры фигуры</Text></TextItem>
+<TextItem><ID>SketchPrimitive.RadiusAxis</ID><Text>Радиус / первая полуось</Text></TextItem>
+<TextItem><ID>SketchPrimitive.Full</ID><Text>Полная фигура</Text></TextItem>
+<TextItem><ID>SketchPrimitive.Arc</ID><Text>Дуга</Text></TextItem>
+<TextItem><ID>SketchPrimitive.Pie</ID><Text>Сектор Pie</Text></TextItem>
+<TextItem><ID>SketchPrimitive.Mode</ID><Text>Тип фигуры</Text></TextItem>
+<TextItem><ID>SketchPrimitive.Start</ID><Text>Начальный угол (градусы)</Text></TextItem>
+<TextItem><ID>SketchPrimitive.Sweep</ID><Text>Угол раскрытия (градусы)</Text></TextItem>
+<TextItem><ID>SketchBoolean.Title</ID><Text>Булевские операции</Text></TextItem>
+<TextItem><ID>SketchBoolean.Union</ID><Text>Объединить</Text></TextItem>
+<TextItem><ID>SketchBoolean.Cut</ID><Text>Вычесть</Text></TextItem>
+<TextItem><ID>SketchBoolean.UnionTip</ID><Text>Выберите два замкнутых контура для объединения.</Text></TextItem>
+<TextItem><ID>SketchBoolean.CutTip</ID><Text>Выберите исходный контур, затем вычитаемый.</Text></TextItem>
+<TextItem><ID>SketchBoolean.ChooseSketch</ID><Text>Булевская операция: выберите эскиз с двумя замкнутыми контурами.</Text></TextItem>
+<TextItem><ID>SketchBoolean.UnionFirst</ID><Text>Объединение: укажите первый контур. Esc — отмена.</Text></TextItem>
+<TextItem><ID>SketchBoolean.UnionSecond</ID><Text>Объединение: укажите второй контур. Esc — отмена.</Text></TextItem>
+<TextItem><ID>SketchBoolean.CutFirst</ID><Text>Вычитание: укажите исходный контур. Esc — отмена.</Text></TextItem>
+<TextItem><ID>SketchBoolean.CutSecond</ID><Text>Вычитание: укажите вычитаемый контур. Esc — отмена.</Text></TextItem>
+<TextItem><ID>SketchBoolean.Closed</ID><Text>Выберите два замкнутых контура, не являющихся вспомогательными.</Text></TextItem>
+<TextItem><ID>SketchBoolean.Different</ID><Text>Выберите два разных замкнутых контура.</Text></TextItem>
+<TextItem><ID>SketchBoolean.Canceled</ID><Text>Булевская операция отменена</Text></TextItem>
+<TextItem><ID>SketchBoolean.Completed</ID><Text>Булевская операция выполнена</Text></TextItem>
+<TextItem><ID>SketchBoolean.InvalidSource</ID><Text>Булевская операция: некорректный исходный контур.</Text></TextItem>
+<TextItem><ID>SketchBoolean.UnionFailed</ID><Text>Не удалось объединить контуры.</Text></TextItem>
+<TextItem><ID>SketchBoolean.CutFailed</ID><Text>Не удалось вычесть контур.</Text></TextItem>
+<TextItem><ID>SketchBoolean.InvalidResult</ID><Text>Булевская операция: некорректный результат.</Text></TextItem>
+<TextItem><ID>SketchBoolean.ConvertFailed</ID><Text>Не удалось преобразовать результат в редактируемые кривые.</Text></TextItem>
+<TextItem><ID>SketchBoolean.EmptyBoundary</ID><Text>Булевская операция: пустая граница.</Text></TextItem>
+<TextItem><ID>SketchBoolean.OpenBoundary</ID><Text>Граница результата булевской операции не замкнута.</Text></TextItem>
+<TextItem><ID>SketchBoolean.InvalidBoundary</ID><Text>Некорректная редактируемая граница результата.</Text></TextItem>
+<TextItem><ID>SketchBoolean.IdLimit</ID><Text>Достигнут предел идентификаторов контуров.</Text></TextItem>
+<TextItem><ID>SketchBoolean.GeometryFailed</ID><Text>Не удалось рассчитать геометрию булевской операции.</Text></TextItem>
+<TextItem><ID>SketchQuickMenu.SweepProfile</ID><Text>Для протягивания нужен один замкнутый контур профиля.</Text></TextItem>
+<TextItem><ID>CurveNode.Title</ID><Text>Координаты узла</Text></TextItem>
+<TextItem><ID>CurveNode.Corner</ID><Text>Угловой узел</Text></TextItem>
+<TextItem><ID>CurveNode.Control</ID><Text>Управляющий узел</Text></TextItem>
+<TextItem><ID>CurveNode.Smooth</ID><Text>Гладкий узел</Text></TextItem>
+<TextItem><ID>CurveNode.Fillets</ID><Text>Перед изменением типа узла удалите его скругления.</Text></TextItem>
+<TextItem><ID>BodySectionSketch</ID><Text>Эскиз сечения</Text></TextItem>
+<TextItem><ID>BodySectionSketch_HINT</ID><Text>Выберите или щёлкните по твёрдому телу, затем задайте секущую плоскость одним из предложенных способов. Инструмент создаёт редактируемый плоский эскиз сечения. Двойной щелчок по эскизу открывает редактирование контуров.</Text></TextItem>
+<TextItem><ID>TextToCurves</ID><Text>Текст в кривые</Text></TextItem>
+<TextItem><ID>TextToCurves_HINT</ID><Text>Включите инструмент и щёлкните по текстовому объекту. Контуры букв преобразуются в плоские эскизы для редактирования и выдавливания. Esc — отмена.</Text></TextItem>
+<TextItem><ID>Centered</ID><Text>Из центра</Text></TextItem>
+<TextItem><ID>Build the box base around the first point.</ID><Text>Строить основание Box вокруг первой точки.</Text></TextItem>
 </ClassArray.TextItem>

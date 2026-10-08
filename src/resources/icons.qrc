@@ -76,6 +76,8 @@
         <file alias="SurfaceOfRevolution.png">icons/SurfaceOfRevolution.png</file>
         <file alias="SurfaceSweepTwoRails.png">icons/SurfaceSweepTwoRails.png</file>
         <file alias="SurfaceFourSplines.png">icons/SurfaceFourSplines.png</file>
+        <file alias="SurfaceBridge.svg">icons/SurfaceBridge.svg</file>
+        <file alias="SurfacePatch.svg">icons/SurfacePatch.svg</file>
         <file alias="SurfaceRuled.png">icons/SurfaceRuled.png</file>
         <file alias="SurfaceLoft.png">icons/SurfaceLoft.png</file>
         <file alias="PlaneTool.png">icons/PlaneTool.png</file>
@@ -89,5 +91,8 @@
         <file alias="open.png">icons/open.png</file>
         <file alias="save.png">icons/save.png</file>
         <file alias="app_icon.ico">app_icon.ico</file>
+        <file alias="SurfaceTwoView.svg">icons/SurfaceTwoView.svg</file>
+        <file alias="SurfaceOffset.svg">icons/SurfaceOffset.svg</file>
+        <file alias="TextToCurves.svg">icons/TextToCurves.svg</file>
     </qresource>
 </RCC>

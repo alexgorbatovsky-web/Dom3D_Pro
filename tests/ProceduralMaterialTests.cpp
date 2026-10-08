@@ -4,6 +4,8 @@
 #include "materials/GlbMaterialBaker.h"
 #include "render/RenderScene.h"
 #include "ui/MaterialPreviewGL.h"
+#include "ui/LightRotationButton.h"
+#include "ui/LightingDialog.h"
 #include "ui/MaterialDrag.h"
 #include "ui/OpenGLViewport.h"
 #include "ui/MaterialEditorDialog.h"
@@ -11,6 +13,8 @@
 #include "MaterialLibrary.h"
 #include "Dom3DProjectSerializer.h"
 #include <QApplication>
+#include <QSettings>
+#include <BRepPrimAPI_MakeSphere.hxx>
 #include <QTemporaryDir>
 #include <QMimeData>
 #include <QDir>
@@ -34,6 +38,218 @@ void require(bool value,const char* reason){if(!value){std::cerr<<reason<<std::e
 }
 int TestProceduralMaterial(int argc,char** argv){
     QApplication app(argc,argv);
+    if(app.arguments().contains("--blinn-phong")) {
+        QSettings settings("Dom3D","Dom3D_Pro");
+        QVariantMap saved;
+        settings.beginGroup("view/lighting");
+        for(const auto& key:settings.allKeys()) saved.insert(key,settings.value(key));
+        settings.remove("");settings.endGroup();
+        auto restore=[&] {
+            settings.beginGroup("view/lighting");settings.remove("");
+            for(auto it=saved.cbegin();it!=saved.cend();++it) settings.setValue(it.key(),it.value());
+            settings.endGroup();settings.sync();CMesh3D::ReloadLightingSettings();
+        };
+        auto check=[&](bool ok,const char* message) {
+            if(!ok){restore();require(false,message);}
+        };
+        settings.setValue("view/lighting/environmentEnabled",false);
+        CMesh3D::ReloadLightingSettings();
+        LightingDialog dialog;
+        auto* toggle=dialog.findChild<QCheckBox*>("blinnPhongLighting");
+        check(toggle && !toggle->isChecked(),"Default lighting mode changed");
+        Material material=Material::DefaultWhite();
+        material.diffuse={0.32f,0.12f,0.06f};material.roughness=0.27f;material.specular=0.8f;
+        const QImage pbr=RenderMaterialSphereGL(material,256);
+        int changes=0;
+        QObject::connect(&dialog,&LightingDialog::LightingChanged,[&]{++changes;});
+        toggle->setChecked(true);
+        check(changes==1 && CMesh3D::GetLightingSettings().blinn_phong,"Lighting toggle was not applied live");
+        check(settings.value("view/lighting/blinnPhong").toBool(),"Lighting mode was not saved");
+        const QImage blinn=RenderMaterialSphereGL(material,256);
+        check(!pbr.isNull() && !blinn.isNull() && pbr!=blinn,"Blinn-Phong did not change the rendered material");
+        material.roughness=0.8f;
+        check(RenderMaterialSphereGL(material,256)!=blinn,"Blinn-Phong ignores roughness");
+        material.roughness=0.27f;
+        toggle->setChecked(false);
+        check(RenderMaterialSphereGL(material,256)==pbr,"Switching back did not restore PBR");
+        QDir().mkpath("output/blinn-phong");
+        pbr.save("output/blinn-phong/pbr.png");blinn.save("output/blinn-phong/blinn-phong.png");
+        restore();
+        std::cout<<"Blinn-Phong rendering, roughness, live toggle, persistence and preview cache passed\n";
+        return 0;
+    }
+    if(app.arguments().contains("--light-rotation")) {
+        QSettings settings("Dom3D","Dom3D_Pro");
+        QVariantMap originalLighting;
+        settings.beginGroup("view/lighting");
+        for(const auto& key:settings.allKeys()) originalLighting.insert(key,settings.value(key));
+        settings.endGroup();
+        auto restoreLighting=[&] {
+            settings.beginGroup("view/lighting");settings.remove("");
+            for(auto it=originalLighting.cbegin();it!=originalLighting.cend();++it)
+                settings.setValue(it.key(),it.value());
+            settings.endGroup();settings.sync();CMesh3D::ReloadLightingSettings();
+        };
+        auto require=[&](bool ok,const char* message) {
+            if(!ok){restoreLighting();std::cerr<<message<<std::endl;std::exit(1);}
+        };
+        settings.setValue("view/lighting/lightX",0.6f);
+        settings.setValue("view/lighting/lightY",-0.4f);
+        settings.setValue("view/lighting/lightZ",0.8f);
+        settings.setValue("view/lighting/environmentRotation",170.f);
+        settings.setValue("view/lighting/environmentStrength",0.65f);
+        settings.setValue("view/lighting/environmentEnabled",false);
+        settings.sync();
+        LightRotationButton button;
+        int changes=0;button.lightingChanged=[&]{++changes;};
+        auto mouse=[&](QEvent::Type type,float x,Qt::MouseButton b,Qt::MouseButtons buttons) {
+            QMouseEvent event(type,QPointF(x,10),QPointF(x,10),b,buttons,Qt::NoModifier);
+            QApplication::sendEvent(&button,&event);
+        };
+        mouse(QEvent::MouseButtonPress,0,Qt::LeftButton,Qt::LeftButton);
+        mouse(QEvent::MouseMove,180,Qt::NoButton,Qt::LeftButton);
+        mouse(QEvent::MouseButtonRelease,180,Qt::LeftButton,Qt::NoButton);
+        CMesh3D::ReloadLightingSettings();
+        auto light=CMesh3D::GetLightingSettings();
+        require(changes==1 && !button.isDown(),"Drag did not finish cleanly");
+        require(std::abs(light.environment_rotation_degrees+100.f)<.001f,"Rotation did not wrap or persist");
+        require(std::abs(light.light_x-.8f)<.001f && std::abs(light.light_z+.6f)<.001f,
+                "Direct light did not rotate with the environment");
+        require(std::abs(light.light_y+.4f)<.001f && !light.environment_enabled
+            && std::abs(light.environment_strength-.65f)<.001f,"Rotation changed unrelated lighting");
+        mouse(QEvent::MouseMove,200,Qt::NoButton,Qt::NoButton);
+        mouse(QEvent::MouseButtonPress,0,Qt::RightButton,Qt::RightButton);
+        mouse(QEvent::MouseMove,200,Qt::NoButton,Qt::RightButton);
+        mouse(QEvent::MouseButtonRelease,200,Qt::RightButton,Qt::NoButton);
+        require(changes==1,"Hover or right drag rotated the light");
+        LightingDialog dialog;
+        RotateViewportLight(15);
+        dialog.RefreshLightDirection();
+        CMesh3D::ReloadLightingSettings();
+        require(std::abs(CMesh3D::GetLightingSettings().environment_rotation_degrees+85.f)<.001f,
+                "Dialog refresh overwrote the toolbar rotation");
+        QKeyEvent key(QEvent::KeyPress,Qt::Key_Left,Qt::NoModifier);
+        QApplication::sendEvent(&button,&key);
+        require(changes==2 && std::abs(CMesh3D::GetLightingSettings().environment_rotation_degrees+90.f)<.001f,
+                "Keyboard rotation failed");
+        restoreLighting();
+        std::cout<<"Light drag, persistence, direction, wrap and dialog synchronization passed\n";
+        return 0;
+    }
+    if(app.arguments().contains("--height-relief")) {
+        QTemporaryDir directory;QDir().mkpath("output/height-relief");
+        QImage color(128,128,QImage::Format_RGB32),height(128,128,QImage::Format_RGB32);
+        for(int y=0;y<128;++y)for(int x=0;x<128;++x){
+            bool raised=(x%32>5&&y%32>5);
+            color.setPixel(x,y,raised?qRgb(180,95,45):qRgb(65,35,20));
+            height.setPixel(x,y,raised?qRgb(220,220,220):qRgb(35,35,35));
+        }
+        require(color.save(directory.filePath("color.png"))&&height.save(directory.filePath("height.png")),"Height fixtures failed");
+        Material material=Material::DefaultWhite();material.roughness=.65f;
+        material.color_texture_path=directory.filePath("color.png").toStdString();
+        material.displacement_scale=0;
+        const auto baseline=RenderMaterialSphereGL(material,320);
+        material.displacement_texture_path=directory.filePath("height.png").toStdString();
+        require(RenderMaterialSphereGL(material,320)==baseline,"Zero height strength must disable relief");
+        material.displacement_scale=.06f;
+        const auto relief=RenderMaterialSphereGL(material,320);
+        require(!relief.isNull()&&relief!=baseline,"Height tracing does not change the image");
+        double difference=0;
+        for(int y=64;y<256;++y)for(int x=64;x<256;++x)
+            difference+=std::abs(qGray(relief.pixel(x,y))-qGray(baseline.pixel(x,y)));
+        require(difference/(192*192)>2,"Relief has no visible effect at oblique angles");
+        baseline.save("output/height-relief/disabled.png");relief.save("output/height-relief/enabled.png");
+        std::cout<<"Height relief and zero-strength rendering passed\n";return 0;
+    }
+    if(app.arguments().contains("--leather-study") || app.arguments().contains("--quad-preview")) {
+        CMesh3D::ReloadLightingSettings();
+        Dom3DProjectSerializer serializer;
+        const QString input=app.arguments().last();
+        CAlfaDoc document;QString room,error;ProjectViewState view;
+        require(serializer.Load(input,document,room,view,error),qPrintable(error));
+        OpenGLViewport viewport;viewport.resize(1400,900);viewport.SetDocument(&document);
+        document.ClearSelection();
+        CMesh3D::SetDisplayMode(MeshDisplayMode::SurfaceMaterial);
+        CSolid::SetDisplayMode(SolidDisplayMode::SurfacesAndEdges);
+        if(app.arguments().contains("--quad-preview")) CMesh3D::SetDisplayMode(MeshDisplayMode::SurfaceMaterialWithMesh);
+        viewport.SetCamera(view.camera);viewport.SetOrthographicProjection(view.orthographic_projection);
+        viewport.SetFloorGridVisible(view.show_floor_grid);
+        viewport.SetCoordinateAxesVisible(view.show_coordinate_axes);
+        viewport.move(-20000,-20000);viewport.show();app.processEvents();
+        const QImage image=viewport.grabFramebuffer();
+        const QString output=app.arguments().contains("--quad-preview")?"output/bridge-shell/mesh.png":input.contains("Leather_Relief")?"output/leather-study/after.png":"output/leather-study/before.png";
+        require(!image.isNull()&&image.save(output),"Leather comparison capture failed");return 0;
+    }
+    if(app.arguments().contains("--roughness-control")) {
+        QTemporaryDir directory;
+        QImage map(16,16,QImage::Format_RGB32);map.fill(qRgb(80,80,80));
+        const QString path=directory.filePath("roughness.png");
+        require(map.save(path),"Cannot create roughness fixture");
+        Material material=Material::DefaultWhite();
+        material.diffuse={.8f,.55f,.18f};material.metallic=1;material.specular=1;
+        material.roughness_texture_path=path.toStdString();
+        QDir().mkpath("output/roughness-control");
+        QImage images[3];int i=0;
+        for(float roughness : {.04f,.5f,1.f}) {
+            material.roughness=roughness;
+            images[i]=RenderMaterialSphereGL(material,256);
+            require(!images[i].isNull(),"Roughness preview failed");
+            images[i].save(QString("output/roughness-control/%1.png").arg(i));++i;
+        }
+        double difference=0;
+        for(int y=48;y<208;++y)for(int x=48;x<208;++x)
+            difference+=std::abs(qGray(images[0].pixel(x,y))-qGray(images[2].pixel(x,y)));
+        require(difference/(160*160)>10,"Roughness map still overrides the slider");
+        // Endpoint controls must also agree with untextured materials.
+        material.roughness_texture_path.clear();material.roughness=.04f;
+        require(RenderMaterialSphereGL(material,256)==images[0],"Polished endpoint differs with a map");
+        material.roughness=1;
+        require(RenderMaterialSphereGL(material,256)==images[2],"Matte endpoint differs with a map");
+        std::cout<<"Textured roughness controls passed\n";return 0;
+    }
+    if(app.arguments().contains("--metal-preview")) {
+        if(app.arguments().contains("--no-environment")) {
+            QSettings settings("Dom3D","Dom3D_Pro");
+            const QString key="view/lighting/environmentEnabled";
+            const bool existed=settings.contains(key);
+            const QVariant saved=settings.value(key);
+            settings.setValue(key,false);settings.sync();
+            CMesh3D::ReloadLightingSettings();
+            // Restore persisted preferences before rendering or assertions.
+            if(existed)settings.setValue(key,saved);else settings.remove(key);
+            settings.sync();
+        }
+        if(app.arguments().contains("--user-lighting")) CMesh3D::ReloadLightingSettings();
+        MaterialLibrary library; library.Load(MaterialLibrary::DefaultLibraryPath());
+        QDir().mkpath("output/metal-preview");
+        CAlfaDoc metal_scene; int index=0;
+        for (const auto& entry : library.Entries()) {
+            if (entry.category != "PBR Metal") continue;
+            const auto image = RenderMaterialSphereGL(entry.material,256);
+            require(!image.isNull(), "Metal preview failed");
+            image.save(QString("output/metal-preview/%1.png").arg(QString::fromStdString(entry.material.name)));
+            double light=0; int count=0;
+            for(int y=64;y<192;++y)for(int x=64;x<192;++x){light+=qGray(image.pixel(x,y));++count;}
+            std::cout<<entry.material.name<<": "<<light/count<<std::endl;
+            require(light/count>20, "Metal preview is nearly black");
+            TopoDS_Shape shape=BRepPrimAPI_MakeSphere(
+                gp_Pnt((index%3-1)*65, (index/3==0?32:-32), 0),25).Shape();
+            auto sphere=std::make_unique<CSolid>(shape);
+            sphere->SetMaterial(metal_scene.UpsertMaterial(entry.material)); sphere->SetColor(entry.material.diffuse);
+            metal_scene.AddObject(std::move(sphere),false); ++index;
+        }
+        require(index>0,"No PBR Metal assets were found");
+        metal_scene.ClearSelection();
+        OpenGLViewport viewport;viewport.resize(900,650);viewport.SetDocument(&metal_scene);
+        CMesh3D::SetDisplayMode(MeshDisplayMode::SurfaceMaterial);
+        CSolid::SetDisplayMode(SolidDisplayMode::SurfacesAndEdges);
+        Camera camera;camera.target={0,0,0};camera.distance=230;camera.orientation={1,0,0,0};
+        viewport.SetCamera(camera);viewport.SetOrthographicProjection(true);
+        viewport.move(-20000,-20000);viewport.show();app.processEvents();
+        const QImage scene=viewport.grabFramebuffer();
+        require(!scene.isNull()&&scene.save("output/metal-preview/scene.png"),"Metal scene render failed");
+        return 0;
+    }
     if(app.arguments().contains("--perforation")) {
         QTemporaryDir dir;MaterialLibrary library;QString error;
         QDir().mkpath("output/perforation");
@@ -108,6 +324,27 @@ int TestProceduralMaterial(int argc,char** argv){
         CSolid::SetHiddenEdgeDrawingEnabled(false);
         require(RenderMaterialSphereGL(material,192) == baseline,"Preview changes after toggling hidden edges");
         require(!CSolid::IsHiddenEdgeDrawingEnabled(),"Preview enabled hidden edges");
+        // A fresh preview rendered during zebra analysis must not poison the
+        // material cache. Check both incoming target states and both shapes.
+        for (bool flat : {false, true}) {
+            CMesh3D::SetZebraAnalysisEnabled(false);
+            material.name = flat ? "Plain zebra plate" : "Plain zebra sphere";
+            const auto plain = RenderMaterialSphereGL(material,192,flat);
+            require(!plain.isNull(),"Zebra preview baseline failed");
+            for (bool target : {false, true}) {
+                material.name += target ? " target" : " no target";
+                CMesh3D::SetZebraAnalysisEnabled(true);
+                CMesh3D::SetZebraAnalysisTarget(target);
+                const auto during = RenderMaterialSphereGL(material,192,flat);
+                require(during == plain,"Scene zebra corrupts material preview");
+                require(CMesh3D::IsZebraAnalysisEnabled()
+                    && CMesh3D::IsZebraAnalysisTarget() == target,
+                    "Preview changed scene zebra state");
+                CMesh3D::SetZebraAnalysisEnabled(false);
+                require(RenderMaterialSphereGL(material,192,flat) == plain,
+                    "Zebra remains in cached material preview after disabling");
+            }
+        }
         QDir().mkpath("output/material-preview");
         require(hidden.save("output/material-preview/hidden-edges-fixed.png"),"Cannot save preview verification");
         std::cout << "Material preview is independent of scene hidden edges\n";
