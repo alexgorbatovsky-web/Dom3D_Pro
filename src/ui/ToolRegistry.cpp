@@ -7,6 +7,7 @@
 #include "../SurfaceSketchTrimBuilder.h"
 #include "../TwoViewSurfaceBuilder.h"
 #include "../SurfaceEdgePatchBuilder.h"
+#include "../NSidedSurfaceBuilder.h"
 #include "../SurfaceBridgeBuilder.h"
 #include "../SurfaceOffsetBuilder.h"
 #include "../SurfaceFilletBuilder.h"
@@ -17,6 +18,7 @@
 #include "../ExtrudeShapeBuilder.h"
 #include "../Sketch.h"
 #include "../SketchSelection.h"
+#include "../SheetShapeBuilder.h"
 #include "../MultiSketchProfileBuilder.h"
 
 #include "../CMesh3D.h"
@@ -168,7 +170,7 @@ bool is_geometry_reference_parameter(const std::string& id) {
         || id == "guide1.id" || id == "guide2.id" || id == "surface.id") {
         return true;
     }
-    return id.size() > 8 && id.rfind("curve", 0) == 0
+    return id.size() > 8 && (id.rfind("curve", 0) == 0 || id.rfind("support", 0) == 0)
         && id.compare(id.size() - 3, 3, ".id") == 0;
 }
 
@@ -7932,8 +7934,10 @@ ToolRegistry::ToolRegistry() {
 
     tools_.push_back({
         "SurfaceTangentCap",
-        "Tangent Cap",
+        "Cap",
         {
+            {"tangent", "Tangent", 1.0, 0.0, 1.0, 1.0, ToolParameterType::Checkbox},
+            {"boundary.edge", "Boundary Edge", -1.0, -1.0, 1000000.0, 1.0},
             {"curve.id", "Boundary Spline ID", 0.0, 0.0,
                 4294967295.0, 1.0},
             {"surface.id", "Supporting Surface ID", 0.0, 0.0,
@@ -7948,7 +7952,9 @@ ToolRegistry::ToolRegistry() {
                     0.0, param(parameters, "curve.id", 0.0))),
                 static_cast<unsigned long>(std::max(
                     0.0, param(parameters, "surface.id", 0.0))),
-                param(parameters, "length_factor", 0.55));
+                param(parameters, "length_factor", 0.55), nullptr,
+                static_cast<int>(param(parameters, "boundary.edge", -1.0)),
+                param(parameters, "tangent", 1.0) >= 0.5);
         },
         [](CAlfaDoc& document, size_t index,
            const std::vector<ToolParameter>& parameters) {
@@ -7958,7 +7964,9 @@ ToolRegistry::ToolRegistry() {
                     0.0, param(parameters, "curve.id", 0.0))),
                 static_cast<unsigned long>(std::max(
                     0.0, param(parameters, "surface.id", 0.0))),
-                param(parameters, "length_factor", 0.55));
+                param(parameters, "length_factor", 0.55), nullptr,
+                static_cast<int>(param(parameters, "boundary.edge", -1.0)),
+                param(parameters, "tangent", 1.0) >= 0.5);
         }
     });
 
@@ -8032,6 +8040,34 @@ ToolRegistry::ToolRegistry() {
                 param(parameters, "length", 350.0),
                 static_cast<int>(param(parameters, "direction", 2.0)),
                 param(parameters, "reverse_normal", 0.0) >= 0.5);
+        }
+    });
+
+    tools_.push_back({
+        "SolidSheet", "Sheet",
+        {{"height", "Height", 10, -10000, 10000, 0.1, ToolParameterType::Number, {}, ToolParameterUnit::Length},
+         {"thickness", "Thickness", 1, -1000, 1000, 0.1, ToolParameterType::Number, {}, ToolParameterUnit::Length},
+         {"profile.id", "Sketch", 0, 0, 4294967295.0, 1}},
+        [](CAlfaDoc& document, const std::vector<ToolParameter>& parameters) {
+            const auto* source = document.FindObjectById(static_cast<unsigned long>(param(parameters,"profile.id",0)));
+            std::string error;
+            auto shape = BuildSheetShape(source, param(parameters,"height",10), param(parameters,"thickness",1), error);
+            if (shape.IsNull()) return;
+            auto solid = std::make_unique<CSolid>(shape);
+            solid->SetName("Sheet");
+            if (solid->ReBuldMesh()) document.AddObject(std::move(solid));
+        },
+        [](CAlfaDoc& document, size_t index, const std::vector<ToolParameter>& parameters) {
+            if (index >= document.GetObjects().size()) return;
+            auto* solid = dynamic_cast<CSolid*>(document.GetObjects()[index].get());
+            if (!solid) return;
+            const auto* source = document.FindObjectById(static_cast<unsigned long>(param(parameters,"profile.id",0)));
+            std::string error;
+            auto shape = BuildSheetShape(source, param(parameters,"height",10), param(parameters,"thickness",1), error);
+            if (shape.IsNull()) return;
+            const auto previous = solid->m_Shape;
+            solid->m_Shape = shape;
+            if (!solid->ReBuldMesh()) { solid->m_Shape = previous; solid->ReBuldMesh(); }
         }
     });
 
@@ -8342,6 +8378,12 @@ ToolRegistry::ToolRegistry() {
                     i==3?10.:0.,i<3?4294967295.:i==3?200.:i==4?10000.:1.,i<4?1.:.01});
             }
             parameters.push_back({"curve.count","",double(BodyPrimitiveGuideCount(int(type))),1,3,1});
+            if(type==0) {
+                const char* corners[]={"Upper left radius","Upper right radius","Lower left radius","Lower right radius"};
+                for(int i=0;i<4;++i)parameters.push_back({"corner.radius."+std::to_string(i),corners[i],0,0,10000,1});
+                parameters.push_back({"tangent.cap","Tangent Cap",0,0,2,1,ToolParameterType::Combo,{"None","Front (min X)","Back (max X)"}});
+                parameters.push_back({"cap.length","Cap Length Factor",.55,.05,3,.05});
+            }
             parameters.push_back({"primitive.type.id","",double(type),0,double(BodyPrimitiveTypes().size()-1),1});
             if(type==14)parameters.push_back({"blade.twist","Tip twist",settings.twist,-60,60,1,ToolParameterType::Number,{},ToolParameterUnit::Angle});
             if(type==16) {
@@ -8407,6 +8449,8 @@ ToolRegistry::ToolRegistry() {
             {"top.graph","Rho Conic Top Graph",0,.01,.99,.01,ToolParameterType::Graph},
             {"bottom.graph","Rho Conic Down Graph",0,.01,.99,.01,ToolParameterType::Graph},
             {"mirror","Mirror Z",0,0,1,1,ToolParameterType::Checkbox},
+            {"tangent.cap","Tangent Cap",0,0,2,1,ToolParameterType::Combo,{"None","Start (min X)","End (max X)"}},
+            {"cap.length","Cap Length Factor",.55,.05,3,.05},
             {"samples","Longitudinal Samples",40,4,200,1},
             {"split","Split into Patches",0,0,1,1,ToolParameterType::Checkbox},
             {"patches.u","Patches along X",8,1,32,1},
@@ -8504,6 +8548,23 @@ ToolRegistry::ToolRegistry() {
             if (shape.IsNull()) return;
             surface->m_Shape = shape;
             surface->ReBuldMesh();
+        }
+    });
+
+    auto nsided_defaults = loft_parameter_defaults();
+    for (int i = 1; i <= 32; ++i) {
+        const auto s = "support"+std::to_string(i);
+        nsided_defaults.push_back({s+".id", "Support ID", 0, 0, 4294967295., 1});
+        nsided_defaults.push_back({s+".face", "Support face", -1, -1, 1000000, 1});
+        nsided_defaults.push_back({s+".edge", "Support edge", -1, -1, 1000000, 1});
+        nsided_defaults.push_back({s+".continuity", "G — "+std::to_string(i), 0, 0, 2, 1,
+            ToolParameterType::Combo, {"G0 — Position", "G1 — Tangent", "G2 — Curvature"}});
+    }
+    tools_.push_back({
+        "SurfaceNSided", "N-Sided Surface", nsided_defaults, {},
+        [](CAlfaDoc& document, size_t index, const std::vector<ToolParameter>& parameters) {
+            std::string error;
+            RebuildNSidedSurface(document, index, ReadNSidedSurfaceParameters(parameter_values(parameters)), error);
         }
     });
 
@@ -9565,7 +9626,7 @@ ActiveParametricObject ToolRegistry::Activate(const std::string& id, CAlfaDoc& d
     const size_t object_count_before = document.GetObjects().size();
     try { tool->create(document, parameters); }
     catch(const TileBuildError& error){QMessageBox::warning(nullptr,"Tile",error.what());return {};}
-    if ((id == "SolidContourPanel" || id == "SurfaceBulge" || id == "SurfaceSaddle") && document.GetObjects().size() <= object_count_before) return {};
+    if ((id == "SolidSheet" || id == "SolidContourPanel" || id == "SurfaceBulge" || id == "SurfaceSaddle") && document.GetObjects().size() <= object_count_before) return {};
     if (id == "SolidTwoSketches" || id == "SurfaceSweepTwoRails" || id == "SolidSweepTwoRails" || id == "SurfaceSweptTool") {
         if (document.GetObjects().size() <= object_count_before) {
             return {};
@@ -9665,7 +9726,7 @@ ActiveParametricObject ToolRegistry::CreateParametricObject(const std::string& i
     const size_t object_count_before = document.GetObjects().size();
     try { tool->create(document, prepared.parameters); }
     catch(const TileBuildError& error){QMessageBox::warning(nullptr,"Tile",error.what());return {};}
-    if ((id == "SolidContourPanel" || id == "SurfaceBulge" || id == "SurfaceSaddle") && document.GetObjects().size() <= object_count_before) return {};
+    if ((id == "SolidSheet" || id == "SolidContourPanel" || id == "SurfaceBulge" || id == "SurfaceSaddle") && document.GetObjects().size() <= object_count_before) return {};
     if (id == "SolidTwoSketches" || id == "SurfaceSweepTwoRails" || id == "SolidSweepTwoRails" || id == "SurfaceSweptTool") {
         if (document.GetObjects().size() <= object_count_before) {
             return {};
@@ -10196,7 +10257,18 @@ bool ToolRegistry::TryRebuildSurfaceOffset(const ActiveParametricObject& active,
     return true;
 }
 
+bool ToolRegistry::TryRebuildNSidedSurface(const ActiveParametricObject& active, CAlfaDoc& document, std::string& error) const {
+    if (!RebuildNSidedSurface(document,active.object_index,
+        ReadNSidedSurfaceParameters(parameter_values(active.parameters)),error)) return false;
+    static_cast<CSurfaceSet*>(document.GetObjects()[active.object_index].get())->SetParametricOperation(
+        0,"SurfaceNSided","N-Sided Surface",parameter_values(active.parameters));
+    return true;
+}
+
 void ToolRegistry::Rebuild(const ActiveParametricObject& active_object, CAlfaDoc& document) const {
+    if (active_object.tool_id == "SurfaceNSided") {
+        std::string error; TryRebuildNSidedSurface(active_object,document,error); return;
+    }
     if (active_object.tool_id == "SurfaceOffset") {
         std::string error;
         TryRebuildSurfaceOffset(active_object, document, error);
@@ -10599,6 +10671,7 @@ bool ToolRegistry::ReplayProfileDependents(unsigned long profile_id, CAlfaDoc& d
                 || objects[i]->GetParametricToolId() == "CurveLinkedBridge"
                 || objects[i]->GetParametricToolId() == "SurfaceSmartHybrid"
                 || objects[i]->GetParametricToolId() == "SurfaceFourSplines"
+                || objects[i]->GetParametricToolId() == "SurfaceNSided"
                 || objects[i]->GetParametricToolId() == "SurfaceTwoView"
                 || IsBodyPrimitiveTool(objects[i]->GetParametricToolId())
                 || objects[i]->GetParametricToolId() == "SurfaceTrimSketch"
@@ -10695,6 +10768,7 @@ bool ToolRegistry::ReplayAllProfileDependents(CAlfaDoc& document) const {
                 || objects[i]->GetParametricToolId() == "SurfaceSmartHybrid"
                 || objects[i]->GetParametricToolId() == "SurfaceFourSplines"
                 || objects[i]->GetParametricToolId() == "SurfaceTwoView"
+                || objects[i]->GetParametricToolId() == "SurfaceNSided"
                 || IsBodyPrimitiveTool(objects[i]->GetParametricToolId())
                 || objects[i]->GetParametricToolId() == "SurfaceTrimSketch"
                 || objects[i]->GetParametricToolId() == "SurfaceBridge"

@@ -299,6 +299,52 @@ int TestSolidPrimitiveTool(int argc, char** argv) {
         std::cout << "Face-based Box/Cylinder cuts preview during height movement" << std::endl;
         return 0;
     }
+    if(app.arguments().contains("--surface-swept-file")) {
+        MainWindow window;auto& doc=window.document_;Dom3DProjectSerializer serializer;ProjectViewState view;QString room,error;
+        require(serializer.Load(app.arguments().value(app.arguments().indexOf("--surface-swept-file")+1),doc,room,view,error),"Cannot load sweep fixture");
+        auto* profile=dynamic_cast<CBSpline*>(doc.FindObjectById(4));auto* guide=doc.FindObjectById(5);require(profile&&guide,"Missing sweep curves");
+        require(profile->IsClosed(),"Fixture profile must be closed");
+        for(bool orientation:{true,false}) {
+            auto shape=BuildSweptSurfaceShape(*profile,*guide,1,0,0,0,{}, {},orientation,0,1);
+            require(!shape.IsNull()&&BRepCheck_Analyzer(shape).IsValid(),"Closed profile sweep failed");
+            require(!TopExp_Explorer(shape,TopAbs_SOLID).More(),"Surface sweep created a solid");
+            CSurfaceSet surface(shape);require(surface.ReBuldMesh(),"Cannot mesh closed profile sweep");
+            if(!orientation)for(int i=0;i<32;++i) {
+                const auto p=profile->Evaluate(float(i)/32);
+                BRepExtrema_DistShapeShape distance(BRepBuilderAPI_MakeVertex(gp_Pnt(p.x,p.y,p.z)).Shape(),shape);
+                require(distance.IsDone()&&distance.Value()<1.e-4,"Sweep changed the closed profile shape");
+            }
+        }
+        const auto varied=BuildSweptSurfaceShape(*profile,*guide,1,0,0,0,{1,1.2,1.3,1.2,1},{},true,45,.65);
+        require(!varied.IsNull()&&BRepCheck_Analyzer(varied).IsValid(),"Closed profile twist/scale failed");
+        const auto initial=doc.GetObjects().size();
+        doc.SelectObjectById(4,SelectionAction::Replace);doc.SelectObjectById(5,SelectionAction::Add);
+        window.undo_redo_.Reset();window.ActivateParametricTool("SurfaceSweptTool");
+        auto* surface=dynamic_cast<CSurfaceSet*>(doc.GetSelectedObject());
+        require(surface&&doc.GetObjects().size()==initial+1,"Fixture Surface Swept failed");
+        window.AcceptActiveProperties();window.UndoDocumentChange();
+        require(doc.GetObjects().size()==initial,"Closed sweep Undo changed inputs");
+        doc.SelectObjectById(4,SelectionAction::Replace);window.ActivateParametricTool("SurfaceSweptTool");
+        require(window.pending_sweep_section_id_==4,"Cannot pick guide after closed profile");
+        doc.SelectObjectById(5,SelectionAction::Replace);window.viewport_->SelectionChanged();app.processEvents();
+        surface=dynamic_cast<CSurfaceSet*>(doc.GetSelectedObject());
+        require(surface&&doc.GetObjects().size()==initial+1,"Profile-first sweep failed");
+        const auto surfaceId=surface->m_id;window.AcceptActiveProperties();
+        QTemporaryDir temp;const auto path=temp.filePath("closed-sweep.dom3d");
+        require(serializer.Save(path,doc,"Surfaces",view,{},error),"Cannot save closed sweep");
+        CAlfaDoc loaded;require(serializer.Load(path,loaded,room,view,error),"Cannot reload closed sweep");
+        ToolRegistry registry;require(registry.ReplayOperations(loaded.FindObjectIndexById(surfaceId),loaded),"Cannot replay closed sweep");
+        const auto* restored=dynamic_cast<const CSurfaceSet*>(loaded.FindObjectById(surfaceId));
+        require(restored&&BRepCheck_Analyzer(restored->m_Shape).IsValid(),"Replayed sweep invalid");
+        if(app.arguments().contains("--output")) {
+            const auto output=app.arguments().value(app.arguments().indexOf("--output")+1);
+            require(serializer.Save(output+".dom3d",doc,"Surfaces",view,{},error),"Cannot save sweep example");
+            window.resize(1100,800);window.show();doc.ClearSelection();
+            window.viewport_->SetCamera(view.camera);window.viewport_->SetOrthographicProjection(true);window.viewport_->FitToDocument();
+            app.processEvents();require(window.viewport_->grabFramebuffer().save(output+".png"),"Cannot save sweep preview");
+        }
+        std::cout<<"Closed spline sweep fixture: geometry, UI, Undo and persistence passed.\n";return 0;
+    }
     if(app.arguments().contains("--surface-swept-only")) {
         MainWindow window;auto& doc=window.document_;doc.GetObjects().clear();
         auto profile=std::make_unique<CBSpline>();

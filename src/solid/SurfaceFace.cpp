@@ -1,4 +1,5 @@
 #include "../Diagnostics.h"
+#include "../ZebraSettings.h"
 #include "ConvexMeshMerge.h"
 #include "SurfaceFace.h"
 #include "CircularSplineBoundary.h"
@@ -2811,6 +2812,16 @@ bool CSurfaceFace::BuldMeshTriangle(float Deflection, float AngDeflection)
 			const gp_Pnt2d uv = aTriangulation->UVNode(nodeIndex);
 			uvs.push_back({static_cast<float>(uv.X()), static_cast<float>(uv.Y())});
 			try {
+				// Reuse the CAD evaluator's limiting normal at collapsed surface
+				// boundaries. Direct D1 at a cap pole can normalize numerical noise,
+				// or discard all analytic normals because of a single zero tangent.
+				if (!spherical_surface) {
+					CPoint8d evaluated;
+					if (GetPoint(uv.X(), uv.Y(), &evaluated)) {
+						normals.push_back({float(evaluated.l),float(evaluated.m),float(evaluated.n)});
+						continue;
+					}
+				}
 				gp_Vec normal;
 				if (spherical_surface) {
 					// A parametric sphere has a singular derivative at each pole.
@@ -3448,6 +3459,8 @@ void CSurfaceFace::PrepareDisplayGeometry() const
 
 void CSurfaceFace::RenderDisplayOverlays() const
 {
+    const bool zebra=CMesh3D::IsZebraAnalysisTarget();
+    const bool isolines=zebra?ZebraOptions().show_edges:surface_display::isolines;
     glPushAttrib(GL_ENABLE_BIT | GL_CURRENT_BIT | GL_LINE_BIT | GL_POINT_BIT | GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT | GL_HINT_BIT);
     glDisable(GL_LIGHTING);
     glDisable(GL_TEXTURE_2D);
@@ -3464,11 +3477,12 @@ void CSurfaceFace::RenderDisplayOverlays() const
         pMesh3D->RenderWire(false, true, &color);
         glDepthFunc(GL_LEQUAL);
     }
-    if (surface_display::isolines || surface_display::normals || surface_display::points) {
+    if (isolines || surface_display::normals || surface_display::points) {
         PrepareDisplayGeometry();
-        if (surface_display::isolines) {
+        if (isolines) {
             for (std::size_t i=0; i<display_geometry_.isolines.size(); ++i) {
-                if (i < display_geometry_.u_isoline_count) glColor3f(.60f,.40f,.94f);
+                if(zebra)glColor3f(.12f,.12f,.12f);
+                else if (i < display_geometry_.u_isoline_count) glColor3f(.60f,.40f,.94f);
                 else glColor3f(.86f,.56f,.77f);
                 const auto& line = display_geometry_.isolines[i];
                 glBegin(GL_LINE_STRIP);

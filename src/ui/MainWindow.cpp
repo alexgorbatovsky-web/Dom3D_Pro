@@ -1,4 +1,5 @@
 #include "../solid/FilletEdgeIdentity.h"
+#include "ZebraDialog.h"
 #include "HybridExtrudeDialog.h"
 #include "SurfacePointTransformDialog.h"
 #include "SurfaceKnotsDialog.h"
@@ -16,6 +17,7 @@
 #include "TwoViewSurfaceDialog.h"
 #include "../TwoViewSurfaceBuilder.h"
 #include "SurfacePatchDialog.h"
+#include "NSidedSurfaceDialog.h"
 #include "SurfaceBridgeDialog.h"
 #include "SurfaceOffsetDialog.h"
 #include "../SurfaceOffsetBuilder.h"
@@ -33,6 +35,7 @@
 #include "../CadCurve3D.h"
 #include "../CBSpline.h"
 #include "../CurveCutGeometry.h"
+#include "../CurveJoinGeometry.h"
 #include "../BezierSpline.h"
 #include "../CMesh3D.h"
 #include "../Tools_Mesh3D.h"
@@ -3588,8 +3591,9 @@ int ShowPlaneDefinitionDialog(
 
 bool ShowPlaneValuesDialog(QWidget* parent, const QString& title,
                            const QStringList& labels,
-                           std::vector<double>& values) {
+                           std::vector<double>& values, OpenGLViewport* direction_viewport = nullptr) {
     QDialog dialog(parent);
+    if(direction_viewport)dialog.setObjectName("ProjectionDirectionDialog");
     dialog.setWindowTitle(title);
     auto* root = new QVBoxLayout(&dialog);
     auto* form = new QFormLayout();
@@ -3603,6 +3607,12 @@ bool ShowPlaneValuesDialog(QWidget* parent, const QString& title,
         editors.push_back(editor);
     }
     root->addLayout(form);
+    if(direction_viewport) {
+        auto* pick=new QPushButton("Pick line or coordinate axis",&dialog);
+        pick->setObjectName("PickProjectionDirection");
+        root->addWidget(pick);
+        QObject::connect(pick,&QPushButton::clicked,&dialog,[&dialog] {dialog.done(2);});
+    }
     auto* buttons = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
     SetDefaultDialogAccept(&dialog, buttons);
@@ -3610,7 +3620,27 @@ bool ShowPlaneValuesDialog(QWidget* parent, const QString& title,
     QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     CenterDialogOnCursor(dialog);
-    if (dialog.exec() != QDialog::Accepted) return false;
+    for(;;) {
+        const int result=dialog.exec();
+        if(result==QDialog::Accepted)break;
+        if(result!=2 || !direction_viewport)return false;
+        QEventLoop pick_loop;
+        QObject::connect(direction_viewport,&OpenGLViewport::RotationAxisPicked,&pick_loop,
+            [&](CPoint3d start,CPoint3d end) {
+                gp_Vec direction(end.x-start.x,end.y-start.y,end.z-start.z);
+                if(direction.SquareMagnitude()>1.e-20) {
+                    direction.Normalize();
+                    editors[0]->setValue(direction.X());editors[1]->setValue(direction.Y());editors[2]->setValue(direction.Z());
+                }
+                pick_loop.quit();
+            });
+        QObject::connect(direction_viewport,&OpenGLViewport::RotationAxisPickCanceled,&pick_loop,&QEventLoop::quit);
+        direction_viewport->setProperty("projectionDirectionPick",true);
+        direction_viewport->BeginPickRotationAxis();
+        direction_viewport->StatusTextChanged("Projection: click a straight line or coordinate axis; Esc returns to vector input");
+        pick_loop.exec();
+        direction_viewport->setProperty("projectionDirectionPick",false);
+    }
     values.clear();
     for (QDoubleSpinBox* editor : editors) values.push_back(editor->value());
     return true;
@@ -4131,6 +4161,25 @@ MainWindow::MainWindow(QWidget* parent)
             "Curve edit: node deleted; dependent geometry rebuilt", 1800);
     });
     connect(viewport_, &OpenGLViewport::SelectionChanged, this, [this]() {
+        if(property("tangentCapPick").toBool()) {
+            if(document_.HasSelectedSolidEdge() || dynamic_cast<CBSpline*>(document_.GetSelectedObject())) QTimer::singleShot(0,this,[this]() {
+                if(property("tangentCapPick").toBool())
+                    ActivateParametricTool("SurfaceTangentCap");
+            });
+            return;
+        }
+        if (pending_group_command_ == PendingGroupCommand::ProjectCurveToPlane
+            || pending_group_command_ == PendingGroupCommand::ProjectCurveToFace
+            || pending_group_command_ == PendingGroupCommand::ProjectCurveToSurface) {
+            const auto command=pending_group_command_;
+            const auto source=pending_projection_curve_id_;
+            QTimer::singleShot(0,this,[this,command,source]() {
+                if(pending_group_command_!=command || pending_projection_curve_id_!=source)return;
+                ProjectCurveToSurface(command==PendingGroupCommand::ProjectCurveToPlane,
+                    command==PendingGroupCommand::ProjectCurveToFace);
+            });
+            return;
+        }
         if (pending_group_command_ == PendingGroupCommand::AssociativeClone) {
             // Finish the picking event before switching to point-to-point placement.
             QTimer::singleShot(0, this, [this]() {
@@ -4208,6 +4257,7 @@ MainWindow::MainWindow(QWidget* parent)
             UpdateActiveToolUi("SurfaceReverseNormals");
             return;
         }
+        if(auto* nsided=findChild<QDialog*>("NSidedSurfaceDialog");nsided&&nsided->isVisible()){RefreshSceneTree();return;}
         if(auto* offset=findChild<QDialog*>("SurfaceOffsetDialog");offset&&offset->isVisible()){RefreshSceneTree();return;}
         if(auto* topology=findChild<QDialog*>("SurfaceTopologyDialog");topology&&topology->isVisible()){RefreshSceneTree();return;}
         if(auto* extrude=findChild<QDialog*>("HybridExtrudeDialog");extrude&&extrude->isVisible()){RefreshSceneTree();return;}
@@ -4473,6 +4523,8 @@ MainWindow::MainWindow(QWidget* parent)
         } else if (pending_group_command_ == PendingGroupCommand::SurfaceIntersection) {
             statusBar()->showMessage(
                 "Surface Intersection: select two intersecting surfaces, then confirm the selection");
+        } else if (pending_group_command_ == PendingGroupCommand::ProjectCurveToPlane) {
+            statusBar()->showMessage("Put on Plane: select one curve and a planar surface, then confirm the selection");
         } else if (pending_group_command_ == PendingGroupCommand::ProjectCurveToSurface) {
             statusBar()->showMessage(
                 "Project Curve: select one Polyline, Spline, Sketch or CAD curve and a target surface, then confirm the selection");
@@ -4553,6 +4605,7 @@ MainWindow::MainWindow(QWidget* parent)
             this, &MainWindow::CloseSpatialCurve);
     connect(viewport_, &OpenGLViewport::RotationAxisPicked,
             this, [this](CPoint3d start, CPoint3d end) {
+        if(findChild<QDialog*>("ProjectionDirectionDialog"))return;
         precise_rotate_axis_start_ = {
             static_cast<float>(start.x),
             static_cast<float>(start.y),
@@ -4566,6 +4619,7 @@ MainWindow::MainWindow(QWidget* parent)
     });
     connect(viewport_, &OpenGLViewport::RotationAxisPickCanceled,
             this, [this]() {
+        if(findChild<QDialog*>("ProjectionDirectionDialog"))return;
         precise_rotate_axis_ready_ = false;
         statusBar()->showMessage("Rotate canceled", 1400);
     });
@@ -4620,6 +4674,10 @@ MainWindow::MainWindow(QWidget* parent)
             CreateSurfaceIntersection();
         } else if (pending_group_command_ == PendingGroupCommand::ProjectCurveToSurface) {
             ProjectCurveToSurface();
+        } else if (pending_group_command_ == PendingGroupCommand::ProjectCurveToPlane) {
+            ProjectCurveToSurface(true);
+        } else if (pending_group_command_ == PendingGroupCommand::ProjectCurveToFace) {
+            ProjectCurveToSurface(false,true);
         } else if (pending_group_command_ == PendingGroupCommand::ExtractSurfaceEdge) {
             ExtractSurfaceEdge();
         } else if (pending_group_command_ == PendingGroupCommand::ExtractFace) {
@@ -4662,7 +4720,9 @@ MainWindow::MainWindow(QWidget* parent)
             CancelPendingGroupCommand("Body Section by Plane: operation canceled");
         } else if (pending_group_command_ == PendingGroupCommand::SurfaceIntersection) {
             CancelPendingGroupCommand("Surface Intersection:operation canceled");
-        } else if (pending_group_command_ == PendingGroupCommand::ProjectCurveToSurface) {
+        } else if (pending_group_command_ == PendingGroupCommand::ProjectCurveToSurface
+                   || pending_group_command_ == PendingGroupCommand::ProjectCurveToFace
+                   || pending_group_command_ == PendingGroupCommand::ProjectCurveToPlane) {
             CancelPendingGroupCommand("Project Curve:operation canceled");
         } else if (pending_group_command_ == PendingGroupCommand::ExtractSurfaceEdge) {
             CancelPendingGroupCommand("Extract Edge:operation canceled");
@@ -4988,8 +5048,16 @@ MainWindow::MainWindow(QWidget* parent)
         QMenu menu(this);
         QAction* fillet = menu.addAction(ToolIcon("fillet_edge"), "Solid Fillet");
         QAction* chamfer = menu.addAction(ToolIcon("ChamferSolid"), "Solid Chamfer");
+        QAction* cap = dynamic_cast<CSurfaceSet*>(document_.GetSelectedSolid())
+            ? menu.addAction(ToolIcon("SurfaceTangentCap"), "Cap") : nullptr;
+        QAction* nsided = menu.addAction(ToolIcon("SurfaceNSided"), DomTranslate("N-Sided Surface"));
+        nsided->setObjectName("EdgeQuickSurfaceNSided");
         QAction* selected = menu.exec(global_position);
-        if (selected == fillet) {
+        if (selected == nsided) {
+            ActivateParametricTool("SurfaceNSided");
+        } else if (cap && selected == cap) {
+            ActivateParametricTool("SurfaceTangentCap");
+        } else if (selected == fillet) {
             ActivateParametricTool("fillet_edge");
         } else if (selected == chamfer) {
             ActivateParametricTool("ChamferSolid");
@@ -5005,6 +5073,7 @@ MainWindow::MainWindow(QWidget* parent)
         }
 
         QMenu menu(this);
+        menu.setObjectName("FaceQuickMenu");
         QAction* fillet = menu.addAction(ToolIcon("fillet_edge"), "Fillet");
         QAction* chamfer = menu.addAction(ToolIcon("ChamferSolid"), "Chamfer");
         menu.addSeparator();
@@ -5012,6 +5081,8 @@ MainWindow::MainWindow(QWidget* parent)
             QAction* extrude_gizmo = menu.addAction(ToolIcon("SolidExtrudeGizmo"), "Extrude with Gizmo");
             QAction* subdivide = menu.addAction("Subdivide...");
             QAction* offset = menu.addAction(ToolIcon("SolidOffsetFace"), "Offset");
+            QAction* shell = menu.addAction(ToolIcon("SolidShell"), "Shell");
+            shell->setObjectName("FaceQuickShell");
             QAction* draft = menu.addAction(ToolIcon("SolidDraft"), "Draft");
             menu.addSeparator();
             QAction* edit_texture = menu.addAction(EditTextureIcon(), "Edit Texture");
@@ -5043,7 +5114,12 @@ MainWindow::MainWindow(QWidget* parent)
         } else if (selected == subdivide) {
             ActivateParametricTool("SolidSubdivideFace");
         } else if (selected == offset) {
-            ActivateParametricTool("SolidOffsetFace");
+            const auto* body = document_.GetSelectedFaceSolid();
+            ActivateParametricTool(body && !TopExp_Explorer(body->m_Shape, TopAbs_SOLID).More()
+                ? "SurfaceOffset" : "SolidOffsetFace");
+        } else if (selected == shell) {
+            pending_group_command_ = PendingGroupCommand::ShellReady;
+            ActivateParametricTool("SolidShell");
             } else if (selected == draft) {
                 ActivateParametricTool("SolidDraft");
             } else if (selected == edit_texture) {
@@ -5064,8 +5140,13 @@ MainWindow::MainWindow(QWidget* parent)
 
         QMenu menu(this);
         menu.setObjectName("SketchQuickMenu");
+        QAction* edit = menu.addAction(ToolIcon("NewSketch"), "Edit");
+        edit->setObjectName("SketchQuickEdit");
+        menu.addSeparator();
         QAction* extrude = menu.addAction(
             ToolIcon("SolidExtrudeTool"), "Extrude");
+        QAction* sheet = menu.addAction(ToolIcon("SolidShell"), "Sheet");
+        sheet->setObjectName("SketchQuickSheet");
         QAction* cut = menu.addAction(
             ToolIcon("SolidSketchFeature"), "Boss/Pocket");
         QAction* trim_by_sketch = menu.addAction(
@@ -5080,6 +5161,7 @@ MainWindow::MainWindow(QWidget* parent)
                 if(!multi->IsConstruction(i) && multi->GetLocalContour(i).GetNumLines())has_geometry=true;
         } else has_geometry=static_cast<CSmartLine*>(sketch)->GetNumLines()>0;
         trim_by_sketch->setEnabled(has_geometry);
+        sheet->setEnabled(has_geometry);
         extrude->setObjectName("SketchQuickExtrude");
         cut->setObjectName("SketchQuickCut");
         trim_by_sketch->setObjectName("SketchQuickTrim");
@@ -5095,8 +5177,12 @@ MainWindow::MainWindow(QWidget* parent)
         QAction* copy = menu.addAction(DuplicateObjectIcon(), "Copy");
 
         QAction* selected = menu.exec(global_position);
-        if (selected == extrude) {
+        if (selected == edit) {
+            EditSelectedFromPopup();
+        } else if (selected == extrude) {
             ActivateParametricTool("SolidExtrudeTool");
+        } else if (selected == sheet) {
+            ActivateParametricTool("SolidSheet");
         } else if (selected == cut) {
             document_.EnsureObjectId(*sketch);
             pending_sketch_cut_profile_id_ = sketch->m_id;
@@ -5135,12 +5221,72 @@ MainWindow::MainWindow(QWidget* parent)
         }
 
         QMenu menu(this);
+        auto* object=document_.GetSelectedObject();
+        const bool curve=IsEditableCurve(object) || dynamic_cast<CCadCurve3D*>(object);
+        menu.setObjectName(curve ? "CurveQuickMenu" : "ObjectQuickMenu");
+        const auto* surface = dynamic_cast<const CSolid*>(object);
+        const bool surface_body = surface && !surface->m_Shape.IsNull()
+            && !TopExp_Explorer(surface->m_Shape, TopAbs_SOLID).More();
+        QAction* shell = nullptr;
+        QAction* offset_surface = nullptr;
+        QAction* style = nullptr;
+        QAction* weight = nullptr;
+        if (surface_body) {
+            shell = menu.addAction(ToolIcon("SolidShell"), "Shell");
+            shell->setObjectName("SurfaceQuickShell");
+            offset_surface = menu.addAction(ToolIcon("SurfaceOffset"), "Offset");
+            offset_surface->setObjectName("SurfaceQuickOffset");
+            menu.addSeparator();
+        }
+        if(curve) {
+            const std::pair<const char*,const char*> commands[]={
+                {"SurfaceTangentCap","Cap"},
+                {"SurfaceNSided","N-Sided Surface"},
+                {"SurfaceRuled","Ruled"},{"SolidWireTool","Wire"},{"SurfaceRevolve","Revolve"},
+                {"CurveTrimByPlane","Trim by Plane"},{"ProjectCurveToPlane","Put on Plane"},
+                {"ProjectCurveToSurface","Put on Surface"},{"ProjectCurveToFace","Put on Face"}};
+            for(const auto& command:commands) {
+                auto* action=menu.addAction(ToolIcon(std::string(command.first)=="ProjectCurveToPlane"
+                    ? "PlaneTool" : std::string(command.first)=="ProjectCurveToFace"
+                    ? "ProjectCurveToSurface" : command.first),command.second);
+                action->setData(QString::fromLatin1(command.first));
+                action->setObjectName(QString("CurveQuick%1").arg(command.first));
+                if(std::string(command.first)=="SurfaceRuled")
+                    action->setEnabled(dynamic_cast<CBSpline*>(object)
+                        && static_cast<CBSpline*>(object)->GetPointCount()>=2);
+                else if(std::string(command.first)=="SurfaceTangentCap")
+                    action->setEnabled(dynamic_cast<CBSpline*>(object)
+                        && static_cast<CBSpline*>(object)->IsClosed());
+                else if(std::string(command.first)=="SurfaceNSided")
+                    action->setEnabled(dynamic_cast<CBSpline*>(object)
+                        && !static_cast<CBSpline*>(object)->IsClosed());
+                else if(std::string(command.first)=="SolidWireTool") {
+                    const auto* spline=dynamic_cast<const CBSpline*>(object);
+                    const auto* polyline=dynamic_cast<const CPolyline*>(object);
+                    action->setEnabled((spline && spline->GetPointCount()>=2 && !spline->IsClosed())
+                        || (polyline && polyline->GetPointCount()>=2 && !polyline->IsClosed()));
+                }
+                else if(std::string(command.first)=="CurveTrimByPlane"
+                        || std::string(command.first)=="SurfaceRevolve")
+                    action->setEnabled(IsEditableCurve(object));
+            }
+            menu.addSeparator();
+        }
+        if (curve) {
+            style = menu.addAction("Style");
+            style->setObjectName("CurveQuickStyle");
+            weight = menu.addAction("Weight");
+            weight->setObjectName("CurveQuickWeight");
+            menu.addSeparator();
+        }
         QAction* move = menu.addAction(ToolIcon("move"), "Move");
         QAction* rotate = menu.addAction(ToolIcon("rotate"), "Rotate");
         QAction* scale = menu.addAction(ToolIcon("scale"), "Scale");
-        menu.addSeparator();
-        QAction* rotate_plus_90 = menu.addAction(ToolIcon("rotate"), "Rotate 90°");
-        QAction* rotate_minus_90 = menu.addAction(ToolIcon("rotate"), "Rotate -90°");
+        QAction* copy = curve ? menu.addAction(DuplicateObjectIcon(), "Copy") : nullptr;
+        if(copy)copy->setObjectName("CurveQuickCopy");
+        if(!curve)menu.addSeparator();
+        QAction* rotate_plus_90 = curve ? nullptr : menu.addAction(ToolIcon("rotate"), "Rotate 90°");
+        QAction* rotate_minus_90 = curve ? nullptr : menu.addAction(ToolIcon("rotate"), "Rotate -90°");
         QAction* edit_text = nullptr;
         if (dynamic_cast<CDrawingText*>(document_.GetSelectedObject())) {
             menu.addSeparator();
@@ -5172,7 +5318,26 @@ MainWindow::MainWindow(QWidget* parent)
         });
         dismiss_timer.start();
         QAction* selected = menu.exec(global_position);
-        if (selected == move) {
+        if (!selected) return;
+        if (selected == shell) {
+            // Whole surface shells still need one supporting face for Shell.
+            if (auto* body = document_.GetSelectedSolid(); body && !body->HasSelectedFace())
+                body->AddSelectedFace(0);
+            pending_group_command_ = PendingGroupCommand::ShellReady;
+            ActivateParametricTool("SolidShell");
+        } else if (selected == offset_surface) {
+            ActivateParametricTool("SurfaceOffset");
+        } else if (selected == style) {
+            ShowLineStyleDialog();
+        } else if (selected == weight) {
+            ShowLineWeightDialog();
+        } else if (curve && selected->data().isValid()) {
+            if(selected->data().toString()=="ProjectCurveToPlane")ProjectCurveToSurface(true);
+            else if(selected->data().toString()=="ProjectCurveToFace")ProjectCurveToSurface(false,true);
+            else ActivateParametricTool(selected->data().toString().toStdString());
+        } else if (selected == copy) {
+            DuplicateSelectedObject();
+        } else if (selected == move) {
             BeginTransformTool(TransformOperation::Move);
         } else if (selected == rotate) {
             BeginTransformTool(TransformOperation::Rotate);
@@ -5729,8 +5894,22 @@ MainWindow::MainWindow(QWidget* parent)
             }
             statusBar()->showMessage("Surface Patch rebuilt. Selected G values applied.");
         }
+        if (active_parametric_object_.tool_id == "SurfaceNSided") {
+            std::string error;
+            if (!tool_registry_.TryRebuildNSidedSurface(active_parametric_object_,document_,error)) {
+                const auto index=active_parametric_object_.object_index;
+                if(index<document_.GetObjects().size())
+                    active_parametric_object_=tool_registry_.ActiveObjectFromDocument(index,*document_.GetObjects()[index],0,&document_);
+                QTimer::singleShot(0,this,[this] {
+                    if(active_parametric_object_.tool_id=="SurfaceNSided")property_panel_->SetActiveObject(active_parametric_object_);
+                });
+                statusBar()->showMessage(DomTranslate(QString::fromStdString(error)));
+                viewport_->update();return;
+            }
+        }
         const bool rebuilding_assembly = ActiveParametricObjectIsAssembly();
-        if(active_parametric_object_.tool_id!="SurfacePatch")tool_registry_.Rebuild(active_parametric_object_, document_);
+        if(active_parametric_object_.tool_id!="SurfacePatch" && active_parametric_object_.tool_id!="SurfaceNSided")
+            tool_registry_.Rebuild(active_parametric_object_, document_);
         if (!active_parametric_edit_existing_
             && (active_parametric_object_.tool_id == "SolidBox"
                 || active_parametric_object_.tool_id == "SolidCylinder")) {
@@ -7233,27 +7412,27 @@ void MainWindow::CreateActions() {
             statusBar()->showMessage("Custom grid parameters applied", 1600);
         });
     auto* zebra_analysis_action = view_menu->addAction("Zebra Analysis");
+    zebra_analysis_action->setObjectName("ZebraAnalysisAction");
     zebra_analysis_action->setCheckable(true);
-    {
-        QSettings settings;
-        const bool enabled =
-            settings.value("view/zebraAnalysis", false).toBool();
-        CMesh3D::SetZebraAnalysisEnabled(enabled);
-        zebra_analysis_action->setChecked(enabled);
-    }
+    auto* zebra_dialog=new ZebraDialog(document_,[this]{viewport_->update();},
+        [this](float scale){viewport_->RefreshSurfaceMeshQuality(scale);},this);
+    CMesh3D::SetZebraAnalysisEnabled(false);ZebraOptions().explicit_objects=false;
     connect(
         zebra_analysis_action, &QAction::toggled, this,
-        [this](bool enabled) {
+        [this,zebra_dialog](bool enabled) {
             CMesh3D::SetZebraAnalysisEnabled(enabled);
+            if(enabled)zebra_dialog->Begin();else {zebra_dialog->hide();ZebraOptions().explicit_objects=false;ZebraOptions().objects.clear();}
             QSettings settings;
             settings.setValue("view/zebraAnalysis", enabled);
             viewport_->update();
             statusBar()->showMessage(
                 enabled
-                    ? "Zebra Analysis: selected object, or all visible bodies when nothing is selected"
+                    ? "Zebra Analysis: adjust stripes or add/remove selected objects in the Zebra Parameters dialog"
                     : "Zebra Analysis disabled",
                 2400);
         });
+    connect(zebra_dialog,&QDialog::finished,this,[zebra_analysis_action]{zebra_analysis_action->setChecked(false);});
+    if(QSettings().value("view/zebraAnalysis",false).toBool())QTimer::singleShot(0,this,[zebra_analysis_action]{zebra_analysis_action->setChecked(true);});
     auto* trim_diagnostics_action = view_menu->addAction(
         "Trim Classification Diagnostics");
     trim_diagnostics_action->setCheckable(true);
@@ -7587,6 +7766,7 @@ void MainWindow::CreateActions() {
         "CurveSimplifyByPoint", "CurveReverse", "TextToCurves",
         "NurbsParametersTool"};
     const std::set<std::string> surface_tool_ids = {
+        "SurfaceNSided",
         "PlaneTool", "SurfaceSaddle", "SurfaceRevolve", "SurfaceLoft", "SurfaceRuled",
         "SewingFaceTool", "SurfaceFourSplines", "SurfaceSweepTwoRails", "SurfaceSweptTool",
         "SurfaceSmartHybrid", "SurfaceShoeUpper", "SurfaceTrimSketch", "SurfaceTwoView", "SurfaceTangentCap", "SurfaceBridge", "SurfaceFillet", "SurfaceOffset", "SurfacePatch",
@@ -11729,6 +11909,31 @@ bool MainWindow::JoinSelectedCurves() {
         }
     }
 
+    if(first_spline && first_spline->GetCurveType()!=SplineCurveType::Bezier
+        && std::all_of(indices.begin(),indices.end(),[&](size_t index) {
+            return !static_cast<const CBSpline*>(objects[index].get())->HasNodeTypes();
+        })) {
+        try {
+            std::vector<const CBSpline*> sources;
+            for(size_t index:indices)sources.push_back(static_cast<const CBSpline*>(objects[index].get()));
+            auto exact=JoinExactSplines(sources);
+            if(exact.IsNull()) {
+                statusBar()->showMessage("Join Curves: curve ends must touch or be within 1 mm",2600);return false;
+            }
+            if(!undo_redo_.BeginChange())return false;
+            auto* target=static_cast<CBSpline*>(objects[indices[0]].get());const auto id=target->m_id;
+            if(!curve_cut::Assign(*target,exact)){undo_redo_.CancelChange();return false;}
+            target->SetClosed(exact->IsClosed());
+            std::sort(indices.begin()+1,indices.end(),std::greater<size_t>());
+            for(auto it=indices.begin()+1;it!=indices.end();++it)objects.erase(objects.begin()+*it);
+            document_.ClearSelection();document_.SelectObjectById(id);
+            tool_registry_.ReplayProfileDependents(id,document_);
+            undo_redo_.CommitChange("Join curves");UpdateUndoRedoActions();RefreshSceneTree();viewport_->update();return true;
+        } catch(const Standard_Failure&) {
+            statusBar()->showMessage("Join Curves: cannot join the selected spline geometry",2600);return false;
+        }
+    }
+
     std::vector<CPoint3d> joined = *CurveControlPoints(objects[indices[0]].get());
     std::vector<double> joined_weights = first_spline
         ? first_spline->GetWeights() : std::vector<double>{};
@@ -13757,43 +13962,113 @@ void MainWindow::CreateSurfaceIntersection() {
         QString("Surface Intersection:operation completed").arg(created), 1800);
 }
 
-void MainWindow::ProjectCurveToSurface() {
+void MainWindow::ProjectCurveToSurface(bool plane_only, bool face_only) {
+    const bool picking=pending_group_command_==PendingGroupCommand::ProjectCurveToPlane
+        || pending_group_command_==PendingGroupCommand::ProjectCurveToFace
+        || pending_group_command_==PendingGroupCommand::ProjectCurveToSurface;
+    if(!picking)pending_projection_curve_id_=0;
     const auto& objects = document_.GetObjects();
     size_t curve_count = 0;
     size_t surface_count = 0;
+    unsigned long curve_id=0;
+    const CSurfaceSet* target=nullptr;
     for (size_t index : document_.GetSelectedObjectIndices()) {
         if (index >= objects.size() || !objects[index]) continue;
         if (dynamic_cast<const CSurfaceSet*>(objects[index].get())) {
             ++surface_count;
+            target=static_cast<const CSurfaceSet*>(objects[index].get());
         } else if (IsEditableCurve(objects[index].get())
                    || dynamic_cast<const CCadCurve3D*>(objects[index].get())
                    || dynamic_cast<const CSmartLine*>(objects[index].get())) {
             ++curve_count;
+            curve_id=objects[index]->m_id;
         }
     }
-    if (curve_count != 1 || surface_count != 1) {
-        pending_group_command_ = PendingGroupCommand::ProjectCurveToSurface;
+    if(!pending_projection_curve_id_ && curve_count==1)pending_projection_curve_id_=curve_id;
+    if(pending_projection_curve_id_) {
+        if(!document_.FindObjectById(pending_projection_curve_id_)) {
+            CancelPendingGroupCommand("Project Curve: the source curve is no longer available");return;
+        }
+        curve_count=1;
+    }
+    gp_Dir plane_normal(0,0,1);
+    gp_Pnt plane_origin(0,0,0);
+    TopoDS_Shape target_shape=target ? target->m_Shape : TopoDS_Shape{};
+    if((plane_only || face_only) && picking) {
+        auto* body=document_.GetSelectedFaceSolid();
+        auto* face=body ? body->GetSurfaceFace(body->GetSelectedFaceIndex()) : nullptr;
+        if(face) { target_shape=face->m_Face;surface_count=1; }
+    }
+    bool planar=false;
+    if((plane_only || face_only) && !target_shape.IsNull()) {
+        TopExp_Explorer faces(target_shape,TopAbs_FACE);
+        if(faces.More()) {
+            const auto selected_face=faces.Current();
+            BRepAdaptor_Surface surface(TopoDS::Face(faces.Current()));
+            planar=surface.GetType()==GeomAbs_Plane;
+            if(planar) {plane_normal=surface.Plane().Axis().Direction();plane_origin=surface.Plane().Location();}
+            faces.Next();planar=planar && !faces.More();
+            if(face_only) {
+                if(faces.More())surface_count=0;
+                else target_shape=selected_face;
+            }
+        }
+    }
+    if(plane_only && picking && viewport_->SelectedOriginPlane()>=0) {
+        const int plane=viewport_->SelectedOriginPlane();
+        plane_normal=plane==0 ? gp_Dir(0,0,1) : plane==1 ? gp_Dir(0,1,0) : gp_Dir(1,0,0);
+        plane_origin=gp_Pnt(0,0,0);planar=true;surface_count=1;
+    }
+    if (curve_count != 1 || surface_count != 1 || (plane_only && !planar)) {
+        pending_group_command_ = plane_only ? PendingGroupCommand::ProjectCurveToPlane
+            : face_only ? PendingGroupCommand::ProjectCurveToFace : PendingGroupCommand::ProjectCurveToSurface;
         viewport_->SetTool(ToolMode::Select);
-        viewport_->SetSelectionMode(SelectionMode::Object);
+        viewport_->SetSelectionMode(pending_projection_curve_id_ && (plane_only || face_only)
+            ? SelectionMode::Face : SelectionMode::Object);
         viewport_->SetSelectionConfirmationMode(true);
         UpdateActiveToolUi("ProjectCurveToSurface");
+        if(pending_projection_curve_id_) {
+            document_.ClearSelection();RefreshSceneTree();viewport_->update();
+            viewport_->setFocus(Qt::OtherFocusReason);
+        }
         statusBar()->showMessage(
-            "Project Curve: select one Polyline, Spline, Sketch or CAD curve and a target surface, then confirm the selection");
+            pending_projection_curve_id_
+                ? (plane_only ? "Put on Plane: click the target plane; Esc to cancel"
+                              : face_only ? "Put on Face: click the target face; Esc to cancel"
+                              : "Put on Surface: click the target surface; Esc to cancel")
+                : "Project Curve: select the source curve");
         return;
     }
 
+    // The source survives ordinary replacement selection of the target.
+    // Consume the pending pick before opening a dialog or updating selection.
+    const auto source_id=pending_projection_curve_id_;
+    pending_group_command_=PendingGroupCommand::None;
+    viewport_->SetSelectionConfirmationMode(false);
+    viewport_->SetSelectionMode(SelectionMode::Object);
+    document_.ClearSelection();
+    document_.SelectObjectById(source_id,SelectionAction::Replace);
     std::vector<double> values{0.0, 0.0, 1.0};
-    if (!ShowPlaneValuesDialog(
+    if(plane_only || (face_only && planar))values={plane_normal.X(),plane_normal.Y(),plane_normal.Z()};
+    if (!plane_only && !(face_only && planar) && !ShowPlaneValuesDialog(
             this, "Projection Direction", {"Vector X", "Vector Y", "Vector Z"},
-            values)) {
+            values, viewport_)) {
         CancelPendingGroupCommand("Project Curve:operation canceled");
         return;
     }
     const Vec3 direction{static_cast<float>(values[0]),
                          static_cast<float>(values[1]),
                          static_cast<float>(values[2])};
-    const size_t created = document_.ProjectSelectedCurveToSurface(direction);
+    if(!undo_redo_.BeginChange()) {
+        CancelPendingGroupCommand("Project Curve: cannot start Undo transaction");return;
+    }
+    const size_t created = plane_only
+        ? document_.ProjectCurveToPlane(source_id,{float(plane_origin.X()),float(plane_origin.Y()),float(plane_origin.Z())},direction)
+        : document_.ProjectCurveToFace(source_id,target_shape,direction,
+            std::clamp(QSettings().value("preferences/modeling/tolerance",0.02).toDouble(),0.001,10.0));
+    pending_projection_curve_id_=0;
     if (created == 0) {
+        undo_redo_.CancelChange();
         pending_group_command_ = PendingGroupCommand::None;
         viewport_->SetSelectionConfirmationMode(false);
         UpdateActiveToolUi("select");
@@ -13802,7 +14077,8 @@ void MainWindow::ProjectCurveToSurface() {
             2600);
         return;
     }
-    RecordDocumentChange("Project curve to surface");
+    undo_redo_.CommitChange(plane_only ? "Put on Plane" : face_only ? "Put on Face" : "Put on Surface");
+    UpdateUndoRedoActions();
     pending_group_command_ = PendingGroupCommand::None;
     viewport_->SetSelectionConfirmationMode(false);
     viewport_->SetTool(ToolMode::Select);
@@ -13908,6 +14184,15 @@ void MainWindow::CreateTwoRailSweepSolid() {
 }
 
 void MainWindow::CancelPendingGroupCommand(const QString& status_text) {
+    setProperty("tangentCapPick",false);
+    viewport_->setProperty("surfaceCapPick",false);
+    if(pending_projection_curve_id_) {
+        viewport_->SetSelectionMode(SelectionMode::Object);
+        document_.ClearSelection();
+        document_.SelectObjectById(pending_projection_curve_id_,SelectionAction::Replace);
+        pending_projection_curve_id_=0;
+        RefreshSceneTree();viewport_->update();
+    }
     if (pending_group_command_ == PendingGroupCommand::ArrayCurveGuide) {
         document_.ClearSelection();
         for (auto id : pending_array_source_ids_) document_.SelectObjectById(id,SelectionAction::Add);
@@ -17081,6 +17366,12 @@ void MainWindow::CancelArchitectureOpeningPlacement() {
 }
 
 void MainWindow::ActivateParametricTool(const std::string& tool_id) {
+    if(tool_id!="SurfaceTangentCap") {
+        setProperty("tangentCapPick",false);
+        viewport_->setProperty("surfaceCapPick",false);
+    }
+    if(tool_id!="ProjectCurveToSurface" && pending_projection_curve_id_)
+        CancelPendingGroupCommand();
     if (active_tool_key_ == "TextToCurves") UpdateActiveToolUi("select");
     if (active_tool_key_ == "SurfaceReverseNormals") UpdateActiveToolUi("select");
     if (tool_id == "CurveTrimByPlane") {
@@ -17110,6 +17401,9 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
     if (active_solid_creation_undo_) ClearActiveProperties();
     if (tool_id != "SurfacePatch") {
         if (auto* patch = findChild<QDialog*>("SurfacePatchDialog")) patch->reject();
+    }
+    if (tool_id != "SurfaceNSided") {
+        if (auto* dialog = findChild<QDialog*>("NSidedSurfaceDialog")) dialog->reject();
     }
     if (tool_id != "SurfaceBridge") {
         if (auto* bridge = findChild<QDialog*>("SurfaceBridgeDialog")) bridge->reject();
@@ -17941,6 +18235,33 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         return;
     }
 
+    if (tool_id == "SolidSheet") {
+        auto* sketch = document_.GetSelectedObject();
+        if (!dynamic_cast<CSmartLine*>(sketch) && !dynamic_cast<CSketch*>(sketch)) return;
+        document_.EnsureObjectId(*sketch);
+        const auto id = sketch->m_id;
+        ClearActiveProperties();
+        auto parameters = tool_registry_.Find(tool_id)->defaults;
+        for (auto& parameter : parameters)
+            if (parameter.id == "profile.id") parameter.value = id;
+        if (!undo_redo_.BeginChange()) return;
+        active_parametric_object_ = tool_registry_.CreateParametricObject(tool_id, document_, parameters);
+        if (active_parametric_object_.tool_id.empty()) {
+            undo_redo_.CancelChange();
+            statusBar()->showMessage("Sheet: cannot thicken the sketch walls; check the contour and thickness", 4000);
+            return;
+        }
+        active_solid_creation_undo_ = true;
+        active_parametric_edit_existing_ = false;
+        property_panel_->SetActiveObject(active_parametric_object_);
+        ShowPropertyPanelAtCursor("Sheet");
+        viewport_->SetTool(ToolMode::Select);
+        viewport_->SetSelectionMode(SelectionMode::Object);
+        UpdateActiveToolUi(tool_id);
+        RefreshSceneTree(); viewport_->update();
+        return;
+    }
+
     if (tool_id == "SolidExtrudeTool") {
         ClearActiveProperties();
         active_parametric_object_ = {
@@ -18245,6 +18566,27 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
         return;
     }
 
+    if (tool_id == "SurfaceNSided") {
+        if (auto* existing = findChild<QDialog*>("NSidedSurfaceDialog")) { existing->raise(); return; }
+        ClearActiveProperties();
+        viewport_->EndDirectCurveEdit();
+        viewport_->SetTool(ToolMode::Select);
+        UpdateActiveToolUi(tool_id);
+        if (!undo_redo_.BeginChange()) return;
+        auto* dialog = new NSidedSurfaceDialog(document_, *viewport_, [this] {
+            RefreshSceneTree(); viewport_->update();
+        }, this);
+        connect(dialog, &QDialog::finished, this, [this](int result) {
+            if (result == QDialog::Accepted) undo_redo_.CommitChange("N-Sided Surface");
+            else undo_redo_.CancelChange();
+            viewport_->SetSelectionMode(SelectionMode::Object);
+            UpdateActiveToolUi("select"); UpdateUndoRedoActions(); RefreshSceneTree(); viewport_->update();
+        });
+        dialog->show();
+        statusBar()->showMessage(DomTranslate("N-Sided Surface: select open boundary splines in any order."));
+        return;
+    }
+
     if (tool_id == "SurfaceFourSplines") {
         ClearActiveProperties();
         CreateFourSplineSurface();
@@ -18268,30 +18610,50 @@ void MainWindow::ActivateParametricTool(const std::string& tool_id) {
     }
 
     if (tool_id == "SurfaceTangentCap") {
+        if (auto* message = findChild<QMessageBox*>("SurfaceCapInputMessage")) message->close();
         ClearActiveProperties();
+        viewport_->EndDirectCurveEdit();
         viewport_->SetTool(ToolMode::Select);
-        viewport_->SetSelectionMode(SelectionMode::Object);
         UpdateActiveToolUi(tool_id);
+        const bool has_boundary = document_.HasSelectedSolidEdge()
+            || dynamic_cast<const CBSpline*>(document_.GetSelectedObject());
+        if (!undo_redo_.BeginChange()) return;
         std::string error;
         if (!document_.CreateTangentCapFromSelection(&error)) {
-            UpdateActiveToolUi("select");
+            undo_redo_.CancelChange();
+            viewport_->SetSelectionMode(SelectionMode::Edge);
+            viewport_->SetSelectionConfirmationMode(true);
+            setProperty("tangentCapPick",true);
+            viewport_->setProperty("surfaceCapPick",true);
             statusBar()->showMessage(
                 error.empty()
-                    ? "Tangent Cap: select one closed spline and one surface"
-                    : QString::fromStdString(error),
+                    ? "Cap: click a closed spline or a closed surface edge"
+                    : DomTranslate(QString::fromStdString(error)),
                 3200);
+            if (has_boundary && !error.empty()) {
+                auto* message = new QMessageBox(QMessageBox::Information, DomTranslate("Cap"),
+                    DomTranslate(QString::fromStdString(error)), QMessageBox::Ok, this);
+                message->setObjectName("SurfaceCapInputMessage");
+                message->setAttribute(Qt::WA_DeleteOnClose);
+                message->open();
+            }
             return;
         }
+        active_solid_creation_undo_ = true;
+        viewport_->SetSelectionConfirmationMode(false);
         if (CAlfaObject* cap = document_.GetSelectedObject()) {
+            const auto cap_id = cap->m_id;
+            viewport_->SetSelectionMode(SelectionMode::Object);
+            document_.SelectObjectById(cap_id, SelectionAction::Replace);
             active_parametric_object_ =
                 tool_registry_.ActiveObjectFromDocument(
                     document_.GetSelectedObjectIndex(), *cap, 0, &document_);
             property_panel_->SetActiveObject(active_parametric_object_);
-            ShowPropertyPanelAtCursor("Tangent Cap");
+            ShowPropertyPanelAtCursor("Cap");
         }
         RefreshSceneTree();
         viewport_->update();
-        statusBar()->showMessage("G1 Tangent Cap created", 1800);
+        statusBar()->showMessage("Cap created", 1800);
         return;
     }
 
@@ -19824,6 +20186,8 @@ bool MainWindow::TryStartLivePolylineRevolveFromSelection() {
 }
 
 void MainWindow::ClearActiveProperties() {
+    setProperty("tangentCapPick",false);
+    viewport_->setProperty("surfaceCapPick",false);
     if (pending_sketch_feature_) {
         pending_sketch_feature_ = false;
         viewport_->SetSelectionConfirmationMode(false);
@@ -19832,6 +20196,7 @@ void MainWindow::ClearActiveProperties() {
     if (active_tool_key_ == "SurfaceReverseNormals") UpdateActiveToolUi("select");
     setProperty("surfaceFilletError",QString());
     if(auto* dialog=findChild<QDialog*>("SurfaceSketchTrimDialog"))dialog->reject();
+    if(auto* dialog=findChild<QDialog*>("NSidedSurfaceDialog"))dialog->reject();
     if(auto* dialog=findChild<QDialog*>("Body1Dialog"))dialog->reject();
     if(auto* dialog=findChild<QDialog*>("TwoViewSurfaceDialog"))dialog->reject();
     if(auto* topology=findChild<QDialog*>("SurfaceTopologyDialog"))topology->reject();
@@ -20904,6 +21269,8 @@ QIcon MainWindow::ToolIcon(const std::string& key) const {
         return QIcon(":/icons/SurfaceLoft.png");
     } else if (icon_key == "SurfacePatch") {
         return QIcon(":/icons/SurfacePatch.svg");
+    } else if (icon_key == "SurfaceNSided") {
+        return QIcon(":/icons/SurfaceNSided.svg");
     } else if (icon_key == "SurfaceFillet") {
         return QIcon(":/icons/FilletSolid.png");
     } else if (icon_key == "SurfaceOffset" || icon_key == "SurfaceGraphOffset") {
@@ -23360,6 +23727,7 @@ void MainWindow::UndoDocumentChange() {
         CancelNurbsParameterChanges();
     }
     const std::string name = undo_redo_.UndoName();
+    if (auto* dialog = findChild<QDialog*>("NSidedSurfaceDialog")) dialog->reject();
     if (!undo_redo_.Undo()) {
         return;
     }
@@ -23391,6 +23759,7 @@ void MainWindow::RedoDocumentChange() {
         CancelNurbsParameterChanges();
     }
     const std::string name = undo_redo_.RedoName();
+    if (auto* dialog = findChild<QDialog*>("NSidedSurfaceDialog")) dialog->reject();
     if (!undo_redo_.Redo()) {
         return;
     }
@@ -23544,7 +23913,7 @@ void MainWindow::PopulateToolsPanelForTab(int tab_index) {
                     "MeshBoundaryLine", "SolidLowPoly",
                     "TrimMeshTest", "ClassifyFaceCut"};
     } else if (tab == "Surfaces") {
-        tool_ids = {"PlaneTool", "SurfaceSaddle", "SurfaceShoeUpper", "SurfaceSmartHybrid", "SurfaceRuled", "SurfaceLoft", "SurfaceTwoView", "SurfaceTangentCap", "SurfaceBridge", "SurfaceFillet", "SurfaceOffset", "SurfacePatch", "SurfaceSweptTool", "SurfaceSweepTwoRails", "SurfaceFourSplines", "SurfaceTrimSketch", "SurfaceJoin", "SurfaceMatch", "SurfaceAlignment", "SurfaceMoveSeam", "SurfaceBoundaryGraph", "SurfaceKnots", "SurfacePointTransform", "SurfaceHybridExtrude", "SurfaceGraphOffset", "SurfaceSplitIso", "SurfaceReverseNormals", "SurfaceRevolve"};
+        tool_ids = {"PlaneTool", "SurfaceSaddle", "SurfaceShoeUpper", "SurfaceSmartHybrid", "SurfaceRuled", "SurfaceLoft", "SurfaceTwoView", "SurfaceTangentCap", "SurfaceNSided", "SurfaceBridge", "SurfaceFillet", "SurfaceOffset", "SurfacePatch", "SurfaceSweptTool", "SurfaceSweepTwoRails", "SurfaceFourSplines", "SurfaceTrimSketch", "SurfaceJoin", "SurfaceMatch", "SurfaceAlignment", "SurfaceMoveSeam", "SurfaceBoundaryGraph", "SurfaceKnots", "SurfacePointTransform", "SurfaceHybridExtrude", "SurfaceGraphOffset", "SurfaceSplitIso", "SurfaceReverseNormals", "SurfaceRevolve"};
     } else if (tab == "Solid") {
         // Row pairs follow the Solid palette: construction above, editing below.
         // Empty entries preserve the intentional gaps at the end of each group.

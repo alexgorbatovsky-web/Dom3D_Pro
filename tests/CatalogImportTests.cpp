@@ -3833,11 +3833,13 @@ void TestTangentCapFromClosedSpline() {
             error.empty() ? "Tangent Cap construction failed." : error.c_str());
     const auto* cap = dynamic_cast<const CSurfaceSet*>(
         document.GetObjects().back().get());
-    require(cap && cap->GetName() == "Tangent Cap"
-                && cap->GetParametricToolId() == "SurfaceTangentCap"
-                && cap->GetNumSurfaces() == 1
-                && BRepCheck_Analyzer(cap->m_Shape).IsValid(),
-            "Tangent Cap did not create a valid parametric G1 patch.");
+    require(cap != nullptr, "Cap did not create a surface object.");
+    require(cap->GetName() == "Cap", "Cap has an unexpected object name.");
+    require(cap->GetParametricToolId() == "SurfaceTangentCap",
+            "Cap did not retain the compatible parametric tool ID.");
+    require(cap->GetNumSurfaces() == 1, "Cap did not create a single surface.");
+    require(BRepCheck_Analyzer(cap->m_Shape).IsValid(),
+            "Cap did not create a valid G1 patch.");
 
     const auto minimum_z = [](const TopoDS_Shape& shape) {
         Bnd_Box bounds;
@@ -3856,6 +3858,52 @@ void TestTangentCapFromClosedSpline() {
     cap = dynamic_cast<const CSurfaceSet*>(document.GetObjects().back().get());
     require(cap && minimum_z(cap->m_Shape) < short_nose_minimum - 5.0,
             "Nose Length Factor did not lengthen the tangent cap.");
+
+    // Pick the two circular rims directly: only cap objects may be added.
+    auto* original = dynamic_cast<CSurfaceSet*>(document.FindObjectById(surface_id));
+    const auto* face = original->GetSurfaceFace(0);
+    int closed_edges = 0;
+    for (int e = 0; e < face->GetEdgeCount(); ++e) {
+        const auto* edge = face->GetTopoEdge(e);
+        if (!edge || BRepAdaptor_Curve(*edge).GetType() != GeomAbs_Circle) continue;
+        document.SelectObjectById(surface_id, SelectionAction::Replace);
+        original->SetSelectedEdge(0, e);
+        const auto count = document.GetObjects().size();
+        require(document.CreateTangentCapFromSelection(&error), error.c_str());
+        require(document.GetObjects().size() == count + 1,
+                "Direct rim cap added a helper curve");
+        const auto* direct = dynamic_cast<const CSurfaceSet*>(document.GetObjects().back().get());
+        require(direct && BRepCheck_Analyzer(direct->m_Shape).IsValid(),
+                "Direct rim cap is invalid");
+        int edge_index = -1;
+        for (const auto& parameter : direct->GetParametricParameters())
+            if (parameter.id == "boundary.edge") edge_index = static_cast<int>(parameter.value);
+        require(edge_index >= 0, "Direct cap lost its edge reference");
+        for(double factor : {.05,.15,.35,.8,1.1}) {
+            const bool rebuilt = document.RebuildTangentCap(count, 0, surface_id, factor, &error, edge_index);
+            if (!rebuilt) std::cerr << "Direct rim " << e << ": " << error << std::endl;
+            require(rebuilt, "Direct rim cap rebuild failed");
+            const auto* rebuiltCap=dynamic_cast<const CSurfaceSet*>(document.GetObjects().back().get());
+            require(BRepCheck_Analyzer(rebuiltCap->m_Shape).IsValid(),"Invalid circular cap");
+            TopExp_Explorer faces(rebuiltCap->m_Shape,TopAbs_FACE);
+            BRepAdaptor_Surface geometry(TopoDS::Face(faces.Current()));
+            const double u=(geometry.FirstUParameter()+geometry.LastUParameter())*.5;
+            double previousZ=0, previousRadius=0, direction=0;
+            for(int sample=0;sample<=100;++sample) {
+                const auto point=geometry.Value(u,geometry.FirstVParameter()+(geometry.LastVParameter()-geometry.FirstVParameter())*sample/100.);
+                const double radius=std::hypot(point.X(),point.Y());
+                if(sample==1)direction=point.Z()>previousZ?1.:-1.;
+                if(sample) {
+                    require((point.Z()-previousZ)*direction>=-1.e-7,"Cap folds back into a dimple");
+                    require(radius<=previousRadius+1.e-7,"Cap radius reverses near tip");
+                }
+                previousZ=point.Z();previousRadius=radius;
+            }
+        }
+        ++closed_edges;
+    }
+    require(closed_edges == 2, "Both circular rims must support direct caps");
+
 }
 
 void TestCurveToPolylineByLength() {
@@ -6077,6 +6125,7 @@ int TestDraftFace(const char* path);
 int TestPlasticityImport(const char* path);
 
 int main(int argc, char** argv) {
+    #include "IgesVisibilityTestCase.inc"
     if (argc == 3 && std::string(argv[1]) == "--test-plasticity-import") return TestPlasticityImport(argv[2]);
     if (argc == 3 && std::string(argv[1]) == "--test-box-drafts-mesh") return TestBoxDraftsMesh(argv[2]);
     if (argc == 3 && std::string(argv[1]) == "--test-draft-face") return TestDraftFace(argv[2]);

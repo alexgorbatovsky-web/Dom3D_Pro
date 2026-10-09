@@ -1,4 +1,5 @@
 #include "ObjSharpEdges.h"
+#include "ZebraSettings.h"
 #include "materials/ProceduralPlasterShader.h"
 #include "materials/ProceduralFabricShader.h"
 #include "materials/ProceduralPerforationShader.h"
@@ -831,7 +832,8 @@ Color normal_rgb_color(Vec3 normal, bool selected) {
 
 GLuint zebra_texture_id() {
     static GLuint texture_id = 0;
-    if (texture_id != 0) {
+    static std::array<float,3> previous_color{-1,-1,-1};
+    if (texture_id != 0 && previous_color==ZebraOptions().color) {
         return texture_id;
     }
 
@@ -847,15 +849,13 @@ GLuint zebra_texture_id() {
         const float rising = smooth_step(0.46f, 0.50f, phase);
         const float falling = 1.0f - smooth_step(0.96f, 1.0f, phase);
         const float white = std::min(rising, falling);
-        const unsigned char value = static_cast<unsigned char>(
-            std::round((0.025f + white * 0.95f) * 255.0f));
-        pixels[static_cast<size_t>(i) * 4 + 0] = value;
-        pixels[static_cast<size_t>(i) * 4 + 1] = value;
-        pixels[static_cast<size_t>(i) * 4 + 2] = value;
+        for(int c=0;c<3;++c)pixels[static_cast<size_t>(i)*4+c]=static_cast<unsigned char>(
+            std::round((ZebraOptions().color[c]*(1-white)+white*.975f)*255.f));
         pixels[static_cast<size_t>(i) * 4 + 3] = 255;
     }
 
-    glGenTextures(1, &texture_id);
+    if(texture_id==0)glGenTextures(1, &texture_id);
+    previous_color=ZebraOptions().color;
     glBindTexture(GL_TEXTURE_1D, texture_id);
     glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -896,18 +896,26 @@ void main() {
 varying vec3 zebraNormalEye;
 varying vec3 zebraPositionEye;
 uniform float zebraStripeCount;
+uniform bool zebraOrthographic;
+uniform bool zebraVertical;
+uniform vec3 zebraColor;
+
+float stripeIntegral(float x) {
+    return floor(x) * 0.5 + min(fract(x), 0.5);
+}
 
 void main() {
     vec3 normal = normalize(zebraNormalEye);
-    vec3 directionToEye = normalize(-zebraPositionEye);
+    vec3 directionToEye = zebraOrthographic ? vec3(0.0, 0.0, 1.0) : normalize(-zebraPositionEye);
     vec3 reflection = reflect(-directionToEye, normal);
-    float coordinate = reflection.y * 0.5 + 0.5;
-    float phase = coordinate * zebraStripeCount * 6.28318530718;
-    float wave = sin(phase);
-    float transition = max(fwidth(phase) * 0.35, 0.035);
-    float white = smoothstep(-transition, transition, wave);
-    float value = mix(0.025, 0.975, white);
-    gl_FragColor = vec4(value, value, value, 1.0);
+    float coordinate = (zebraVertical ? reflection.x : reflection.y) * 0.5 + 0.5;
+    float phase = coordinate * zebraStripeCount;
+    // Integrate the stripe over the pixel footprint. This also converges to
+    // grey when several thin bands cover one pixel, rather than shimmering.
+    float footprint = max(fwidth(phase), 0.0001);
+    float white = clamp((stripeIntegral(phase + footprint * 0.5)
+        - stripeIntegral(phase - footprint * 0.5)) / footprint, 0.0, 1.0);
+    gl_FragColor = vec4(mix(zebraColor, vec3(0.975), white), 1.0);
 }
 )GLSL";
     if (!candidate->addShaderFromSourceCode(
@@ -4219,11 +4227,12 @@ void CMesh3D::Render3d(bool selected) const {
     // Plain Texture is the finished material presentation and intentionally
     // hides polygon boundaries. Texture + Mesh is the CAD2Quads-style mode:
     // it keeps the material and overlays the source quad/triangle topology.
-    const bool draw_edges = mode == MeshDisplayMode::SurfaceGray
+    const bool draw_edges = zebra ? ZebraOptions().show_edges : (mode == MeshDisplayMode::SurfaceGray
         || mode == MeshDisplayMode::SurfaceColored
-        || mode == MeshDisplayMode::SurfaceMaterialWithMesh;
+        || mode == MeshDisplayMode::SurfaceMaterialWithMesh);
     RenderFaces(rgb_selected, draw_edges, &material,
                 rgb_selected || mode == MeshDisplayMode::SurfaceColored);
+    if(zebra && !ZebraOptions().show_edges)return;
     if (draw_edges) {
         RenderWire(selected, true, nullptr);
     }
@@ -4339,7 +4348,11 @@ void CMesh3D::RenderFaces(bool selected,
     const bool zebra_shader_active =
         zebra_program && zebra_program->bind();
     if (zebra_shader_active) {
-        zebra_program->setUniformValue("zebraStripeCount", 10.0f);
+        zebra_program->setUniformValue("zebraStripeCount", ZebraOptions().stripe_count);
+        zebra_program->setUniformValue("zebraOrthographic", s_ZebraOrthographic);
+        zebra_program->setUniformValue("zebraVertical", ZebraOptions().vertical);
+        const auto& stripe_color=ZebraOptions().color;
+        zebra_program->setUniformValue("zebraColor",QVector3D(stripe_color[0],stripe_color[1],stripe_color[2]));
     } else if (zebra) {
         glEnable(GL_TEXTURE_1D);
         glBindTexture(GL_TEXTURE_1D, zebra_texture_id());
@@ -4547,10 +4560,11 @@ void CMesh3D::RenderFaces(bool selected,
                             unit_normal
                                 * (2.0f * dot(unit_normal, direction_to_eye))
                             - direction_to_eye);
+                        const Vec3 stripe_axis=ZebraOptions().vertical?normalize(cross(s_ZebraForward,s_ZebraUp)):s_ZebraUp;
                         const float reflection_height = std::clamp(
-                            dot(reflection, s_ZebraUp), -1.0f, 1.0f);
+                            dot(reflection, stripe_axis), -1.0f, 1.0f);
                         glTexCoord1f(
-                            (reflection_height * 0.5f + 0.5f) * 10.0f);
+                            (reflection_height * 0.5f + 0.5f) * ZebraOptions().stripe_count);
                     } else if (has_texture) {
                         UV base_uv = corner.uv < uvs_.size()
                             ? uvs_[corner.uv]

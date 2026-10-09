@@ -233,7 +233,9 @@ set(DOM3D_SOURCES
     src/ui/SurfaceFilletDialog.cpp
     src/ui/SurfaceBridgeDialog.cpp
     src/SurfaceEdgePatchBuilder.cpp
+    src/NSidedSurfaceBuilder.cpp
     src/ui/SurfacePatchDialog.cpp
+    src/ui/NSidedSurfaceDialog.cpp
     src/main.cpp
     src/Material.cpp
     src/render/RenderScene.cpp
@@ -1045,6 +1047,10 @@ if(BUILD_TESTING)
     add_test(NAME SurfaceBridgeSaved COMMAND CatalogImportTests --test-scene-persistence --surface-bridge-file
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Bridge_Shell.dom3d")
     set_tests_properties(SurfaceBridgeSaved PROPERTIES TIMEOUT 90 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    add_test(NAME SurfaceBridgeClosed COMMAND CatalogImportTests --test-scene-persistence --surface-bridge-file
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/surface-regression/Bridge-2.dom3d" --closed-bridge -platform offscreen)
+    add_test(NAME SurfaceBridgeClosedAlignment COMMAND CatalogImportTests --test-scene-persistence --surface-bridge-closed-only -platform offscreen)
+    set_tests_properties(SurfaceBridgeClosed SurfaceBridgeClosedAlignment PROPERTIES TIMEOUT 90 WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
     add_test(NAME SurfacePatchFailureUI COMMAND CatalogImportTests --test-scene-persistence --surface-patch-file
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/surface-regression/Patch_IncompatibleCorners.dom3d" -platform offscreen)
     set_tests_properties(SurfacePatchFailureUI PROPERTIES TIMEOUT 60)
@@ -1120,7 +1126,36 @@ if(BUILD_TESTING)
     set_tests_properties(BodyPrimitives PROPERTIES TIMEOUT 240)
     add_test(NAME Body1 COMMAND CatalogImportTests --test-scene-persistence --body1)
     set_tests_properties(Body1 PROPERTIES TIMEOUT 180)
+    add_test(NAME TangentCapExtractedRevolution COMMAND CatalogImportTests --test-scene-persistence --cap-file
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/surface-regression/Tangent Cap.dom3d")
+    set_tests_properties(TangentCapExtractedRevolution PROPERTIES TIMEOUT 60)
+    add_test(NAME TangentCapSweptProfile COMMAND CatalogImportTests --test-scene-persistence --swept-cap-file
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/surface-regression/Swept-1_3_Cap.dom3d")
+    set_tests_properties(TangentCapSweptProfile PROPERTIES TIMEOUT 60)
+    add_test(NAME SurfaceCap COMMAND CatalogImportTests --test-scene-persistence --surface-cap)
+    add_test(NAME IgesExportVisibility COMMAND CatalogImportTests --iges-export-visibility)
+    set_tests_properties(IgesExportVisibility PROPERTIES TIMEOUT 60)
+    add_test(NAME NSidedSurface COMMAND CatalogImportTests --test-scene-persistence --n-sided-surface
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/surface-regression/X_NURBS_6.dom3d")
+    set_tests_properties(NSidedSurface PROPERTIES TIMEOUT 90)
+    add_test(NAME NSidedContinuity COMMAND CatalogImportTests --test-scene-persistence --n-sided-continuity)
+    set_tests_properties(NSidedContinuity PROPERTIES TIMEOUT 120)
+    set_tests_properties(SurfaceCap PROPERTIES TIMEOUT 90)
+    add_test(NAME SurfaceCapComplex COMMAND CatalogImportTests --test-scene-persistence --surface-cap --input
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/surface-regression/Cap.dom3d")
+    set_tests_properties(SurfaceCapComplex PROPERTIES TIMEOUT 60
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME Body1TangentCap COMMAND CatalogImportTests --test-scene-persistence --body1-cap-file
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/solid-regression/Body-1_Filleted.dom3d")
+    set_tests_properties(Body1TangentCap PROPERTIES TIMEOUT 180)
+    add_test(NAME Body1NativeRadii COMMAND CatalogImportTests --test-scene-persistence --body1-cap-file
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/solid-regression/Body-1_Filleted.dom3d" --native-rounding)
+    set_tests_properties(Body1NativeRadii PROPERTIES TIMEOUT 60)
+    add_test(NAME ZebraDialog COMMAND CatalogImportTests --test-scene-persistence --zebra-dialog)
+    set_tests_properties(ZebraDialog PROPERTIES TIMEOUT 90)
     add_test(NAME SurfaceTwoView COMMAND CatalogImportTests --test-scene-persistence --two-view)
+    add_test(NAME JoinSurfaceEdges COMMAND CatalogImportTests --test-scene-persistence
+        --join-surface-edges-file ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/ui-regression/Join_Surface_Edges.dom3d)
     set_tests_properties(SurfaceTwoView PROPERTIES TIMEOUT 120)
     add_test(NAME SurfaceFilletTool COMMAND CatalogImportTests --test-scene-persistence --surface-fillet-file
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/surface-regression/Fillet.dom3d -platform offscreen)
@@ -1131,6 +1166,8 @@ if(BUILD_TESTING)
     add_test(NAME FourCurveAssociativity COMMAND CatalogImportTests --test-scene-persistence --four-curves-associative-only -platform offscreen)
     set_tests_properties(SurfaceBridgeTool FourCurveAssociativity PROPERTIES TIMEOUT 90)
     add_test(NAME QuickMenuCancellation COMMAND CatalogImportTests --test-scene-persistence --quick-menu-cancel-only -platform offscreen)
+    add_test(NAME CurveQuickMenu COMMAND CatalogImportTests --test-scene-persistence --curve-quick-menu-only -platform offscreen)
+    set_tests_properties(CurveQuickMenu PROPERTIES TIMEOUT 90 WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
     set_tests_properties(QuickMenuCancellation PROPERTIES TIMEOUT 30 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     add_test(NAME LowPolyDialogMeshState COMMAND CatalogImportTests --test-scene-persistence --low-poly-state-only -platform offscreen)
     set_tests_properties(LowPolyDialogMeshState PROPERTIES TIMEOUT 60 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
@@ -1335,6 +1372,9 @@ if(BUILD_TESTING)
     add_test(NAME BentOpenSketchTrim COMMAND CatalogImportTests --test-solid-primitive-tool --bent-trim-only
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/TrimBy_SL_Open.dom3d")
     set_tests_properties(BentOpenSketchTrim PROPERTIES TIMEOUT 120 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    add_test(NAME SurfaceSweptClosedProfile COMMAND CatalogImportTests --test-solid-primitive-tool --surface-swept-file
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/surface-regression/Swept-1_3.dom3d")
+    set_tests_properties(SurfaceSweptClosedProfile PROPERTIES TIMEOUT 60)
     add_test(NAME SurfaceSweptOneRail COMMAND CatalogImportTests --test-solid-primitive-tool --surface-swept-only)
     set_tests_properties(SurfaceSweptOneRail PROPERTIES TIMEOUT 120 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     add_test(NAME MeshWireColor

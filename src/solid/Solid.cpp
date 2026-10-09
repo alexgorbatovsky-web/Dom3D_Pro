@@ -1,4 +1,5 @@
 #include "../OpenGLCompat.h"
+#include "../ZebraSettings.h"
 #include "Solid.h"
 #include "MeshBoundaryEdges.h"
 #include "MeshBuildProgress.h"
@@ -3510,9 +3511,9 @@ bool CSolid::BuildHybridRenderMesh(float Deflection)
 	Deflection /= 10.0;
 		if (m_Shape.IsNull())
 			return false;
-		const auto tube = quadro::BuildTubeCadBody(*this, Deflection);
-		if (tube != quadro::BodyMeshAttempt::NotApplicable)
-			return tube == quadro::BodyMeshAttempt::Built;
+        const auto tube = quadro::BuildTubeCadBody(*this, Deflection);
+        if (tube != quadro::BodyMeshAttempt::NotApplicable)
+            return tube == quadro::BodyMeshAttempt::Built;
 
 		// Default Solid rendering is hybrid: natural, untrimmed UV faces are
 		// much cheaper (and cleaner) as CNet quad grids, while genuinely
@@ -3550,7 +3551,7 @@ bool CSolid::BuildHybridRenderMesh(float Deflection)
                     }
         };
 
-		bool prepared_boundaries = true;
+        bool prepared_boundaries = true;
 		float global_len_edge_max = 0.0f;
 		for (CSurfaceFace* surface : m_Surfaces) {
 			lowpoly::MeshBuildProgress();
@@ -4058,7 +4059,8 @@ void CSolid::Clear()
 void CSolid::Render3d(bool selected) const
 {
     RenderBody3d(selected);
-    if (surface_display::isolines || surface_display::normals || surface_display::mesh || surface_display::points)
+    if (surface_display::isolines || surface_display::normals || surface_display::mesh || surface_display::points
+        || (CMesh3D::IsZebraAnalysisTarget() && ZebraOptions().show_edges))
         for (const auto* surface : m_Surfaces)
             if (surface) surface->RenderDisplayOverlays();
 }
@@ -4350,6 +4352,7 @@ void CSolid::RenderBody3d(bool selected) const
 		}
 	}
 
+	if (zebra && !ZebraOptions().show_edges)return;
 	if (draw_mesh) {
 		if (render_batch) {
 			m_RenderBatch->RenderWire(
@@ -5222,6 +5225,12 @@ bool CSolid::EnsureRenderMesh() const
 		return true;
 	if (m_Shape.IsNull())
 		return false;
+	// A generated bridge has natural UV bounds and uses normal-error-driven
+	// display sampling in its preview. The generic imported/stored triangulation
+	// path is coarser and visibly facets its silhouette after reopening a project.
+	// Recreate the same display mesh without replaying or changing the CAD shape.
+	if (GetParametricToolId() == "SurfaceBridge" && !MeshQuadro)
+		return const_cast<CSolid*>(this)->ReBuldMesh();
 	// Native .dom3d BRep packs include OCCT face triangulations.  Loading used
 	// to call ReBuldMesh(), whose BRepTools::Clean() deliberately discarded
 	// those triangles and calculated the whole solid again.  Restore the

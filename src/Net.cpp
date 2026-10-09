@@ -165,9 +165,16 @@ bool normal_inside_degenerate_boundary(const TopoDS_Face& face,
                                       const Handle(Geom_Surface)& surface,
                                       double u, double v, gp_Vec& normal)
 {
-    if (!surface->IsKind(STANDARD_TYPE(Geom_BSplineSurface))) return false;
     double u0,u1,v0,v1;
     surface->Bounds(u0,u1,v0,v1);
+    // Finite natural bounds are available directly for splines/revolutions.
+    // Walking the face wires at every interior grid sample is prohibitively
+    // expensive on knot-rich patches. Infinite charts (e.g. cones) need the
+    // finite face domain instead.
+    if(!std::isfinite(u0)||!std::isfinite(u1)||!std::isfinite(v0)||!std::isfinite(v1)
+        || std::abs(u0)>1.e50 || std::abs(u1)>1.e50 || std::abs(v0)>1.e50 || std::abs(v1)>1.e50)
+        BRepTools::UVBounds(face,u0,u1,v0,v1);
+    if(!std::isfinite(u0)||!std::isfinite(u1)||!std::isfinite(v0)||!std::isfinite(v1))return false;
     const double ue=(u1-u0)*1.e-7, ve=(v1-v0)*1.e-7;
     if (!(ue>0 && ve>0)
         || (std::min(std::abs(u-u0),std::abs(u-u1))>ue
@@ -185,11 +192,24 @@ bool normal_inside_degenerate_boundary(const TopoDS_Face& face,
         else if(std::abs(a.Y()-b.Y())<=ve && std::abs(v-a.Y())<=ve)
             sample_v=v+(v<v0+(v1-v0)*0.5 ? 1 : -1)*(v1-v0)*1.e-4;
         else continue;
+        // Evaluate the one-sided limit for any CAD surface with a collapsed
+        // chart side, including analytic revolutions. D1 at the pole itself
+        // may contain a tiny residual with an arbitrary direction.
         gp_Pnt p; gp_Vec du,dv;
         surface->D1(sample_u,sample_v,p,du,dv);
-        const gp_Vec candidate=du.Crossed(dv);
+        gp_Vec candidate=du.Crossed(dv);
         if(is_finite_vec(candidate) && candidate.SquareMagnitude()>1.e-20) {
-            normal=candidate.Normalized();
+            candidate.Normalize();
+            surface->D1((u+sample_u)*.5,(v+sample_v)*.5,p,du,dv);
+            gp_Vec closer=du.Crossed(dv);
+            if(is_finite_vec(closer)&&closer.SquareMagnitude()>1.e-20) {
+                closer.Normalize();
+                // Cancel the first-order offset error. In particular a smooth
+                // pole has one normal, independent of the longitude sampled.
+                const auto limit=closer*2.-candidate;
+                if(limit.SquareMagnitude()>1.e-20) candidate=limit.Normalized();
+            }
+            normal=candidate;
             return true;
         }
     }
@@ -320,7 +340,9 @@ bool CSurfaceFace::GetPoint(double U, double V, CPoint8d* pnt)
         d1v.Transform(transform);
 
         gp_Vec normal = d1u.Crossed(d1v);
-        const BRepAdaptor_Surface analytic(face);
+        // Only the analytic type/placed sphere is needed here. Restricting the
+        // adaptor to the face rescans its UV wires at every mesh sample.
+        const BRepAdaptor_Surface analytic(face, Standard_False);
         if (analytic.GetType() == GeomAbs_Sphere) {
             // Float UV storage can round V past +/- pi/2. The derivative
             // cross product then changes sign although the point remains at
@@ -330,10 +352,11 @@ bool CSurfaceFace::GetPoint(double U, double V, CPoint8d* pnt)
             normal = gp_Vec(sphere.Location(), point);
             if (!sphere.Position().Direct()) normal.Reverse();
         }
-        // A topologically collapsed spline side can retain tiny, noisy
+        // A topologically collapsed surface side can retain tiny, noisy
         // derivatives in CAD. Their cross product (or SLProps normal) is not
         // the limiting normal. Sample just inside that side without moving XYZ.
-        if (normal_inside_degenerate_boundary(face,surface,U,V,normal))
+        if (analytic.GetType()!=GeomAbs_Sphere
+            && normal_inside_degenerate_boundary(face,surface,U,V,normal))
             normal.Transform(transform);
         if (normal.SquareMagnitude() > 1.0e-20 && is_finite_vec(normal)) {
             normal.Normalize();
@@ -477,6 +500,7 @@ int CNet::Build(CSurfaceFace* mm, double delta)
                 }
             }
 
+            const auto axis_split_u=split_u, axis_split_v=split_v;
             for (size_t j = 0; j + 1 < v_parameters.size(); ++j) {
                 for (size_t i = 0; i + 1 < u_parameters.size(); ++i) {
                     CPoint8d p00;
@@ -501,10 +525,27 @@ int CNet::Build(CSurfaceFace* mm, double delta)
                 }
             }
 
-            const size_t add_u = static_cast<size_t>(
+            // A knot-rich periodic direction may already exhaust its budget.
+            // Keep refining the other direction: aborting both leaves curved
+            // bridge profiles represented by only a handful of straight bands.
+            size_t add_u = static_cast<size_t>(
                 std::count(split_u.begin(), split_u.end(), true));
-            const size_t add_v = static_cast<size_t>(
+            size_t add_v = static_cast<size_t>(
                 std::count(split_v.begin(), split_v.end(), true));
+            if (u_parameters.size() + add_u > max_parameters) {
+                std::fill(split_u.begin(),split_u.end(),false);add_u=0;
+                // A residual U error on the cell diagonal cannot be cured by
+                // repeatedly subdividing V. Keep V's independently measured errors.
+                split_v=axis_split_v;
+                add_v=static_cast<size_t>(std::count(split_v.begin(),split_v.end(),true));
+            }
+            if (v_parameters.size() + add_v > max_parameters) {
+                std::fill(split_v.begin(),split_v.end(),false);add_v=0;
+                if(add_u) {
+                    split_u=axis_split_u;
+                    add_u=static_cast<size_t>(std::count(split_u.begin(),split_u.end(),true));
+                }
+            }
             if (add_u == 0 && add_v == 0)
                 break;
             if (u_parameters.size() + add_u > max_parameters

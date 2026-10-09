@@ -1,4 +1,4 @@
-﻿<?xml version='1.0' encoding='UTF-8'?>
+<?xml version='1.0' encoding='UTF-8'?>
 <ClassArray.TextItem>
   <TextItem>
     <ID>BlinnPhongLighting</ID>
@@ -11257,4 +11257,35 @@
 <TextItem><ID>TextToCurves_HINT</ID><Text>Включите инструмент и щёлкните по текстовому объекту. Контуры букв преобразуются в плоские эскизы для редактирования и выдавливания. Esc — отмена.</Text></TextItem>
 <TextItem><ID>Centered</ID><Text>Из центра</Text></TextItem>
 <TextItem><ID>Build the box base around the first point.</ID><Text>Строить основание Box вокруг первой точки.</Text></TextItem>
+<TextItem><ID>Cap requires a smooth closed spline. Remove Corner nodes and breaks in tangency.</ID><Text>Для Cap нужен гладкий замкнутый сплайн. Сгладьте угловые узлы Corner и устраните изломы контура.</Text></TextItem>
+<TextItem><ID>SurfaceNSided</ID><Text>Поверхность по N кривым</Text></TextItem>
+<TextItem><ID>SurfaceNSided_HINT</ID><Text>Создание одной поверхности по 3–32 сплайнам или кромкам замкнутого контура. Задайте G0, G1 или G2 для каждой стороны. Для G1/G2 нужна совпадающая кромка соседней поверхности.</Text></TextItem>
+<TextItem><ID>Select 3 or more open splines forming one closed contour. Click the curves in any order.</ID><Text>Выберите 3 и более открытых сплайна, образующих один замкнутый контур. Порядок выбора не важен.</Text></TextItem>
+<TextItem><ID>Preview ready: %1 sides, one surface.</ID><Text>Предварительный результат: %1 сторон, одна поверхность.</Text></TextItem>
+<TextItem><ID>Selected %1 curves. Select at least 3 connected sides.</ID><Text>Выбрано сторон: %1. Укажите не менее 3 связанных сторон.</Text></TextItem>
+<TextItem><ID>N-Sided Surface: select open boundary splines in any order.</ID><Text>Поверхность по N кривым: выберите сплайны или кромки и задайте сопряжение для каждой стороны.</Text></TextItem>
+<TextItem><ID>Select 3 to 32 open splines forming one closed contour.</ID><Text>Выберите от 3 до 32 открытых сплайнов или кромок, образующих один замкнутый контур.</Text></TextItem>
+<TextItem><ID>The splines must form one closed contour without gaps or branches. Connect their endpoints.</ID><Text>Сплайны должны образовывать один замкнутый контур без разрывов и ответвлений. Соедините их концы.</Text></TextItem>
+<TextItem><ID>The selection contains more than one contour. Select only one closed loop.</ID><Text>Выбрано несколько отдельных контуров. Оставьте один замкнутый контур.</Text></TextItem>
+<TextItem><ID>N-Sided Surface needs open sides. Use Cap for one closed spline.</ID><Text>Для поверхности по N кривым нужны открытые стороны. Для одного замкнутого сплайна используйте Cap.</Text></TextItem>
+<TextItem><ID>The surface could not match every boundary. Check for intersections or try a simpler contour.</ID><Text>Не удалось точно соблюсти все границы. Проверьте пересечения кривых или упростите контур.</Text></TextItem>
+<TextItem><ID>Select 3 or more splines or surface edges forming a closed contour. Set continuity for each side below.</ID><Text>Выберите не менее 3 сплайнов или кромок поверхностей, образующих замкнутый контур. Задайте сопряжение для каждой стороны.</Text></TextItem>
+<TextItem><ID>Select splines</ID><Text>Выбирать сплайны</Text></TextItem>
+<TextItem><ID>Select surface edges</ID><Text>Выбирать кромки поверхностей</Text></TextItem>
+<TextItem><ID>G0 — Position</ID><Text>G0 — Положение</Text></TextItem>
+<TextItem><ID>G1 — Tangent</ID><Text>G1 — Касание</Text></TextItem>
+<TextItem><ID>G2 — Curvature</ID><Text>G2 — Кривизна</Text></TextItem>
+<TextItem><ID>Pick support edge for selected side</ID><Text>Указать опорную кромку для выбранной стороны</Text></TextItem>
+<TextItem><ID>Click the matching edge on the adjacent surface.</ID><Text>Укажите совпадающую кромку на соседней поверхности.</Text></TextItem>
+<TextItem><ID>Support: %1, face %2, edge %3</ID><Text>Опора: %1, грань %2, кромка %3</Text></TextItem>
+<TextItem><ID>No support. G1/G2 needs an adjacent surface edge.</ID><Text>Опора не задана. Для G1/G2 укажите кромку соседней поверхности.</Text></TextItem>
+<TextItem><ID>Invalid boundary continuity. Choose G0, G1 or G2.</ID><Text>Недопустимое сопряжение. Выберите G0, G1 или G2.</Text></TextItem>
+<TextItem><ID>A supporting edge is missing. Select the support again.</ID><Text>Опорная кромка не найдена. Укажите опору заново.</Text></TextItem>
+<TextItem><ID>The support edge must coincide with the entire boundary spline.</ID><Text>Опорная кромка должна совпадать со всем граничным сплайном.</Text></TextItem>
+<TextItem><ID>The support edge has no surface parameter curve.</ID><Text>Для опорной кромки отсутствует параметрическая кривая на поверхности.</Text></TextItem>
+<TextItem><ID>G1/G2 requires a supporting surface. Select its matching edge for this side.</ID><Text>Для G1/G2 требуется опорная поверхность. Укажите её совпадающую кромку для этой стороны.</Text></TextItem>
+<TextItem><ID>The same boundary edge was selected more than once.</ID><Text>Одна граничная кромка выбрана несколько раз.</Text></TextItem>
+<TextItem><ID>The supports disagree at a shared corner. Adjust the surfaces or reduce continuity on an adjacent side.</ID><Text>Опоры несовместимы в общем углу. Измените поверхности или понизьте сопряжение на одной из соседних сторон.</Text></TextItem>
+<TextItem><ID>Cannot satisfy the requested G1/G2 continuity. Check the supports or reduce continuity.</ID><Text>Не удалось обеспечить заданное сопряжение G1/G2. Проверьте опоры или понизьте сопряжение.</Text></TextItem>
+<TextItem><ID>A surface cannot support itself.</ID><Text>Поверхность не может быть собственной опорой.</Text></TextItem>
 </ClassArray.TextItem>

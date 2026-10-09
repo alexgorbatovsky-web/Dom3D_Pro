@@ -1,4 +1,4 @@
-﻿<?xml version='1.0' encoding='UTF-8'?>
+<?xml version='1.0' encoding='UTF-8'?>
 <ClassArray.TextItem>
   <TextItem>
     <ID>BlinnPhongLighting</ID>
@@ -11255,4 +11255,35 @@ If the fillet cannot be built, check the radius and the selected geometry.</Text
 <TextItem><ID>TextToCurves_HINT</ID><Text>Activate the tool, then click a text object. Converts letter outlines into planar sketches for editing and extrusion. Press Esc to cancel.</Text></TextItem>
 <TextItem><ID>Centered</ID><Text>Centered</Text></TextItem>
 <TextItem><ID>Build the box base around the first point.</ID><Text>Build the box base around the first point.</Text></TextItem>
+<TextItem><ID>Cap requires a smooth closed spline. Remove Corner nodes and breaks in tangency.</ID><Text>Cap requires a smooth closed spline. Remove Corner nodes and breaks in tangency.</Text></TextItem>
+<TextItem><ID>SurfaceNSided</ID><Text>N-Sided Surface</Text></TextItem>
+<TextItem><ID>SurfaceNSided_HINT</ID><Text>Create one surface from 3 to 32 splines or surface edges forming a closed contour. Set G0, G1 or G2 for each side. G1/G2 needs a matching edge on an adjacent surface.</Text></TextItem>
+<TextItem><ID>Select 3 or more open splines forming one closed contour. Click the curves in any order.</ID><Text>Select 3 or more open splines forming one closed contour. Click the curves in any order.</Text></TextItem>
+<TextItem><ID>Preview ready: %1 sides, one surface.</ID><Text>Preview ready: %1 sides, one surface.</Text></TextItem>
+<TextItem><ID>Selected %1 curves. Select at least 3 connected sides.</ID><Text>Selected %1 sides. Select at least 3 connected sides.</Text></TextItem>
+<TextItem><ID>N-Sided Surface: select open boundary splines in any order.</ID><Text>N-Sided Surface: select splines or surface edges, then set continuity for each side.</Text></TextItem>
+<TextItem><ID>Select 3 to 32 open splines forming one closed contour.</ID><Text>Select 3 to 32 open splines or surface edges forming one closed contour.</Text></TextItem>
+<TextItem><ID>The splines must form one closed contour without gaps or branches. Connect their endpoints.</ID><Text>The splines must form one closed contour without gaps or branches. Connect their endpoints.</Text></TextItem>
+<TextItem><ID>The selection contains more than one contour. Select only one closed loop.</ID><Text>The selection contains more than one contour. Select only one closed loop.</Text></TextItem>
+<TextItem><ID>N-Sided Surface needs open sides. Use Cap for one closed spline.</ID><Text>N-Sided Surface needs open sides. Use Cap for one closed spline.</Text></TextItem>
+<TextItem><ID>The surface could not match every boundary. Check for intersections or try a simpler contour.</ID><Text>The surface could not match every boundary. Check for intersections or try a simpler contour.</Text></TextItem>
+<TextItem><ID>Select 3 or more splines or surface edges forming a closed contour. Set continuity for each side below.</ID><Text>Select 3 or more splines or surface edges forming a closed contour. Set continuity for each side below.</Text></TextItem>
+<TextItem><ID>Select splines</ID><Text>Select splines</Text></TextItem>
+<TextItem><ID>Select surface edges</ID><Text>Select surface edges</Text></TextItem>
+<TextItem><ID>G0 — Position</ID><Text>G0 — Position</Text></TextItem>
+<TextItem><ID>G1 — Tangent</ID><Text>G1 — Tangent</Text></TextItem>
+<TextItem><ID>G2 — Curvature</ID><Text>G2 — Curvature</Text></TextItem>
+<TextItem><ID>Pick support edge for selected side</ID><Text>Pick support edge for selected side</Text></TextItem>
+<TextItem><ID>Click the matching edge on the adjacent surface.</ID><Text>Click the matching edge on the adjacent surface.</Text></TextItem>
+<TextItem><ID>Support: %1, face %2, edge %3</ID><Text>Support: %1, face %2, edge %3</Text></TextItem>
+<TextItem><ID>No support. G1/G2 needs an adjacent surface edge.</ID><Text>No support. G1/G2 needs an adjacent surface edge.</Text></TextItem>
+<TextItem><ID>Invalid boundary continuity. Choose G0, G1 or G2.</ID><Text>Invalid boundary continuity. Choose G0, G1 or G2.</Text></TextItem>
+<TextItem><ID>A supporting edge is missing. Select the support again.</ID><Text>A supporting edge is missing. Select the support again.</Text></TextItem>
+<TextItem><ID>The support edge must coincide with the entire boundary spline.</ID><Text>The support edge must coincide with the entire boundary spline.</Text></TextItem>
+<TextItem><ID>The support edge has no surface parameter curve.</ID><Text>The support edge has no surface parameter curve.</Text></TextItem>
+<TextItem><ID>G1/G2 requires a supporting surface. Select its matching edge for this side.</ID><Text>G1/G2 requires a supporting surface. Select its matching edge for this side.</Text></TextItem>
+<TextItem><ID>The same boundary edge was selected more than once.</ID><Text>The same boundary edge was selected more than once.</Text></TextItem>
+<TextItem><ID>The supports disagree at a shared corner. Adjust the surfaces or reduce continuity on an adjacent side.</ID><Text>The supports disagree at a shared corner. Adjust the surfaces or reduce continuity on an adjacent side.</Text></TextItem>
+<TextItem><ID>Cannot satisfy the requested G1/G2 continuity. Check the supports or reduce continuity.</ID><Text>Cannot satisfy the requested G1/G2 continuity. Check the supports or reduce continuity.</Text></TextItem>
+<TextItem><ID>A surface cannot support itself.</ID><Text>A surface cannot support itself.</Text></TextItem>
 </ClassArray.TextItem>

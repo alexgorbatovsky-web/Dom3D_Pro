@@ -108,7 +108,7 @@ public:
     Vec3 GetBackgroundColor() const;
     QImage CaptureSceneImage(const QSize& requested_size);
     void ReloadModelingPreferences();
-    void RefreshSurfaceMeshQuality();
+    void RefreshSurfaceMeshQuality(float pixel_scale=1.0f);
     void BeginMaterialPaint(const Material& material);
     void BeginMaterialPick();
     void CancelMaterialInteraction();

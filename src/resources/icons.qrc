@@ -92,6 +92,7 @@
         <file alias="save.png">icons/save.png</file>
         <file alias="app_icon.ico">app_icon.ico</file>
         <file alias="SurfaceTwoView.svg">icons/SurfaceTwoView.svg</file>
+        <file alias="SurfaceNSided.svg">icons/SurfaceNSided.svg</file>
         <file alias="SurfaceOffset.svg">icons/SurfaceOffset.svg</file>
         <file alias="TextToCurves.svg">icons/TextToCurves.svg</file>
     </qresource>

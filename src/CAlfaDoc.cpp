@@ -1,4 +1,8 @@
+#include "TangentCapRevolution.h"
+#include "TangentCapSpline.h"
+#include "SurfaceCapBuilder.h"
 #include "SurfaceTopologyBuilder.h"
+#include "TwoViewSurfaceBuilder.h"
 #include "SurfaceRevolveProfile.h"
 #include "CAlfaDoc.h"
 
@@ -1391,13 +1395,13 @@ std::vector<TopoDS_Edge> shape_edges(const TopoDS_Shape& shape)
 }
 
 std::vector<std::unique_ptr<CBSpline>> nurbs_curves_from_shape(
-    const TopoDS_Shape& shape, const std::string& name)
+    const TopoDS_Shape& shape, const std::string& name, double tolerance = 0.0)
 {
     std::vector<std::unique_ptr<CBSpline>> curves;
     int number = 1;
     for (const TopoDS_Edge& edge : shape_edges(shape)) {
         std::unique_ptr<CBSpline> curve = editable_nurbs_from_edge(
-            edge, name + (number > 1 ? " " + std::to_string(number) : ""));
+            edge, name + (number > 1 ? " " + std::to_string(number) : ""), tolerance);
         if (curve) {
             curves.push_back(std::move(curve));
             ++number;
@@ -1673,11 +1677,21 @@ struct TangentCapBoundary {
 };
 
 TangentCapBoundary tangent_cap_boundary(const TopoDS_Shape& shape,
-                                        const CBSpline& spline)
+                                        const CBSpline& spline,
+                                        const TopoDS_Edge& selected_edge)
 {
     TangentCapBoundary best;
     const std::vector<SupportedBoundaryEdge> free_edges =
         surface_boundary_edges(shape);
+    if (!selected_edge.IsNull()) {
+        // A picked edge already identifies the boundary exactly. Comparing
+        // independently spaced point clouds can reject that very same curve.
+        for (const auto& boundary : free_edges)
+            if (boundary.edge.IsSame(selected_edge)
+                && BRepAdaptor_Curve(boundary.edge).IsClosed())
+                return {{boundary}, 0.0};
+        return best;
+    }
     Handle(TopTools_HSequenceOfShape) edge_sequence =
         new TopTools_HSequenceOfShape;
     for (const SupportedBoundaryEdge& boundary : free_edges)
@@ -1734,7 +1748,8 @@ double sampled_spline_span(const CBSpline& spline)
 TopoDS_Shape make_tangent_cap(const CBSpline& spline,
                               const CSurfaceSet& support_surface,
                               double length_factor,
-                              std::string* error_message)
+                              std::string* error_message,
+                              const TopoDS_Edge& selected_edge = {})
 {
     const auto fail = [&](const char* message) -> TopoDS_Shape {
         if (error_message) *error_message = message;
@@ -1747,8 +1762,30 @@ TopoDS_Shape make_tangent_cap(const CBSpline& spline,
     if (support_surface.m_Shape.IsNull())
         return fail("The supporting surface is empty.");
 
+    const auto trace=[](const char* stage){if(std::getenv("DOM3D_TRACE_CAP")){std::fprintf(stderr,"Cap: %s\n",stage);std::fflush(stderr);}};
+    trace("sew");
+    // Connect coincident patch boundaries before looking for the outer rim.
+    TopoDS_Shape sewn = support_surface.m_Shape;
+    TopoDS_Edge resolved_edge = selected_edge;
+    try {
+        BRepBuilderAPI_Sewing sewing(1.e-5);
+        sewing.Add(support_surface.m_Shape);
+        sewing.Perform();
+        if (!sewing.SewedShape().IsNull()) {
+            sewn = sewing.SewedShape();
+            if (!selected_edge.IsNull() && sewing.IsModifiedSubShape(selected_edge)) {
+                const auto modified = sewing.ModifiedSubShape(selected_edge);
+                if (modified.ShapeType() != TopAbs_EDGE)
+                    return fail("The selected boundary was split during sewing.");
+                resolved_edge = TopoDS::Edge(modified);
+            }
+        }
+    } catch (const Standard_Failure&) {
+        return fail("The supporting surface could not be sewn.");
+    }
+    trace("boundary");
     const TangentCapBoundary boundary = tangent_cap_boundary(
-        support_surface.m_Shape, spline);
+        sewn, spline, resolved_edge);
     if (boundary.edges.empty())
         return fail("No open boundary was found on the supporting surface.");
     const double span = sampled_spline_span(spline);
@@ -1758,6 +1795,17 @@ TopoDS_Shape make_tangent_cap(const CBSpline& spline,
         return fail("The spline does not coincide with an open surface boundary.");
     }
 
+    trace("circular cap");
+    if (boundary.edges.size() == 1) {
+        const auto cap = MakeCircularTangentCap(boundary.edges.front().edge,
+            boundary.edges.front().face, support_surface.m_Shape, span * length_factor);
+        if (!cap.IsNull() && BRepCheck_Analyzer(cap).IsValid()) return cap;
+        const auto spline_cap = MakeSplineRimTangentCap(boundary.edges.front().edge,
+            boundary.edges.front().face, span * length_factor);
+        if (!spline_cap.IsNull()) return spline_cap;
+    }
+
+    trace("general filling");
     gp_Pnt boundary_center(0.0, 0.0, 0.0);
     try {
         constexpr int center_samples_per_edge = 64;
@@ -1778,6 +1826,14 @@ TopoDS_Shape make_tangent_cap(const CBSpline& spline,
         boundary_center.ChangeCoord() /= accumulated_samples;
     } catch (const Standard_Failure&) {
         return fail("The selected surface boundary could not be evaluated.");
+    }
+
+    if(support_surface.GetParametricToolId()=="SurfaceTwoView") {
+        std::string error;
+        auto rounded=BuildTwoViewTangentCapOnSurface(support_surface.m_Shape,
+            boundary_center.X(),length_factor,error);
+        if(!rounded.IsNull())return rounded;
+        // Rotated or subsequently trimmed supports retain the general G1 fill.
     }
 
     // A tangency constraint alone has a flat disk as a competing minimum-
@@ -6356,6 +6412,23 @@ bool CAlfaDoc::RebuildLoftSurface(
 
 bool CAlfaDoc::CreateTangentCapFromSelection(std::string* error_message) {
     EnsureObjectIds();
+    if (const auto* support = dynamic_cast<const CSurfaceSet*>(GetSelectedSolid())) {
+        const auto selected = unique_edges(support->GetSelectedTopoEdges());
+        if (!selected.empty()) {
+            if (selected.size() != 1) {
+                if (error_message) *error_message = "Select one closed boundary edge.";
+                return false;
+            }
+            const auto edges = shape_edges(support->m_Shape);
+            for (size_t i = 0; i < edges.size(); ++i) {
+                if (edges[i].IsSame(selected.front()))
+                    return CreateTangentCap(0, support->m_id, 0.55,
+                                            error_message, static_cast<int>(i));
+            }
+            if (error_message) *error_message = "The selected boundary edge was not found.";
+            return false;
+        }
+    }
     const CBSpline* curve = nullptr;
     const CSurfaceSet* surface = nullptr;
     for (size_t index : selected_object_indices_) {
@@ -6379,9 +6452,11 @@ bool CAlfaDoc::CreateTangentCapFromSelection(std::string* error_message) {
             surface = selected_surface;
         }
     }
+    if (curve && !surface)
+        return CreateTangentCap(curve->m_id, 0, 0.55, error_message, -1, false);
     if (!curve || !surface) {
         if (error_message) *error_message =
-            "Select one closed boundary spline and its supporting surface.";
+            "Cap: select one closed spline or a closed surface edge.";
         return false;
     }
     return CreateTangentCap(curve->m_id, surface->m_id, 0.55, error_message);
@@ -6390,33 +6465,49 @@ bool CAlfaDoc::CreateTangentCapFromSelection(std::string* error_message) {
 bool CAlfaDoc::CreateTangentCap(unsigned long curve_id,
                                 unsigned long surface_id,
                                 double length_factor,
-                                std::string* error_message) {
+                                std::string* error_message, int boundary_edge, bool tangent) {
     if (error_message) error_message->clear();
     const auto* curve = dynamic_cast<const CBSpline*>(FindObjectById(curve_id));
     const auto* support = dynamic_cast<const CSurfaceSet*>(
         FindObjectById(surface_id));
-    if (!curve || !support) {
+    // Resolve the original edge on every rebuild; no extracted scene object is needed.
+    std::unique_ptr<CBSpline> edge_curve;
+    TopoDS_Edge selected_edge;
+    if (boundary_edge >= 0 && support) {
+        const auto edges = shape_edges(support->m_Shape);
+        if (static_cast<size_t>(boundary_edge) < edges.size()) {
+            selected_edge = edges[boundary_edge];
+            edge_curve = editable_nurbs_from_edge(selected_edge, "Cap boundary");
+        }
+        curve = edge_curve.get();
+    }
+    if (!curve || (tangent && !support)) {
         if (error_message) *error_message =
             "The boundary spline or supporting surface was not found.";
         return false;
     }
-    TopoDS_Shape shape = make_tangent_cap(
-        *curve, *support, length_factor, error_message);
+    TopoDS_Shape shape = tangent
+        ? make_tangent_cap(*curve, *support, length_factor, error_message, selected_edge)
+        : MakeSurfaceCap(*curve, error_message);
     if (shape.IsNull()) return false;
 
     auto cap = std::make_unique<CSurfaceSet>(shape);
-    cap->SetName("Tangent Cap");
-    cap->SetColor(support->GetColor());
-    cap->SetMaterial(support->GetMaterial());
-    cap->SetMaterialId(support->GetMaterialId());
-    cap->SetParametricOperation(0, "SurfaceTangentCap", "Tangent Cap", {
+    cap->SetName("Cap");
+    const CAlfaObject* appearance = support ? static_cast<const CAlfaObject*>(support) : curve;
+    cap->SetColor(appearance->GetColor());
+    cap->SetMaterial(appearance->GetMaterial());
+    cap->SetMaterialId(appearance->GetMaterialId());
+    cap->SetParametricOperation(0, "SurfaceTangentCap", "Cap", {
+        {"tangent", tangent ? 1.0 : 0.0},
         {"curve.id", static_cast<double>(curve_id)},
         {"surface.id", static_cast<double>(surface_id)},
-        {"length_factor", length_factor}
+        {"length_factor", length_factor},
+        {"boundary.edge", static_cast<double>(boundary_edge)}
     });
+    if(std::getenv("DOM3D_TRACE_CAP")){std::fprintf(stderr,"Cap: mesh\n");std::fflush(stderr);}
     if (!cap->ReBuldMesh(loft_display_mesh_deflection)) {
         if (error_message) *error_message =
-            "The tangent cap was built, but its display mesh failed.";
+            "The cap was built, but its display mesh failed.";
         return false;
     }
     AddObject(std::move(cap));
@@ -6427,15 +6518,27 @@ bool CAlfaDoc::RebuildTangentCap(size_t object_index,
                                  unsigned long curve_id,
                                  unsigned long surface_id,
                                  double length_factor,
-                                 std::string* error_message) {
+                                 std::string* error_message, int boundary_edge, bool tangent) {
     if (object_index >= objects_.size()) return false;
     auto* cap = dynamic_cast<CSurfaceSet*>(objects_[object_index].get());
     const auto* curve = dynamic_cast<const CBSpline*>(FindObjectById(curve_id));
     const auto* support = dynamic_cast<const CSurfaceSet*>(
         FindObjectById(surface_id));
-    if (!cap || !curve || !support) return false;
-    TopoDS_Shape shape = make_tangent_cap(
-        *curve, *support, length_factor, error_message);
+    // Resolve the original edge on every rebuild; no extracted scene object is needed.
+    std::unique_ptr<CBSpline> edge_curve;
+    TopoDS_Edge selected_edge;
+    if (boundary_edge >= 0 && support) {
+        const auto edges = shape_edges(support->m_Shape);
+        if (static_cast<size_t>(boundary_edge) < edges.size()) {
+            selected_edge = edges[boundary_edge];
+            edge_curve = editable_nurbs_from_edge(selected_edge, "Cap boundary");
+        }
+        curve = edge_curve.get();
+    }
+    if (!cap || !curve || (tangent && !support)) return false;
+    TopoDS_Shape shape = tangent
+        ? make_tangent_cap(*curve, *support, length_factor, error_message, selected_edge)
+        : MakeSurfaceCap(*curve, error_message);
     if (shape.IsNull()) return false;
     cap->m_Shape = shape;
     return cap->ReBuldMesh(loft_display_mesh_deflection);
@@ -6704,17 +6807,51 @@ size_t CAlfaDoc::ProjectSelectedCurveToSurface(Vec3 direction) {
         }
     }
     if (!curve || !surface || surface->m_Shape.IsNull()) return 0;
-    const TopoDS_Wire source = make_wire_from_curve_object(*curve);
-    if (source.IsNull()) return 0;
+    return ProjectCurveToFace(curve->m_id,surface->m_Shape,direction);
+}
+
+size_t CAlfaDoc::ProjectCurveToPlane(unsigned long curve_id, Vec3 origin, Vec3 normal) {
+    if(dot(normal,normal)<1.e-12f)return 0;
+    const auto source=BuildCurveWire(curve_id);
+    if(source.IsNull())return 0;
+    try {
+        const gp_Vec n=gp_Vec(normal.x,normal.y,normal.z).Normalized();
+        const gp_Pnt base(origin.x,origin.y,origin.z);
+        std::vector<std::unique_ptr<CBSpline>> results;
+        for(TopExp_Explorer ex(source,TopAbs_EDGE);ex.More();ex.Next()) {
+            auto spline=BuildExtractedEdgeCurve(TopoDS::Edge(ex.Current()),0.);
+            if(spline.IsNull())return 0;
+            // Orthogonal projection is affine: project the rational spline's
+            // poles while retaining all knots, weights and the full parameter range.
+            for(int i=1;i<=spline->NbPoles();++i) {
+                const auto p=spline->Pole(i);
+                spline->SetPole(i,p.Translated(-n*gp_Vec(base,p).Dot(n)));
+            }
+            BRepBuilderAPI_MakeEdge edge(spline);
+            if(!edge.IsDone())return 0;
+            auto result=editable_nurbs_from_edge(edge.Edge(),"Projected Curve");
+            if(!result)return 0;
+            results.push_back(std::move(result));
+        }
+        const auto count=results.size();
+        for(auto& result:results)AddObject(std::move(result));
+        return count;
+    } catch(const Standard_Failure&) { return 0; }
+}
+
+size_t CAlfaDoc::ProjectCurveToFace(unsigned long curve_id, const TopoDS_Shape& face, Vec3 direction, double tolerance) {
+    if(face.IsNull() || dot(direction,direction)<1.e-12f)return 0;
+    const TopoDS_Wire source=BuildCurveWire(curve_id);
+    if(source.IsNull())return 0;
     try {
         BRepProj_Projection projection(
-            source, surface->m_Shape,
+            source, face,
             gp_Dir(direction.x, direction.y, direction.z));
         std::vector<std::unique_ptr<CBSpline>> results;
         while (projection.More()) {
             std::vector<std::unique_ptr<CBSpline>> curves =
                 nurbs_curves_from_shape(projection.Current(),
-                                        "Projected Curve");
+                                        "Projected Curve", tolerance);
             for (auto& projected : curves) results.push_back(std::move(projected));
             projection.Next();
         }

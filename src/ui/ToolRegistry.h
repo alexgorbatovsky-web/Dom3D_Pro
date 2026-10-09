@@ -63,6 +63,7 @@ public:
     ToolRegistry();
 
     bool TryRebuildSurfaceOffset(const ActiveParametricObject&, CAlfaDoc&, std::string& error) const;
+    bool TryRebuildNSidedSurface(const ActiveParametricObject&, CAlfaDoc&, std::string& error) const;
     const std::vector<ToolDefinition>& Tools() const;
     const ToolDefinition* Find(const std::string& id) const;
     ActiveParametricObject Activate(const std::string& id, CAlfaDoc& document) const;

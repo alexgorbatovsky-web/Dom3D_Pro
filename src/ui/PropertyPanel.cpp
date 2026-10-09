@@ -304,6 +304,10 @@ bool IsIntegerParameter(const ToolParameter& parameter) {
 }
 
 bool IsInternalPlacementParameter(const ToolParameter& parameter) {
+    if (parameter.id.rfind("support",0)==0 && parameter.id.size()>7
+        && (parameter.id.compare(parameter.id.size()-3,3,".id")==0
+        || parameter.id.compare(parameter.id.size()-5,5,".face")==0
+        || parameter.id.compare(parameter.id.size()-5,5,".edge")==0)) return true;
     if (parameter.id == "hole.distance1"
         || parameter.id == "hole.distance2") {
         return false;
@@ -328,6 +332,7 @@ bool IsInternalPlacementParameter(const ToolParameter& parameter) {
             && parameter.type != ToolParameterType::CatalogProduct)
         || parameter.id == "cutter.id"
         || parameter.id == "surface.id"
+        || parameter.id == "boundary.edge"
         || parameter.id == "support1.id" || parameter.id == "support2.id"
         || parameter.id == "support3.id" || parameter.id == "support4.id"
         || parameter.id == "support1.face" || parameter.id == "support2.face"
@@ -506,6 +511,9 @@ bool IsSliderParameter(const ActiveParametricObject& active,
     }
     const std::string& tool_id = active.tool_id;
     return tool_id == "SolidBeamTool"
+        || (tool_id == "SurfaceTwoView" && parameter.id == "cap.length")
+        || (tool_id == "Body1" && (parameter.id == "cap.length" || parameter.id.rfind("corner.radius.",0)==0))
+        || tool_id == "SurfaceTangentCap"
         || tool_id == "SolidBox"
         || tool_id == "SolidCylinder"
         || tool_id == "SolidHole"
@@ -531,6 +539,7 @@ bool IsSliderParameter(const ActiveParametricObject& active,
         || (tool_id == "SurfaceOfRevolution" || tool_id == "SurfaceRevolve")
         || tool_id == "SurfaceRuled"
         || tool_id == "SolidShell"
+        || tool_id == "SolidSheet"
         || tool_id == "cabinet"
         || tool_id == "cabinet_advanced"
         || tool_id == "cabinet_advanced_slx"
@@ -721,6 +730,11 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
                 [](const ToolParameter& p) { return p.id == "boolean.body_id" && p.value > 0.0; })) {
             continue;
         }
+        if (active_object_.tool_id == "SurfaceNSided" && parameter.id.rfind("support",0)==0) {
+            const auto count=std::find_if(active_object_.parameters.begin(),active_object_.parameters.end(),
+                [](const auto& p){return p.id=="curve.count";});
+            if (count==active_object_.parameters.end() || std::atoi(parameter.id.c_str()+7)>int(count->value)) continue;
+        }
         if (IsInternalPlacementParameter(parameter)
             || !IsPlaneParameterVisible(active_object_, parameter)
             || !IsFilletParameterVisible(active_object_, parameter)
@@ -838,10 +852,23 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
             editor->setObjectName(QString::fromStdString("parameter_"+parameter.id));
             editor->setChecked(parameter.value >= 0.5);
             editor->setEnabled(parameter.enabled);
+            if(active_object_.tool_id=="SurfaceTangentCap"&&parameter.id=="tangent") {
+                const auto support=std::find_if(active_object_.parameters.begin(),active_object_.parameters.end(),
+                    [](const auto& p){return p.id=="surface.id";});
+                const bool available=support!=active_object_.parameters.end()&&support->value>0;
+                editor->setEnabled(available);
+                if(!available)editor->setToolTip("Tangent requires a supporting surface. Select its closed edge, or a closed spline with that surface.");
+            }
             connect(editor, &QCheckBox::toggled, this, [this, i](bool checked) {
                 ToolParameter& changed =
                     active_object_.parameters[static_cast<size_t>(i)];
                 changed.value = checked ? 1.0 : 0.0;
+                if(active_object_.tool_id=="SurfaceTangentCap"&&changed.id=="tangent") {
+                    if(auto* field=findChild<QDoubleSpinBox*>("parameter_length_factor")) {
+                        field->setEnabled(checked);
+                        if(auto* label=form_->labelForField(field))label->setEnabled(checked);
+                    }
+                }
                 if(active_object_.tool_id=="SurfaceSweptTool"&&changed.id=="auto_orientation") {
                     for(const auto* id:{"angle","dx","dy"}) {
                         if(auto* field=findChild<QDoubleSpinBox*>(QString("parameter_%1").arg(id))) {
@@ -1152,6 +1179,13 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
             const auto automatic=std::find_if(active_object_.parameters.begin(),active_object_.parameters.end(),
                 [](const auto& p){return p.id=="auto_orientation";});
             const bool enabled=automatic==active_object_.parameters.end()||automatic->value>=0.5;
+            editor->setEnabled(enabled);
+            if(auto* label=form_->labelForField(editor))label->setEnabled(enabled);
+        }
+        if(active_object_.tool_id=="SurfaceTangentCap"&&parameter.id=="length_factor") {
+            const auto tangent=std::find_if(active_object_.parameters.begin(),active_object_.parameters.end(),
+                [](const auto& p){return p.id=="tangent";});
+            const bool enabled=tangent==active_object_.parameters.end()||tangent->value>=.5;
             editor->setEnabled(enabled);
             if(auto* label=form_->labelForField(editor))label->setEnabled(enabled);
         }

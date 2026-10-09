@@ -1500,7 +1500,7 @@ void OpenGLViewport::ReloadModelingPreferences() {
     update();
 }
 
-void OpenGLViewport::RefreshSurfaceMeshQuality() {
+void OpenGLViewport::RefreshSurfaceMeshQuality(float pixel_scale) {
     if (!document_ || width() <= 0 || height() <= 0) {
         return;
     }
@@ -1526,7 +1526,7 @@ void OpenGLViewport::RefreshSurfaceMeshQuality() {
     // dividing it by ten. Compensate here so the resulting tessellation is
     // approximately one screen pixel at the current camera scale.
     const float mesh_deflection =
-        std::max(modeling_tolerance, world_per_pixel) * 10.0f;
+        std::max(modeling_tolerance, world_per_pixel * std::clamp(pixel_scale,.1f,4.f)) * 10.0f;
     if (!std::isfinite(mesh_deflection) || mesh_deflection <= 0.0f) {
         return;
     }
@@ -4104,11 +4104,14 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
             emit RotationAxisPicked(
                 CPoint3d(axis_start.x, axis_start.y, axis_start.z),
                 CPoint3d(axis_end.x, axis_end.y, axis_end.z));
-            emit StatusTextChanged("Rotate: rotation axis selected");
+            emit StatusTextChanged(property("projectionDirectionPick").toBool()
+                ? "Projection direction selected" : "Rotate: rotation axis selected");
             update();
         } else {
             emit StatusTextChanged(
-                "Rotate: point to a coordinate axis, straight segment, or straight edge");
+                property("projectionDirectionPick").toBool()
+                    ? "Projection: click a coordinate axis, straight segment, or straight edge"
+                    : "Rotate: point to a coordinate axis, straight segment, or straight edge");
         }
         event->accept();
         return;
@@ -6141,7 +6144,8 @@ void OpenGLViewport::keyPressEvent(QKeyEvent* event) {
         rotation_axis_hover_valid_ = false;
         RestoreDefaultToolCursor();
         emit RotationAxisPickCanceled();
-        emit StatusTextChanged("Rotate canceled");
+        emit StatusTextChanged(property("projectionDirectionPick").toBool()
+            ? "Projection: enter a vector or pick another direction" : "Rotate canceled");
         update();
         event->accept();
         return;
@@ -6801,7 +6805,13 @@ void OpenGLViewport::SelectAt(const QPoint& point, SelectionAction action) {
             update();
             return;
         }
-        emit StatusTextChanged("Select Edge: edge not found");
+        if(property("surfaceCapPick").toBool()
+            && document_->SelectPolylineAtScreen(screen_point,world_to_screen,8.0f,action)) {
+            emit SelectionChanged();update();return;
+        }
+        emit StatusTextChanged(property("surfaceCapPick").toBool()
+            ? "Cap: click a closed spline or a closed surface edge"
+            : "Select Edge: edge not found");
         return;
     }
 

@@ -5,6 +5,7 @@
 #include "CPolyline.h"
 #include "SketchProfileBuilder.h"
 #include "SmartLine.h"
+#include "SplineBezierSections.h"
 
 #ifdef Coord
 #undef Coord
@@ -1304,7 +1305,13 @@ TopoDS_Shape BuildSweptSurfaceShape(const CAlfaObject& section,const CAlfaObject
     bool auto_orientation,double twist_angle,double end_scale) {
     if(&section==&guide||!std::isfinite(twist_angle)||!std::isfinite(end_scale)||end_scale<=0)return {};
     try {
-        const auto source=BuildSolidCenterPath(section),spine=BuildSolidCenterPath(guide);
+        // A surface sweep accepts closed profiles, while the guide conversion
+        // intentionally accepts only open splines. Preserve the exact periodic
+        // section instead of sending it through that guide-only conversion.
+        const auto* profile=dynamic_cast<const CBSpline*>(&section);
+        const auto source=profile&&profile->IsClosed()
+            ? BuildSplineBezierWire(*profile) : BuildSolidCenterPath(section);
+        const auto spine=BuildSolidCenterPath(guide);
         if(source.IsNull()||spine.IsNull())return {};
         CPoint3d origin,x,normal;
         if(!initial_guide_frame(section,origin,x,normal))return {};

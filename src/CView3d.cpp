@@ -1,4 +1,5 @@
 #include "CView3d.h"
+#include "ZebraSettings.h"
 
 #include "OpenGLCompat.h"
 #include "SmartLine.h"
@@ -168,7 +169,7 @@ void CView3d::DrawObjects(const CAlfaDoc& document,
             && document.GetSelectedObjectIndex() == index
             && document.HasSelectedPoint();
         CMesh3D::SetZebraAnalysisTarget(
-            !has_zebra_selection || selected);
+            ZebraOptions().explicit_objects ? ZebraOptions().objects.count(objects[index]->m_id)!=0 : (!has_zebra_selection || selected));
         objects[index]->Render3d(
             selected, has_selected_point, document.GetSelectedPointIndex());
     };

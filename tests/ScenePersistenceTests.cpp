@@ -32,7 +32,12 @@
 #include "SurfaceSketchTrimBuilder.h"
 #include "TwoViewSurfaceBuilder.h"
 #include "ui/PropertyPanel.h"
+#include "ui/ZebraDialog.h"
 #include "SurfaceEdgePatchBuilder.h"
+#include "NSidedSurfaceBuilder.h"
+#include "ui/NSidedSurfaceDialog.h"
+#include "ui/LanguageManager.h"
+#include <QListWidget>
 #include "SurfaceFilletBuilder.h"
 #include <set>
 #include <BRepAlgoAPI_Splitter.hxx>
@@ -48,7 +53,10 @@
 #include "SurfaceBridgeBuilder.h"
 #include <BRepAdaptor_Curve.hxx>
 #include <BRep_Tool.hxx>
+#include <BRep_Builder.hxx>
 #include <Geom_Surface.hxx>
+#include <Geom2d_Curve.hxx>
+#include <Geom_CylindricalSurface.hxx>
 #include "CBSpline.h"
 #include "CurveCutGeometry.h"
 #include <gp_Lin.hxx>
@@ -143,6 +151,173 @@ void answer(QMessageBox::StandardButton button) {
 int TestScenePersistence(int argc, char** argv) {
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
     QApplication application(argc, argv);
+    if(application.arguments().contains("--curve-quick-menu-only")) {
+        QTemporaryDir settings;QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,settings.path());
+        const char* ids[]={"SurfaceRuled","SolidWireTool","SurfaceRevolve","CurveTrimByPlane","ProjectCurveToPlane","ProjectCurveToSurface","ProjectCurveToFace"};
+        const QStringList labels={"Ruled","Wire","Revolve","Trim by Plane","Put on Plane","Put on Surface","Put on Face"};
+        for(int choice=-1;choice<7;++choice) {
+            MainWindow window;auto& doc=window.document_;doc.GetObjects().clear();
+            auto spline=std::make_unique<CBSpline>();
+            spline->AddPoint({10,0,10});spline->AddPoint({20,10,20});spline->AddPoint({30,0,30});
+            doc.AddObject(std::move(spline));const auto source=doc.GetSelectedObject()->m_id;
+            window.UpdateActiveToolUi("select");window.viewport_->SetTool(ToolMode::Select);
+            bool shown=false;
+            QTimer::singleShot(0,&window,[&] {
+                auto* menu=window.findChild<QMenu*>("CurveQuickMenu");require(menu,"Curve menu missing");shown=true;
+                auto* cap=menu->actions().front();
+                require(cap->text()=="Cap"&&cap->data().toString()=="SurfaceTangentCap"&&!cap->isEnabled(),"Cap must require a closed spline");
+                auto* nsided=menu->findChild<QAction*>("CurveQuickSurfaceNSided");
+                require(nsided&&nsided->isEnabled(),"Open spline menu lost N-Sided Surface");
+                for(int i=0;i<7;++i) {
+                    auto* action=menu->actions().at(i+2);
+                    require(action->text()==labels[i] && action->data().toString()==ids[i] && action->isEnabled(),"Wrong curve command order or availability");
+                }
+                require(menu->findChild<QAction*>("CurveQuickCopy"),"Curve menu lost Copy");
+                if(choice<0)menu->close();
+                else {
+                    menu->setActiveAction(menu->actions().at(choice+2));
+                    QKeyEvent enter(QEvent::KeyPress,Qt::Key_Return,Qt::NoModifier);QApplication::sendEvent(menu,&enter);
+                }
+            });
+            window.viewport_->ObjectQuickMenuRequested(QPoint(100,100));require(shown,"Curve menu was not shown");
+            if(choice<0)require(doc.GetObjects().size()==1 && doc.GetSelectedObject()->m_id==source,"Dismissing curve menu changed selection");
+            else if(choice<3)require(window.active_parametric_object_.tool_id==ids[choice],"Curve menu started wrong modeling tool");
+            else if(choice==3)require(window.pending_curve_edit_command_==MainWindow::CurveEditCommand::TrimByPlane,"Curve trim did not start");
+            else {
+                const auto expected=choice==4 ? MainWindow::PendingGroupCommand::ProjectCurveToPlane : choice==6 ? MainWindow::PendingGroupCommand::ProjectCurveToFace : MainWindow::PendingGroupCommand::ProjectCurveToSurface;
+                require(window.pending_group_command_==expected,"Projection target selection did not start");
+                require(window.pending_projection_curve_id_==source,"Projection forgot the selected source curve");
+                window.viewport_->SelectionCommandCanceled();
+                require(!window.pending_projection_curve_id_ && doc.GetSelectedObject()->m_id==source,"Cancel did not restore source curve");
+                window.ProjectCurveToSurface(choice==4,choice==6);
+                {
+                    auto planeShape=BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(0,0,0),gp_Dir(0,0,1)),15,25,-100,100).Shape();
+                    if(choice==6) {
+                        planeShape=BRepPrimAPI_MakeBox(gp_Pnt(15,-100,-5),10,200,5).Shape();
+                        doc.AddObject(std::make_unique<CSolid>(planeShape));
+                    } else doc.AddObject(std::make_unique<CSurfaceSet>(planeShape));
+                    const auto target=doc.GetSelectedObject()->m_id;
+                    doc.SelectObjectById(target,SelectionAction::Replace);
+                    if(choice==6) {
+                        auto* body=dynamic_cast<CSolid*>(doc.FindObjectById(target));
+                        require(body->EnsureRenderMesh(),"Cannot prepare target face");
+                        int top=-1;
+                        for(int f=0;f<body->GetNumSurfaces();++f) {
+                            BRepAdaptor_Surface geometry(TopoDS::Face(body->GetSurfaceFace(f)->m_Face));
+                            if(geometry.GetType()==GeomAbs_Plane && std::abs(geometry.Plane().Axis().Direction().Z())>.99
+                                && std::abs(geometry.Plane().Location().Z())<1.e-8)top=f;
+                        }
+                        require(top>=0,"Cannot locate top face");
+                        require(doc.SelectSolidFaceAtScreen({200,0},[](Vec3 p,DomPoint& screen,float& depth) {
+                            screen={int(p.x*10),int(p.y*10)};depth=100-p.z;return true;
+                        }),"Cannot pick target face");
+                        require(body->GetSelectedFaceIndex()==top,"Picked wrong target face");
+                    }
+                    window.viewport_->SelectionChanged();
+                    bool directionShown=false;
+                    if(choice==5)QTimer::singleShot(0,&window,[&] {
+                        auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());
+                        require(dialog && dialog->parentWidget()==&window
+                            && dialog->findChildren<QDoubleSpinBox*>().size()==3,"Surface target did not advance to projection direction");
+                        directionShown=true;
+                        auto* pick=dialog->findChild<QPushButton*>("PickProjectionDirection");
+                        require(pick,"Projection direction picker missing");pick->click();
+                        QTimer::singleShot(0,&window,[&,dialog] {
+                            require(!dialog->isVisible(),"Vector dialog blocks viewport picking");
+                            // Same shared picker signal is emitted by a straight
+                            // segment and by a coordinate-axis hit.
+                            window.viewport_->RotationAxisPicked({0,0,0},{0,0,4});
+                            QTimer::singleShot(0,&window,[&,dialog] {
+                                const auto inputs=dialog->findChildren<QDoubleSpinBox*>();
+                                require(inputs[0]->value()==0 && inputs[1]->value()==0 && inputs[2]->value()==1,"Picked vector was not normalized into the dialog");
+                                require(!window.precise_rotate_axis_ready_,"Projection pick started Rotate");
+                                // Clear the simulated pick just as a real mouse
+                                // hit does before emitting RotationAxisPicked.
+                                QKeyEvent escape(QEvent::KeyPress,Qt::Key_Escape,Qt::NoModifier);
+                                QApplication::sendEvent(window.viewport_,&escape);
+                                dialog->accept();
+                            });
+                        });
+                    });
+                    application.processEvents();
+                    require(choice!=5 || directionShown,"Surface projection did not start automatically");
+                    require(window.pending_group_command_==MainWindow::PendingGroupCommand::None && !window.pending_projection_curve_id_,"Completed projection kept stale picking state");
+                    require(doc.GetObjects().size()>2,"Clicking projection target did not produce a curve");
+                    for(size_t i=2;i<doc.GetObjects().size();++i) {
+                        Vec3 lo,hi;require(doc.GetObjects()[i]->GetBounds(lo,hi),"Projected curve has no bounds");
+                        require(std::abs(lo.z)<1.e-4 && std::abs(hi.z)<1.e-4,"Put on Plane missed target plane");
+                        if(choice==4)require(lo.x<10.01 && hi.x>29.99,"Put on Plane clipped the curve to the plane rectangle");
+                        else require(lo.x>=14.99 && hi.x<=25.01,"Bounded projection escaped the target face");
+                    }
+                    const auto projected_count=doc.GetObjects().size();
+                    require(window.undo_redo_.Undo(),"Projection has no Undo");
+                    require(doc.GetObjects().size()==2 && doc.FindObjectById(source) && doc.FindObjectById(target),"Undo removed projection inputs or kept results");
+                    require(window.undo_redo_.Redo() && doc.GetObjects().size()==projected_count,"Projection Redo failed");
+                }
+                if(choice==4)for(int axis=0;axis<3;++axis) {
+                    doc.SelectObjectById(source,SelectionAction::Replace);
+                    window.ProjectCurveToSurface(true);
+                    const auto before=doc.GetObjects().size();
+                    window.viewport_->SelectOriginPlane(axis);application.processEvents();
+                    require(doc.GetObjects().size()==before+1,"Reference plane click failed to project curve");
+                    Vec3 lo,hi;require(doc.GetObjects().back()->GetBounds(lo,hi),"No projected reference-plane bounds");
+                    const double low=axis==0?lo.z:axis==1?lo.y:lo.x,high=axis==0?hi.z:axis==1?hi.y:hi.x;
+                    require(std::abs(low)<1.e-4 && std::abs(high)<1.e-4,"Wrong reference plane projection");
+                    require(hi.x-lo.x>19.9 || hi.z-lo.z>19.9,"Reference plane clipped the original curve");
+                }
+            }
+        }
+        // A non-planar projection must become lighter without moving its ends
+        // or exceeding the requested modeling tolerance.
+        CAlfaDoc projectedDoc;
+        projectedDoc.GetObjects().clear();
+        auto input=std::make_unique<CBSpline>();
+        for(const Vec3 p : {Vec3{20,-8,-5},Vec3{20,-3,10},Vec3{20,3,-10},Vec3{20,8,5}})
+            input->AddPoint({p.x,p.y,p.z});
+        projectedDoc.AddObject(std::move(input));
+        const auto inputId=projectedDoc.GetSelectedObject()->m_id;
+        Handle(Geom_CylindricalSurface) cylinder=new Geom_CylindricalSurface(
+            gp_Ax3(gp_Pnt(0,0,0),gp_Dir(0,0,1)),10);
+        const auto target=BRepBuilderAPI_MakeFace(cylinder,0,6.283185307179586,-20,20,1.e-7).Face();
+        const auto rawCount=projectedDoc.ProjectCurveToFace(inputId,target,{-1,0,0},0);
+        require(rawCount>0,"Cylinder projection failed");
+        std::vector<const CBSpline*> raw;
+        for(size_t i=1;i<=rawCount;++i) {
+            raw.push_back(dynamic_cast<CBSpline*>(projectedDoc.GetObjects()[i].get()));
+            require(raw.back(),"Raw projection is not editable NURBS");
+        }
+        for(double tolerance : {0.02,0.002}) {
+            const auto before=projectedDoc.GetObjects().size();
+            require(projectedDoc.ProjectCurveToFace(inputId,target,{-1,0,0},tolerance)==rawCount,
+                "Simplification changed projection branch count");
+            size_t rawPoles=0,resultPoles=0;
+            for(size_t i=0;i<rawCount;++i) {
+                auto* result=dynamic_cast<CBSpline*>(projectedDoc.GetObjects()[before+i].get());
+                require(result,"Projected result is not editable NURBS");
+                rawPoles+=raw[i]->GetPoints().size();resultPoles+=result->GetPoints().size();
+                double worst=0;
+                for(int j=0;j<=10000;++j) {
+                    const float t=float(j)/10000;
+                    const auto p=result->Evaluate(t);
+                    const auto q=raw[i]->Evaluate(t);
+                    const double error=gp_Pnt(q.x,q.y,q.z).Distance(gp_Pnt(p.x,p.y,p.z));
+                    worst=std::max(worst,error);
+                    if(j==0 || j==10000) {
+                        if(error>=1.e-5)std::cerr<<"Projection endpoint branch="<<i<<" t="<<t<<" error="<<error
+                            <<" raw="<<q.x<<","<<q.y<<","<<q.z<<" result="<<p.x<<","<<p.y<<","<<p.z<<std::endl;
+                        require(error<1.e-5,"Simplification moved a projection endpoint");
+                    }
+                }
+                require(worst<=tolerance,"Projected NURBS exceeds modeling tolerance");
+            }
+            require(resultPoles<rawPoles,"Curved projection was not simplified");
+            std::cout<<"Projection poles "<<rawPoles<<" -> "<<resultPoles<<" tolerance="<<tolerance<<std::endl;
+        }
+        require(dynamic_cast<CBSpline*>(projectedDoc.FindObjectById(inputId))->GetPoints().size()==4,
+            "Projection simplification modified the source curve");
+        std::cout<<"Curve quick menu commands, projection simplification and Undo passed\n";return 0;
+    }
     if (application.arguments().contains("--quick-menu-cancel-only")) {
         CAlfaDoc document;
         auto mesh=std::make_unique<CMesh3D>("Quick menu fixture");
@@ -1394,7 +1569,43 @@ int TestScenePersistence(int argc, char** argv) {
     #include "BodyPrimitiveTestCases.inc"
     #include "SectionGraphTestCases.inc"
     #include "Bottle3TestCases.inc"
+    #include "SurfaceCapTestCases.inc"
+    #include "NSidedContinuityTestCases.inc"
+    #include "NSidedSurfaceTestCases.inc"
     #include "Body1TestCases.inc"
+    if(application.arguments().contains("--join-surface-edges-file")) {
+        const auto args=application.arguments();MainWindow window;auto& doc=window.document_;
+        Dom3DProjectSerializer serializer;ProjectViewState view;QString room,error;
+        require(serializer.Load(args.value(args.indexOf("--join-surface-edges-file")+1),doc,room,view,error),"Cannot load edge-join fixture");
+        std::vector<CPoint3d> samples;std::vector<unsigned long> ids;
+        doc.ClearSelection();
+        for(const auto& object:doc.GetObjects())if(auto* spline=dynamic_cast<CBSpline*>(object.get());spline&&spline->GetName().find("Extracted Edge")==0) {
+            ids.push_back(spline->m_id);
+            for(int i=0;i<=100;++i)samples.push_back(spline->Evaluate(float(i)/100));
+        }
+        require(ids.size()==4,"Expected four original extracted edges");
+        // Scrambled selection and one reversed input exercise ordering.
+        dynamic_cast<CBSpline*>(doc.FindObjectById(ids[2]))->Reverse();
+        for(int i:{0,2,3,1})doc.SelectObjectById(ids[i],SelectionAction::Add);
+        const auto count=doc.GetObjects().size();
+        require(window.JoinSelectedCurves(),"Join extracted edges failed");
+        const auto verify=[&](CAlfaDoc& document) {
+            auto* joined=dynamic_cast<CBSpline*>(document.FindObjectById(ids[0]));
+            require(joined&&joined->IsClosed()&&!joined->GetKnots().empty(),"Join lost closure or knots");
+            auto copy=joined->Clone();auto* open=dynamic_cast<CBSpline*>(copy.get());open->SetClosed(false);
+            const auto exact=curve_cut::Spline(*open);require(!exact.IsNull(),"Cannot read joined NURBS");
+            for(const auto& p:samples){GeomAPI_ProjectPointOnCurve projection(gp_Pnt(p.x,p.y,p.z),exact);
+                require(projection.NbPoints()>0&&projection.LowerDistance()<2.e-5,"Joining changed an original edge");}
+        };
+        verify(doc);require(doc.GetObjects().size()==count-3,"Join removed wrong objects");
+        require(window.undo_redo_.Undo()&&doc.GetObjects().size()==count,"Join Undo failed");
+        require(window.undo_redo_.Redo(),"Join Redo failed");verify(doc);
+        QTemporaryDir temp;const auto path=temp.filePath("joined.dom3d");
+        require(serializer.Save(path,doc,room,view,{},error),"Cannot save joined contour");
+        CAlfaDoc loaded;require(serializer.Load(path,loaded,room,view,error),"Cannot reload joined contour");verify(loaded);
+        if(args.contains("--output"))require(serializer.Save(args.value(args.indexOf("--output")+1),doc,room,view,{},error),"Cannot save repaired copy");
+        std::cout<<"Extracted edge join preserves geometry, closure, Undo and persistence\n";return 0;
+    }
     if(application.arguments().contains("--two-view")) {
         QTemporaryDir temp;QSettings::setDefaultFormat(QSettings::IniFormat);
         QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,temp.path());
@@ -1426,6 +1637,33 @@ int TestScenePersistence(int argc, char** argv) {
             for(double x:{0.,33.333333333333,66.666666666667,100.})p->AddPoint({x,i==0?10.:i==2?-10.:0.,i==1?-10.:0.});
             auto* raw=p.get();round.AddObject(std::move(p));circular.guides[i]=raw->m_id;}
         auto cylinder=BuildTwoViewSurface(round,circular,error);require(!cylinder.IsNull(),"Circular conics failed");
+        circular.mirror=true;
+        for(int side:{1,2}) {
+            circular.tangent_cap=side;
+            auto capped=BuildTwoViewSurface(round,circular,error);
+            if(capped.IsNull())std::cerr<<error<<std::endl;
+            require(!capped.IsNull()&&BRepCheck_Analyzer(capped).IsValid(),"Rounded two-view cap failed");
+            auto cap=BuildTwoViewTangentCap(round,circular,side,.55,error);
+            require(!cap.IsNull(),"Standalone conic cap failed");
+            int count=0;
+            for(TopExp_Explorer ex(cap,TopAbs_FACE);ex.More();ex.Next()) {
+                ++count;const auto surf=BRep_Tool::Surface(TopoDS::Face(ex.Current()));
+                for(double v:{.1,.3,.5,.7,.9}) {
+                    gp_Pnt p;gp_Vec du,dv;surf->D1(0,v,p,du,dv);
+                    require(std::abs(p.X()-(side==1?0:100))<1.e-7,"Cap moved the rim");
+                    require(std::hypot(du.Y(),du.Z())<1.e-7&&du.X()*(side==1?-1:1)>0,"Cap lost cylindrical G1 tangency");
+                    double previous=0;
+                    for(int j=0;j<=100;++j) {
+                        const auto q=surf->Value(j/100.,v);const double distance=(q.X()-p.X())*(side==1?-1:1);
+                        require(distance>=previous-1.e-7,"Cap folds back along the axis");previous=distance;
+                        require(q.Y()*q.Y()+q.Z()*q.Z()<=100.000001,"Cap has radial bulges");
+                    }
+                }
+            }
+            require(count==4,"Expected four fair cap patches");
+            const auto saved=ReadTwoViewParameters(TwoViewParameters(circular));
+            require(saved.tangent_cap==side&&saved.cap_length==circular.cap_length,"Cap settings did not round-trip");
+        }
         auto circle=BRep_Tool::Surface(TopoDS::Face(TopExp_Explorer(cylinder,TopAbs_FACE).Current()));
         for(double v:{.1,.3,.5,.8}){auto p=circle->Value(.45,v);require(std::abs(p.Y()*p.Y()+p.Z()*p.Z()-100)<1.e-6,"Rho 0.4142 is not an exact circular section");}
         GProp_GProps original;BRepGProp::SurfaceProperties(shape,original);
@@ -1452,6 +1690,33 @@ int TestScenePersistence(int argc, char** argv) {
         GProp_GProps va,ra;BRepGProp::SurfaceProperties(variable,va);BRepGProp::SurfaceProperties(reversed,ra);
         require(std::abs(va.Mass()-ra.Mass())<1.e-5,"Reversing input direction changed geometry");
         auto bad=settings;bad.top_graph[2]=1;require(BuildTwoViewSurface(doc,bad,error).IsNull(),"Invalid rho accepted");
+        auto caps=BuildTwoViewTangentCap(doc,settings,2,.55,error);require(!caps.IsNull(),"Variable-rho cap failed");
+        TopExp_Explorer support_face(variable,TopAbs_FACE),cap_face(caps,TopAbs_FACE);
+        for(;support_face.More()&&cap_face.More();support_face.Next(),cap_face.Next()) {
+            const auto a=BRep_Tool::Surface(TopoDS::Face(support_face.Current())),b=BRep_Tool::Surface(TopoDS::Face(cap_face.Current()));
+            for(double v:{.05,.25,.5,.75,.95}) {
+                require(a->Value(1,v).Distance(b->Value(0,v))<1.e-7,"Variable-rho cap rim has a gap");
+                GeomLProp_SLProps na(a,1,v,1,1.e-9),nb(b,0,v,1,1.e-9);
+                require(std::abs(na.Normal().Dot(nb.Normal()))>.999999,"Variable-rho cap lost G1 continuity");
+            }
+        }
+        settings.tangent_cap=2;
+        auto capped_settings=settings;capped_settings.split=true;
+        require(!BuildTwoViewSurface(doc,capped_settings,error).IsNull(),"Split surface cap failed");
+        circular.tangent_cap=0;circular.split=true;circular.patches_u=3;circular.patches_v=2;
+        auto cap_support_shape=BuildTwoViewSurface(round,circular,error);
+        auto cap_support=std::make_unique<CSurfaceSet>(cap_support_shape);
+        cap_support->SetParametricOperation(0,"SurfaceTwoView","Surface by two View",TwoViewParameters(circular));
+        require(cap_support->ReBuldMesh(),"Cap support mesh failed");round.AddObject(std::move(cap_support));
+        const auto cap_support_id=round.GetSelectedObject()->m_id;
+        auto rim=std::make_unique<CBSpline>();
+        for(int j=0;j<48;++j){double a=2*3.141592653589793*j/48;rim->AddPoint({0,10*std::cos(a),10*std::sin(a)});}
+        rim->SetClosed(true);round.AddObject(std::move(rim));const auto rim_id=round.GetSelectedObject()->m_id;
+        const bool cap_created=round.CreateTangentCap(rim_id,cap_support_id,.55,&error);
+        if(!cap_created)std::cerr<<error<<std::endl;
+        require(cap_created,"Tangent Cap tool failed on split Two Views");
+        auto* cap_object=dynamic_cast<CSurfaceSet*>(round.GetSelectedObject());
+        require(cap_object&&cap_object->GetNumSurfaces()==8,"Tangent Cap did not use the fair conic construction");
         window.undo_redo_.Reset();window.ActivateParametricTool("SurfaceTwoView");
         auto* dialog=window.findChild<QDialog*>("TwoViewSurfaceDialog");require(dialog,"No two-view dialog");
         for(auto id:settings.guides){doc.SelectObjectById(id);window.viewport_->SelectionChanged();}
@@ -1463,6 +1728,8 @@ int TestScenePersistence(int argc, char** argv) {
         for(auto id:settings.guides){doc.SelectObjectById(id);window.viewport_->SelectionChanged();}
         auto* panel=dialog->findChild<PropertyPanel*>("TwoViewParameters");require(panel,"Missing parameters");
         panel->findChild<QCheckBox*>("parameter_mirror")->setChecked(true);
+        auto* cap_selector=panel->findChild<QComboBox*>("parameter_tangent.cap");require(cap_selector,"Missing Tangent Cap selector");
+        cap_selector->setCurrentIndex(2);
         if(application.arguments().contains("--preview")) {
             window.resize(1100,800);window.show();window.viewport_->FitToDocument();
             QElapsedTimer wait;wait.start();while(wait.elapsed()<700)application.processEvents();
@@ -1479,6 +1746,7 @@ int TestScenePersistence(int argc, char** argv) {
         CAlfaDoc loaded;require(serializer.Load(path,loaded,room,view,saveError),"Reload failed");
         auto saved=ReadTwoViewParameters(loaded.GetObjects().back()->GetParametricParameters());
         require(saved.guides==settings.guides&&saved.mirror&&saved.graphs&&saved.top_graph==settings.top_graph&&saved.bottom_graph==settings.bottom_graph,"Lost two-view settings");
+        require(saved.tangent_cap==2&&saved.cap_length==settings.cap_length,"Lost Tangent Cap settings");
         require(RebuildTwoViewSurface(loaded,loaded.GetObjects().size()-1,saved,error),"Saved two-view surface cannot rebuild");
         if(application.arguments().contains("--output"))require(serializer.Save(application.arguments().value(application.arguments().indexOf("--output")+1),doc,room,view,{},saveError),"Cannot save example");
         std::cout<<"Two-view geometry, conics, graphs, patches, UI, Undo and persistence passed\n";return 0;
@@ -1795,6 +2063,41 @@ int TestScenePersistence(int argc, char** argv) {
         std::cout << "Saved Swept spline input passed\n";
         return 0;
     }
+    if (application.arguments().contains("--surface-bridge-closed-only")) {
+        for(bool reverse:{false,true}) {
+            CAlfaDoc doc;SurfaceBridgeEdges refs;
+            for(int side=0;side<2;++side) {
+                Handle(Geom_CylindricalSurface) surface=new Geom_CylindricalSurface(gp_Ax3(gp_Pnt(0,0,side?30:0),gp_Dir(0,0,1)),10);
+                if(side && reverse)surface->UReverse();
+                const double phase=side?.731:0.;
+                auto shape=BRepBuilderAPI_MakeFace(surface,phase,phase+2*std::acos(-1.),0.,10.,1.e-7).Shape();
+                auto body=std::make_unique<CSurfaceSet>(shape);
+                require(body->ReBuldMesh(),"Cannot mesh periodic support");
+                auto* ptr=body.get();doc.AddObject(std::move(body));refs[side].body=ptr->m_id;refs[side].face=0;
+                auto* face=ptr->GetSurfaceFace(0);
+                for(int e=0;e<face->GetEdgeCount();++e) {
+                    BRepAdaptor_Curve edge(*face->GetTopoEdge(e));
+                    const auto a=edge.Value(edge.FirstParameter()),b=edge.Value(edge.LastParameter());
+                    if(a.Distance(b)<1.e-7 && std::abs(a.Z()-(side?30:10))<1.e-7)refs[side].edge=e;
+                }
+                require(refs[side].edge>=0,"Cannot locate closed support edge");
+            }
+            for(int mode=0;mode<=2;++mode) {
+                refs[0].continuity=refs[1].continuity=mode;
+                std::string error;const auto shape=BuildSurfaceBridge(doc,refs,error);
+                require(!shape.IsNull() && BRepCheck_Analyzer(shape).IsValid(),"Shifted/reversed closed bridge failed");
+                const auto surface=Handle(Geom_BSplineSurface)::DownCast(BRep_Tool::Surface(TopoDS::Face(shape)));
+                require(surface->IsUPeriodic(),"Closed bridge has an open seam");
+                for(int u=0;u<79;++u)for(int v=0;v<=8;++v) {
+                    const auto p=surface->Value(u/79.,v/8.);
+                    require(std::abs(std::hypot(p.X(),p.Y())-10)<1.e-4,"Closed bridge twists between shifted/reversed seams");
+                    require(std::abs(p.Z()-(10+20*v/8.))<1.e-5,"Closed bridge deviates from cylinder");
+                }
+            }
+        }
+        std::cout<<"Closed bridges with shifted and reversed seams passed\n";
+        return 0;
+    }
     if (application.arguments().contains("--surface-bridge-file")) {
         CAlfaDoc doc;Dom3DProjectSerializer serializer;ProjectViewState view;QString room,errorText;
         const int arg=application.arguments().indexOf("--surface-bridge-file");
@@ -1837,6 +2140,15 @@ int TestScenePersistence(int argc, char** argv) {
             auto surface=Handle(Geom_BSplineSurface)::DownCast(BRep_Tool::Surface(TopoDS::Face(shape)));
             require(!surface.IsNull(),"Bridge must be a natural B-spline patch");
             double u0,u1,v0,v1;surface->Bounds(u0,u1,v0,v1);
+            if(application.arguments().contains("--closed-bridge")) {
+                require(surface->IsUPeriodic(),"Closed bridge must be periodic");
+                for(int k=0;k<=20;++k) {
+                    gp_Pnt a,b;gp_Vec au,av,bu,bv;
+                    surface->D1(u0,k/20.,a,au,av);surface->D1(u1,k/20.,b,bu,bv);
+                    require(a.Distance(b)<1.e-9 && au.Subtracted(bu).Magnitude()<1.e-8
+                        && av.Subtracted(bv).Magnitude()<1.e-8,"Periodic bridge seam is not smooth");
+                }
+            }
             int edgeCount=0;
             for(TopExp_Explorer ex(shape,TopAbs_EDGE);ex.More();ex.Next())++edgeCount;
             require(edgeCount==4,"Bridge must have four natural sides");
@@ -1893,6 +2205,68 @@ int TestScenePersistence(int argc, char** argv) {
             require(create->isEnabled(),"G2 preview failed on curved support fixture");
             first->setCurrentIndex(1);second->setCurrentIndex(1);
             require(create->isEnabled(),"Cannot recover G1 preview after G2 failure");
+            if(application.arguments().contains("--closed-bridge") && !reverse) {
+                QTemporaryDir saved;
+                require(serializer.Save(saved.filePath("bridge.dom3d"),live,room,view,{},errorText),"Cannot save display regression");
+                size_t before=0;
+                for(const auto& o:live.GetObjects())if(o->GetParametricToolId()=="SurfaceBridge")
+                {
+                    auto* face=dynamic_cast<CSolid*>(o.get())->GetSurfaceFace(0);
+                    before=face->pMesh3D->GetVertices().size();
+                    std::cout<<"Bridge grid "<<face->m_QtyU<<" x "<<face->m_QtyV<<std::endl;
+                    const auto geom=BRep_Tool::Surface(TopoDS::Face(face->m_Face));
+                    const auto& vertices=face->pMesh3D->GetVertices();
+                    // Check meridian chords against the analytic profile, not
+                    // just the total count (many circular rows can hide 4 bands).
+                    double maxGap=0,normalError=0;
+                    const auto& normals=face->pMesh3D->GetNormals();
+                    for(int j=0;j+1<face->m_QtyV;++j) {
+                        const size_t a=j*face->m_QtyU,b=(j+1)*face->m_QtyU;
+                        const auto mid=(vertices[a]+vertices[b])*.5f;
+                        GeomAPI_ProjectPointOnSurf projection(gp_Pnt(mid.x,mid.y,mid.z),geom);
+                        require(projection.NbPoints()>0,"Cannot evaluate display meridian");
+                        maxGap=std::max(maxGap,projection.LowerDistance());
+                        double u,v;projection.LowerDistanceParameters(u,v);
+                        GeomLProp_SLProps props(geom,u,v,1,1.e-9);
+                        const auto n=(normals[a]+normals[b])*.5f;
+                        const auto expected=gp_Vec(n.x,n.y,n.z).Normalized();
+                        normalError=std::max(normalError,std::acos(std::clamp(std::abs(expected.Dot(props.Normal())),0.,1.)));
+                    }
+                    std::cout<<"Meridian max chord gap="<<maxGap<<", normal error="<<normalError<<std::endl;
+                    require(normalError<.005,"Bridge display meridian normal interpolation is visibly faceted");
+                }
+                CAlfaDoc reopened;require(serializer.Load(saved.filePath("bridge.dom3d"),reopened,room,view,errorText),"Cannot reload display regression");
+                for(const auto& o:reopened.GetObjects())if(o->GetParametricToolId()=="SurfaceBridge") {
+                    auto* solid=dynamic_cast<CSolid*>(o.get());require(solid->EnsureRenderMesh(),"Cannot display saved bridge");
+                    const auto after=solid->GetSurfaceFace(0)->pMesh3D->GetVertices().size();
+                    std::cout<<"Bridge display vertices: preview="<<before<<", reopened="<<after<<std::endl;
+                    require(before==after,"Reopening a bridge loses adaptive display mesh quality");
+                }
+            }
+            if(!capture.isEmpty() && !reverse) {
+                if(qEnvironmentVariableIsSet("DOM3D_BRIDGE_CAPTURE_G2")) {
+                    first->setCurrentIndex(2);second->setCurrentIndex(2);
+                    require(create->isEnabled(),"Cannot capture G2 bridge");
+                }
+                dialog->accept();QCoreApplication::sendPostedEvents(nullptr,QEvent::DeferredDelete);
+                live.ClearSelection();window.viewport_->update();application.processEvents();
+                window.viewport_->grab().save(capture+".result.png");
+                CMesh3D::SetZebraAnalysisEnabled(true);
+                window.viewport_->update();application.processEvents();
+                window.viewport_->grab().save(capture+".zebra.png");
+                CMesh3D::SetZebraAnalysisEnabled(false);
+                require(serializer.Save(capture+".dom3d",live,room,view,{},errorText),"Cannot save bridge result");
+                CAlfaDoc loaded;require(serializer.Load(capture+".dom3d",loaded,room,view,errorText),"Cannot reload closed bridge");
+                for(const auto& o:loaded.GetObjects())if(auto* solid=dynamic_cast<CSolid*>(o.get()))
+                    require(solid->EnsureRenderMesh(),"Cannot initialize reloaded bridge edges");
+                bool found=false;
+                for(const auto& o:loaded.GetObjects())if(o->GetParametricToolId()=="SurfaceBridge") {
+                    std::string failure;const auto rebuilt=BuildSurfaceBridge(loaded,ReadSurfaceBridgeParameters(o->GetParametricParameters()),failure);
+                    require(!rebuilt.IsNull(),"Saved bridge cannot replay its support references");found=true;
+                }
+                require(found,"Saved result lost bridge history");
+                continue;
+            }
             dialog->reject();QCoreApplication::sendPostedEvents(nullptr,QEvent::DeferredDelete);
         }
         std::cout<<"Four-spline bridge: G1 preview, both selection orders, errors and recovery passed\n";

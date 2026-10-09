@@ -141,7 +141,7 @@ private:
     void CompleteBodySectionByPlane(Vec3 origin, Vec3 normal);
     bool CompleteBodySectionPlaneObjectPick();
     void CreateSurfaceIntersection();
-    void ProjectCurveToSurface();
+    void ProjectCurveToSurface(bool plane_only = false, bool face_only = false);
     void ExtractSurfaceEdge();
     void ExtractPickedFace();
     void CreateFourSplineSurface();
@@ -343,6 +343,8 @@ private:
         PlaneIntersection,
         SurfaceIntersection,
         ProjectCurveToSurface,
+        ProjectCurveToPlane,
+        ProjectCurveToFace,
         ExtractSurfaceEdge,
         ExtractFace,
         ShellPick,
@@ -501,6 +503,7 @@ private:
     bool nurbs_parameters_modified_ = false;
     CurveEditCommand pending_curve_edit_command_ = CurveEditCommand::None;
     unsigned long pending_curve_cut_target_id_ = 0;
+    unsigned long pending_projection_curve_id_ = 0;
     std::vector<CPoint3d> pending_curve_trim_plane_points_;
     bool plane_three_point_pick_active_ = false;
     bool plane_three_point_method_selected_ = false;

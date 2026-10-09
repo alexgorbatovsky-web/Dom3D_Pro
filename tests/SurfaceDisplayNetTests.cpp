@@ -49,10 +49,12 @@ size_t check_net(CSolid& solid, float tolerance)
 }
 
 void TestSteppedCylinderSpacing();
+void TestCollapsedDisplayPoles();
 
 int TestSurfaceDisplayNet()
 {
     TestSteppedCylinderSpacing();
+    TestCollapsedDisplayPoles();
     TColgp_Array2OfPnt poles(1, 4, 1, 4);
     for (int u = 1; u <= 4; ++u) {
         for (int v = 1; v <= 4; ++v) {
@@ -826,4 +828,48 @@ void TestTwoSketchCornerNormals(const char* path)
         }
     }
     check(tested==1,"Expected one Two_SL solid");
+}
+
+
+#include <Geom_SurfaceOfRevolution.hxx>
+#include <Geom_BezierCurve.hxx>
+#include <BRepBuilderAPI_NurbsConvert.hxx>
+#include <TColgp_Array1OfPnt.hxx>
+#include <chrono>
+
+void TestCollapsedDisplayPoles()
+{
+    for(double height:{5.,110.}) for(bool nurbs:{false,true}) for(bool reverse:{false,true}) {
+        TColgp_Array1OfPnt poles(1,4);
+        poles(1)=gp_Pnt(100,0,0);poles(2)=gp_Pnt(90,0,height*.45);
+        poles(3)=gp_Pnt(50,0,height);poles(4)=gp_Pnt(0,0,height);
+        Handle(Geom_BezierCurve) meridian=new Geom_BezierCurve(poles);
+        Handle(Geom_SurfaceOfRevolution) geometry=new Geom_SurfaceOfRevolution(meridian,gp_Ax1(gp_Pnt(),gp_Dir(0,0,1)));
+        TopoDS_Shape shape=BRepBuilderAPI_MakeFace(geometry,1.e-7).Shape();
+        if(nurbs)shape=BRepBuilderAPI_NurbsConvert(shape,true).Shape();
+        gp_Trsf rotation;rotation.SetRotation(gp_Ax1(gp_Pnt(7,11,13),gp_Dir(1,2,3)),.79);
+        shape=BRepBuilderAPI_Transform(shape,rotation,false).Shape();
+        if(reverse)shape.Reverse();
+        CSurfaceSet body(shape);body.MeshQuadro=false;
+        const auto start=std::chrono::steady_clock::now();
+        check(body.ReBuldMesh(2),"Collapsed display mesh failed");
+        auto* face=body.GetSurfaceFace(0);
+        check(face&&face->pMesh3D&&!face->IsTrimmed,"Collapsed natural face fell back to trimmed mesh");
+        const auto& mesh=*face->pMesh3D;
+        check(mesh.GetVertices().size()<25000,"Pole refinement exhausted the grid budget");
+        size_t quads=0;for(const auto& cell:mesh.GetFaces())if(!cell.deleted&&cell.corners.size()==4)++quads;
+        check(quads>mesh.GetFaces().size()*.9,"Collapsed automatic mesh lost its quad grid");
+        double u0,u1,v0,v1;BRepTools::UVBounds(TopoDS::Face(face->m_Face),u0,u1,v0,v1);
+        gp_Vec expected(0,0,reverse?-1.:1.);expected.Transform(rotation);
+        const auto tip=gp_Pnt(0,0,height).Transformed(rotation);
+        for(int i=0;i<=32;++i) {
+            CPoint8d value;check(face->GetPoint(u0+(u1-u0)*i/32.,v1,&value),"Cannot evaluate pole");
+            const gp_Vec normal(value.l,value.m,value.n);
+            check(std::abs(normal.Magnitude()-1)<1.e-9&&normal.Dot(expected)>1.-1.e-8,"Pole has a noisy or reversed normal");
+            check(gp_Pnt(value.x,value.y,value.z).Distance(tip)<1.e-7,"Normal correction moved the pole");
+        }
+        const auto elapsed=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count();
+        check(elapsed<10000,"Automatic pole mesh took too long");
+        std::cout<<"Automatic pole native="<<!nurbs<<" height="<<height<<" reversed="<<reverse<<": "<<quads<<" quads, "<<elapsed<<" ms\n";
+    }
 }

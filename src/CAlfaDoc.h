@@ -293,12 +293,16 @@ public:
     bool CreateTangentCap(unsigned long curve_id,
                           unsigned long surface_id,
                           double length_factor = 0.55,
-                          std::string* error_message = nullptr);
+                          std::string* error_message = nullptr,
+                          int boundary_edge = -1,
+                          bool tangent = true);
     bool RebuildTangentCap(size_t object_index,
                            unsigned long curve_id,
                            unsigned long surface_id,
                            double length_factor = 0.55,
-                           std::string* error_message = nullptr);
+                           std::string* error_message = nullptr,
+                          int boundary_edge = -1,
+                          bool tangent = true);
     bool JoinSelectedSurfaces();
     size_t CreatePlaneIntersectionCurves(
         std::string* error_message = nullptr);
@@ -312,6 +316,8 @@ public:
                         std::string* error_message = nullptr) const;
     size_t CreateSurfaceIntersectionCurves();
     size_t ProjectSelectedCurveToSurface(Vec3 direction);
+    size_t ProjectCurveToFace(unsigned long curve_id, const TopoDS_Shape& face, Vec3 direction, double tolerance = 0.0);
+    size_t ProjectCurveToPlane(unsigned long curve_id, Vec3 origin, Vec3 normal);
     size_t ExtractSelectedSurfaceEdges(double tolerance = 0.002);
     bool CreateRuledSurfaceFromSpline(unsigned long curve_id,
                                       double length,

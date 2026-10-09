@@ -526,8 +526,10 @@ bool IgesIO::Export(const std::string& path, const CAlfaDoc& document, std::stri
     try {
         IGESControl_Writer writer;
         for (const auto& object : document.GetObjects()) {
+            // Use the same effective visibility as the viewport, including the layer.
+            if (!object || !document.IsObjectVisible(*object)) continue;
             const auto* solid = dynamic_cast<const CSolid*>(object.get());
-            if (solid && solid->IsVisible() && !solid->m_Shape.IsNull()) {
+            if (solid && !solid->m_Shape.IsNull()) {
                 if (!writer.AddShape(solid->m_Shape)) {
                     error = "Could not transfer visible shape to IGES writer.";
                     return false;
@@ -537,7 +539,7 @@ bool IgesIO::Export(const std::string& path, const CAlfaDoc& document, std::stri
             }
 
             const auto* spline = dynamic_cast<const CBSpline*>(object.get());
-            if (spline && spline->IsVisible()) {
+            if (spline) {
                 const TopoDS_Shape curve_shape = make_export_curve_shape(*spline);
                 if (curve_shape.IsNull()) {
                     continue;
