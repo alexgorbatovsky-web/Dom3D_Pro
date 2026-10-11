@@ -1,3 +1,4 @@
+#include "LiveFormSwept.h"
 #include "../solid/FilletEdgeIdentity.h"
 #include "../HybridExtrude.h"
 #include "../solid/SubdivideFace.h"
@@ -23,6 +24,9 @@
 
 #include "../CMesh3D.h"
 #include "../CatmullClarkSurfaceBuilder.h"
+#include "../LiveFormPrimitive.h"
+#include "../LiveFormEdit.h"
+#include "../Tools_Mesh3D.h"
 #include "../CAssembled.h"
 #include "../CFacadeFurniture.h"
 #include "../CFurnitureDrawer.h"
@@ -1998,6 +2002,7 @@ std::vector<ToolParameter> merge_saved_parameters(const std::vector<ToolParamete
                                                   const std::vector<ParametricParameterValue>& saved) {
     std::vector<ToolParameter> parameters = defaults;
     for (ToolParameter& parameter : parameters) {
+        if(parameter.id=="revolve.axis")parameter.value=-1; // Preserve arbitrary axes in older LiveForm histories.
         // Old Shell history predates body-wide thickening: preserve its face scope.
         if(parameter.id=="whole.body")parameter.value=0;
 
@@ -2011,7 +2016,7 @@ std::vector<ToolParameter> merge_saved_parameters(const std::vector<ToolParamete
     // Face placement metadata is not part of the visible primitive defaults.
     // Preserve it when replaying history, including the captured screen margin.
     for (const auto& item : saved) {
-        if ((item.id == "boolean.body_id" || item.id == "boolean.overlap"
+        if ((item.id == "boolean.body_id" || item.id == "boolean.overlap" || item.id.rfind("sweep.path.",0)==0
              || is_geometry_reference_parameter(item.id))
             && std::none_of(parameters.begin(), parameters.end(), [&](const auto& p) { return p.id == item.id; }))
             parameters.push_back({item.id, item.id, item.value, 0.0, 4294967295.0, 0.01});
@@ -3534,6 +3539,13 @@ bool rebuild_solid_operation_tree_in_place(const ToolRegistry& registry,
     }
 
     std::vector<StoredOperation> operations;
+    if (IsLiveForm(*solid) && (HasLiveFormEdits(*solid) || solid->GetOperation(0)->ToolId=="LiveFormMesh")) {
+        if (!active_object.tool_id.empty() && !active_object.parameters.empty())
+            solid->SetParametricOperation(active_object.operation_index,active_object.tool_id,
+                registry.LabelFor(active_object.tool_id),parameter_values(active_object.parameters));
+        std::string error;
+        return RebuildLiveForm(*solid,error);
+    }
     operations.reserve(static_cast<size_t>(solid->GetNumOperations()));
     for (const ParametricFunction* operation : solid->GetOperationTree()) {
         if (!operation || operation->ToolId.empty()) {
@@ -3935,7 +3947,7 @@ bool rebuild_solid_operation_tree(const ToolRegistry& registry,
     auto& objects = document.GetObjects();
     if (active_object.object_index >= objects.size()) return false;
     const auto* body = dynamic_cast<CSolid*>(objects[active_object.object_index].get());
-    if (!has_sewn_base(body) && !has_draft_history(body) && !has_edge_treatment_history(body))
+    if (!(body && IsLiveForm(*body)) && !has_sewn_base(body) && !has_draft_history(body) && !has_edge_treatment_history(body))
         return rebuild_solid_operation_tree_in_place(registry,active_object,document);
 
     // Replaying a base feature can replace the body before a later draft
@@ -8650,6 +8662,66 @@ ToolRegistry::ToolRegistry() {
         }
     });
 
+    {
+        const auto build = [](const std::vector<ToolParameter>& parameters) -> std::unique_ptr<CAlfaObject> {
+            LiveFormPrimitiveParameters p;
+            p.ball = int(std::lround(param(parameters,"type",0))) == 1;
+            p.cylinder = int(std::lround(param(parameters,"type",0))) == 2;
+            p.torus = int(std::lround(param(parameters,"type",0))) == 3;
+            p.torus_major_radius=param(parameters,"torus_major_radius",50);p.torus_minor_radius=param(parameters,"torus_minor_radius",15);
+            p.torus_segments=int(std::lround(param(parameters,"torus_segments",12)));p.torus_sides=int(std::lround(param(parameters,"torus_sides",4)));
+            p.cylinder_sides = int(std::lround(param(parameters,"cylinder_sides",6)));
+            p.length = param(parameters,"length",100); p.width = param(parameters,"width",70);
+            p.height = param(parameters,"height",60); p.radius = param(parameters,"radius",50);
+            p.x_faces = int(std::lround(param(parameters,"x_faces",3)));
+            p.y_faces = int(std::lround(param(parameters,"y_faces",2)));
+            p.z_faces = int(std::lround(param(parameters,"z_faces",2)));
+            p.ball_faces = int(std::lround(param(parameters,"ball_faces",3)));
+            std::string error;
+            auto cage = int(std::lround(param(parameters,"type",0)))==5 ? BuildLiveFormRevolveCage(parameter_values(parameters),error) : int(std::lround(param(parameters,"type",0)))==4 ? BuildLiveFormSweptCage(parameter_values(parameters),error) : BuildLiveFormPrimitiveCage(p);
+            if (!cage) return {};
+            auto solid = Tools_Mesh3D::Subdivide(*cage,error);
+            if (solid) solid->SetName(int(std::lround(param(parameters,"type",0)))==5 ? "LiveForm Revolve" : int(std::lround(param(parameters,"type",0)))==4 ? "LiveForm Swept" : p.torus ? "LiveForm Torus" : p.cylinder ? "LiveForm Cylinder" : p.ball ? "LiveForm Ball" : "LiveForm Box");
+            return solid;
+        };
+        tools_.push_back({"MeshSharpEdges","Sharp Edges",{},[](CAlfaDoc&,const std::vector<ToolParameter>&){},[](CAlfaDoc&,size_t,const std::vector<ToolParameter>&){}});
+        tools_.push_back({"MeshSetSharp","Set Sharp",{},[](CAlfaDoc&,const std::vector<ToolParameter>&){},[](CAlfaDoc&,size_t,const std::vector<ToolParameter>&){}});
+        std::vector<ToolParameter> primitiveParameters{
+            {"type","Type",0,0,5,1,ToolParameterType::Combo,{"Box","Ball","Cylinder","Torus","Swept","Revolve"}},
+            {"length","Length",100,1,10000,1,ToolParameterType::Number,{},ToolParameterUnit::Length},
+            {"width","Width",70,1,10000,1,ToolParameterType::Number,{},ToolParameterUnit::Length},
+            {"height","Height",60,1,10000,1,ToolParameterType::Number,{},ToolParameterUnit::Length},
+            {"x_faces","Length Faces",3,1,8,1},
+            {"y_faces","Width Faces",2,1,8,1},
+            {"z_faces","Height Faces",2,1,8,1},
+            {"radius","Radius",50,1,10000,1,ToolParameterType::Number,{},ToolParameterUnit::Length},
+            {"ball_faces","Faces per Side",3,1,8,1},
+            {"cylinder_sides","Sides (even)",6,4,32,2},
+            {"torus_major_radius","Ring Radius",50,1,10000,1,ToolParameterType::Number,{},ToolParameterUnit::Length},
+            {"torus_minor_radius","Tube Radius",15,.1,9500,1,ToolParameterType::Number,{},ToolParameterUnit::Length},
+            {"torus_segments","Ring Segments",12,4,32,1},
+            {"torus_sides","Tube Segments",4,4,16,1},
+            {"sweep.guide.id","Guide Spline",0,0,1.e10,1,ToolParameterType::Combo,{"Select guide spline"}},
+            {"sweep.segments","Guide Divisions",8,1,64,1},
+            {"revolve.axis","Axis",2,-1,2,1,ToolParameterType::Combo,{"Axis X","Axis Y","Axis Z","Custom"},ToolParameterUnit::None},
+            {"revolve.segments","Profile Divisions",8,1,64,1},
+            {"revolve.sides","Sides (even)",8,4,32,2},
+            {"revolve.origin.x","Axis Point X",0,-1.e6,1.e6,1,ToolParameterType::Number,{},ToolParameterUnit::Length},
+            {"revolve.origin.y","Axis Point Y",0,-1.e6,1.e6,1,ToolParameterType::Number,{},ToolParameterUnit::Length},
+            {"revolve.origin.z","Axis Point Z",0,-1.e6,1.e6,1,ToolParameterType::Number,{},ToolParameterUnit::Length},
+            {"revolve.direction.x","Axis Direction X",0,-1.e6,1.e6,.1},
+            {"revolve.direction.y","Axis Direction Y",0,-1.e6,1.e6,.1},
+            {"revolve.direction.z","Axis Direction Z",1,-1.e6,1.e6,.1}};
+        for(auto& parameter:primitiveParameters)if(parameter.id=="revolve.axis")parameter.option_values={0,1,2,-1};
+        for(const auto& parameter:surface_sweep_parameters)
+            if(parameter.id!="auto_orientation" && parameter.id!="section.id" && parameter.id!="guide.id")primitiveParameters.push_back(parameter);
+        tools_.push_back({"LiveFormPrimitives","Primitives",primitiveParameters,
+            [build](CAlfaDoc& doc,const std::vector<ToolParameter>& p){doc.AddObject(build(p));},
+            [build](CAlfaDoc& doc,size_t index,const std::vector<ToolParameter>& p){
+                replace_selected_cushion(doc,index,build(p));
+            }});
+    }
+
     tools_.push_back({
         "MeshCushion",
         "Cushion",
@@ -8760,6 +8832,25 @@ ToolRegistry::ToolRegistry() {
         },
         [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {
         }
+    });
+
+    tools_.push_back({
+        "LiveFormMove", "LiveForm Move / Rotate / Scale", {},
+        [](CAlfaDoc&, const std::vector<ToolParameter>&) {},
+        [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {}
+    });
+    tools_.push_back({"LiveFormExtrude", "LiveForm Extrude", {}, {}, {}});
+    tools_.push_back({"LiveFormEdit", "Edit control mesh", {}, {}, {}});
+    tools_.push_back({"LiveFormMesh", "LiveForm control mesh", {}, {},
+        [](CAlfaDoc& doc,size_t index,const std::vector<ToolParameter>&){
+            if(index<doc.GetObjects().size())if(auto* body=dynamic_cast<CSolid*>(doc.GetObjects()[index].get())){
+                std::string error;RebuildLiveForm(*body,error);
+            }
+        }});
+    tools_.push_back({
+        "MeshSubdivide", "Subdivide", {},
+        [](CAlfaDoc&, const std::vector<ToolParameter>&) {},
+        [](CAlfaDoc&, size_t, const std::vector<ToolParameter>&) {}
     });
 
     tools_.push_back({
@@ -9039,6 +9130,7 @@ ToolRegistry::ToolRegistry() {
         {"rotate.z","Rotate Z",0,-180,180,1,ToolParameterType::Number,{},ToolParameterUnit::Angle},
         {"scale","Scale",1,.05,20,.05}}, [](CAlfaDoc&,const std::vector<ToolParameter>&){}, {}});
     tools_.push_back({"SurfacePointTransform", "Smart Hybrid Transform", {}, [](CAlfaDoc&,const std::vector<ToolParameter>&){}, {}});
+    tools_.push_back({"SurfaceNurbsParameters", "NURBS Surface Parameters", {}, [](CAlfaDoc&,const std::vector<ToolParameter>&){}, {}});
     tools_.push_back({"SurfaceKnots", "Increase Surface Knots", {}, [](CAlfaDoc&,const std::vector<ToolParameter>&){}, {}});
     tools_.push_back({"SurfaceGraphOffset", "Region Offset by Graphs", {}, [](CAlfaDoc&,const std::vector<ToolParameter>&){}, {}});
     tools_.push_back({"SurfaceBoundaryGraph", "Boundary on Surface", {}, [](CAlfaDoc&,const std::vector<ToolParameter>&){}, {}});
@@ -9618,6 +9710,7 @@ ActiveParametricObject ToolRegistry::Activate(const std::string& id, CAlfaDoc& d
 
     std::vector<ToolParameter> parameters =
         prepare_material_parameters(document, tool->defaults);
+    if(id=="LiveFormPrimitives")PrepareLiveFormSweep(document,parameters,true);
     if (id == "window" || id == "door") {
         set_tool_parameter_value(
             parameters, "host.wall.id",
@@ -9626,7 +9719,7 @@ ActiveParametricObject ToolRegistry::Activate(const std::string& id, CAlfaDoc& d
     const size_t object_count_before = document.GetObjects().size();
     try { tool->create(document, parameters); }
     catch(const TileBuildError& error){QMessageBox::warning(nullptr,"Tile",error.what());return {};}
-    if ((id == "SolidSheet" || id == "SolidContourPanel" || id == "SurfaceBulge" || id == "SurfaceSaddle") && document.GetObjects().size() <= object_count_before) return {};
+    if ((id == "LiveFormPrimitives" || id == "SolidSheet" || id == "SolidContourPanel" || id == "SurfaceBulge" || id == "SurfaceSaddle") && document.GetObjects().size() <= object_count_before) return {};
     if (id == "SolidTwoSketches" || id == "SurfaceSweepTwoRails" || id == "SolidSweepTwoRails" || id == "SurfaceSweptTool") {
         if (document.GetObjects().size() <= object_count_before) {
             return {};
@@ -9726,7 +9819,7 @@ ActiveParametricObject ToolRegistry::CreateParametricObject(const std::string& i
     const size_t object_count_before = document.GetObjects().size();
     try { tool->create(document, prepared.parameters); }
     catch(const TileBuildError& error){QMessageBox::warning(nullptr,"Tile",error.what());return {};}
-    if ((id == "SolidSheet" || id == "SolidContourPanel" || id == "SurfaceBulge" || id == "SurfaceSaddle") && document.GetObjects().size() <= object_count_before) return {};
+    if ((id == "LiveFormPrimitives" || id == "SolidSheet" || id == "SolidContourPanel" || id == "SurfaceBulge" || id == "SurfaceSaddle") && document.GetObjects().size() <= object_count_before) return {};
     if (id == "SolidTwoSketches" || id == "SurfaceSweepTwoRails" || id == "SolidSweepTwoRails" || id == "SurfaceSweptTool") {
         if (document.GetObjects().size() <= object_count_before) {
             return {};
@@ -9760,11 +9853,9 @@ ActiveParametricObject ToolRegistry::PrepareParametricObject(
     if (!tool || !tool->create || parameters.empty()) {
         return {};
     }
-    return {
-        tool->id,
-        std::numeric_limits<size_t>::max(),
-        0,
-        prepare_material_parameters(document, parameters)};
+    auto prepared=prepare_material_parameters(document,parameters);
+    if(id=="LiveFormPrimitives")PrepareLiveFormSweep(document,prepared);
+    return {tool->id,std::numeric_limits<size_t>::max(),0,std::move(prepared)};
 }
 
 ActiveParametricObject ToolRegistry::ApplyTrimToSelection(
@@ -10266,6 +10357,14 @@ bool ToolRegistry::TryRebuildNSidedSurface(const ActiveParametricObject& active,
 }
 
 void ToolRegistry::Rebuild(const ActiveParametricObject& active_object, CAlfaDoc& document) const {
+    if(active_object.tool_id=="LiveFormPrimitives") {
+        auto active=active_object;std::string error;RebuildLiveFormPrimitive(document,active,error);return;
+    }
+    if(active_object.object_index<document.GetObjects().size())
+        if(auto* body=dynamic_cast<CSolid*>(document.GetObjects()[active_object.object_index].get());
+            body&&IsLiveForm(*body)&&HasLiveFormEdits(*body)) {
+            rebuild_solid_operation_tree(*this,active_object,document);return;
+        }
     if (active_object.tool_id == "SurfaceNSided") {
         std::string error; TryRebuildNSidedSurface(active_object,document,error); return;
     }
@@ -10978,6 +11077,7 @@ ActiveParametricObject ToolRegistry::ActiveObjectFromDocument(
             for(auto& p:parameters)if(p.type==ToolParameterType::Graph)p.enabled=enabled;
         }
     }
+    if(tool_id=="LiveFormPrimitives" && document)PrepareLiveFormSweep(*document,parameters);
     return {tool_id, object_index, operation_index, std::move(parameters)};
 }
 

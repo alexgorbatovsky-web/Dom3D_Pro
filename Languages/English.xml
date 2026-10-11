@@ -1,4 +1,4 @@
-<?xml version='1.0' encoding='UTF-8'?>
+﻿<?xml version='1.0' encoding='UTF-8'?>
 <ClassArray.TextItem>
   <TextItem>
     <ID>BlinnPhongLighting</ID>
@@ -10475,7 +10475,7 @@ If the fillet cannot be built, check the radius and the selected geometry.</Text
   <TextItem><ID>SurfaceBulge_HINT</ID><Text>Select a panel surface, then set Bulge Height. Positive values raise the middle along the surface normal; negative values create a recess. The boundary stays fixed. Apply Shell and fillets to the resulting surface.</Text></TextItem>
   <TextItem><ID>BulgeHeightLabel</ID><Text>Bulge Height</Text></TextItem>
   <TextItem><ID>MeshImageRelief</ID><Text>Image Relief</Text></TextItem>
-  <TextItem><ID>MeshImageRelief_HINT</ID><Text>Select one face of the vase and load a flat ornament image. Inspect Quick Preview, then build the final mesh at the requested spacing. Other faces receive no relief. Open shells remain open.</Text></TextItem>
+  <TextItem><ID>MeshImageRelief_HINT</ID><Text>Select one surface face and load an ornament image. Inspect Quick Preview, then build the final mesh with the required spacing. Only the selected face receives relief.</Text></TextItem>
   <TextItem><ID>ImageReliefHelp</ID><Text>Wrap a height image around the vase: white is raised, black stays on the surface. Use a flat ornament image; photo shadows also become relief.</Text></TextItem>
   <TextItem><ID>ImageReliefOpen</ID><Text>Open ornament image...</Text></TextItem>
   <TextItem><ID>ImageReliefSpacing</ID><Text>Mesh spacing (mm)</Text></TextItem>
@@ -10842,8 +10842,8 @@ If the fillet cannot be built, check the radius and the selected geometry.</Text
   <TextItem><ID>TopologyReset</ID><Text>Select again</Text></TextItem>
   <TextItem><ID>TopologyU</ID><Text>U = constant</Text></TextItem>
   <TextItem><ID>TopologyV</ID><Text>V = constant</Text></TextItem>
-  <TextItem><ID>SurfaceMatch_HINT</ID><Text>Match tangent or curvature continuity along a shared full spline boundary.</Text></TextItem>
-  <TextItem><ID>SurfaceSplitIso_HINT</ID><Text>Split a rectangular surface along a U or V isoline without changing its shape.</Text></TextItem>
+  <TextItem><ID>SurfaceMatch_HINT</ID><Text>Select neighboring surfaces with a shared full spline boundary. Choose tangent or curvature continuity and inspect the preview before confirming the match.</Text></TextItem>
+  <TextItem><ID>SurfaceSplitIso_HINT</ID><Text>Select a complete rectangular surface patch. Choose U or V and position the cutting isoline. The preview shows the seam. Confirm to create two independent surfaces without changing their shape.</Text></TextItem>
   <TextItem><ID>TopologyMatchHelp</ID><Text>Select two patches sharing one complete boundary. The order is shown below. G1/G2 changes nearby control rows; the opposite boundary stays fixed. Rational and trimmed patches are not supported yet.</Text></TextItem>
   <TextItem><ID>TopologySplitHelp</ID><Text>Select a complete rectangular surface patch. The preview seam shows the cut. Two independent surfaces will be created.</Text></TextItem>
   <TextItem><ID>TopologyFirstPicked</ID><Text>First: object %1, face %2. Select the second face.</Text></TextItem>
@@ -10930,10 +10930,7 @@ If the fillet cannot be built, check the radius and the selected geometry.</Text
     <ID>Associative Clone: click a solid; Esc to cancel</ID>
     <Text>Associative Clone: click a solid; Esc to cancel</Text>
   </TextItem>
-  <TextItem>
-    <ID>SurfaceAlignment</ID>
-    <Text>Smart Hybrid Alignment</Text>
-  </TextItem>
+  <TextItem><ID>SurfaceAlignment</ID><Text>Smart Hybrid Alignment</Text></TextItem>
   <TextItem>
     <ID>AlignmentUBias</ID>
     <Text>U distribution</Text>
@@ -10958,10 +10955,7 @@ If the fillet cannot be built, check the radius and the selected geometry.</Text
     <ID>AlignmentPickFace</ID>
     <Text>Click a face in the viewport. The yellow grid will appear on the accepted face.</Text>
   </TextItem>
-  <TextItem>
-    <ID>SurfaceMoveSeam</ID>
-    <Text>Move Surface Seam</Text>
-  </TextItem>
+  <TextItem><ID>SurfaceMoveSeam</ID><Text>Move Surface Seam</Text></TextItem>
   <TextItem>
     <ID>SeamPosition</ID>
     <Text>Seam position</Text>
@@ -10982,10 +10976,7 @@ If the fillet cannot be built, check the radius and the selected geometry.</Text
     <ID>SeamReady</ID>
     <Text>Preview ready. Move the seam position, then click OK. 50% restores the original boundary.</Text>
   </TextItem>
-  <TextItem>
-    <ID>SurfaceBoundaryGraph</ID>
-    <Text>Boundary on Surface</Text>
-  </TextItem>
+  <TextItem><ID>SurfaceBoundaryGraph</ID><Text>Boundary on Surface</Text></TextItem>
   <TextItem>
     <ID>BoundaryCapture</ID>
     <Text>Use selected region</Text>
@@ -11082,10 +11073,7 @@ If the fillet cannot be built, check the radius and the selected geometry.</Text
     <ID>BoundaryMirrorOverlap</ID>
     <Text>The selected and mirrored strips overlap. Choose a region on one side of the symmetry plane.</Text>
   </TextItem>
-  <TextItem>
-    <ID>SurfaceGraphOffset</ID>
-    <Text>Region Offset by Graphs</Text>
-  </TextItem>
+  <TextItem><ID>SurfaceGraphOffset</ID><Text>Region Offset by Graphs</Text></TextItem>
   <TextItem>
     <ID>GraphOffsetHint</ID>
     <Text>Select a rectangular region of faces (one or more rows). Offset = coefficient x U graph x V graph, along the surface normal. The perimeter stays fixed. Both graphs affect the entire region.</Text>
@@ -11126,10 +11114,7 @@ If the fillet cannot be built, check the radius and the selected geometry.</Text
     <ID>GraphOffsetQuad</ID>
     <Text>Select a rectangular region of four-sided faces without holes.</Text>
   </TextItem>
-  <TextItem>
-    <ID>SurfaceKnots</ID>
-    <Text>Increase Surface Knots</Text>
-  </TextItem>
+  <TextItem><ID>SurfaceKnots</ID><Text>Increase Surface Knots</Text></TextItem>
   <TextItem>
     <ID>SurfaceKnotsHint</ID>
     <Text>Select one or more NURBS faces. Add knots per existing interval in U and V. Shape, boundaries and degree stay unchanged. Yellow lines show the control net, which may lie outside the surface.</Text>
@@ -11162,10 +11147,7 @@ If the fillet cannot be built, check the radius and the selected geometry.</Text
     <ID>SurfaceShowPoints</ID>
     <Text>Show Points</Text>
   </TextItem>
-  <TextItem>
-    <ID>SurfacePointTransform</ID>
-    <Text>Smart Hybrid Transform</Text>
-  </TextItem>
+  <TextItem><ID>SurfacePointTransform</ID><Text>Smart Hybrid Transform</Text></TextItem>
   <TextItem>
     <ID>SurfacePointTransformCapture</ID>
     <Text>Use selected surface</Text>
@@ -11286,4 +11268,111 @@ If the fillet cannot be built, check the radius and the selected geometry.</Text
 <TextItem><ID>The supports disagree at a shared corner. Adjust the surfaces or reduce continuity on an adjacent side.</ID><Text>The supports disagree at a shared corner. Adjust the surfaces or reduce continuity on an adjacent side.</Text></TextItem>
 <TextItem><ID>Cannot satisfy the requested G1/G2 continuity. Check the supports or reduce continuity.</ID><Text>Cannot satisfy the requested G1/G2 continuity. Check the supports or reduce continuity.</Text></TextItem>
 <TextItem><ID>A surface cannot support itself.</ID><Text>A surface cannot support itself.</Text></TextItem>
+<TextItem><ID>LiveFormPrimitives</ID><Text>LiveForm Primitives</Text></TextItem>
+<TextItem><ID>LiveFormPrimitives_HINT</ID><Text>Create a LiveForm primitive and adjust its dimensions and control mesh. Use the LiveForm editing tools to reshape the smooth result.</Text></TextItem>
+<TextItem><ID>Primitives</ID><Text>Primitives</Text></TextItem>
+<TextItem><ID>LiveFormMove</ID><Text>Edit LiveForm</Text></TextItem>
+<TextItem><ID>LiveFormMove_HINT</ID><Text>Select LiveForm control faces. Use the manipulator to move, rotate or scale the selected region and reshape the smooth surface.</Text></TextItem>
+<TextItem><ID>LiveFormExtrude</ID><Text>Extrude LiveForm</Text></TextItem>
+<TextItem><ID>LiveFormExtrude_HINT</ID><Text>Select a region of LiveForm control faces and extrude it. Inspect the new region and the rebuilt smooth form before confirming.</Text></TextItem>
+<TextItem><ID>NURBS Surface Parameters</ID><Text>NURBS Surface Parameters</Text></TextItem>
+<TextItem><ID>SurfaceNurbsParameters</ID><Text>NURBS Surface Parameters</Text></TextItem>
+<TextItem><ID>Degree U</ID><Text>Degree U</Text></TextItem>
+<TextItem><ID>Degree V</ID><Text>Degree V</Text></TextItem>
+<TextItem><ID>Apply NURBS parameters</ID><Text>Apply NURBS parameters</Text></TextItem>
+<TextItem><ID>Selected point weight</ID><Text>Selected point weight</Text></TextItem>
+<TextItem><ID>Click a control point and drag it in the view plane, or use X/Y/Z. Shift adds, Ctrl toggles. Degree elevation and knot insertion preserve the surface. Boundary edits on joined faces must remain watertight.</ID><Text>Click a control point and drag it in the view plane, or use X/Y/Z. Shift adds, Ctrl toggles. Degree elevation and knot insertion preserve the surface. Boundary edits on joined faces must remain watertight.</Text></TextItem>
+<TextItem><ID>Control points: %1 x %2. Selected: %3. Drag a point or use X/Y/Z.</ID><Text>Control points: %1 x %2. Selected: %3. Drag a point or use X/Y/Z.</Text></TextItem>
+<TextItem><ID>Cannot apply this point weight.</ID><Text>Cannot apply this point weight.</Text></TextItem>
+<TextItem><ID>Cannot apply these NURBS parameters.</ID><Text>Cannot apply these NURBS parameters.</Text></TextItem>
+<TextItem><ID>Degree can only be increased without approximation.</ID><Text>Degree can only be increased without approximation.</Text></TextItem>
+<TextItem><ID>Use zero to eight new knots per interval.</ID><Text>Use zero to eight new knots per interval.</Text></TextItem>
+<TextItem><ID>Selected surface points: %1. Drag to move; Shift adds, Ctrl toggles, Esc clears.</ID><Text>Selected surface points: %1. Drag to move; Shift adds, Ctrl toggles, Esc clears.</Text></TextItem>
+<TextItem><ID>NURBS Surface Parameters: edit U/V degrees, insert knots and change control point weights.</ID><Text>NURBS Surface Parameters: edit U/V degrees, insert knots and change control point weights.</Text></TextItem>
+<TextItem><ID>Smart Hybrid Transform: select surface points with a circle or rectangle; use Soft Selection and X/Y/Z to deform the surface.</ID><Text>Smart Hybrid Transform: select surface points with a circle or rectangle; use Soft Selection and X/Y/Z to deform the surface.</Text></TextItem>
+<TextItem><ID>Increase Surface Knots: insert U/V knots to add control points while preserving the surface shape.</ID><Text>Increase Surface Knots: insert U/V knots to add control points while preserving the surface shape.</Text></TextItem>
+<TextItem><ID>Smart Hybrid Alignment: align a surface using reference geometry.</ID><Text>Smart Hybrid Alignment: align a surface using reference geometry.</Text></TextItem>
+<TextItem><ID>Move Surface Seam: reposition the seam of a closed periodic surface.</ID><Text>Move Surface Seam: reposition the seam of a closed periodic surface.</Text></TextItem>
+<TextItem><ID>Boundary on Surface: define and edit a boundary on the selected surface.</ID><Text>Boundary on Surface: define and edit a boundary on the selected surface.</Text></TextItem>
+<TextItem><ID>Region Offset by Graphs: deform a surface region with offsets controlled by graphs.</ID><Text>Region Offset by Graphs: deform a surface region with offsets controlled by graphs.</Text></TextItem>
+<TextItem><ID>Smart Hybrid Extrude: extrude selected surface geometry using the movement gizmo.</ID><Text>Smart Hybrid Extrude: extrude selected surface geometry using the movement gizmo.</Text></TextItem>
+<TextItem><ID>Match Surfaces: adjust adjoining surfaces for the required continuity.</ID><Text>Match Surfaces: adjust adjoining surfaces for the required continuity.</Text></TextItem>
+<TextItem><ID>Split Surface by Isoline: split the selected surface along a U or V isoline.</ID><Text>Split Surface by Isoline: split the selected surface along a U or V isoline.</Text></TextItem>
+<TextItem><ID>Saddle Surface: create a saddle-shaped surface.</ID><Text>Saddle Surface: create a saddle-shaped surface.</Text></TextItem>
+<TextItem><ID>Shoe Upper: create a parametric shoe upper surface.</ID><Text>Shoe Upper: create a parametric shoe upper surface.</Text></TextItem>
+<TextItem><ID>room</ID><Text>Room</Text></TextItem>
+<TextItem><ID>room_HINT</ID><Text>Create a room, then set its dimensions and wall thickness in the parameters. Use Window and Door to place openings in its walls.</Text></TextItem>
+<TextItem><ID>window</ID><Text>Window</Text></TextItem>
+<TextItem><ID>window_HINT</ID><Text>Run the command and click the approximate position on a visible room wall. Adjust the window size and position in the parameters.</Text></TextItem>
+<TextItem><ID>door</ID><Text>Door</Text></TextItem>
+<TextItem><ID>door_HINT</ID><Text>Run the command and click the desired position on a visible room wall. Set the opening dimensions and adjust the door parameters.</Text></TextItem>
+<TextItem><ID>tile</ID><Text>Tile</Text></TextItem>
+<TextItem><ID>tile_HINT</ID><Text>Create a tile layout and adjust its dimensions, pattern and materials in the parameters. Inspect the arrangement in the viewport before finishing.</Text></TextItem>
+<TextItem><ID>chair_simple</ID><Text>Simple Chair</Text></TextItem>
+<TextItem><ID>chair_simple_HINT</ID><Text>Create a chair with a slatted, railed or solid back. Set width, depth, seat height and overall height in the parameters.</Text></TextItem>
+<TextItem><ID>chair</ID><Text>Chair</Text></TextItem>
+<TextItem><ID>chair_HINT</ID><Text>Create a parametric chair. Adjust its dimensions and the seat, back and leg options; inspect the result from different angles.</Text></TextItem>
+<TextItem><ID>cabinet</ID><Text>Cabinet</Text></TextItem>
+<TextItem><ID>cabinet_HINT</ID><Text>Create an open cabinet or a cabinet with one or two doors. Set dimensions, panel thickness, shelves, handles and materials. Use Overhead for a wall-mounted cabinet.</Text></TextItem>
+<TextItem><ID>cabinet_advanced</ID><Text>Advanced Cabinet</Text></TextItem>
+<TextItem><ID>cabinet_advanced_HINT</ID><Text>Create a cabinet with extended construction and facade settings. Adjust the body dimensions, facade design and hardware in the parameters.</Text></TextItem>
+<TextItem><ID>cabinet_showcase</ID><Text>Showcase Cabinet</Text></TextItem>
+<TextItem><ID>cabinet_showcase_HINT</ID><Text>Create a showcase with one or two doors. Choose glass, lattice, muntin bars or stained glass; set shelves, dimensions and door opening angle.</Text></TextItem>
+<TextItem><ID>cabinet_advanced_slx</ID><Text>Cabinet with Catalog Profiles</Text></TextItem>
+<TextItem><ID>cabinet_advanced_slx_HINT</ID><Text>Create a cabinet using catalog frame and panel profiles. Choose cutter and milling pattern profiles if needed, then set milling depth and the handle.</Text></TextItem>
+<TextItem><ID>table</ID><Text>Table</Text></TextItem>
+<TextItem><ID>table_HINT</ID><Text>Create a parametric table. Set the tabletop dimensions and height, then adjust the legs and materials in the parameters.</Text></TextItem>
+<TextItem><ID>desk</ID><Text>Desk</Text></TextItem>
+<TextItem><ID>desk_HINT</ID><Text>Create a desk and adjust its dimensions and construction in the parameters. Inspect the tabletop and supports before finishing.</Text></TextItem>
+<TextItem><ID>drawer_box</ID><Text>Drawer Cabinet</Text></TextItem>
+<TextItem><ID>drawer_box_HINT</ID><Text>Create a cabinet with multiple drawers. Set drawer count and individual heights, facade style and slide clearances; choose materials and handles.</Text></TextItem>
+<TextItem><ID>single_drawer</ID><Text>Single Drawer</Text></TextItem>
+<TextItem><ID>single_drawer_HINT</ID><Text>Create one drawer with a facade. Set width, facade height, depth and slide clearances. Choose Open and Pullout Distance to show the extended drawer.</Text></TextItem>
+<TextItem><ID>single_facade</ID><Text>Single Facade</Text></TextItem>
+<TextItem><ID>single_facade_HINT</ID><Text>Create a separate furniture door or facade. Choose its style, dimensions and thickness, then set the hinge side, opening angle and handle.</Text></TextItem>
+<TextItem><ID>kitchen_layout</ID><Text>Kitchen Layout</Text></TextItem>
+<TextItem><ID>kitchen_layout_HINT</ID><Text>Open the kitchen layout editor to arrange a straight or corner run of modules. After creating it, double-click a module to edit its parameters.</Text></TextItem>
+<TextItem><ID>kitchen_nika_260</ID><Text>Nika 260 Kitchen</Text></TextItem>
+<TextItem><ID>kitchen_nika_260_HINT</ID><Text>Create the Nika 260 kitchen preset. Adjust the available dimensions, facade options and materials in the parameters to suit the room.</Text></TextItem>
+<TextItem><ID>kitchen_corner</ID><Text>Corner Kitchen</Text></TextItem>
+<TextItem><ID>kitchen_corner_HINT</ID><Text>Create a corner kitchen preset. Adjust its dimensions, facades and materials in the parameters; check the arrangement around the corner.</Text></TextItem>
+<TextItem><ID>SurfaceNurbsParameters_HINT</ID><Text>Select one complete NURBS surface. Adjust U/V degrees, insert knots or change a selected point&#x27;s weight. Degree elevation and knot insertion preserve the shape. Apply the parameters, inspect the preview, then click OK.</Text></TextItem>
+<TextItem><ID>SurfacePointTransform_HINT</ID><Text>Select a complete NURBS face and use the selected surface. Choose circle or rectangle selection on the top toolbar, then select points. Enable Soft Selection and adjust the influence graph. Move with X/Y/Z; the two outer control rows stay fixed.</Text></TextItem>
+<TextItem><ID>SurfaceKnots_HINT</ID><Text>Select a surface and set the number of knots to insert in U and V. Additional control points allow finer editing while preserving the original shape. Inspect the preview and confirm.</Text></TextItem>
+<TextItem><ID>SurfaceAlignment_HINT</ID><Text>Click a face of a surface or solid. Adjust U and V to redistribute the yellow parameter lines: positive values concentrate them near the start, negative values near the end. Zero keeps the original spacing. Shape and seams stay fixed.</Text></TextItem>
+<TextItem><ID>SurfaceMoveSeam_HINT</ID><Text>Select two neighboring faces of the same body. Adjust the seam position: 50% keeps the original boundary; smaller values shrink the first face and larger values expand it. Check the yellow seam preview. The body shape stays unchanged.</Text></TextItem>
+<TextItem><ID>SurfaceBoundaryGraph_HINT</ID><Text>Select a connected region of faces and pick its boundary on the model. Click the surface to add spline points, then drag them to shape the new boundary. The body shape is preserved.</Text></TextItem>
+<TextItem><ID>SurfaceGraphOffset_HINT</ID><Text>Select a rectangular region of faces. Set the offset coefficient and shape the U and V graphs. Displacement follows the surface normal and equals coefficient × U graph × V graph. The perimeter stays fixed.</Text></TextItem>
+<TextItem><ID>SurfaceHybridExtrude</ID><Text>Smart Hybrid Extrude</Text></TextItem>
+<TextItem><ID>SurfaceHybridExtrude_HINT</ID><Text>Select connected faces on one body. Drag arrows to move, rings to rotate, or the centre cube to scale. Local Y follows the average normal. Side walls follow the outer boundary; exact geometry updates when you release the mouse.</Text></TextItem>
+<TextItem><ID>MeshCushion</ID><Text>Cushion</Text></TextItem>
+<TextItem><ID>MeshCushion_HINT</ID><Text>Create a cushion mesh. Adjust length, width, height, bevel and segment counts. Enable Hybrid to create Catmull-Clark surfaces.</Text></TextItem>
+<TextItem><ID>MeshFillContour</ID><Text>Fill Contour</Text></TextItem>
+<TextItem><ID>MeshFillContour_HINT</ID><Text>Select a surface and continue in the dialog. Configure the contour filling and inspect the generated mesh before accepting.</Text></TextItem>
+<TextItem><ID>MeshIslandBoundaries</ID><Text>Island Boundaries</Text></TextItem>
+<TextItem><ID>MeshIslandBoundaries_HINT</ID><Text>Run the command and click a trimmed Low Poly surface. Boundary curves are generated for its separate regions. A preselected surface face is also accepted.</Text></TextItem>
+<TextItem><ID>WeldingVertex</ID><Text>Weld Vertices</Text></TextItem>
+<TextItem><ID>WeldingVertex_HINT</ID><Text>Select one or more Mesh3D objects and run the command. Coincident vertices are merged to connect the mesh. Inspect the result along the former seams.</Text></TextItem>
+<TextItem><ID>MeshBoundaryLine</ID><Text>Boundary Line Patch</Text></TextItem>
+<TextItem><ID>MeshBoundaryLine_HINT</ID><Text>Select spline or polyline boundary curves, then open the tool. Set the boundary sampling and build a mesh patch in the dialog.</Text></TextItem>
+<TextItem><ID>SolidLowPoly</ID><Text>Low Poly</Text></TextItem>
+<TextItem><ID>SolidLowPoly_HINT</ID><Text>Select a surface or solid to create a Low Poly representation. Adjust mesh settings in the dialog and inspect the result before confirming.</Text></TextItem>
+<TextItem><ID>MeshSharpEdges</ID><Text>Sharp Edges</Text></TextItem>
+<TextItem><ID>MeshSharpEdges_HINT</ID><Text>Activate the tool and click Low Poly edges to mark them as sharp. Ctrl-click removes a sharp mark. Press Esc to finish editing.</Text></TextItem>
+<TextItem><ID>MeshSetSharp</ID><Text>Set Sharp</Text></TextItem>
+<TextItem><ID>MeshSetSharp_HINT</ID><Text>Select mesh edges, then run the command to mark them as sharp. The marks are applied to the selected edges; Undo restores the previous state.</Text></TextItem>
+<TextItem><ID>MeshSubdivide</ID><Text>Subdivide</Text></TextItem>
+<TextItem><ID>MeshSubdivide_HINT</ID><Text>Select closed meshes made of quadrilateral faces. Create smooth Catmull-Clark B-spline solids; the source meshes are hidden and preserved.</Text></TextItem>
+<TextItem><ID>Do Welding</ID><Text>Do Welding</Text></TextItem>
+<TextItem><ID>Weld vertices when creating the mesh, using the same tolerance as Weld Vertices. Keeps UVs, normals and sharp edges.</ID><Text>Weld vertices when creating the mesh, using the same tolerance as Weld Vertices. Keeps UVs, normals and sharp edges.</Text></TextItem>
+<TextItem><ID>Cannot weld the generated mesh.</ID><Text>Cannot weld the generated mesh.</Text></TextItem>
+<TextItem><ID>Create Surfaces</ID><Text>Create Surfaces</Text></TextItem>
+<TextItem><ID>Edit Surfaces</ID><Text>Edit Surfaces</Text></TextItem>
+<TextItem><ID>Curves</ID><Text>Curves</Text></TextItem>
+<TextItem><ID>Surfaces</ID><Text>Surfaces</Text></TextItem>
+<TextItem><ID>Solids</ID><Text>Solids</Text></TextItem>
+<TextItem><ID>Meshes</ID><Text>Meshes</Text></TextItem>
+<TextItem><ID>Other</ID><Text>Other</Text></TextItem>
+<TextItem><ID>Hide curves in this category</ID><Text>Hide curves in this category</Text></TextItem>
+<TextItem><ID>Show curves in this category</ID><Text>Show curves in this category</Text></TextItem>
 </ClassArray.TextItem>

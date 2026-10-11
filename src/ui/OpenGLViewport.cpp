@@ -5,6 +5,7 @@
 #include "../solid/SolidCylinderTool.h"
 #include <windows.h>
 #include "OpenGLViewport.h"
+#include "../solid/SurfaceDisplay.h"
 #include "CurveCutGeometry.h"
 #include "LanguageManager.h"
 #include "TransformGizmoGeometry.h"
@@ -849,6 +850,7 @@ void OpenGLViewport::SetDocument(CAlfaDoc* document) {
 }
 
 void OpenGLViewport::SetTool(ToolMode tool) {
+    setProperty("meshSharpPainting",false);
     if (tool_!=tool) {
         active_tangent_id_=pending_tangent_id_=0; ++tangent_hover_generation_;
     }
@@ -856,8 +858,10 @@ void OpenGLViewport::SetTool(ToolMode tool) {
     reference_hover_body_ = 0;
     reference_plane_pending_ = false;
     hovered_reference_plane_ = -1;
-    if(tool_==ToolMode::FaceExtrude&&tool!=tool_&&document_&&document_->IsLiveExtrudeSelectedSolidFaceActive())
+    if(tool_==ToolMode::FaceExtrude&&tool!=tool_&&document_&&document_->IsLiveExtrudeSelectedSolidFaceActive()) {
         document_->CancelLiveExtrudeSelectedSolidFace();
+        emit FaceExtrudeEditFinished(false);
+    }
     if (tool_==ToolMode::DraftFace && tool!=tool_ && document_ && document_->IsLiveDraftFaceActive()) {
         document_->CancelLiveDraftFace();
         emit DraftFaceEditFinished(false);
@@ -1316,6 +1320,9 @@ SelectionMode OpenGLViewport::GetSelectionMode() const {
 }
 
 void OpenGLViewport::SetSelectionMode(SelectionMode mode) {
+    if(mode!=SelectionMode::Edge)setProperty("meshSharpPainting",false);
+    if(mode!=SelectionMode::Edge&&document_)for(auto& object:document_->GetObjects())
+        if(auto* mesh=dynamic_cast<CMesh3D*>(object.get()))mesh->ClearSelectedEdges();
     if (selection_mode_ == mode) {
         return;
     }
@@ -4522,6 +4529,13 @@ void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
 }
 
 void OpenGLViewport::mouseDoubleClickEvent(QMouseEvent* event) {
+    if(document_&&tool_==ToolMode::Select&&selection_mode_==SelectionMode::Edge&&event->button()==Qt::LeftButton) {
+        selecting_with_rect_=false;
+        if(property("meshSharpPainting").toBool()){event->accept();return;}
+        const auto action=event->modifiers().testFlag(Qt::ControlModifier)?SelectionAction::Remove
+            :event->modifiers().testFlag(Qt::ShiftModifier)?SelectionAction::Add:SelectionAction::Replace;
+        if(SelectMeshEdgeAt(event->pos(),action,true)){event->accept();return;}
+    }
     const bool direct_curve_edit_tool = tool_ == ToolMode::Select
         || tool_ == ToolMode::EditPoint
         || tool_ == ToolMode::Orbit
@@ -5904,7 +5918,18 @@ void OpenGLViewport::mouseReleaseEvent(QMouseEvent* event) {
             } else if (selection_mode_ == SelectionMode::Face) {
                 document_->SelectSolidFacesInScreenRect(rect, world_to_screen, rect_selection_action_);
             } else if (selection_mode_ == SelectionMode::Edge) {
+                if(rect_selection_action_==SelectionAction::Replace)
+                    for(auto& object:document_->GetObjects())if(auto* mesh=dynamic_cast<CMesh3D*>(object.get()))mesh->ClearSelectedEdges();
                 document_->SelectSolidEdgesInScreenRect(rect, world_to_screen, rect_selection_action_);
+                if(!property("meshSharpPainting").toBool())for(auto& object:document_->GetObjects())
+                    if(auto* mesh=dynamic_cast<CMesh3D*>(object.get());mesh&&document_->IsObjectVisible(*mesh)&&!mesh->IsFrozen()) {
+                        const auto inside=[&](DomPoint p){return p.x>=std::min(rect.left,rect.right)&&p.x<=std::max(rect.left,rect.right)&&p.y>=std::min(rect.top,rect.bottom)&&p.y<=std::max(rect.top,rect.bottom);};
+                        bool hit=false;for(auto e:mesh->GetControlEdges()){DomPoint a,b;
+                            if(world_to_screen(mesh->GetVertices()[e.v1],a)&&world_to_screen(mesh->GetVertices()[e.v2],b)&&inside(a)&&inside(b)) {
+                                mesh->SelectControlEdge(e,rect_selection_action_==SelectionAction::Remove);hit=true;
+                            }}
+                        if(hit)document_->SelectObjectById(mesh->m_id,SelectionAction::Add);
+                    }
             } else if (selection_mode_ == SelectionMode::Point) {
                 document_->SelectCurvePointsInScreenRect(rect, world_to_screen, rect_selection_action_);
             }
@@ -6059,6 +6084,7 @@ void OpenGLViewport::keyPressEvent(QKeyEvent* event) {
     }
 
     if (event->key()==Qt::Key_Escape) {
+        setProperty("meshSharpPainting",false);
         active_tangent_id_=pending_tangent_id_=0; ++tangent_hover_generation_;
         auxiliary_guide_visible_=false; update();
     }
@@ -6466,6 +6492,7 @@ void OpenGLViewport::keyPressEvent(QKeyEvent* event) {
         if (document_) {
             if (cancel_extrude) {
                 document_->CancelLiveExtrudeSelectedSolidFace();
+                emit FaceExtrudeEditFinished(false);
             } else {
                 document_->CancelLiveDraftFace();
                 emit DraftFaceEditFinished(false);
@@ -6477,7 +6504,6 @@ void OpenGLViewport::keyPressEvent(QKeyEvent* event) {
         draft_face_angle_degrees_ = 0.0;
         SetTool(ToolMode::Select);
         emit SelectionChanged();
-        if (cancel_extrude) NotifyDocumentChanged();
         emit StatusTextChanged(
             cancel_extrude ? "Extrude Face canceled" : "Draft Face canceled");
         event->accept();
@@ -6487,6 +6513,7 @@ void OpenGLViewport::keyPressEvent(QKeyEvent* event) {
     if (event->key() == Qt::Key_Escape && document_) {
         if (dragging_face_extrude_) {
             document_->CancelLiveExtrudeSelectedSolidFace();
+            emit FaceExtrudeEditFinished(false);
             dragging_face_extrude_ = false;
             face_extrude_distance_ = 0.0f;
         } else if (dragging_draft_face_) {
@@ -6748,7 +6775,31 @@ void OpenGLViewport::dropEvent(QDropEvent* event) {
     update();
 }
 
+bool OpenGLViewport::SelectMeshEdgeAt(const QPoint& point,SelectionAction action,bool loop) {
+    if(!document_)return false;
+    const auto project=[this](Vec3 world,DomPoint& screen,float& depth){
+        Vec3 forward,right,up;viewport_camera_basis(camera_,forward,right,up);
+        depth=dot(world-camera_position(camera_,orthographic_projection_),forward);
+        return depth>0&&renderer_.WorldToScreen(world,camera_,orthographic_projection_,width(),height(),screen);
+    };
+    unsigned long id=0;int a,b;
+    if(!document_->FindMeshEdgeAtScreen({point.x(),point.y()},project,float(capture_distance_pixels_),id,a,b))return false;
+    ++edge_quick_menu_generation_;
+    if(property("meshSharpPainting").toBool()) {
+        emit MeshSharpEdgeClicked(id,a,b,action==SelectionAction::Remove);
+        update();return true;
+    }
+    auto* mesh=dynamic_cast<CMesh3D*>(document_->FindObjectById(id));
+    const auto edges=loop?mesh->GetEdgeLoop(Edge(a,b)):std::vector<Edge>{Edge(a,b)};
+    if(action==SelectionAction::Replace)document_->ClearSelection();
+    document_->SelectObjectById(id,SelectionAction::Add);
+    for(auto edge:edges)mesh->SelectControlEdge(edge,action==SelectionAction::Remove);
+    emit SelectionChanged();update();return true;
+}
+
 void OpenGLViewport::SelectAt(const QPoint& point, SelectionAction action) {
+    if(selection_mode_==SelectionMode::Edge&&SelectMeshEdgeAt(point,action))return;
+    if(property("meshSharpPainting").toBool())return;
     const int origin_plane = HitReferencePlane(point);
     if (origin_plane >= 0) {
         SelectOriginPlane(origin_plane);
@@ -6798,6 +6849,8 @@ void OpenGLViewport::SelectAt(const QPoint& point, SelectionAction action) {
         if (document_->SelectSolidEdgeAtScreen(
                 screen_point, world_to_screen,
                 static_cast<float>(capture_distance_pixels_), action)) {
+            if(action==SelectionAction::Replace)
+                for(auto& object:document_->GetObjects())if(auto* mesh=dynamic_cast<CMesh3D*>(object.get()))mesh->ClearSelectedEdges();
             fillet_pick_screen_ = point;
             fillet_pick_valid_ = true;
             fillet_anchor_valid_ = false;
@@ -7137,7 +7190,9 @@ void OpenGLViewport::HandleFaceExtrudeClick(const QPoint& point) {
     }
 
     if (document_->GetSelectedSolidFaceCenterAndNormal(face_extrude_center_, face_extrude_normal_) && HitTestFaceExtrudeGizmo(point)) {
+        emit FaceExtrudeEditStarted();
         if (!document_->BeginLiveExtrudeSelectedSolidFace(face_extrude_taper_angle_degrees_)) {
+            emit FaceExtrudeEditFinished(false);
             emit StatusTextChanged("Extrude Face: operation failed");
             return;
         }
@@ -7172,7 +7227,6 @@ void OpenGLViewport::HandleFaceExtrudeClick(const QPoint& point) {
     if (document_->SelectSolidFaceAtScreen(screen_point, project_world)) {
         document_->GetSelectedSolidFaceCenterAndNormal(face_extrude_center_, face_extrude_normal_);
         emit SelectionChanged();
-        NotifyDocumentChanged();
         emit StatusTextChanged("Extrude Face: drag the orange normal gizmo");
         update();
         return;
@@ -7233,7 +7287,7 @@ void OpenGLViewport::CommitFaceExtrudeDrag() {
     face_extrude_distance_ = 0.0f;
     SetTool(ToolMode::Select);
     emit SelectionChanged();
-    if(valid)NotifyDocumentChanged();
+    emit FaceExtrudeEditFinished(valid);
     emit StatusTextChanged(valid?"Extrude Face: done":"Extrude Face: no valid extrusion; original body restored");
 }
 
@@ -10219,6 +10273,10 @@ bool OpenGLViewport::PickModelingPoint(const QPoint& point,
         return ScreenToWorldPlane(point, spatial_curve_plane_origin_,
                                   spatial_curve_plane_normal_, result);
     }
+    // Camera panning/fitting must not silently set the depth of a new curve.
+    // Explicit work planes and geometry snaps above still take precedence.
+    if (spatial_curve_preview_kind_ != SpatialCurvePreviewKind::None)
+        return ScreenToViewPlane(point, {}, result);
     return ScreenToViewPlane(point, camera_.target, result);
 }
 
@@ -10586,9 +10644,9 @@ bool OpenGLViewport::ScreenToCurvePlane(const QPoint& point, CPoint3d& result) {
         if (draw_spline_raw_points_.empty()) {
             // Freehand drawing is a screen-oriented operation. The floor is
             // edge-on in front/side views, so a camera ray cannot intersect
-            // it there. Start the stroke on the view plane through the camera
-            // target; all following samples stay on that same plane.
-            return ScreenToViewPlane(point, camera_.target, result);
+            // it there. Start on the view plane through the world origin;
+            // camera panning must not introduce an arbitrary drawing depth.
+            return ScreenToViewPlane(point, {}, result);
         }
         const CPoint3d& anchor = draw_spline_raw_points_.front();
         return ScreenToViewPlane(
@@ -12885,4 +12943,10 @@ void OpenGLViewport::DrawFaceExtrudePreviewWalls() {
         glBegin(GL_LINES);for(auto p:{line.front(),line.back()}){glVertex3f(p.x,p.y,p.z);p=capPoint(p);glVertex3f(p.x,p.y,p.z);}glEnd();
     }
     glPopAttrib();
+}
+
+bool OpenGLViewport::PointDragPosition(QPoint screen,gp_Pnt anchor,gp_Pnt& result)const{
+    CPoint3d hit;const auto normal=rotate(camera_.orientation,{0,0,-1});
+    if(!ScreenToWorldPlane(screen,{float(anchor.X()),float(anchor.Y()),float(anchor.Z())},normal,hit))return false;
+    result=gp_Pnt(hit.x,hit.y,hit.z);return true;
 }

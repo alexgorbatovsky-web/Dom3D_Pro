@@ -216,11 +216,16 @@ public:
         Material& after_material,
         unsigned long& after_material_id);
 
+    bool PointDragPosition(QPoint screen,gp_Pnt anchor,gp_Pnt& result) const;
 signals:
+    void SurfacePolePressed(unsigned long object_id,int face,int pole,QPoint position);
     void FirstFrameRendered();
+    void FaceExtrudeEditStarted();
+    void FaceExtrudeEditFinished(bool accepted);
     void DraftFaceEditStarted();
     void DraftFaceEditFinished(bool accepted);
     void DocumentChanged();
+    void MeshSharpEdgeClicked(unsigned long object_id, int first, int second, bool remove);
     void SelectionChanged();
     void CurveNodeDeleteRequested();
     void CurveNodeTypeCycleRequested();
@@ -329,6 +334,7 @@ private:
     };
 
     void SelectAt(const QPoint& point, SelectionAction action);
+    bool SelectMeshEdgeAt(const QPoint& point, SelectionAction action, bool loop = false);
     NavigationDrag NavigationDragFor(const QMouseEvent& event) const;
     bool UsesAltNavigationModifier() const;
     void DrawCurveAt(const QPoint& point, Qt::KeyboardModifiers modifiers);

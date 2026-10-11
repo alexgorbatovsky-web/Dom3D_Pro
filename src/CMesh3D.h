@@ -121,6 +121,12 @@ public:
     void SetSharpEdges(std::vector<Edge> edges);
     bool AddSharpEdge(size_t first_vertex, size_t second_vertex);
     void ClearSharpEdges();
+    std::vector<Edge> GetControlEdges() const;
+    std::vector<Edge> GetEdgeLoop(Edge seed) const;
+    const std::vector<Edge>& GetSelectedEdges() const { return selected_edges_; }
+    void ClearSelectedEdges() { selected_edges_.clear(); }
+    void SelectControlEdge(Edge edge, bool remove = false);
+    void RenderEdgeMarks() const;
     int SynchronizeBoundaryVertices(const std::vector<Vec3>& master_points, float tolerance);
     static size_t GetFaceVertexIndex(const Face& face, size_t i);
     static void SetFaceVertexIndex(Face& face, size_t i, size_t v);
@@ -244,6 +250,7 @@ private:
     std::vector<Vec3> normals_;
     std::vector<Face> faces_;
     std::vector<Edge> sharp_edges_;
+    std::vector<Edge> selected_edges_;
     int subdivision_level_ = 0;
     int shading_mode_ = 0;
     mutable std::unique_ptr<CMesh3D> evaluated_mesh_;

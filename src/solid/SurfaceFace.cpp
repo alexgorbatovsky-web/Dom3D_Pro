@@ -3493,10 +3493,17 @@ void CSurfaceFace::RenderDisplayOverlays() const
         if (surface_display::points) {
             // Control points may sit behind their surface. Draw the control cage
             // markers as an overlay, independently of the display isolines.
-            glDisable(GL_DEPTH_TEST);glEnable(GL_POINT_SMOOTH);
+            glDisable(GL_DEPTH_TEST);glDisable(GL_POINT_SMOOTH);
+            const int nu=display_geometry_.u_poles,nv=display_geometry_.v_poles;
+            glLineWidth(1.f);
+            const auto vertex=[&](int u,int v){auto p=display_geometry_.control_points[u*nv+v];glVertex3f(p.x,p.y,p.z);};
+            glColor3f(.60f,.40f,.74f);
+            for(int v=0;v<nv;++v){glBegin(GL_LINE_STRIP);for(int u=0;u<nu;++u)vertex(u,v);glEnd();}
+            glColor3f(.76f,.52f,.69f);
+            for(int u=0;u<nu;++u){glBegin(GL_LINE_STRIP);for(int v=0;v<nv;++v)vertex(u,v);glEnd();}
             const auto drawPoints=[&]{glBegin(GL_POINTS);for(auto p:display_geometry_.control_points)glVertex3f(p.x,p.y,p.z);glEnd();};
-            glPointSize(8.f);glColor3f(.08f,.08f,.08f);drawPoints();
-            glPointSize(5.f);glColor3f(1.f,.72f,.12f);drawPoints();
+            glPointSize(5.f);glColor3f(.08f,.08f,.08f);drawPoints();
+            glPointSize(3.f);glColor3f(.8f,.62f,.8f);drawPoints();
             glEnable(GL_DEPTH_TEST);
         }
         if (surface_display::normals) {

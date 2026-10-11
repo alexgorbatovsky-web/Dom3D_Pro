@@ -223,8 +223,10 @@ set(DOM3D_SOURCES
     src/SurfaceGraphOffsetBuilder.cpp
     src/HybridExtrude.cpp
     src/ui/HybridExtrudeDialog.cpp
+    src/ui/LiveFormHistoryDialog.cpp
     src/SurfacePointTransform.cpp
     src/ui/SurfacePointTransformDialog.cpp
+    src/ui/SurfacePointEditor.cpp
     src/ui/SurfaceKnotsDialog.cpp
     src/ui/SurfaceGraphOffsetDialog.cpp
     src/ui/SurfaceTopologyDialog.cpp
@@ -263,6 +265,10 @@ set(DOM3D_SOURCES
     src/solid/LowPolySharpEdges.cpp
     src/CMeshSubdivision.cpp
     src/CatmullClarkSurfaceBuilder.cpp
+    src/LiveFormSwept.cpp
+    src/LiveFormPrimitive.cpp
+    src/LiveFormEdit.cpp
+    src/MeshEdgeTools.cpp
     src/Tools_Mesh3D.cpp
     src/mesh/ImageRelief.cpp
     src/ui/ImageReliefDialog.cpp
@@ -394,6 +400,7 @@ set(DOM3D_HEADERS
     src/Common.h
     src/CMesh3D.h
     src/CatmullClarkSurfaceBuilder.h
+    src/LiveFormPrimitive.h
     src/Tools_Mesh3D.h
     src/mesh/ImageRelief.h
     src/ui/ImageReliefDialog.h
@@ -933,6 +940,25 @@ if(BUILD_TESTING)
     add_test(NAME BridgeShellQuadro COMMAND CatalogImportTests --test-bridge-shell-quadro
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Bridge_Shell.dom3d")
     set_tests_properties(BridgeShellQuadro PROPERTIES TIMEOUT 90)
+    add_test(NAME ShellLowDensity COMMAND CatalogImportTests --test-shell-low-density
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Shell_LowDensity.dom3d")
+    set_tests_properties(ShellLowDensity PROPERTIES TIMEOUT 90)
+    add_test(NAME MeshSharpTools COMMAND CatalogImportTests --test-scene-persistence --mesh-sharp-tools)
+    set_tests_properties(MeshSharpTools PROPERTIES TIMEOUT 90 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    add_test(NAME FaceToolsUndo COMMAND CatalogImportTests --test-scene-persistence --face-tools-undo)
+    set_tests_properties(FaceToolsUndo PROPERTIES TIMEOUT 90 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    add_test(NAME LiveFormGraphDrag COMMAND CatalogImportTests --test-scene-persistence --liveform-graph-drag)
+    set_tests_properties(LiveFormGraphDrag PROPERTIES TIMEOUT 30 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    add_test(NAME LiveFormSettings COMMAND CatalogImportTests --test-scene-persistence --liveform-settings)
+    set_tests_properties(LiveFormSettings PROPERTIES TIMEOUT 90 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    add_test(NAME LiveFormRevolveOffset COMMAND CatalogImportTests --test-scene-persistence --liveform-revolve-offset "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Revolve_OffsetProfile.dom3d")
+    set_tests_properties(LiveFormRevolveOffset PROPERTIES TIMEOUT 120 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    add_test(NAME LiveFormRevolve COMMAND CatalogImportTests --test-scene-persistence --liveform-revolve)
+    set_tests_properties(LiveFormRevolve PROPERTIES TIMEOUT 120 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    add_test(NAME LiveFormSwept COMMAND CatalogImportTests --test-scene-persistence --liveform-swept)
+    set_tests_properties(LiveFormSwept PROPERTIES TIMEOUT 120 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    add_test(NAME LiveFormMoveUndo COMMAND CatalogImportTests --test-scene-persistence --liveform-move-undo)
+    set_tests_properties(LiveFormMoveUndo PROPERTIES TIMEOUT 90 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     add_test(NAME PillowCadQuadro COMMAND CatalogImportTests --test-pillow-cad-quadro
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Podushka-2.dom3d")
     add_test(NAME FilletMeshNormals COMMAND CatalogImportTests --test-fillet-mesh-normals
@@ -1102,6 +1128,16 @@ if(BUILD_TESTING)
     add_test(NAME BodyPrimitives COMMAND CatalogImportTests --test-scene-persistence --body-primitives)
     add_test(NAME SubdivideExtrude COMMAND CatalogImportTests --test-scene-persistence --subdivide-extrude)
     set_tests_properties(SubdivideExtrude PROPERTIES TIMEOUT 180)
+    add_test(NAME MeshSubdivideSolid COMMAND CatalogImportTests --test-mesh-to-solid
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Mesh_1_2.dom3d"
+        "${CMAKE_CURRENT_BINARY_DIR}/mesh-subdivide-result.dom3d")
+    add_test(NAME LiveFormPrimitives COMMAND CatalogImportTests --test-scene-persistence --liveform-primitives)
+    add_test(NAME LiveFormEdit COMMAND CatalogImportTests --test-scene-persistence --liveform-edit)
+    set_tests_properties(LiveFormEdit PROPERTIES TIMEOUT 180 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    set_tests_properties(LiveFormPrimitives PROPERTIES TIMEOUT 120 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    add_test(NAME MeshSubdivideUI COMMAND CatalogImportTests --test-scene-persistence --mesh-subdivide
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mesh-regression/Mesh_1_2.dom3d")
+    set_tests_properties(MeshSubdivideSolid MeshSubdivideUI PROPERTIES TIMEOUT 120 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     add_test(NAME ExtrudeTaperPreview COMMAND CatalogImportTests --test-scene-persistence --extrude-taper-preview)
     set_tests_properties(ExtrudeTaperPreview PROPERTIES TIMEOUT 60 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     add_test(NAME FilletExtrudeDistance COMMAND CatalogImportTests --test-scene-persistence
@@ -1944,6 +1980,8 @@ if(BUILD_TESTING)
     add_test(NAME LoftSmoothDisplacement COMMAND CatalogImportTests --test-scene-persistence --surface-graph-offset "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/surface-regression/Loft-3_Moved.dom3d" --loft-smooth)
     get_test_property(SurfacePointTransformUI ENVIRONMENT POINT_TRANSFORM_TEST_ENV)
     set_tests_properties(LoftSmoothDisplacement HybridImportedZebra PROPERTIES TIMEOUT 240 ENVIRONMENT "${POINT_TRANSFORM_TEST_ENV}")
+    add_test(NAME SurfaceNurbsUI COMMAND CatalogImportTests --test-scene-persistence --surface-nurbs)
+    set_tests_properties(SurfaceNurbsUI PROPERTIES TIMEOUT 120 ENVIRONMENT "${POINT_TRANSFORM_TEST_ENV}")
     add_executable(SurfacePointTransformTests tests/SurfacePointTransformTests.cpp src/SurfacePointTransform.cpp src/HybridExtrude.cpp)
     target_compile_features(SurfacePointTransformTests PRIVATE cxx_std_17)
     target_include_directories(SurfacePointTransformTests PRIVATE src "${DOM3D_OPENCASCADE_INCLUDE_DIR}")

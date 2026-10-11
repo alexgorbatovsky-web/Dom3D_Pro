@@ -240,6 +240,7 @@ private:
     void ShowLowPolyTool();
     void ShowImageReliefTool();
     void ShowMeshFillContourTool();
+    void SubdivideSelectedMeshes();
     void BeginMeshIslandBoundaryTool();
     void CreateSelectedSurfaceIslandBoundaries();
     void WeldSelectedMeshVertices();

@@ -63,6 +63,15 @@ StructuredBodyPlan PlanStructuredBody(const BoundarySnapshot& s,double density,b
     p.sampling.minimumSegments=shellPatch?1:4;p.sampling.maximumSegments=256;
     p.sampling.maxSegmentLength=diagonal/(12+24*density);
     p.sampling.chordTolerance=diagonal*0.002/(0.25+density);
+    if(shellPatch) {
+        // Low Poly density must be able to request a coarse control cage.
+        // The general quilt floor (12 + 24*density) forced hundreds of cells
+        // on a simple thickened patch even at density 0.1. Scale both length
+        // and chord-error budgets with the requested resolution instead.
+        const double segments=std::max(2.,20.*density);
+        p.sampling.maxSegmentLength=diagonal/segments;
+        p.sampling.chordTolerance=diagonal/(segments*segments);
+    }
     p.eligible=true;return p;
 }
 

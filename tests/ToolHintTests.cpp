@@ -66,6 +66,33 @@ int main(int argc, char** argv) {
     hover(menu, menu.actionGeometry(&shortcut).center());
     check(QToolTip::text().contains("control points"), "Menu action hint missing");
     menu.hide();
+    for(const char* locale : {"English","Russian"}) {
+        check(language.SetLanguage(locale), "Missing mesh hint language");
+        for(const char* key : {"MeshImageRelief","MeshCushion","MeshFillContour","MeshIslandBoundaries","WeldingVertex","MeshBoundaryLine","SolidLowPoly","MeshSharpEdges","MeshSetSharp","MeshSubdivide","LiveFormPrimitives","LiveFormMove","LiveFormExtrude"}) {
+            button.setProperty("toolKey",key);
+            button.setIcon(QIcon(QString(":/icons/%1.svg").arg(key)));
+            check(!button.icon().pixmap(32,32).isNull(),"Missing mesh icon");
+            hover(button);
+            check(QToolTip::text().contains("<table") && QToolTip::text().contains("data:image/png;base64,"),"Mesh command has no illustrated hint");
+            check(language.Text(QString(key)+"_HINT").size()>60,"Mesh command needs usage instructions");
+        }
+    }
+    // New palette commands must use the same illustrated card as older tools.
+    for(const char* locale : {"English", "Russian"}) {
+        check(language.SetLanguage(locale), "Missing presentation language");
+        for(const char* key : {"room", "window", "door", "tile", "chair_simple", "chair", "cabinet", "cabinet_advanced", "cabinet_showcase", "cabinet_advanced_slx", "table", "desk", "drawer_box", "single_drawer", "single_facade", "kitchen_layout", "kitchen_nika_260", "kitchen_corner", "SurfaceNurbsParameters", "SurfacePointTransform", "SurfaceKnots", "SurfaceAlignment", "SurfaceMoveSeam", "SurfaceBoundaryGraph", "SurfaceGraphOffset", "SurfaceHybridExtrude", "SurfaceMatch", "SurfaceSplitIso"}) {
+            button.setProperty("toolKey", key);
+            button.setIcon(QIcon(QString(":/icons/%1.svg").arg(key)));
+            hover(button);
+            const auto text=QToolTip::text();
+            check(text.contains("<table") && text.contains("<b>"), "New command has a plain tooltip");
+            check(text.contains("data:image/png;base64,"), "New command has no illustrated icon");
+            check(language.Text(QString(key)+"_HINT").size()>60, "New command has no usage instructions");
+            if(argc>1 && QString(locale)=="Russian" && (QString(key)=="SurfaceHybridExtrude" || QString(key)=="cabinet_showcase" || QString(key)=="room"))
+                for(auto* widget:app.topLevelWidgets())if(widget->objectName()=="qtooltip_label")
+                    check(widget->grab().save(QString::fromLocal8Bit(argv[1])+"."+key+".png"), "Cannot save new tooltip");
+        }
+    }
     button.setProperty("toolKey", "NoAuthoredHint");
     button.setToolTip("Existing tooltip");
     hover(button);

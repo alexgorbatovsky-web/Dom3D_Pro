@@ -7,6 +7,16 @@
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakeSphere.hxx>
 #include "Tools_Mesh3D.h"
+#include "CatmullClarkSurfaceBuilder.h"
+#include <TopExp.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
+#include <TopTools_ListIteratorOfListOfShape.hxx>
+#include <TopoDS.hxx>
+#include <BRep_Tool.hxx>
+#include <Geom2d_Curve.hxx>
+#include <BRepCheck_Analyzer.hxx>
+#include <BRepGProp.hxx>
+#include <GProp_GProps.hxx>
 #include "CPolyline.h"
 #include "ContourQuadrangulator3DCoat.h"
 #include "solid/SurfaceFace.h"
@@ -1183,6 +1193,87 @@ void TestObjSharpEdges() {
     Check(io.Import(direct,loaded,error),error);Check(loaded.size()==1,"Direct OBJ import failed");verify(*loaded.front());
     Check(source->GetNormals().empty() && source->GetSharpEdges().size()==1,"Export mutated source mesh");
     std::cout<<"OBJ Sharp edges: s/vn, smooth neighbors, offsets, direct export and exact flag roundtrip passed.\n";
+}
+
+// Compare actual CAD derivatives on both sides of each sewn edge, independent
+// of display tessellation or interpolated rendering normals.
+double SubdivideSeamRms(const TopoDS_Shape& shape) {
+    TopTools_IndexedDataMapOfShapeListOfShape adjacency;
+    TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, adjacency);
+    double squared = 0., maximum = 0.;
+    size_t count = 0;
+    for (int index = 1; index <= adjacency.Extent(); ++index) {
+        const auto& owners = adjacency.FindFromIndex(index);
+        Check(owners.Extent() == 2, "Subdivision seam is not manifold");
+        TopTools_ListIteratorOfListOfShape owner(owners);
+        const auto a = TopoDS::Face(owner.Value()); owner.Next();
+        const auto b = TopoDS::Face(owner.Value());
+        const auto edge = TopoDS::Edge(adjacency.FindKey(index));
+        double a0, a1, b0, b1;
+        const auto ca = BRep_Tool::CurveOnSurface(edge, a, a0, a1);
+        const auto cb = BRep_Tool::CurveOnSurface(edge, b, b0, b1);
+        Check(!ca.IsNull() && !cb.IsNull(), "Missing edge pcurve");
+        BRepAdaptor_Surface sa(a), sb(b);
+        for (int sample = 1; sample < 100; ++sample) {
+            const double t = a0 + (a1 - a0) * sample / 100.;
+            const auto ua = ca->Value(t), ub = cb->Value(t);
+            gp_Pnt pa, pb;
+            gp_Vec au, av, bu, bv;
+            sa.D1(ua.X(), ua.Y(), pa, au, av);
+            sb.D1(ub.X(), ub.Y(), pb, bu, bv);
+            Check(pa.Distance(pb) < 1.e-3, "Subdivision seam has a gap");
+            const auto na = au.Crossed(av).Normalized(), nb = bu.Crossed(bv).Normalized();
+            const double angle = std::acos(std::clamp(std::abs(na.Dot(nb)), 0., 1.)) * 180. / 3.141592653589793;
+            squared += angle * angle; maximum = std::max(maximum, angle); ++count;
+        }
+    }
+    Check(count > 0, "No subdivision seams measured");
+    const double rms = std::sqrt(squared / count);
+    std::cout << "seam normals RMS=" << rms << " max=" << maximum << " degrees" << std::endl;
+    return rms;
+}
+
+void TestMeshToSolid(const char* input, const char* output) {
+    CAlfaDoc doc;
+    Dom3DProjectSerializer serializer;
+    ProjectViewState view;
+    QString room, error;
+    Check(serializer.Load(QString::fromLocal8Bit(input), doc, room, view, error), error.toStdString());
+    std::vector<std::unique_ptr<CSolid>> results;
+    for (const auto& object : doc.GetObjects()) {
+        if (auto* mesh = dynamic_cast<CMesh3D*>(object.get())) {
+            std::cout << mesh->GetName() << ": vertices=" << mesh->GetVertices().size()
+                << " faces=" << mesh->GetFaces().size() << " sharp=" << mesh->GetSharpEdges().size() << std::endl;
+            std::string failure;
+            auto result = Tools_Mesh3D::Subdivide(*mesh, failure);
+            Check(bool(result), failure);
+            Check(result->m_Shape.ShapeType() == TopAbs_SOLID && BRepCheck_Analyzer(result->m_Shape).IsValid(), "Invalid solid");
+            const auto legacy = BuildCatmullClarkSurfaceBody(*mesh);
+            Check(legacy.solid, "Legacy subdivision failed");
+            std::cout << "Two steps: ";
+            const double oldRms = SubdivideSeamRms(legacy.shape);
+            std::cout << "Three steps: ";
+            const double newRms = SubdivideSeamRms(result->m_Shape);
+            Check(newRms < oldRms, "Three steps must improve seam normals on reference meshes");
+            GProp_GProps props;
+            BRepGProp::VolumeProperties(result->m_Shape, props);
+            Check(props.Mass() > 0., "Nonpositive solid volume");
+            std::cout << "solid faces=" << result->GetNumSurfaces() << " volume=" << props.Mass() << std::endl;
+            results.push_back(std::move(result));
+            mesh->SetVisible(false);
+        }
+    }
+    Check(results.size() == 2, "Expected two source meshes");
+    for (auto& result : results) doc.AddObject(std::move(result));
+    Check(serializer.Save(QString::fromLocal8Bit(output), doc, room, view, {}, error), error.toStdString());
+    CAlfaDoc restored;
+    Check(serializer.Load(QString::fromLocal8Bit(output), restored, room, view, error), error.toStdString());
+    Check(restored.GetObjects().size() == doc.GetObjects().size(), "Roundtrip object count");
+    CMesh3D open;
+    Check(open.SetGeometry({{0,0,0},{1,0,0},{1,1,0},{0,1,0}}, {{0,1,2,3}}), "Open fixture");
+    std::string failure;
+    Check(!Tools_Mesh3D::Subdivide(open, failure) && !failure.empty(), "Open mesh must not become solid");
+    std::cout << "Mesh to solid and save/load passed" << std::endl;
 }
 
 #include "SlxAudit.inc"

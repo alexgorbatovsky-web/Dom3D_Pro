@@ -201,6 +201,7 @@ public:
                 this, [this]() { UpdateTranslation(); });
     }
 
+    std::function<void()> editing_started, editing_finished;
     std::function<int()> current_position;
     std::function<void(int)> apply_position;
     double drag_speed = 2.0;
@@ -210,6 +211,7 @@ protected:
     void mousePressEvent(QMouseEvent* event) override {
         if (event->button() == Qt::LeftButton && current_position) {
             dragging_ = true;
+            if(editing_started)editing_started();
             drag_start_x_ = event->globalPosition().x();
             drag_start_position_ = current_position();
             event->accept();
@@ -244,7 +246,8 @@ protected:
 
     void mouseReleaseEvent(QMouseEvent* event) override {
         if (event->button() == Qt::LeftButton) {
-            dragging_ = false;
+            const bool was_dragging=dragging_;dragging_ = false;
+            if(was_dragging&&editing_finished)editing_finished();
             event->accept();
             return;
         }
@@ -510,7 +513,7 @@ bool IsSliderParameter(const ActiveParametricObject& active,
         return false;
     }
     const std::string& tool_id = active.tool_id;
-    return tool_id == "SolidBeamTool"
+    return tool_id == "LiveFormPrimitives" || tool_id == "SolidBeamTool"
         || (tool_id == "SurfaceTwoView" && parameter.id == "cap.length")
         || (tool_id == "Body1" && (parameter.id == "cap.length" || parameter.id.rfind("corner.radius.",0)==0))
         || tool_id == "SurfaceTangentCap"
@@ -734,6 +737,24 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
             const auto count=std::find_if(active_object_.parameters.begin(),active_object_.parameters.end(),
                 [](const auto& p){return p.id=="curve.count";});
             if (count==active_object_.parameters.end() || std::atoi(parameter.id.c_str()+7)>int(count->value)) continue;
+        }
+        if (active_object_.tool_id == "LiveFormMesh" || active_object_.tool_id == "LiveFormEdit") continue;
+        if (active_object_.tool_id == "LiveFormPrimitives" && parameter.id != "type") {
+            const auto type = std::find_if(active_object_.parameters.begin(),active_object_.parameters.end(),
+                [](const auto& p){return p.id == "type";});
+            const int kind = type == active_object_.parameters.end() ? 0 : int(std::lround(type->value));
+            const auto& id=parameter.id;
+            const bool visible=kind==5 ? (id=="sweep.guide.id"||id.rfind("revolve.",0)==0)
+                : kind==4 ? (id=="sweep.guide.id"||id=="sweep.segments"||id=="width"||id=="height"||id=="dx"||id=="dy"||id=="angle"||id=="twist_angle"||id=="end_scale"||id=="width.graph"||id=="height.graph")
+                : kind==3 ? id.rfind("torus_",0)==0
+                : kind==2 ? (id=="radius"||id=="height"||id=="z_faces"||id=="cylinder_sides")
+                : kind==1 ? (id=="radius"||id=="ball_faces")
+                : (id=="length"||id=="width"||id=="height"||id=="x_faces"||id=="y_faces"||id=="z_faces");
+            if (!visible) continue;
+            if(kind==5&&(id.rfind("revolve.origin.",0)==0||id.rfind("revolve.direction.",0)==0)) {
+                const auto axis=std::find_if(active_object_.parameters.begin(),active_object_.parameters.end(),[](const auto& p){return p.id=="revolve.axis";});
+                if(axis!=active_object_.parameters.end()&&axis->value>=0)continue;
+            }
         }
         if (IsInternalPlacementParameter(parameter)
             || !IsPlaneParameterVisible(active_object_, parameter)
@@ -965,6 +986,7 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
                     : static_cast<double>(index);
                 emit ParametersChanged();
                 if (rebuild_plane_form || rebuild_catalog_form || rebuild_fillet_form
+                    || (active_object_.tool_id=="LiveFormPrimitives" && (parameter.id=="type"||parameter.id=="revolve.axis"))
                     || (active_object_.tool_id=="SurfaceTwoView"&&parameter.id=="two.guides")) {
                     QTimer::singleShot(0, this, [this]() {
                         SetActiveObject(active_object_);
@@ -972,7 +994,9 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
                     });
                 }
             });
-            form_->addRow(QString::fromStdString(parameter.label), editor);
+            const bool revolveProfile=active_object_.tool_id=="LiveFormPrimitives" && parameter.id=="sweep.guide.id"
+                && std::any_of(active_object_.parameters.begin(),active_object_.parameters.end(),[](const auto& p){return p.id=="type"&&int(p.value)==5;});
+            form_->addRow(revolveProfile?QString("Profile Spline"):QString::fromStdString(parameter.label), editor);
             continue;
         }
 
@@ -1023,15 +1047,16 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
                         active_object_.parameters[parameter_indices[point]].value = values[point];
                     }
                 };
-                graph->values_changed = [this, store_values, fillet_law](
+                const bool rebuild_on_release = fillet_law || active_object_.tool_id == "LiveFormPrimitives";
+                graph->setObjectName("ScaleGraphEditor");
+                graph->values_changed = [this, store_values, rebuild_on_release](
                                             const std::vector<double>& values) {
                     store_values(values);
-                    // A radius-law fillet is much more expensive than the
-                    // generic scale graphs. Keep the graph responsive while
-                    // dragging and rebuild the solid once on mouse release.
-                    if (!fillet_law) emit ParametersChanged();
+                    // NURBS/fillet reconstruction must not block each mouse move.
+                    // Store all graph changes, then rebuild once on release.
+                    if (!rebuild_on_release) emit ParametersChanged();
                 };
-                if (fillet_law) {
+                if (rebuild_on_release) {
                     graph->editing_finished = [this, store_values](
                                                   const std::vector<double>& values) {
                         store_values(values);
@@ -1060,7 +1085,8 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
         const bool solid_transform_angle = active_object_.tool_id == "SolidTransform" && parameter.id == "angle";
         const bool degree_parameter = parameter.unit == ToolParameterUnit::Angle;
         const bool length_parameter = IsLengthParameter(parameter);
-        const bool integer_parameter = IsIntegerParameter(parameter);
+        const bool integer_parameter = IsIntegerParameter(parameter) || (active_object_.tool_id=="LiveFormPrimitives" &&
+            (parameter.id=="x_faces"||parameter.id=="y_faces"||parameter.id=="z_faces"||parameter.id=="ball_faces"||parameter.id=="cylinder_sides"||parameter.id=="torus_segments"||parameter.id=="torus_sides"||parameter.id=="sweep.segments"||parameter.id=="revolve.segments"||parameter.id=="revolve.sides"));
         const DisplayLengthUnit display_unit = LoadDisplayLengthUnit();
         const double display_factor = solid_transform_angle
             ? radians_to_degrees
@@ -1075,10 +1101,23 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
             ? QString::fromUtf8("°") : QString());
         editor->setValue(parameter.value * display_factor);
         const bool use_drag_label = IsSliderParameter(active_object_, parameter);
-        connect(editor, &QDoubleSpinBox::valueChanged, this, [this, i, display_factor](double value) {
+        if(active_object_.tool_id=="LiveFormPrimitives"&&(parameter.id=="cylinder_sides"||parameter.id=="revolve.sides"||parameter.id=="revolve.segments"))editor->setDecimals(0);
+        if(active_object_.tool_id=="LiveFormPrimitives"&&(parameter.id=="torus_segments"||parameter.id=="torus_sides"||parameter.id=="sweep.segments"))editor->setDecimals(0);
+        connect(editor, &QDoubleSpinBox::valueChanged, this, [this, i, display_factor, editor](double value) {
             ToolParameter& changed =
                 active_object_.parameters[static_cast<size_t>(i)];
             changed.value = value / display_factor;
+            if(active_object_.tool_id=="LiveFormPrimitives"&&(changed.id=="torus_major_radius"||changed.id=="torus_minor_radius")) {
+                const bool major=changed.id=="torus_major_radius";
+                for(const auto& p:active_object_.parameters)if(p.id==(major?"torus_minor_radius":"torus_major_radius")) {
+                    changed.value=major?std::max(changed.value,p.value/.95):std::min(changed.value,p.value*.95);
+                    const QSignalBlocker blocker(editor);editor->setValue(changed.value*display_factor);break;
+                }
+            }
+            if(active_object_.tool_id=="LiveFormPrimitives"&&(changed.id=="cylinder_sides"||changed.id=="revolve.sides")) {
+                changed.value=std::clamp(2.*std::round(changed.value/2.),4.,32.);
+                const QSignalBlocker blocker(editor);editor->setValue(changed.value);
+            }
             if (active_object_.tool_id == "cabinet_advanced_slx"
                 && changed.id == "panel_thickness") {
                 const auto milling_depth = std::find_if(
@@ -1104,11 +1143,17 @@ void PropertyPanel::SetActiveObject(const ActiveParametricObject& active_object)
                     }
                 }
             }
-            emit ParametersChanged();
+            if(property("liveFormNumberDragging").toBool())setProperty("liveFormNumberDirty",true);
+            else emit ParametersChanged();
         });
         if (use_drag_label) {
             auto* drag_label = new DragValueLabel(
                 QString::fromStdString(parameter.label), this);
+            drag_label->setObjectName(QString::fromStdString("slider_"+parameter.id));
+            if(active_object_.tool_id=="LiveFormPrimitives") {
+                drag_label->editing_started=[this]{setProperty("liveFormNumberDragging",true);setProperty("liveFormNumberDirty",false);};
+                drag_label->editing_finished=[this]{setProperty("liveFormNumberDragging",false);if(property("liveFormNumberDirty").toBool()){setProperty("liveFormNumberDirty",false);emit ParametersChanged();}};
+            }
             if (integer_parameter) {
                 const int minimum = static_cast<int>(std::lround(parameter.minimum));
                 const int maximum = static_cast<int>(std::lround(parameter.maximum));

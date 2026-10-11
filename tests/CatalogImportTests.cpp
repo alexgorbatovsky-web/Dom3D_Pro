@@ -105,6 +105,7 @@ void TestHolePlacement();
 void TestPanelContour();
 void TestPillowCadQuadro(const char* path, const char* outputPrefix);
 void TestBridgeShellQuadro(const char* path, const char* outputPrefix);
+void TestShellLowDensity(const char* path, const char* outputPrefix);
 void TestFrameCadQuadro(const char* path);
 void TestFilletMeshNormals(const char* path);
 void TestCylinderQuadroNormals(const char* path);
@@ -5943,6 +5944,7 @@ void DiagnoseProjectFillets(const QString& path, double radius) {
 void TestObjSharpEdges();
 void TestLowPolySharpEdges();
 void TestMeshSubdivision();
+void TestMeshToSolid(const char*, const char*);
 void RenderMeshSubdivisionPreview(const char* directory);
 void TestToolsMesh3D(const char* boundary_path, const char* diagnostic_directory);
 void TestDivideFace(const char* output_directory);
@@ -6295,6 +6297,9 @@ int main(int argc, char** argv) {
         RenderMeshSubdivisionPreview(argv[2]); return 0;
     }
     QCoreApplication application(argc, argv);
+    if (argc == 4 && std::string(argv[1]) == "--test-mesh-to-solid") {
+        TestMeshToSolid(argv[2], argv[3]); return 0;
+    }
     if (argc == 4 && std::string(argv[1]) == "--test-rebuild-polyhedron") {
         CAlfaDoc document;
         Dom3DProjectSerializer serializer;
@@ -7404,6 +7409,10 @@ int main(int argc, char** argv) {
     }
     if (argc == 3 && std::string(argv[1]) == "--test-frame-cad-quadro") {
         TestFrameCadQuadro(argv[2]);
+        return 0;
+    }
+    if ((argc == 3 || argc == 4) && std::string(argv[1]) == "--test-shell-low-density") {
+        TestShellLowDensity(argv[2], argc == 4 ? argv[3] : nullptr);
         return 0;
     }
     if ((argc == 3 || argc == 4) && std::string(argv[1]) == "--test-bridge-shell-quadro") {

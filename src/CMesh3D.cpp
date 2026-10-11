@@ -3923,6 +3923,7 @@ bool CMesh3D::SetGeometry(std::vector<Vec3> vertices,
 
     vertices_ = std::move(vertices);
     faces_ = std::move(faces);
+    selected_edges_.clear();
     sharp_edges_.clear();
     uvs_ = std::move(uvs);
     normals_ = std::move(normals);
@@ -4179,9 +4180,13 @@ void CMesh3D::Render3d(bool selected) const {
                 for (const Vec3 p : evaluated.vertices_) glVertex3f(p.x, p.y, p.z);
                 glEnd(); glPopAttrib();
             }
+            evaluated.RenderEdgeMarks();
             return;
         }
     }
+    // Keep selection membership for edge commands without tinting the body.
+    // LiveForm above retains its own control-cage presentation.
+    if (!selected_edges_.empty()) selected = false;
     const MeshDisplayMode mode = GetDisplayMode();
     const bool shaded_mode = mode == MeshDisplayMode::SurfaceMaterial
         || mode == MeshDisplayMode::SurfaceMaterialWithMesh
@@ -4198,7 +4203,7 @@ void CMesh3D::Render3d(bool selected) const {
         const Color background = CSolid::GetHiddenLineBackgroundColor();
         RenderHiddenLineDepth(background);
         RenderHiddenLineEdges(false, background, selected);
-        RenderOpenEdges();
+        RenderOpenEdges(); RenderEdgeMarks();
         return;
     }
 
@@ -4208,12 +4213,12 @@ void CMesh3D::Render3d(bool selected) const {
         || solid_mode == SolidDisplayMode::MeshOnly;
     if (!rgb_selected && !zebra && mode == MeshDisplayMode::Wire && !solid_requests_fill) {
         RenderWire(selected, true, nullptr);
-        RenderOpenEdges();
+        RenderOpenEdges(); RenderEdgeMarks();
         return;
     }
     if (wire_only && !rgb_selected) {
         RenderWire(selected, true, nullptr);
-        RenderOpenEdges();
+        RenderOpenEdges(); RenderEdgeMarks();
         return;
     }
 
@@ -4230,13 +4235,13 @@ void CMesh3D::Render3d(bool selected) const {
     const bool draw_edges = zebra ? ZebraOptions().show_edges : (mode == MeshDisplayMode::SurfaceGray
         || mode == MeshDisplayMode::SurfaceColored
         || mode == MeshDisplayMode::SurfaceMaterialWithMesh);
-    RenderFaces(rgb_selected, draw_edges, &material,
+    RenderFaces(rgb_selected, draw_edges || !sharp_edges_.empty() || !selected_edges_.empty(), &material,
                 rgb_selected || mode == MeshDisplayMode::SurfaceColored);
     if(zebra && !ZebraOptions().show_edges)return;
     if (draw_edges) {
         RenderWire(selected, true, nullptr);
     }
-    RenderOpenEdges();
+    RenderOpenEdges(); RenderEdgeMarks();
 }
 
 void CMesh3D::RenderFaces(bool selected,
@@ -4682,6 +4687,19 @@ void CMesh3D::RenderWire(bool selected,
     glDisable(GL_BLEND);
     glDepthFunc(GL_LESS);
     glDepthMask(depth_write_enabled);
+}
+
+void CMesh3D::RenderEdgeMarks() const {
+    if(sharp_edges_.empty()&&selected_edges_.empty())return;
+    glPushAttrib(GL_ENABLE_BIT|GL_CURRENT_BIT|GL_LINE_BIT|GL_DEPTH_BUFFER_BIT);
+    glDisable(GL_LIGHTING);glDisable(GL_TEXTURE_2D);glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);glDepthMask(GL_FALSE);glLineWidth(2.5f);
+    const auto draw=[&](const std::vector<Edge>& edges){glBegin(GL_LINES);for(auto e:edges)
+        if(e.v1>=0&&e.v2>=0&&size_t(e.v1)<vertices_.size()&&size_t(e.v2)<vertices_.size())
+            for(int index:{e.v1,e.v2}){const auto v=vertices_[index];glVertex3f(v.x,v.y,v.z);}glEnd();};
+    glColor3f(0.05f,0.2f,1.f);draw(sharp_edges_);
+    glColor3f(1.f,.65f,.05f);draw(selected_edges_);
+    glPopAttrib();
 }
 
 void CMesh3D::RenderOpenEdges() const {
@@ -6324,6 +6342,7 @@ bool CMesh3D::TrimByPlineTest(CPolyline* pLine, CPoint3d pc) {
 }
 
 void CMesh3D::Clear() {
+    selected_edges_.clear();
     vertices_.clear();
     uvs_.clear();
     normals_.clear();

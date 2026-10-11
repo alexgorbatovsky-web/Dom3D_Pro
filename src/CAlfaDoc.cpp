@@ -5431,6 +5431,7 @@ bool CAlfaDoc::FindPolylinePointAtScreen(DomPoint point,
 }
 
 void CAlfaDoc::ClearSelection() {
+    for(auto& object:objects_)if(auto* mesh=dynamic_cast<CMesh3D*>(object.get()))mesh->ClearSelectedEdges();
     for (ObjectPtr& object : objects_) {
         if (auto* solid = dynamic_cast<CSolid*>(object.get())) {
             solid->ClearSelectedEdge();
@@ -6812,6 +6813,28 @@ size_t CAlfaDoc::ProjectSelectedCurveToSurface(Vec3 direction) {
 
 size_t CAlfaDoc::ProjectCurveToPlane(unsigned long curve_id, Vec3 origin, Vec3 normal) {
     if(dot(normal,normal)<1.e-12f)return 0;
+    auto* object=FindObjectById(curve_id);
+    if(!object)return 0;
+    const auto project=[&](CPoint3d& p) {
+        const double nx=normal.x,ny=normal.y,nz=normal.z;
+        const double d=((p.x-origin.x)*nx+(p.y-origin.y)*ny+(p.z-origin.z)*nz)/(nx*nx+ny*ny+nz*nz);
+        p.x-=nx*d;p.y-=ny*d;p.z-=nz*d;
+    };
+    // Project the authored controls directly: no conversion, resampling or
+    // SetPoint handle adjustments. Degree, weights, knots and node types stay intact.
+    if(auto* spline=dynamic_cast<CBSpline*>(object)) {
+        for(auto& p:spline->GetPoints())project(p);
+        return 1;
+    }
+    if(auto* polyline=dynamic_cast<CPolyline*>(object)) {
+        for(auto& p:polyline->GetPoints())project(p);
+        polyline->SetLockedPlane(origin,normal);
+        return 1;
+    }
+    if(auto* curve=dynamic_cast<CCadCurve3D*>(object)) {
+        curve->Scale(origin,normal,0);
+        return 1;
+    }
     const auto source=BuildCurveWire(curve_id);
     if(source.IsNull())return 0;
     try {
@@ -6833,9 +6856,10 @@ size_t CAlfaDoc::ProjectCurveToPlane(unsigned long curve_id, Vec3 origin, Vec3 n
             if(!result)return 0;
             results.push_back(std::move(result));
         }
-        const auto count=results.size();
-        for(auto& result:results)AddObject(std::move(result));
-        return count;
+        if(results.size()!=1)return 0;
+        static_cast<CAlfaObject&>(*results.front())=*object;
+        objects_[FindObjectIndexById(curve_id)]=std::move(results.front());
+        return 1;
     } catch(const Standard_Failure&) { return 0; }
 }
 

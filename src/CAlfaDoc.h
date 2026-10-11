@@ -115,6 +115,9 @@ public:
     bool AddObjectToSelectionAt(CurvePoint point, float tolerance, bool include_mesh = true);
     bool RemoveObjectFromSelectionAt(CurvePoint point, float tolerance, bool include_mesh = true);
     bool ToggleObjectSelectionAt(CurvePoint point, float tolerance, bool include_mesh = true);
+    bool FindMeshEdgeAtScreen(DomPoint point,
+        const std::function<bool(Vec3, DomPoint&, float&)>& project,
+        float tolerance, unsigned long& object_id, int& first, int& second) const;
     bool SelectSolidEdgeAtScreen(DomPoint point,
                                  const std::function<bool(Vec3, DomPoint&)>& world_to_screen,
                                  float tolerance,

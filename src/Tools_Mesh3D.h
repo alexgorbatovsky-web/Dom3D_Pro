@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CMesh3D.h"
+#include "solid/Solid.h"
 
 #include <filesystem>
 #include <memory>
@@ -11,6 +12,9 @@ class CPolyline;
 class CSurfaceFace;
 
 namespace Tools_Mesh3D {
+
+// Creates a CAD solid; never silently substitutes an open surface or a mesh.
+std::unique_ptr<CSolid> Subdivide(const CMesh3D& mesh, std::string& error);
 
 struct FillContourOptions {
     bool raw_quadrangulator = true;

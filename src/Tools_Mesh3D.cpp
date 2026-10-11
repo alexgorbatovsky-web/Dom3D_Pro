@@ -1,4 +1,6 @@
 #include "Tools_Mesh3D.h"
+#include "CatmullClarkSurfaceBuilder.h"
+#include "LiveFormEdit.h"
 
 #include "CPolyline.h"
 #include "ContourQuadrangulator3DCoat.h"
@@ -6,8 +8,65 @@
 
 #include <fstream>
 #include <limits>
+#include <map>
+#include <set>
+#include <cmath>
 
 namespace Tools_Mesh3D {
+
+std::unique_ptr<CSolid> Subdivide(const CMesh3D& mesh, std::string& error)
+{
+    error.clear();
+    std::map<std::pair<size_t, size_t>, std::pair<int, int>> edges;
+    for (const auto& face : mesh.GetFaces()) {
+        if (face.deleted) continue;
+        std::set<size_t> vertices;
+        if (face.corners.size() != 4) {
+            error = "Subdivide requires quad faces.";
+            return {};
+        }
+        for (size_t i = 0; i < 4; ++i) {
+            const size_t a = face.corners[i].v, b = face.corners[(i + 1) % 4].v;
+            if (a >= mesh.GetVertices().size() || !vertices.insert(a).second) {
+                error = "Subdivide: invalid face vertex.";
+                return {};
+            }
+            const auto p = mesh.GetVertices()[a];
+            if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) {
+                error = "Subdivide: invalid vertex coordinates.";
+                return {};
+            }
+            auto& edge = edges[std::minmax(a, b)];
+            ++edge.first;
+            edge.second += a < b ? 1 : -1;
+        }
+    }
+    for (const auto& edge : edges) {
+        if (edge.second.first != 2 || edge.second.second != 0) {
+            error = "Subdivide requires a closed manifold quad mesh with consistent face normals.";
+            return {};
+        }
+    }
+    auto build = BuildCatmullClarkSurfaceBody(mesh, 1.0e-4, 3);
+    if (!build.solid || build.shape.IsNull()) {
+        error = "Subdivide requires a closed, connected manifold quad mesh. "
+                "Check open boundaries, duplicated vertices and non-quad faces.";
+        return {};
+    }
+    auto solid = std::make_unique<CSolid>(build.shape);
+    solid->SetName(mesh.GetName() + " Subdivide");
+    solid->SetParametricOperation(0,"LiveFormMesh","LiveForm control mesh",EncodeLiveFormMesh(mesh));
+    solid->SetColor(mesh.GetColor());
+    solid->SetMaterial(mesh.GetMaterial());
+    solid->SetMaterialId(mesh.GetMaterialId());
+    solid->m_LayerID = mesh.m_LayerID;
+    if (!solid->EnsureRenderMesh()) {
+        error = "Subdivide could not prepare the solid for display.";
+        return {};
+    }
+    return solid;
+}
+
 namespace {
 
 void CountFaces(FillContourResult& result)

@@ -1,6 +1,9 @@
+#include "LiveFormSwept.h"
 #include "solid/FilletEdgeIdentity.h"
 #include "ui/ExtrudeFaceDialog.h"
 #include "HybridExtrude.h"
+#include "LiveFormEdit.h"
+#include "ui/HybridExtrudeDialog.h"
 #include "SurfacePointTransform.h"
 #include <QSpinBox>
 #include "SurfaceGraphOffsetBuilder.h"
@@ -96,6 +99,7 @@
 #include <QCheckBox>
 #include <QToolButton>
 #include <QMenu>
+#include <QInputDialog>
 #include <QDir>
 #include <QComboBox>
 #include <QDialog>
@@ -151,6 +155,46 @@ void answer(QMessageBox::StandardButton button) {
 int TestScenePersistence(int argc, char** argv) {
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
     QApplication application(argc, argv);
+    #include "LiveFormPrimitiveTestCases.inc"
+    #include "FaceToolsUndoTestCases.inc"
+    #include "LiveFormGraphTestCases.inc"
+    #include "LiveFormSettingsTestCases.inc"
+    #include "LiveFormRevolveTestCases.inc"
+    #include "LiveFormSweptTestCases.inc"
+    #include "LiveFormEditTestCases.inc"
+    if (application.arguments().contains("--mesh-subdivide")) {
+        QTemporaryDir settings;
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings.path());
+        MainWindow window;
+        auto& doc = window.document_;
+        Dom3DProjectSerializer serializer;
+        ProjectViewState view;
+        QString room, error;
+        const auto path = application.arguments().value(application.arguments().indexOf("--mesh-subdivide") + 1);
+        require(serializer.Load(path, doc, room, view, error), "Cannot load Mesh Subdivide fixture");
+        const auto count = doc.GetObjects().size();
+        doc.ClearSelection();
+        std::vector<unsigned long> sourceIds;
+        for (const auto& object : doc.GetObjects()) {
+            if (dynamic_cast<CMesh3D*>(object.get())) {
+                sourceIds.push_back(object->m_id);
+                doc.SelectObjectById(object->m_id, SelectionAction::Add);
+            }
+        }
+        require(sourceIds.size() == 2, "Expected two quad meshes");
+        window.undo_redo_.Reset();
+        require(window.tool_registry_.Find("MeshSubdivide"), "Subdivide tool missing");
+        window.SubdivideSelectedMeshes();
+        require(doc.GetObjects().size() == count + 2, "Subdivide did not create two solids");
+        require(doc.GetSelectedObjectIndices().size() == 2, "Subdivide result selection lost");
+        for (auto id : sourceIds) require(!doc.FindObjectById(id)->IsVisible(), "Source mesh must be hidden");
+        require(window.undo_redo_.Undo() && doc.GetObjects().size() == count, "Subdivide Undo failed");
+        for (auto id : sourceIds) require(doc.FindObjectById(id)->IsVisible(), "Undo did not restore source mesh");
+        require(window.undo_redo_.Redo() && doc.GetObjects().size() == count + 2, "Subdivide Redo failed");
+        std::cout << "Mesh Subdivide UI, multiple selection, Undo/Redo passed" << std::endl;
+        return 0;
+    }
     if(application.arguments().contains("--curve-quick-menu-only")) {
         QTemporaryDir settings;QSettings::setDefaultFormat(QSettings::IniFormat);
         QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,settings.path());
@@ -243,7 +287,12 @@ int TestScenePersistence(int argc, char** argv) {
                     application.processEvents();
                     require(choice!=5 || directionShown,"Surface projection did not start automatically");
                     require(window.pending_group_command_==MainWindow::PendingGroupCommand::None && !window.pending_projection_curve_id_,"Completed projection kept stale picking state");
-                    require(doc.GetObjects().size()>2,"Clicking projection target did not produce a curve");
+                    require(choice==4 ? doc.GetObjects().size()==2 : doc.GetObjects().size()>2,"Wrong projection object count");
+                    if(choice==4) {
+                        auto* projected=dynamic_cast<CBSpline*>(doc.FindObjectById(source));
+                        require(projected && projected->GetPointCount()==3,"Put on Plane changed curve identity or nodes");
+                        for(const auto& p:projected->GetPoints())require(std::abs(p.z)<1.e-8,"Control point missed plane");
+                    }
                     for(size_t i=2;i<doc.GetObjects().size();++i) {
                         Vec3 lo,hi;require(doc.GetObjects()[i]->GetBounds(lo,hi),"Projected curve has no bounds");
                         require(std::abs(lo.z)<1.e-4 && std::abs(hi.z)<1.e-4,"Put on Plane missed target plane");
@@ -253,6 +302,7 @@ int TestScenePersistence(int argc, char** argv) {
                     const auto projected_count=doc.GetObjects().size();
                     require(window.undo_redo_.Undo(),"Projection has no Undo");
                     require(doc.GetObjects().size()==2 && doc.FindObjectById(source) && doc.FindObjectById(target),"Undo removed projection inputs or kept results");
+                    if(choice==4)require(std::abs(dynamic_cast<CBSpline*>(doc.FindObjectById(source))->GetPoints()[0].z-10)<1.e-8,"Undo did not restore original nodes");
                     require(window.undo_redo_.Redo() && doc.GetObjects().size()==projected_count,"Projection Redo failed");
                 }
                 if(choice==4)for(int axis=0;axis<3;++axis) {
@@ -260,11 +310,11 @@ int TestScenePersistence(int argc, char** argv) {
                     window.ProjectCurveToSurface(true);
                     const auto before=doc.GetObjects().size();
                     window.viewport_->SelectOriginPlane(axis);application.processEvents();
-                    require(doc.GetObjects().size()==before+1,"Reference plane click failed to project curve");
-                    Vec3 lo,hi;require(doc.GetObjects().back()->GetBounds(lo,hi),"No projected reference-plane bounds");
+                    require(doc.GetObjects().size()==before,"Reference plane projection created a copy");
+                    Vec3 lo,hi;require(doc.FindObjectById(source)->GetBounds(lo,hi),"No projected reference-plane bounds");
                     const double low=axis==0?lo.z:axis==1?lo.y:lo.x,high=axis==0?hi.z:axis==1?hi.y:hi.x;
                     require(std::abs(low)<1.e-4 && std::abs(high)<1.e-4,"Wrong reference plane projection");
-                    require(hi.x-lo.x>19.9 || hi.z-lo.z>19.9,"Reference plane clipped the original curve");
+                    require(window.undo_redo_.Undo(),"Reference plane projection Undo failed");
                 }
             }
         }
@@ -1558,6 +1608,7 @@ int TestScenePersistence(int argc, char** argv) {
     #include "ExtractSurfaceEdgeTestCases.inc"
     #include "LoftBezierTestCases.inc"
     #include "FilletResponsiveTestCases.inc"
+    #include "SurfaceNurbsTestCases.inc"
     #include "SurfaceDisplayOptionsTestCases.inc"
     #include "SurfaceReverseNormalsTestCases.inc"
     #include "SurfaceGraphOffsetTestCases.inc"
@@ -2688,6 +2739,19 @@ int TestScenePersistence(int argc, char** argv) {
             if(button->text()=="Create Low Poly")button->click();
         auto* sharp_mesh=dynamic_cast<CMesh3D*>(doc.GetObjects().back().get());
         require(sharp_mesh && !sharp_mesh->GetSharpEdges().empty(), "Automatic box sharp edges missing");
+        auto* welding=sharp_dialog->findChild<QCheckBox*>("LowPolyDoWelding");
+        require(welding && !welding->isChecked(), "Missing optional Low Poly welding");
+        const auto unweldedVertices=sharp_mesh->GetVertices().size();
+        const auto unweldedFaces=sharp_mesh->GetFaces().size();
+        welding->setChecked(true);
+        require(quadro->GetSurfaceFace(0)->pMesh3D==sharp_preview,"Welding option rebuilt source preview");
+        for(auto* button:sharp_dialog->findChildren<QPushButton*>())
+            if(button->text()=="Create Low Poly")button->click();
+        auto* weldedMesh=dynamic_cast<CMesh3D*>(doc.GetObjects().back().get());
+        require(weldedMesh && weldedMesh->GetVertices().size()<unweldedVertices,"Low Poly welding did not merge boundary vertices");
+        require(weldedMesh->GetFaces().size()==unweldedFaces && !weldedMesh->GetSharpEdges().empty(),"Welding lost faces or sharp edges");
+        require(weldedMesh->GetMaterialId()==sharp_mesh->GetMaterialId(),"Welding lost material assignment");
+        welding->setChecked(false);
         require(quadro->GetSurfaceFace(0)->pMesh3D==sharp_preview,"Sharp assignment rebuilt accepted preview");
         angle->setValue(100.0);
         for(auto* button:sharp_dialog->findChildren<QPushButton*>())
@@ -3455,6 +3519,16 @@ int TestScenePersistence(int argc, char** argv) {
             viewport.SetCamera(camera);
             viewport.SetOrthographicProjection(orthographic);
             viewport.SetTool(kind == Kind::Polyline ? ToolMode::DrawCurve : ToolMode::DrawBSpline);
+            viewport.BeginSpatialCurvePreview(kind);
+            Camera panned = camera; panned.target = {627,-155,-608}; panned.distance = 3000;
+            viewport.SetCamera(panned);
+            CPoint3d initial{};
+            require(viewport.PickModelingPoint(QPoint(430,270),initial),"New curve initial projection failed");
+            viewport.SetSpatialCurvePreviewPoints({initial});
+            require(std::abs(dot(vector(initial),viewport.spatial_curve_plane_normal_)) < .001,
+                    "New curve inherited camera target depth");
+            viewport.EndSpatialCurvePreview();
+            viewport.SetCamera(camera);
             viewport.BeginSpatialCurvePreview(kind);
             const CPoint3d first(3,7,11);
             viewport.SetSpatialCurvePreviewPoints({first});
@@ -4729,6 +4803,25 @@ int TestScenePersistence(int argc, char** argv) {
         require(false, "Scene tree row missing");
         return static_cast<QTreeWidgetItem*>(nullptr);
     };
+    auto* curveFolder=row("Selection A")->parent();
+    require(curveFolder && curveFolder==row("Visibility B")->parent(),"Loose curves are not in the same category");
+    require(curveFolder->data(0,Qt::UserRole+8).toString()=="Curves","Wrong scene category");
+    require(!curveFolder->data(0,Qt::UserRole+1).isValid(),"Display category became a document object");
+    const auto categoryCount=document.GetObjects().size();
+    curveFolder->setExpanded(false);
+    window.RefreshSceneTree();
+    require(!row("Selection A")->parent()->isExpanded(),"Category collapse lost on refresh");
+    require(document.GetObjects().size()==categoryCount && document.GetSelectedObject()==first,"Category refresh changed scene or selection");
+    row("Selection A")->parent()->setExpanded(true);
+    curveFolder=row("Selection A")->parent();
+    require(!curveFolder->icon(0).isNull(),"Curves category visibility icon missing");
+    window.scene_tree_->itemClicked(curveFolder,0);
+    require(!first->IsVisible()&&!second->IsVisible()&&!document.HasSelection(),"Category hide did not hide curves and clear invisible selection");
+    window.scene_tree_->itemClicked(curveFolder,0);
+    require(first->IsVisible()&&second->IsVisible(),"Category show did not restore curve visibility");
+    require(document.GetObjects().size()==categoryCount,"Category visibility changed scene structure");
+    document.SelectObjectById(first->m_id);
+    window.RefreshSceneTree();
     const auto click_visibility = [&](const QString& name) {
         auto* item = row(name);
         // Reproduce Qt's selection change before dispatching itemClicked.

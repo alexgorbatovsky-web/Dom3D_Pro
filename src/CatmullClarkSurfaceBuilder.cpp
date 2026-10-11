@@ -179,11 +179,49 @@ SubdivisionLevel subdivide(const SubdivisionLevel& source) {
     return result;
 }
 
-bool patch_grid(const SubdivisionLevel& first,
-                const SubdivisionLevel& second,
+void project_to_limit(SubdivisionLevel& level) {
+    // Catmull-Clark limit mask: (n*n*P + 4*sum(edge neighbours)
+    // + sum(opposite face vertices)) / (n*(n+5)).
+    // https://patents.google.com/patent/USRE41677E1/en (limit-position stencil).
+    std::vector<std::set<size_t>> neighbours(level.vertices.size());
+    std::vector<Vec3> opposites(level.vertices.size());
+    std::map<EdgeKey, int> owners;
+    for (const auto& face : level.faces) {
+        for (size_t i = 0; i < 4; ++i) {
+            const auto a = face[i], b = face[(i + 1) % 4];
+            neighbours[a].insert(b); neighbours[b].insert(a);
+            opposites[a] = opposites[a] + level.vertices[face[(i + 2) % 4]];
+            ++owners[edge_key(a, b)];
+        }
+    }
+    auto projected = level.vertices;
+    for (size_t i = 0; i < projected.size(); ++i) {
+        std::vector<size_t> creases;
+        Vec3 sum{};
+        for (auto j : neighbours[i]) {
+            sum = sum + level.vertices[j];
+            const auto edge = edge_key(i, j);
+            if (level.sharp_edges.count(edge) || owners[edge] != 2) creases.push_back(j);
+        }
+        const float n = static_cast<float>(neighbours[i].size());
+        if (creases.size() >= 3 || n == 0) continue;
+        if (creases.size() == 2) {
+            projected[i] = (level.vertices[i] * 4.f + level.vertices[creases[0]]
+                + level.vertices[creases[1]]) * (1.f / 6.f);
+        } else {
+            projected[i] = (level.vertices[i] * (n * n) + sum * 4.f + opposites[i])
+                * (1.f / (n * (n + 5.f)));
+        }
+    }
+    level.vertices = std::move(projected);
+}
+
+bool patch_grid(const std::vector<SubdivisionLevel>& levels,
                 size_t original_face,
-                std::array<std::array<Vec3, 5>, 5>& grid) {
-    std::array<std::array<bool, 5>, 5> assigned{};
+                std::vector<std::vector<Vec3>>& grid) {
+    const int extent = 1 << (levels.size() - 1);
+    grid.assign(extent + 1, std::vector<Vec3>(extent + 1));
+    std::vector<std::vector<bool>> assigned(extent + 1, std::vector<bool>(extent + 1));
     using GridPoint = std::pair<int, int>;
     using GridQuad = std::array<GridPoint, 4>;
     const auto midpoint = [](GridPoint first, GridPoint second) {
@@ -204,24 +242,24 @@ bool patch_grid(const SubdivisionLevel& first,
                         center,
                         midpoint(parent[previous], parent[corner])};
     };
-    const GridQuad root{{{0, 0}, {4, 0}, {4, 4}, {0, 4}}};
-    for (size_t first_quadrant = 0; first_quadrant < 4; ++first_quadrant) {
-        const size_t first_face = first.children[original_face][first_quadrant];
-        const GridQuad first_coordinates =
-            child_coordinates(root, first_quadrant);
-        for (size_t second_quadrant = 0; second_quadrant < 4; ++second_quadrant) {
-            const size_t second_face = second.children[first_face][second_quadrant];
-            const GridQuad coordinates =
-                child_coordinates(first_coordinates, second_quadrant);
-            const Quad& quad = second.faces[second_face];
+    const GridQuad root{{{0, 0}, {extent, 0}, {extent, extent}, {0, extent}}};
+    const auto visit = [&](const auto& self, size_t level, size_t face,
+                           const GridQuad& coordinates) -> void {
+        if (level + 1 == levels.size()) {
+            const Quad& quad = levels[level].faces[face];
             for (size_t corner = 0; corner < 4; ++corner) {
                 const int gx = coordinates[corner].first;
                 const int gy = coordinates[corner].second;
-                grid[gx][gy] = second.vertices[quad[corner]];
+                grid[gx][gy] = levels[level].vertices[quad[corner]];
                 assigned[gx][gy] = true;
             }
+            return;
         }
-    }
+        for (size_t corner = 0; corner < 4; ++corner)
+            self(self, level + 1, levels[level + 1].children[face][corner],
+                 child_coordinates(coordinates, corner));
+    };
+    visit(visit, 0, original_face, root);
     for (const auto& column : assigned)
         for (bool value : column)
             if (!value) return false;
@@ -231,29 +269,34 @@ bool patch_grid(const SubdivisionLevel& first,
 
 CatmullClarkSurfaceBuildResult BuildCatmullClarkSurfaceBody(
         const CMesh3D& control_mesh,
-        double sewing_tolerance) {
+        double sewing_tolerance,
+        int subdivision_steps) {
     CatmullClarkSurfaceBuildResult result;
     try {
+        if (subdivision_steps < 2 || subdivision_steps > 4) return result;
         SubdivisionLevel control;
         if (!make_control_level(control_mesh, control)) return result;
-        const SubdivisionLevel first = subdivide(control);
-        const SubdivisionLevel second = subdivide(first);
+        std::vector<SubdivisionLevel> levels;
+        levels.push_back(std::move(control));
+        for (int step = 0; step < subdivision_steps; ++step)
+            levels.push_back(subdivide(levels.back()));
+        if (subdivision_steps >= 3) project_to_limit(levels.back());
+        const int grid_size = (1 << subdivision_steps) + 1;
 
         BRepBuilderAPI_Sewing sewing(
             std::max(1.0e-7, sewing_tolerance), Standard_True,
             Standard_True, Standard_True, Standard_False);
-        for (size_t face = 0; face < control.faces.size(); ++face) {
-            std::array<std::array<Vec3, 5>, 5> grid{};
-            if (!patch_grid(first, second, face, grid)) continue;
-            TColgp_Array2OfPnt points(1, 5, 1, 5);
-            for (int u = 0; u < 5; ++u)
-                for (int v = 0; v < 5; ++v) {
+        for (size_t face = 0; face < levels.front().faces.size(); ++face) {
+            std::vector<std::vector<Vec3>> grid;
+            if (!patch_grid(levels, face, grid)) continue;
+            TColgp_Array2OfPnt points(1, grid_size, 1, grid_size);
+            for (int u = 0; u < grid_size; ++u)
+                for (int v = 0; v < grid_size; ++v) {
                     const Vec3 point = grid[u][v];
                     points.SetValue(u + 1, v + 1,
                         gp_Pnt(point.x, point.y, point.z));
                 }
-            // Uniform parameters are essential here. They reproduce the old
-            // five-by-five spline interpolation while making a shared row of
+            // Uniform parameters make a shared row of
             // points generate the exact same boundary curve on both patches.
             GeomAPI_PointsToBSplineSurface interpolation;
             interpolation.Interpolate(
@@ -264,9 +307,10 @@ CatmullClarkSurfaceBuildResult BuildCatmullClarkSurfaceBody(
                 interpolation.Surface(), 1.0e-7);
             if (!make_face.IsDone() || make_face.Face().IsNull()) continue;
             sewing.Add(make_face.Face());
+            result.control_faces.push_back(make_face.Face());
             ++result.patch_count;
         }
-        if (result.patch_count != control.faces.size()) return {};
+        if (result.patch_count != levels.front().faces.size()) return {};
         sewing.Perform();
         result.free_edge_count = static_cast<size_t>(sewing.NbFreeEdges());
         result.shape = sewing.SewedShape();

@@ -85,6 +85,7 @@ public:
 	bool GetCenterAndNormal(Vec3& center, Vec3& normal) const;
     void RenderDisplayOverlays() const;
     void PrepareDisplayGeometry() const;
+    const surface_display::Geometry& DisplayGeometry() const { PrepareDisplayGeometry(); return display_geometry_; }
     mutable TopoDS_Shape display_geometry_source_;
     mutable surface_display::Geometry display_geometry_;
 	bool GetPoint(double U, double V, CPoint8d* pnt);

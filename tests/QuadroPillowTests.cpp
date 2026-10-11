@@ -110,3 +110,30 @@ void TestPillowCadQuadro(const char* path,const char* outputPrefix) { TestCadPat
 void TestFrameCadQuadro(const char* path) { TestCadPatchBody(path,nullptr,true); }
 
 void TestBridgeShellQuadro(const char* path,const char* outputPrefix) { TestCadPatchBody(path,outputPrefix,false,true); }
+
+void TestShellLowDensity(const char* path,const char* outputPrefix) {
+    CAlfaDoc document;Dom3DProjectSerializer serializer;QString room,error;ProjectViewState view;
+    check(serializer.Load(QString::fromLocal8Bit(path),document,room,view,error),"Cannot load Shell");
+    CSolid* body=nullptr;
+    for(const auto& o:document.GetObjects())if(auto* s=dynamic_cast<CSolid*>(o.get());s&&s->GetName()=="Shell")body=s;
+    check(body,"Shell missing");body->MeshQuadro=true;
+    size_t previous=0;
+    for(float density:{.1f,.15f,.5f}) {
+        check(body->ReBuldMesh(1.f/density),"Shell density rebuild failed");
+        std::vector<const CMesh3D*> parts;
+        for(int i=0;i<body->GetNumSurfaces();++i)parts.push_back(body->GetSurfaceFace(i)->pMesh3D);
+        auto mesh=CMesh3D::CreateWelded(parts);check(bool(mesh),"Shell weld failed");
+        std::map<std::pair<size_t,size_t>,std::pair<int,int>> edges;
+        for(const auto& f:mesh->GetFaces()) {
+            check(f.corners.size()==4,"Shell has non-quads");
+            for(size_t i=0;i<4;++i){auto a=f.corners[i].v,b=f.corners[(i+1)%4].v;auto& e=edges[std::minmax(a,b)];++e.first;e.second+=a<b?1:-1;}
+        }
+        for(const auto& e:edges)check(e.second.first==2&&e.second.second==0,"Shell has open or inconsistent seams");
+        const size_t count=mesh->GetFaces().size();
+        std::cout<<"Shell density="<<density<<" quads="<<count<<std::endl;
+        if(density==.1f)check(count<=80,"Low density Shell is still over-refined");
+        check(count>previous,"Shell density does not increase detail");previous=count;
+        if(outputPrefix){CAlfaDoc result;result.Clear();result.AddObject(std::move(mesh));
+            check(serializer.Save(QString::fromLocal8Bit(outputPrefix)+QString::number(density,'f',2)+".dom3d",result,room,view,{},error),"Cannot save Shell preview");}
+    }
+}
