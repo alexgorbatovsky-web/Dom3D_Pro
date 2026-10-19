@@ -10080,4 +10080,8 @@
     <ID>Auto_27CC776E2C1E8F</ID>
     <Text>Scène Dom3D</Text>
   </TextItem>
+  <TextItem><ID>TransformFreeHelp</ID><Text>Transformation (%1) : déplacez la souris ; X/Y/Z choisit un axe ; Espace saisit une valeur ; clic/Entrée valide ; Échap annule</Text></TextItem>
+  <TextItem><ID>TransformValueHelp</ID><Text>Entrée valide ; Échap annule</Text></TextItem>
+  <TextItem><ID>TransformValueInvalid</ID><Text>Saisissez un nombre fini ; facteur d’échelle : de 0,001 à 1000</Text></TextItem>
+  <TextItem><ID>TransformGizmoHelp</ID><Text>Transformation : %1. Faites glisser une poignée ; Espace saisit une valeur. Répétez le raccourci de l’outil pour une transformation libre ; X/Y/Z choisit un axe.</Text></TextItem>
 </ClassArray.TextItem>

@@ -10080,4 +10080,8 @@
     <ID>Auto_27CC776E2C1E8F</ID>
     <Text>Escena Dom3D</Text>
   </TextItem>
+  <TextItem><ID>TransformFreeHelp</ID><Text>Transformación (%1): mueva el ratón; X/Y/Z elige un eje; Espacio introduce un valor; clic/Intro confirma; Esc cancela</Text></TextItem>
+  <TextItem><ID>TransformValueHelp</ID><Text>Intro confirma; Esc cancela</Text></TextItem>
+  <TextItem><ID>TransformValueInvalid</ID><Text>Introduzca un número finito; factor de escala: de 0,001 a 1000</Text></TextItem>
+  <TextItem><ID>TransformGizmoHelp</ID><Text>Transformación: %1. Arrastre un control; Espacio introduce un valor. Repita el atajo de la herramienta para transformar libremente; X/Y/Z elige el eje.</Text></TextItem>
 </ClassArray.TextItem>

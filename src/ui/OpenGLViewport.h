@@ -26,6 +26,7 @@ struct Body1Settings;
 
 class QKeyEvent;
 class QLabel;
+class QLineEdit;
 class QVariantAnimation;
 class CSmartLine;
 
@@ -429,6 +430,17 @@ private:
     void HandleMovePointToPointClick(const QPoint& point);
     void HandleMeasurePointToPointClick(const QPoint& point);
     void HandleTransformDrag(const QPoint& point, Qt::KeyboardModifiers modifiers);
+    void BeginTransformDrag(TransformAxis axis, const QPoint& point, bool free_transform = false);
+    void BeginFreeTransform(TransformAxis axis = TransformAxis::None);
+    void ResetTransformPreview();
+    void FinishTransformDrag(bool commit);
+    bool HandleTransformKey(QKeyEvent* event);
+    bool IsTransformKey(const QKeyEvent* event) const;
+    void ShowTransformValueEditor();
+    void AcceptTransformValue();
+    bool ApplyTransformValue(double value);
+    double TransformValue() const;
+    void DrawFreeTransformGuide();
     void CommitTransformDrag();
     TransformAxis HitTestTransformGizmo(const QPoint& point, TransformOperation* operation = nullptr) const;
     TransformAxis HitTestTransformGizmoForOperation(const QPoint& point, TransformOperation operation) const;
@@ -634,6 +646,10 @@ private:
     bool sketch_fillet_preview_valid_ = false;
     CPoint3d sketch_fillet_preview_center_{};
     bool transform_drag_has_preview_ = false;
+    bool transform_keyboard_enabled_ = false;
+    bool free_transform_ = false;
+    QWidget* transform_value_popup_ = nullptr;
+    QLineEdit* transform_value_editor_ = nullptr;
     Vec3 transform_drag_center_{};
     Vec3 transform_drag_axis_{};
     Vec3 transform_drag_move_delta_{};

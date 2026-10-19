@@ -10081,4 +10081,8 @@
     <ID>Auto_27CC776E2C1E8F</ID>
     <Text>مشهد Dom3D</Text>
   </TextItem>
+  <TextItem><ID>TransformFreeHelp</ID><Text>التحويل (%1): حرّك الماوس؛ X/Y/Z لتحديد المحور؛ مسافة لإدخال قيمة؛ النقر/Enter للتأكيد؛ Esc للإلغاء</Text></TextItem>
+  <TextItem><ID>TransformValueHelp</ID><Text>Enter للتأكيد؛ Esc للإلغاء</Text></TextItem>
+  <TextItem><ID>TransformValueInvalid</ID><Text>أدخل عددًا محدودًا؛ معامل التحجيم: من 0.001 إلى 1000</Text></TextItem>
+  <TextItem><ID>TransformGizmoHelp</ID><Text>التحويل: %1. اسحب المقبض؛ مسافة لإدخال قيمة. كرر اختصار الأداة للتحويل الحر؛ X/Y/Z لتحديد المحور.</Text></TextItem>
 </ClassArray.TextItem>

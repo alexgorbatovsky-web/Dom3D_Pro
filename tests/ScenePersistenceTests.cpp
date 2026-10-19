@@ -47,6 +47,10 @@
 #include <TopTools_ListIteratorOfListOfShape.hxx>
 #include <QLabel>
 #include <QShortcut>
+#include <QShortcutEvent>
+#include <QtTest/qtestkeyboard.h>
+#include <QtGui/qtestsupport_gui.h>
+#include "ui/MeasurementUnits.h"
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QCursor>
@@ -4496,6 +4500,8 @@ int TestScenePersistence(int argc, char** argv) {
         }
         std::cout<<"Extrude taper settings, positive/negative preview, gizmo and Cancel passed\n";return 0;
     }
+    #include "TransformInteractionTestCases.inc"
+    #include "GizmoRepeatShortcutTestCases.inc"
     if (application.arguments().contains("--universal-transform")) {
         auto shape=BRepPrimAPI_MakeBox(40,25,15).Shape();auto body=std::make_unique<CSolid>(shape);
         require(body->ReBuldMesh(),"Cannot mesh transform fixture");auto* solid=body.get();document.AddObject(std::move(body),false);document.SelectObjectById(solid->m_id);

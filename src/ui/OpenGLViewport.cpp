@@ -37,6 +37,11 @@
 #include <QCursor>
 #include <QCoreApplication>
 #include <QApplication>
+#include <QAction>
+#include <QShortcutEvent>
+#include <QLineEdit>
+#include <QHBoxLayout>
+#include <QFrame>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
@@ -787,6 +792,48 @@ OpenGLViewport::OpenGLViewport(QWidget* parent)
 }
 
 bool OpenGLViewport::eventFilter(QObject* watched, QEvent* event) {
+    if (dragging_transform_ && event->type() == QEvent::MouseButtonPress) {
+        if (auto* widget = qobject_cast<QWidget*>(watched); widget && widget != this && !isAncestorOf(widget))
+            FinishTransformDrag(false);
+    }
+    if (dragging_transform_ && event->type() == QEvent::ApplicationDeactivate)
+        FinishTransformDrag(false);
+    if (watched == transform_value_editor_ && event->type() == QEvent::ShortcutOverride) {
+        const int key = static_cast<QKeyEvent*>(event)->key();
+        if (key == Qt::Key_Escape || key == Qt::Key_Return || key == Qt::Key_Enter) {
+            event->accept();
+            return true;
+        }
+    }
+    if (watched == transform_value_editor_ && event->type() == QEvent::KeyPress) {
+        auto* key = static_cast<QKeyEvent*>(event);
+        if (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter) {
+            AcceptTransformValue();
+            return true;
+        }
+        if (key->key() == Qt::Key_Escape) {
+            FinishTransformDrag(false);
+            return true;
+        }
+    }
+    if (watched == this && event->type() == QEvent::ShortcutOverride
+        && IsTransformKey(static_cast<QKeyEvent*>(event))) {
+        event->accept();
+        return true;
+    }
+    // Observe the actual QAction shortcut, so user-remapped hotkeys work too.
+    // Toolbar/menu activation still selects the ordinary gizmo mode.
+    if (event->type() == QEvent::Shortcut && hasFocus() && transform_keyboard_enabled_
+        && tool_ == ToolMode::Transform && !universal_transform_) {
+        const auto operation = watched->property("dom3dTransformOperation");
+        if (operation.isValid() && operation.toInt() == static_cast<int>(transform_operation_)
+            && !static_cast<QShortcutEvent*>(event)->isAmbiguous()) {
+            BeginFreeTransform();
+            return true;
+        }
+    }
+    if (event->type() == QEvent::Shortcut && dragging_transform_)
+        FinishTransformDrag(false);
     // A selection dwell belongs to one uninterrupted interaction. Menus and
     // dialogs run nested event loops, so their opening must retire the timer,
     // even if they close before the one-second delay expires.
@@ -850,6 +897,8 @@ void OpenGLViewport::SetDocument(CAlfaDoc* document) {
 }
 
 void OpenGLViewport::SetTool(ToolMode tool) {
+    if (dragging_transform_) FinishTransformDrag(false);
+    transform_keyboard_enabled_ = false;
     setProperty("meshSharpPainting",false);
     if (tool_!=tool) {
         active_tangent_id_=pending_tangent_id_=0; ++tangent_hover_generation_;
@@ -1123,6 +1172,7 @@ bool OpenGLViewport::UsesAltNavigationModifier() const {
 }
 
 void OpenGLViewport::SetTransformOperation(TransformOperation operation) {
+    if (dragging_transform_) FinishTransformDrag(false);
     // A sketch can leave point-edit mode active without document point
     // selection. In that case Move/Rotate/Scale act on the selected object.
     if (document_ && selection_mode_==SelectionMode::Point && !document_->HasSelectedPoint())
@@ -1132,6 +1182,7 @@ void OpenGLViewport::SetTransformOperation(TransformOperation operation) {
     transform_dialog_rotation_angle_degrees_ = 0.0f;
     transform_dialog_rotation_axis_ = {};
     SetTool(ToolMode::Transform);
+    transform_keyboard_enabled_ = !universal_transform_;
 }
 
 bool OpenGLViewport::ApplyPreciseMove(Vec3 delta) {
@@ -1230,6 +1281,7 @@ void OpenGLViewport::SetTransformDialogGuide(TransformOperation operation,
                                              Vec3 center,
                                              float rotation_angle_degrees,
                                              Vec3 custom_rotation_axis) {
+    if (dragging_transform_) FinishTransformDrag(false);
     universal_transform_ = false;
     transform_operation_ = operation;
     highlighted_transform_axis_ = axis;
@@ -3480,7 +3532,9 @@ void OpenGLViewport::paintGL() {
     // physical framebuffer pixels. Read the current DPR on every frame so
     // moving the window between monitors also updates the render extent.
     const QSize framebuffer_size = size() * devicePixelRatioF();
-    renderer_.Render(*document_, camera_, orthographic_projection_, show_coordinate_axes_ || coordinate_axis_selection_, show_floor_grid_, xy_plane_view_enabled_, grid_size_, grid_step_, grid_subdivisions_, tool_, universal_transform_ ? TransformOperation::Universal : transform_operation_, highlighted_transform_axis_, transform_dialog_rotation_angle_degrees_, transform_dialog_rotation_axis_, highlighted_draft_face_gizmo_, framebuffer_size.width(), framebuffer_size.height());
+    const float rotation_guide_angle = dragging_transform_ && transform_operation_ == TransformOperation::Rotate
+        ? transform_drag_rotation_angle_ * 180.0f / 3.14159265f : transform_dialog_rotation_angle_degrees_;
+    renderer_.Render(*document_, camera_, orthographic_projection_, show_coordinate_axes_ || coordinate_axis_selection_, show_floor_grid_, xy_plane_view_enabled_, grid_size_, grid_step_, grid_subdivisions_, free_transform_ ? ToolMode::Select : tool_, universal_transform_ ? TransformOperation::Universal : transform_operation_, highlighted_transform_axis_, rotation_guide_angle, transform_dialog_rotation_axis_, highlighted_draft_face_gizmo_, framebuffer_size.width(), framebuffer_size.height());
     if (hide_preview_source) preview_source->SetVisible(true);
     if (hide_primitive_target) primitive_target->SetVisible(true);
     if (preview_contour) {
@@ -3588,6 +3642,7 @@ void OpenGLViewport::paintGL() {
     DrawReferencePlanes();
     DrawSurfaceFilletNormals();
     DrawBottleModelControls();
+    DrawFreeTransformGuide();
     bool persistent_tangent=false;
     if (active_tangent_id_ && IsSnapTargetEnabled(SnapTarget::AuxLine)) {
         const auto* source=dynamic_cast<const CBSpline*>(document_->FindObjectById(active_tangent_id_));
@@ -3757,6 +3812,16 @@ QImage OpenGLViewport::CaptureSceneImage(const QSize& requested_size) {
 }
 
 void OpenGLViewport::mousePressEvent(QMouseEvent* event) {
+    if (dragging_transform_ && (free_transform_ || event->button() != Qt::LeftButton
+        || (transform_value_popup_ && transform_value_popup_->isVisible()))) {
+        if (event->button() == Qt::RightButton) FinishTransformDrag(false);
+        else if (event->button() == Qt::LeftButton) {
+            if (transform_value_popup_ && transform_value_popup_->isVisible()) AcceptTransformValue();
+            else FinishTransformDrag(true);
+        }
+        event->accept();
+        return;
+    }
     sketch_shape_circle_=event->modifiers().testFlag(Qt::ShiftModifier);
     if(event->button()==Qt::LeftButton && event->modifiers()==Qt::NoModifier
        && BeginBottleModelDrag(event->pos())) {event->accept();return;}
@@ -5050,6 +5115,10 @@ void OpenGLViewport::UpdateTangentHover(const QPoint& point, bool eligible) {
 }
 
 void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
+    if (dragging_transform_ && transform_value_popup_ && transform_value_popup_->isVisible()) {
+        event->accept();
+        return;
+    }
     sketch_shape_circle_=event->modifiers().testFlag(Qt::ShiftModifier);
     if(MoveBottleModelDrag(event->pos())) {event->accept();return;}
 
@@ -5784,6 +5853,12 @@ void OpenGLViewport::mouseMoveEvent(QMouseEvent* event) {
 }
 
 void OpenGLViewport::mouseReleaseEvent(QMouseEvent* event) {
+    if (dragging_transform_) {
+        if (!free_transform_ && !(transform_value_popup_ && transform_value_popup_->isVisible())
+            && event->button() == Qt::LeftButton) FinishTransformDrag(true);
+        event->accept();
+        return;
+    }
     if(event->button()==Qt::LeftButton && MoveBottleModelDrag(event->pos(),true)) {event->accept();return;}
 
     const unsigned int release_generation = ++edge_quick_menu_generation_;
@@ -6073,6 +6148,7 @@ void OpenGLViewport::mouseReleaseEvent(QMouseEvent* event) {
 }
 
 void OpenGLViewport::keyPressEvent(QKeyEvent* event) {
+    if (HandleTransformKey(event)) return;
     if(event->key()==Qt::Key_Shift && tool_==ToolMode::SketchRectangle && sketch_shape_kind_==2) {
         sketch_shape_circle_=true; update(); event->accept(); return;
     }
@@ -6541,6 +6617,11 @@ void OpenGLViewport::keyPressEvent(QKeyEvent* event) {
 }
 
 void OpenGLViewport::keyReleaseEvent(QKeyEvent* event) {
+    if (event->key() == Qt::Key_Control && dragging_transform_
+        && transform_operation_ == TransformOperation::Rotate
+        && !(transform_value_popup_ && transform_value_popup_->isVisible())) {
+        HandleTransformDrag(last_mouse_, event->modifiers() & ~Qt::ControlModifier);
+    }
     if(event->key()==Qt::Key_Shift && tool_==ToolMode::SketchRectangle && sketch_shape_kind_==2) {
         sketch_shape_circle_=false; update(); event->accept(); return;
     }
@@ -6657,6 +6738,7 @@ bool OpenGLViewport::PickNavigationPoint(const QPoint& point, Vec3& result) cons
 }
 
 void OpenGLViewport::wheelEvent(QWheelEvent* event) {
+    if (dragging_transform_) { event->accept(); return; }
     StopCameraAnimation(false);
     Vec3 anchor = camera_.target;
     if (!PickNavigationPoint(event->position().toPoint(), anchor)) {
@@ -7517,6 +7599,8 @@ bool OpenGLViewport::HitTestDraftFaceGizmo(const QPoint& point) const {
     return best_distance < 18.0f;
 }
 
+#include "TransformInteraction.inc"
+
 void OpenGLViewport::HandleTransformClick(const QPoint& point, bool add_to_selection) {
     if (document_->HasSelection()) {
         // Preserve the handle shown to the user.  In particular, once the
@@ -7528,21 +7612,7 @@ void OpenGLViewport::HandleTransformClick(const QPoint& point, bool add_to_selec
             ? TransformAxis::ScreenPlane : HitTestTransformGizmo(point, &picked_operation);
         if (axis != TransformAxis::None) {
             transform_operation_ = picked_operation;
-            active_transform_axis_ = axis;
-            highlighted_transform_axis_ = axis;
-            dragging_transform_ = true;
-            transform_drag_has_preview_ = false;
-            transform_drag_move_delta_ = {};
-            transform_drag_rotation_input_angle_ = 0.0f;
-            transform_drag_rotation_angle_ = 0.0f;
-            transform_drag_scale_factor_ = 1.0f;
-            document_->GetTransformGizmoCenter(transform_drag_center_);
-            transform_drag_axis_ = AxisVector(axis);
-            if (selection_mode_ == SelectionMode::Point) {
-                CaptureCurvePointChangeBefore();
-            }
-            last_mouse_ = point;
-            update();
+            BeginTransformDrag(axis, point);
             return;
         }
     }
@@ -7661,19 +7731,13 @@ void OpenGLViewport::HandleTransformDrag(const QPoint& point, Qt::KeyboardModifi
     if (transform_operation_ == TransformOperation::Scale && active_transform_axis_ == TransformAxis::UniformScale) {
         const float pixels = mouse_dx - mouse_dy;
         const float factor = std::clamp(1.0f + pixels * 0.01f, 0.05f, 20.0f);
-        const bool scaled = selection_mode_ == SelectionMode::Point
-            ? document_->ScaleSelectedCurvePoints(center, {}, factor)
-            : document_->PreviewUniformScaleSelectedObjects(center, factor);
-        if (std::fabs(pixels) > 0.0001f && scaled) {
-            transform_drag_scale_factor_ *= factor;
-            transform_drag_has_preview_ = true;
-            last_mouse_ = point;
-            update();
-        }
+        if (std::fabs(pixels) > 0.0001f)
+            ApplyTransformValue(std::clamp(double(transform_drag_scale_factor_) * factor, 0.001, 1000.0));
+        last_mouse_ = point;
         return;
     }
 
-    const Vec3 axis = AxisVector(active_transform_axis_);
+    const Vec3 axis = transform_drag_axis_;
     const float gizmo_size = std::max(0.8f, camera_.distance * 0.10f);
     const float axis_distance =
         gizmo_size * TransformGizmoGeometry::kAxisDistanceScale;
@@ -7706,16 +7770,16 @@ void OpenGLViewport::HandleTransformDrag(const QPoint& point, Qt::KeyboardModifi
         const float current_y = static_cast<float>(axis_screen.y - point.y());
         const float previous_length_sq = previous_x * previous_x + previous_y * previous_y;
         const float current_length_sq = current_x * current_x + current_y * current_y;
-        if (previous_length_sq <= 1.0f || current_length_sq <= 1.0f) {
-            last_mouse_ = point;
-            return;
+        if (previous_length_sq > 1.0f && current_length_sq > 1.0f) {
+            const float cross = previous_x * current_y - previous_y * current_x;
+            const float dot_product = previous_x * current_x + previous_y * current_y;
+            const float angular_delta = std::atan2(cross, dot_product);
+            pixels_around_axis = angular_delta / 0.01f;
         }
-        const float cross = previous_x * current_y - previous_y * current_x;
-        const float dot_product = previous_x * current_x + previous_y * current_y;
-        const float angular_delta = std::atan2(cross, dot_product);
-        pixels_around_axis = angular_delta / 0.01f;
     } else {
-        return;
+        // A world axis viewed end-on still needs usable mouse input.
+        pixels_along_axis = -mouse_dy;
+        world_delta = pixels_along_axis * camera_.distance * 0.84f / std::max(1, height());
     }
 
     bool transformed = false;
@@ -7732,7 +7796,7 @@ void OpenGLViewport::HandleTransformDrag(const QPoint& point, Qt::KeyboardModifi
         transform_drag_rotation_input_angle_ += pixels_around_axis * 0.01f;
         float target_angle = transform_drag_rotation_input_angle_;
         if (modifiers.testFlag(Qt::ControlModifier)) {
-            target_angle = std::trunc(target_angle / kRotationSnapAngle) * kRotationSnapAngle;
+            target_angle = std::round(target_angle / kRotationSnapAngle) * kRotationSnapAngle;
         }
         const float angle_to_apply = target_angle - transform_drag_rotation_angle_;
         if (std::fabs(angle_to_apply) > 0.000001f) {
@@ -7749,17 +7813,13 @@ void OpenGLViewport::HandleTransformDrag(const QPoint& point, Qt::KeyboardModifi
         last_mouse_ = point;
     } else {
         const float factor = std::clamp(1.0f + pixels_along_axis * 0.01f, 0.05f, 20.0f);
-        transformed = selection_mode_ == SelectionMode::Point
-            ? document_->ScaleSelectedCurvePoints(center, axis, factor)
-            : document_->PreviewScaleSelectedObjects(center, axis, factor);
-        if (transformed) {
-            transform_drag_scale_factor_ *= factor;
-            transform_drag_axis_ = axis;
-        }
+        if (std::fabs(pixels_along_axis) > 0.0001f)
+            ApplyTransformValue(std::clamp(double(transform_drag_scale_factor_) * factor, 0.001, 1000.0));
+        last_mouse_ = point;
+        return;
     }
 
-    const float active_pixels = transform_operation_ == TransformOperation::Rotate ? pixels_around_axis : pixels_along_axis;
-    if (std::fabs(active_pixels) > 0.0001f && transformed) {
+    if (transformed) {
         transform_drag_has_preview_ = true;
         if (transform_operation_ != TransformOperation::Rotate) {
             last_mouse_ = point;

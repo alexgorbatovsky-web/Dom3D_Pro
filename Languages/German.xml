@@ -10080,4 +10080,8 @@
     <ID>Auto_27CC776E2C1E8F</ID>
     <Text>Dom3D-Szene</Text>
   </TextItem>
+  <TextItem><ID>TransformFreeHelp</ID><Text>Transformation (%1): Maus bewegen; X/Y/Z wählt die Achse; Leertaste zur Werteingabe; Klick/Eingabe bestätigt; Esc bricht ab</Text></TextItem>
+  <TextItem><ID>TransformValueHelp</ID><Text>Eingabe bestätigt; Esc bricht ab</Text></TextItem>
+  <TextItem><ID>TransformValueInvalid</ID><Text>Endliche Zahl eingeben; Skalierungsfaktor: 0,001 bis 1000</Text></TextItem>
+  <TextItem><ID>TransformGizmoHelp</ID><Text>Transformation: %1. Griff ziehen; Leertaste zur Werteingabe. Werkzeugkürzel erneut drücken für freie Transformation; X/Y/Z wählt die Achse.</Text></TextItem>
 </ClassArray.TextItem>

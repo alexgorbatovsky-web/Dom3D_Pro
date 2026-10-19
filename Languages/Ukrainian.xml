@@ -10081,4 +10081,8 @@
     <ID>Auto_27CC776E2C1E8F</ID>
     <Text>Сцена Dom3D</Text>
   </TextItem>
+  <TextItem><ID>TransformFreeHelp</ID><Text>Перетворення (%1): рухайте мишу; X/Y/Z — вісь; пробіл — введення значення; клацання/Enter — застосувати; Esc — скасувати</Text></TextItem>
+  <TextItem><ID>TransformValueHelp</ID><Text>Enter — застосувати; Esc — скасувати</Text></TextItem>
+  <TextItem><ID>TransformValueInvalid</ID><Text>Введіть скінченне число; коефіцієнт масштабу: від 0,001 до 1000</Text></TextItem>
+  <TextItem><ID>TransformGizmoHelp</ID><Text>Перетворення: %1. Перетягніть маркер; пробіл — введення значення. Повторіть гарячу клавішу інструмента для вільного режиму; X/Y/Z — вибір осі.</Text></TextItem>
 </ClassArray.TextItem>

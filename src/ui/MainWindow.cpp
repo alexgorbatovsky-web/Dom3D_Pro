@@ -7665,14 +7665,20 @@ void MainWindow::CreateActions() {
     });
     auto* transform_action = add_action("Transform", {}, [this]() { BeginTransformTool(TransformOperation::Universal); });
     auto* move_action = add_action("Move", QKeySequence(Qt::Key_M), [this]() { BeginTransformTool(TransformOperation::Move); });
-    auto* rotate_action = add_action("Rotate", {}, [this]() { BeginTransformTool(TransformOperation::Rotate); });
-    auto* scale_action = add_action("Scale", {}, [this]() { BeginTransformTool(TransformOperation::Scale); });
+    auto* rotate_action = add_action("Rotate", QKeySequence(Qt::Key_R), [this]() { BeginTransformTool(TransformOperation::Rotate); });
+    auto* scale_action = add_action("Scale", QKeySequence(Qt::Key_S), [this]() { BeginTransformTool(TransformOperation::Scale); });
+    for (auto* action : {move_action, rotate_action, scale_action}) {
+        action->setAutoRepeat(false);
+        action->setProperty("dom3dTransformOperation", static_cast<int>(action == move_action
+            ? TransformOperation::Move : action == rotate_action ? TransformOperation::Rotate : TransformOperation::Scale));
+    }
     auto* precise_move_action = add_action("Move with Dialog...", {}, [this]() { ShowPreciseMoveDialog(); });
     auto* precise_rotate_action = add_action("Rotate with Dialog...", {}, [this]() { ShowPreciseRotateDialog(); });
     auto* precise_scale_action = add_action("Scale with Dialog...", {}, [this]() { ShowPreciseScaleDialog(); });
     auto* new_sketch_action = add_action("New Sketch", {}, [this]() { BeginNewSketch(); });
     auto* drawing_text_action = add_action("Text...", {}, [this]() { BeginCreateDrawingText(); });
     auto* duplicate_action = add_action("Make Object/Group Copy", {}, [this]() { DuplicateSelectedObject(); });
+    duplicate_action->setObjectName("DuplicateSelectedObjectAction");
     duplicate_action->setToolTip("Make a copy of the selected object or whole group and move it");
     duplicate_action->setIcon(DuplicateObjectIcon());
     auto* mirror_action = add_action("Mirror Object by Plane...", {}, [this]() { MirrorSelectedObject(); });
@@ -7756,12 +7762,15 @@ void MainWindow::CreateActions() {
     transform_menu->addAction(precise_scale_action);
     transform_menu->addAction(mirror_action);
     auto* array_menu = transform_menu->addMenu("Array");
-    array_menu->addAction(add_action("Linear Array", {},
-        [this]() { ShowLinearArrayDialog(); }));
-    array_menu->addAction(add_action("Radial Array", {},
-        [this]() { ShowRadialArrayDialog(); }));
-    array_menu->addAction(add_action("Rectangular Array", {},
-        [this]() { ShowRectangularArrayDialog(); }));
+    auto* linear_array_action = add_action("Linear Array", {}, [this]() { ShowLinearArrayDialog(); });
+    linear_array_action->setObjectName("LinearArrayAction");
+    array_menu->addAction(linear_array_action);
+    auto* radial_array_action = add_action("Radial Array", {}, [this]() { ShowRadialArrayDialog(); });
+    radial_array_action->setObjectName("RadialArrayAction");
+    array_menu->addAction(radial_array_action);
+    auto* rectangular_array_action = add_action("Rectangular Array", {}, [this]() { ShowRectangularArrayDialog(); });
+    rectangular_array_action->setObjectName("RectangularArrayAction");
+    array_menu->addAction(rectangular_array_action);
     array_menu->addAction(add_action("Array Along Curve", {},
         [this]() { ShowCurveArrayDialog(); }));
 
@@ -15113,7 +15122,9 @@ void MainWindow::BeginTransformTool(TransformOperation operation) {
     UpdateActiveToolUi(tool_key);
 
     if (document_.HasSelection()) {
-        statusBar()->showMessage(QString("Transform: %1. Drag X/Y/Z gizmo axis.").arg(operation_name));
+        statusBar()->showMessage((operation == TransformOperation::Universal
+            ? QString("Transform: %1. Drag X/Y/Z gizmo axis.")
+            : DomText("TransformGizmoHelp", "Transform: %1. Drag a handle; Space enters a value. Repeat the tool hotkey for free transform; X/Y/Z constrain the axis.")).arg(operation_name));
     } else {
         statusBar()->showMessage(QString("Transform: %1. Select an object, then drag X/Y/Z gizmo axis.").arg(operation_name));
     }

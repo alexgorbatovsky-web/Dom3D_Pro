@@ -10080,4 +10080,8 @@
     <ID>Auto_27CC776E2C1E8F</ID>
     <Text>Dom3Dシーン</Text>
   </TextItem>
+  <TextItem><ID>TransformFreeHelp</ID><Text>変形 (%1)：マウスを移動；X/Y/Z で軸を指定；スペースで数値入力；クリック/Enter で確定；Esc でキャンセル</Text></TextItem>
+  <TextItem><ID>TransformValueHelp</ID><Text>Enter で確定；Esc でキャンセル</Text></TextItem>
+  <TextItem><ID>TransformValueInvalid</ID><Text>有限の数値を入力してください。倍率：0.001～1000</Text></TextItem>
+  <TextItem><ID>TransformGizmoHelp</ID><Text>変形：%1。ハンドルをドラッグし、スペースで数値を入力します。ツールのショートカットをもう一度押すと自由変形、X/Y/Z で軸を指定します。</Text></TextItem>
 </ClassArray.TextItem>

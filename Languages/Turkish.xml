@@ -10080,4 +10080,8 @@
     <ID>Auto_27CC776E2C1E8F</ID>
     <Text>Dom3D sahnesi</Text>
   </TextItem>
+  <TextItem><ID>TransformFreeHelp</ID><Text>Dönüştürme (%1): fareyi hareket ettirin; X/Y/Z eksen seçer; Boşluk değer girer; tıklama/Enter onaylar; Esc iptal eder</Text></TextItem>
+  <TextItem><ID>TransformValueHelp</ID><Text>Enter onaylar; Esc iptal eder</Text></TextItem>
+  <TextItem><ID>TransformValueInvalid</ID><Text>Sonlu bir sayı girin; ölçek katsayısı: 0,001 ile 1000 arası</Text></TextItem>
+  <TextItem><ID>TransformGizmoHelp</ID><Text>Dönüştürme: %1. Tutamacı sürükleyin; Boşluk değer girer. Serbest dönüştürme için araç kısayoluna tekrar basın; X/Y/Z eksen seçer.</Text></TextItem>
 </ClassArray.TextItem>

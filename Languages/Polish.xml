@@ -10080,4 +10080,8 @@
     <ID>Auto_27CC776E2C1E8F</ID>
     <Text>Scena Dom3D</Text>
   </TextItem>
+  <TextItem><ID>TransformFreeHelp</ID><Text>Przekształcenie (%1): poruszaj myszą; X/Y/Z wybiera oś; Spacja wprowadza wartość; kliknięcie/Enter zatwierdza; Esc anuluje</Text></TextItem>
+  <TextItem><ID>TransformValueHelp</ID><Text>Enter zatwierdza; Esc anuluje</Text></TextItem>
+  <TextItem><ID>TransformValueInvalid</ID><Text>Wprowadź skończoną liczbę; współczynnik skali: od 0,001 do 1000</Text></TextItem>
+  <TextItem><ID>TransformGizmoHelp</ID><Text>Przekształcenie: %1. Przeciągnij uchwyt; Spacja wprowadza wartość. Ponów skrót narzędzia, aby przekształcać swobodnie; X/Y/Z wybiera oś.</Text></TextItem>
 </ClassArray.TextItem>

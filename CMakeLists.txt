@@ -852,6 +852,14 @@ if(BUILD_TESTING)
         raytrace
         ${DOM3D_OPENCASCADE_LIBS}
     )
+    find_package(Qt6 REQUIRED COMPONENTS Test)
+    target_link_libraries(CatalogImportTests PRIVATE Qt6::Test)
+    if(WIN32)
+        add_custom_command(TARGET CatalogImportTests POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:Qt6::Test>" "$<TARGET_FILE_DIR:CatalogImportTests>"
+            COMMENT "Deploying Qt keyboard test runtime")
+    endif()
     if(WIN32)
         target_link_libraries(CatalogImportTests PRIVATE comdlg32)
     endif()
@@ -1278,6 +1286,10 @@ if(BUILD_TESTING)
     set_tests_properties(GroupTransformAfterMaterialPreview PROPERTIES TIMEOUT 60)
     add_test(NAME UniversalTransformGizmo COMMAND CatalogImportTests --test-scene-persistence --universal-transform)
     set_tests_properties(UniversalTransformGizmo PROPERTIES TIMEOUT 60)
+    add_test(NAME TransformInteraction COMMAND CatalogImportTests --test-scene-persistence --transform-interaction)
+    set_tests_properties(TransformInteraction PROPERTIES TIMEOUT 60)
+    add_test(NAME GizmoRepeatShortcuts COMMAND CatalogImportTests --test-scene-persistence --gizmo-repeat-shortcuts)
+    set_tests_properties(GizmoRepeatShortcuts PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
     if(WIN32)
         # QOpenGLWidget needs the Windows platform plugin for framebuffer tests.
         # The test window is placed outside the desktop.

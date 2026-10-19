@@ -10081,4 +10081,8 @@
     <ID>Auto_27CC776E2C1E8F</ID>
     <Text>Scena Dom3D</Text>
   </TextItem>
+  <TextItem><ID>TransformFreeHelp</ID><Text>Trasformazione (%1): muovere il mouse; X/Y/Z sceglie un asse; Spazio inserisce un valore; clic/Invio conferma; Esc annulla</Text></TextItem>
+  <TextItem><ID>TransformValueHelp</ID><Text>Invio conferma; Esc annulla</Text></TextItem>
+  <TextItem><ID>TransformValueInvalid</ID><Text>Inserire un numero finito; fattore di scala: da 0,001 a 1000</Text></TextItem>
+  <TextItem><ID>TransformGizmoHelp</ID><Text>Trasformazione: %1. Trascinare una maniglia; Spazio inserisce un valore. Ripetere la scorciatoia dello strumento per la trasformazione libera; X/Y/Z sceglie l’asse.</Text></TextItem>
 </ClassArray.TextItem>

@@ -11375,4 +11375,8 @@ If the fillet cannot be built, check the radius and the selected geometry.</Text
 <TextItem><ID>Other</ID><Text>Other</Text></TextItem>
 <TextItem><ID>Hide curves in this category</ID><Text>Hide curves in this category</Text></TextItem>
 <TextItem><ID>Show curves in this category</ID><Text>Show curves in this category</Text></TextItem>
+  <TextItem><ID>TransformFreeHelp</ID><Text>Transform (%1): move mouse; X/Y/Z constrain; Space enters a value; click/Enter confirms; Esc cancels</Text></TextItem>
+  <TextItem><ID>TransformValueHelp</ID><Text>Enter confirms; Esc cancels</Text></TextItem>
+  <TextItem><ID>TransformValueInvalid</ID><Text>Enter a finite number; scale factor: 0.001 to 1000</Text></TextItem>
+  <TextItem><ID>TransformGizmoHelp</ID><Text>Transform: %1. Drag a handle; Space enters a value. Repeat the tool hotkey for free transform; X/Y/Z constrain the axis.</Text></TextItem>
 </ClassArray.TextItem>

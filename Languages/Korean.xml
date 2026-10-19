@@ -10080,4 +10080,8 @@
     <ID>Auto_27CC776E2C1E8F</ID>
     <Text>Dom3D 장면</Text>
   </TextItem>
+  <TextItem><ID>TransformFreeHelp</ID><Text>변형 (%1): 마우스 이동; X/Y/Z 축 제한; 스페이스 값 입력; 클릭/Enter 확인; Esc 취소</Text></TextItem>
+  <TextItem><ID>TransformValueHelp</ID><Text>Enter 확인; Esc 취소</Text></TextItem>
+  <TextItem><ID>TransformValueInvalid</ID><Text>유한한 숫자를 입력하세요. 배율: 0.001~1000</Text></TextItem>
+  <TextItem><ID>TransformGizmoHelp</ID><Text>변형: %1. 핸들을 드래그하고 스페이스로 값을 입력합니다. 도구 단축키를 다시 누르면 자유 변형, X/Y/Z로 축을 제한합니다.</Text></TextItem>
 </ClassArray.TextItem>

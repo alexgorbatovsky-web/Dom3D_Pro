@@ -11377,4 +11377,8 @@
 <TextItem><ID>Other</ID><Text>Прочее</Text></TextItem>
 <TextItem><ID>Hide curves in this category</ID><Text>Скрыть кривые в этом разделе</Text></TextItem>
 <TextItem><ID>Show curves in this category</ID><Text>Показать кривые в этом разделе</Text></TextItem>
+  <TextItem><ID>TransformFreeHelp</ID><Text>Преобразование (%1): двигайте мышь; X/Y/Z — ось; пробел — ввод значения; щелчок/Enter — применить; Esc — отменить</Text></TextItem>
+  <TextItem><ID>TransformValueHelp</ID><Text>Enter — применить; Esc — отменить</Text></TextItem>
+  <TextItem><ID>TransformValueInvalid</ID><Text>Введите конечное число; коэффициент масштаба: от 0,001 до 1000</Text></TextItem>
+  <TextItem><ID>TransformGizmoHelp</ID><Text>Преобразование: %1. Перетащите маркер; пробел — ввод значения. Повторите горячую клавишу инструмента для свободного режима; X/Y/Z — выбор оси.</Text></TextItem>
 </ClassArray.TextItem>

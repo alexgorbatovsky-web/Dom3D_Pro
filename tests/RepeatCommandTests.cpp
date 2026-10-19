@@ -1,4 +1,5 @@
 #include "ui/MainWindow.h"
+#include "CAlfaDoc.h"
 
 #include <QAction>
 #include <QApplication>
@@ -99,46 +100,44 @@ int TestRepeatCommand(int argc, char** argv) {
     viewport->Point3DPicked(CPoint3d(0, 0, 0));
     viewport->Point3DPicked(CPoint3d(10, 0, 0));
     viewport->Point3DPickFinished();
-    QAction* copy = nullptr;
-    for (QAction* action : window.findChildren<QAction*>()) {
-        if (action->property("dom3dHotkeyId").toString().endsWith("/make_object_group_copy")) {
-            copy = action;
-            break;
-        }
-    }
+    // Hotkey IDs are derived from translated captions; they are not UI identities.
+    auto* copy = window.findChild<QAction*>("DuplicateSelectedObjectAction");
     require(copy, "Copy action must exist");
+    auto* document = GetAlfaDoc();
+    require(document && document->HasSelection(), "Copy fixture must be selected");
+    const size_t before_copy = document->GetObjects().size();
     copy->trigger();
-    require(window.statusBar()->currentMessage().contains("copy created"),
+    require(document->GetObjects().size() == before_copy + 1 && viewport->CurrentTool() == ToolMode::Transform,
             "Copy must create geometry for the nested-command regression");
     select->trigger();
     repeat->trigger();
-    require(window.statusBar()->currentMessage().contains("copy created"),
+    require(document->GetObjects().size() == before_copy + 2 && viewport->CurrentTool() == ToolMode::Transform,
             "Repeat must preserve Copy instead of remembering its nested Move");
 
     std::cerr << "Checking retained array parameters...\n";
     select->trigger();
     struct ArrayValues {
-        QString title;
+        QString name;
         std::vector<int> counts;
         std::vector<double> numbers;
         int direction;
     };
     const std::vector<ArrayValues> initial{
-        {"Linear Array", {2}, {-12.125}, 1},
-        {"Radial Array", {3}, {-137.25, 1.125, -2.25, 3.5}, 0},
-        {"Rectangular Array", {2, 3}, {-4.125, 8.25}, 2}
+        {"LinearArray", {2}, {-12.125}, 1},
+        {"RadialArray", {3}, {-137.25, 1.125, -2.25, 3.5}, 0},
+        {"RectangularArray", {2, 3}, {-4.125, 8.25}, 2}
     };
     const std::vector<ArrayValues> confirmed{
-        {"Linear Array", {3}, {7.625}, 2},
-        {"Radial Array", {2}, {93.75, -7.25, 4.125, -9.5}, 1},
-        {"Rectangular Array", {3, 2}, {9.625, -6.5}, 1}
+        {"LinearArray", {3}, {7.625}, 2},
+        {"RadialArray", {2}, {93.75, -7.25, 4.125, -9.5}, 1},
+        {"RectangularArray", {3, 2}, {9.625, -6.5}, 1}
     };
     const auto open_array = [&](const ArrayValues& expected, const ArrayValues* edit,
                                 bool check, bool accept, bool use_repeat) {
         bool handled = false;
         QTimer::singleShot(0, &window, [&]() {
-            auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
-            require(dialog && dialog->windowTitle() == expected.title,
+            auto* dialog = window.findChild<QDialog*>(expected.name + "Dialog");
+            require(dialog && dialog->isVisible(),
                     "Expected array dialog missing");
             const auto counts = dialog->findChildren<QSpinBox*>();
             const auto numbers = dialog->findChildren<QDoubleSpinBox*>();
@@ -172,22 +171,19 @@ int TestRepeatCommand(int argc, char** argv) {
         if (use_repeat) {
             repeat->trigger();
         } else {
-            QToolButton* array = nullptr;
-            for (auto* button : window.findChildren<QToolButton*>()) {
-                if (button->toolTip() == expected.title && !button->menu()) {
-                    array = button;
-                    break;
-                }
-            }
-            require(array, "Array flyout entry missing");
-            array->pressed();
+            auto* array = window.findChild<QAction*>(expected.name + "Action");
+            require(array, "Array action missing");
+            array->trigger();
         }
         require(handled, "Array dialog did not open");
     };
     for (size_t i = 0; i < initial.size(); ++i) {
         open_array(initial[i], &initial[i], false, false, false);
+        const size_t before_array = document->GetObjects().size();
         open_array(initial[i], &confirmed[i], true, true, false);
-        require(window.statusBar()->currentMessage().contains("created"),
+        int quantity = 1;
+        for (int count : confirmed[i].counts) quantity *= count;
+        require(document->GetObjects().size() == before_array + quantity - 1,
                 "Confirmed array must still create copies");
         open_array(confirmed[i], nullptr, true, false, true);
     }

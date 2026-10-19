@@ -10080,4 +10080,8 @@
     <ID>Auto_27CC776E2C1E8F</ID>
     <Text>Dom3D दृश्य</Text>
   </TextItem>
+  <TextItem><ID>TransformFreeHelp</ID><Text>रूपांतरण (%1): माउस चलाएँ; X/Y/Z से अक्ष चुनें; स्पेस से मान दर्ज करें; क्लिक/Enter से पुष्टि करें; Esc से रद्द करें</Text></TextItem>
+  <TextItem><ID>TransformValueHelp</ID><Text>Enter से पुष्टि करें; Esc से रद्द करें</Text></TextItem>
+  <TextItem><ID>TransformValueInvalid</ID><Text>सीमित संख्या दर्ज करें; स्केल गुणक: 0.001 से 1000 तक</Text></TextItem>
+  <TextItem><ID>TransformGizmoHelp</ID><Text>रूपांतरण: %1। हैंडल खींचें; स्पेस से मान दर्ज करें। मुक्त रूपांतरण के लिए टूल का शॉर्टकट दोबारा दबाएँ; X/Y/Z से अक्ष चुनें।</Text></TextItem>
 </ClassArray.TextItem>

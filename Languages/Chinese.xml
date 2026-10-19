@@ -10081,4 +10081,8 @@
     <ID>Auto_27CC776E2C1E8F</ID>
     <Text>Dom3D 场景</Text>
   </TextItem>
+  <TextItem><ID>TransformFreeHelp</ID><Text>变换 (%1)：移动鼠标；X/Y/Z 限定轴；空格输入数值；单击或 Enter 确认；Esc 取消</Text></TextItem>
+  <TextItem><ID>TransformValueHelp</ID><Text>Enter 确认；Esc 取消</Text></TextItem>
+  <TextItem><ID>TransformValueInvalid</ID><Text>请输入有限数值；缩放系数范围：0.001 至 1000</Text></TextItem>
+  <TextItem><ID>TransformGizmoHelp</ID><Text>变换：%1。拖动控制柄；空格输入数值。再次按工具快捷键进入自由变换；X/Y/Z 限定轴。</Text></TextItem>
 </ClassArray.TextItem>
